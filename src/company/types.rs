@@ -602,8 +602,25 @@ pub struct Agent {
     #[serde(default)]
     pub model: Option<String>,
     /// Tool grant globs, intersected with `[tools].allow`.
-    #[serde(default)]
-    pub tools: Vec<String>,
+    ///
+    /// Three distinct states, made representable by issue #1804 (epic #1817,
+    /// Rung 2 — a standing grant that is real and explicit):
+    ///
+    /// * `None` — **inherit** the company's standard grant (the full
+    ///   `[tools].allow`). This is the default, and how every record written
+    ///   before #1804 (which had no `tools` key, or a `tools = []`) deserializes,
+    ///   so promoting the field changes nothing for an existing manifest.
+    /// * `Some(vec![])` — an **explicit, deliberate no-tools** grant: this
+    ///   teammate reaches nothing. Newly reachable in #1804; before it, an empty
+    ///   list was indistinguishable from an absent one and both meant "standard".
+    /// * `Some(globs)` — **narrow** to the listed globs, intersected with
+    ///   `[tools].allow` at roster-build time (narrow-only, never a widen).
+    ///
+    /// `skip_serializing_if = "Option::is_none"` keeps a standard-grant teammate
+    /// serializing exactly as it did before this field was optional (no `tools`
+    /// key), so no existing on-disk record moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     /// Desks this agent may hand work on to (issue #176).
     ///
     /// Empty (the default) means **no delegation tools at all** — the behaviour
@@ -1375,7 +1392,11 @@ pub struct ChannelConfig {
 }
 
 /// `[tools]` — company-wide tool grants.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `PartialEq` so `runtime::builder::carry_tool_grants_override` can ask the one
+/// question the seed-wins rule turns on: did version control speak about
+/// `[tools]` since the operator's console grant was written (issue #1796)?
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tools {
     /// `openhuman` (default) | `builtin`.
     #[serde(default = "default_tool_provider")]
@@ -1464,7 +1485,7 @@ pub const DEFAULT_MAX_DELEGATION_DEPTH: u8 = 2;
 pub const MAX_DELEGATION_DEPTH_BOUNDS: std::ops::RangeInclusive<u8> = 1..=4;
 
 /// `[tools.composio]` — the per-tenant Composio toolkit allowlist (issue #110).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ComposioTools {
     /// Toolkit slugs the agent may target (e.g. `gmail`, `slack`, `github`).
     /// Empty defers to the backend's server-enforced allowlist (open mode);

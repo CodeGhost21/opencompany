@@ -68,6 +68,12 @@ The two get different tones and are counted separately in `byNode`, because
 folding them sends an operator hunting a bug in the node that most often just
 needs a click.
 
+**Declined is not succeeded.** A by-design compiler refusal (issue #1809) is a
+clean terminal outcome, not a failure — but it did not succeed either. It gets
+the `idle` tone (the closed vocabulary's neutral word — never `done`'s green,
+never `failed`'s red) in `AttemptCard`, the waterfall span and a workflow run's
+summary dot, and its own `declined` column in `byNode`, apart from `succeeded`.
+
 ## Redacted vs raw
 
 A step carries both halves and the panes label which is which. `detail` and

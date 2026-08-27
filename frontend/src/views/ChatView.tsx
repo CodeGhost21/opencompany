@@ -14,7 +14,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent } from "@/api/tasks";
+import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
@@ -54,8 +54,10 @@ import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
 import { useIsDesktop } from "@/hooks/use-mobile";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
+import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
+import { PageHeader } from "@/components/page-header";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
 import { TypingLine } from "./chat/TypingLine";
@@ -85,9 +87,12 @@ import {
   firstChannel,
   historyReady,
   HISTORY_UNTRACKED,
+  budgetPauseRedeemId,
   clearTaskCardEverywhere,
   directMessageChannels,
   directMessageForId,
+  latestBudgetPauseMessageIdByAgent,
+  mergeBudgetPauseMarkerRead,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
@@ -259,6 +264,18 @@ interface Props {
     loadedMessageIds?: ReadonlySet<string>,
   ) => void;
   /**
+   * Reports whether the transcript is actually on screen right now — below
+   * `lg`, `mobilePane === "rail"` hides it behind the channel list even
+   * though `onChannelViewed`'s last report still names that channel.
+   * Distinct from `onChannelViewed`'s own channel memory (which the shell
+   * also uses to address an unaddressed system line after the operator walks
+   * off to Approvals, and must keep doing even while the rail is showing):
+   * this is only for "is a completion's inline marker visible right now",
+   * so a stale-but-correct channel name does not suppress its toast for a
+   * transcript the operator cannot see (#1768 codex review).
+   */
+  onChatPaneVisibilityChange?: (visible: boolean) => void;
+  /**
    * Every approval currently awaiting the operator, straight off the shell's
    * feed, plus the host thread → channel map that places them (#379).
    *
@@ -271,6 +288,8 @@ interface Props {
    */
   approvals?: ApprovalSummary[];
   chatChannelByThread?: Record<string, string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
@@ -289,6 +308,15 @@ interface Props {
    * one is often to open the Approvals page and come back.
    */
   failedApprovals?: Record<string, string>;
+  /**
+   * The coarse "near your credit limit" warning (issue #1846), off the live
+   * `budget_proximity` frame. Owned by the shell — it can fire mid-turn on any
+   * channel, and the shell is what outlives a channel switch. `null`/absent
+   * renders no banner.
+   */
+  budgetProximity?: { message: string; atMillis: number } | null;
+  /** Clears the banner above — the shell's own state, this view only asks. */
+  onDismissBudgetProximity?: () => void;
 }
 
 const FIRST_TEAM_BRIEF =
@@ -332,13 +360,17 @@ export function ChatView({
   mentions,
   mentionFeedRevision,
   onChannelViewed,
+  onChatPaneVisibilityChange,
   approvals,
   chatChannelByThread,
+  taskStatusByTaskId,
   now,
   onDecideApproval,
   decidingApprovals,
   decidedApprovals,
   failedApprovals,
+  budgetProximity,
+  onDismissBudgetProximity,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -395,8 +427,15 @@ export function ChatView({
   } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
+  /** Issue #1846: which teammate's budget-pause redeem is in flight, if any —
+   * so only that notice's button shows a busy state. */
+  const [redeemingBudgetPauseAgent, setRedeemingBudgetPauseAgent] = useState<string | null>(
+    null,
+  );
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  // The rail's "+" (issue #1835) — chat's own door for creating a channel.
+  const [channelCreateOpen, setChannelCreateOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
   // Whether the transcript is actually on screen. At `lg` (≥1024) the rail and
   // transcript share the viewport (`hidden lg:flex`), so it is visible even
@@ -662,6 +701,18 @@ export function ChatView({
   // dead — and a stale answer landing last would replace the current company's
   // channels with the previous one's.
   const desksRun = useRef(0);
+  /**
+   * Whether the current `desks` state is `defaultDesks()` — the fabricated
+   * starter set shown when the host exposes no desks — rather than the host's
+   * own list. `onCreated` below needs the distinction (codex on #1872):
+   * appending the company's first real channel *beside* the fallback would
+   * leave nonexistent channels in the rail until reload, and a channel named
+   * "Strategy" would collide with the fallback row of the same id, so
+   * navigation could land on the fabrication instead of the real thing. The
+   * moment one real desk exists the fallback set has no business rendering —
+   * that is the fallback's own contract (`lib/desks.ts`).
+   */
+  const desksAreFallback = useRef(false);
 
   /**
    * The company's real desks, when the host exposes them — a company with its
@@ -684,10 +735,12 @@ export function ChatView({
     try {
       const dtos = await client.listDesks(company);
       if (run !== desksRun.current) return;
+      desksAreFallback.current = dtos.length === 0;
       setDesks(dtos.length ? dtos.map(deskFromDto) : defaultDesks());
     } catch (error) {
       if (run !== desksRun.current) return;
       if (error instanceof ApiError && error.status === 404) {
+        desksAreFallback.current = true;
         setDesks(defaultDesks());
         return;
       }
@@ -994,6 +1047,82 @@ export function ChatView({
     [entries, channelApprovals, settledApprovals, decidedApprovals],
   );
 
+  // Company-wide, not scoped to the open channel — see the function's own
+  // doc for why a per-channel version silently redeemed the wrong marker
+  // (issue #1846 review, Codex #3865395879).
+  const budgetPauseMessageIdByAgent = useMemo(
+    () => latestBudgetPauseMessageIdByAgent(transcripts),
+    [transcripts],
+  );
+
+  /**
+   * The marker id `GET …/budget-pause` returned for each budget-pause
+   * notice, keyed by the notice's OWN `message.id` (issue #1846 review,
+   * Codex #3868962374) — read back once, at the moment a notice becomes the
+   * latest for its agent, rather than re-read live at click time.
+   *
+   * `redeemBudgetPause` used to re-read the live marker in its own click
+   * handler and send THAT id as `?id=` — which sounds like it binds the
+   * click to a specific marker, but the read happens at click time, so it is
+   * always comparing "whatever is live right now" against itself. A
+   * background turn (a workflow node, an unstreamed task) that re-parks the
+   * SAME agent's marker with no chat destination BEFORE the click — which
+   * `isBudgetPauseNoticeSuperseded` cannot see, since a chat-less park never
+   * touches the transcript it watches — would have its id picked up by that
+   * live read and redeemed instead, silently, under the operator's "add
+   * credits" intent for the card they actually clicked.
+   *
+   * Reading the marker at RENDER time instead — the moment this becomes the
+   * latest notice for its agent — narrows that window from "however long the
+   * operator takes to notice the card" down to the round-trip of the one GET
+   * fired here, the same "narrow, not eliminate" shape the server's own
+   * `?id=` 409 guard already accepts for the GET→POST race it closes.
+   */
+  const [budgetPauseMarkerByNotice, setBudgetPauseMarkerByNotice] = useState<
+    Map<string, string>
+  >(new Map());
+  // Issue #1846 review (Codex #3870014951 / #3870092746): company-scoped,
+  // like `workflowRunEvents`/`openTurns`/`budgetProximity` above — host
+  // message ids (`h<seq>`) are a per-company sequence, so a marker id cached
+  // under company A's message id must not answer for company B's
+  // identically-numbered one. `ChatView` is not remounted on a company
+  // switch, so nothing else clears this map: `transcripts` resetting (in
+  // `AppShell`) does not reach a `ChatView`-local `useState`.
+  useEffect(() => {
+    setBudgetPauseMarkerByNotice((prev) => (prev.size === 0 ? prev : new Map()));
+  }, [client, company]);
+  useEffect(() => {
+    let live = true;
+    for (const [agentId, messageId] of budgetPauseMessageIdByAgent) {
+      if (budgetPauseMarkerByNotice.has(messageId)) continue;
+      void client
+        .getBudgetPause(agentId, company)
+        .then((marker) => {
+          if (!live || marker == null) return;
+          setBudgetPauseMarkerByNotice((prev) =>
+            mergeBudgetPauseMarkerRead(prev, messageId, marker.id),
+          );
+        })
+        .catch(() => {
+          // Issue #1846 review (Codex #3870092746): best-effort read-back —
+          // every other `client.*` call in this file that is not inside a
+          // try/catch ends with one. `redeemBudgetPause`'s live-read
+          // fallback still covers this notice at click time if the cache
+          // never gets populated (a host that lacks this route, a transient
+          // network failure), so a swallowed rejection here degrades to no
+          // worse than the pre-fix always-live-at-click-time behaviour
+          // rather than an unhandled promise rejection on every effect run.
+        });
+    }
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `client`/`company`
+    // intentionally excluded: this effect's job is "a new notice appeared",
+    // not "the client changed"; a client/company change already clears
+    // `transcripts` (and therefore this map) via the boot/company-switch path.
+  }, [budgetPauseMessageIdByAgent]);
+
   // An open thread only makes sense while its parent is on screen; switching
   // channels closes it rather than leaving a panel pointing at nothing.
   useEffect(() => {
@@ -1034,6 +1163,17 @@ export function ChatView({
     loadedMessageIds,
     chatPaneVisible,
   ]);
+
+  // The visibility half of the report above: `onChannelViewed` only ever says
+  // *which* channel, and only while it is visible, so nothing tells the shell
+  // the moment that stops being true — its "last channel seen" memory keeps
+  // naming whatever was visible before the operator dropped to the rail. A
+  // plain mirror of `chatPaneVisible`, not folded into that report, because
+  // the two callbacks answer different questions the shell must not conflate
+  // (see the prop doc).
+  useEffect(() => {
+    onChatPaneVisibilityChange?.(chatPaneVisible);
+  }, [chatPaneVisible, onChatPaneVisibilityChange]);
 
   // Upload one attachment's bytes for the composer (issue #1682). Bound to the
   // active connection's client/company so the composer stays agnostic of both.
@@ -1511,6 +1651,75 @@ export function ChatView({
   }
 
   /**
+   * The Add-Credits CTA (issue #1846): redeems the parked marker and
+   * re-dispatches the original message. The redeemed turn's own reply arrives
+   * over the SSE feed like any other, so there is nothing to inject here on
+   * success — only the busy state and a failure toast.
+   *
+   * Sends `noticeMessageId`'s cached read from
+   * {@link budgetPauseMarkerByNotice} as `?id=` (issue #1846 review, Codex
+   * #3868962374, replacing the live-read-at-click-time shape Codex
+   * #3866418876/#3866802268 first added): that cache is read back once, at
+   * the moment THIS notice became the latest for its agent — see its own doc
+   * for why re-reading live in this handler, at CLICK time, defeated the
+   * point of sending an id at all. The card can only ever have been rendered
+   * from a chat-transcript notice, and the click can lag that render by
+   * however long the operator took to notice it; a background turn (a
+   * workflow node, an unstreamed task) pausing for the SAME agent in that gap
+   * re-parks with no chat destination, which
+   * {@link isBudgetPauseNoticeSuperseded} cannot see — a chat-less park never
+   * touches the transcript it watches — so a live re-read at click time would
+   * silently pick up ITS id and redeem the background turn's message under
+   * the operator's own "add credits" intent instead of theirs.
+   *
+   * Falls back to a live read when the cache has nothing yet for this notice
+   * — a click landing faster than the render-time `GET` resolved, or a host
+   * that predates {@link OpenCompanyClient.getBudgetPause} entirely — rather
+   * than refusing the click outright; a live-at-click read is exactly this
+   * function's own pre-fix behaviour, so this degrades to no worse than
+   * before rather than to broken.
+   *
+   * A 404 means the marker is already gone: redeemed from another tab,
+   * expired with the process, or already handled. Read as a (delayed) success
+   * rather than an error — the operator's intent ("get this moving again") is
+   * either already satisfied or nothing this click can fix by retrying.
+   *
+   * A 409 means the id sent above no longer names the live marker — the
+   * server's own atomic check caught what the cached (or live-fallback) read
+   * could only narrow the window on, not close outright. Same "nothing this
+   * click can fix by retrying blindly" shape as the 404: the operator is told
+   * to look again rather than have their click silently redeem the wrong
+   * marker.
+   */
+  async function redeemBudgetPause(agentId: string, noticeMessageId: string) {
+    if (redeemingBudgetPauseAgent) return;
+    setRedeemingBudgetPauseAgent(agentId);
+    try {
+      // Only falls through to a live GET when the render-time cache has
+      // nothing yet for this notice — see `redeemBudgetPause`'s doc.
+      const cached = budgetPauseMarkerByNotice.get(noticeMessageId);
+      const live = cached == null ? await client.getBudgetPause(agentId, company) : null;
+      const expectedId = budgetPauseRedeemId(noticeMessageId, budgetPauseMarkerByNotice, live?.id);
+      await client.redeemBudgetPause(agentId, company, expectedId);
+      toast.success("Resending the stalled message.");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        toast("Nothing to resend — that pause was already handled.");
+      } else if (error instanceof ApiError && error.status === 409) {
+        toast("That pause has changed since it was shown — check the latest message and try again.");
+      } else {
+        toast.error(
+          error instanceof Error && error.message
+            ? error.message
+            : "Couldn't resend — try again in a moment.",
+        );
+      }
+    } finally {
+      setRedeemingBudgetPauseAgent(null);
+    }
+  }
+
+  /**
    * Give a teammate an inbox, or take it away, on the host — keyed by the
    * roster **agent id**, which is the `InboxStore` key the Inbox page reads and
    * the ingest webhook files mail under. Nothing is persisted client-side: if
@@ -1638,6 +1847,15 @@ export function ChatView({
     }
   }
 
+  /**
+   * The rail's create affordance (issue #1835) — or `undefined`, which is the
+   * rule this codebase follows for a control that would be refused: absent,
+   * not disabled. A starter roster (`!fromHost`) has no saved teammates to
+   * staff a channel with, and an empty roster has nobody at all.
+   */
+  const onAddChannel =
+    fromHost && members.length > 0 ? () => setChannelCreateOpen(true) : undefined;
+
   function selectChannel(id: string) {
     onNavigate(id);
     setMobilePane("chat");
@@ -1665,6 +1883,7 @@ export function ChatView({
         onToggleSection={toggleRailSection}
         directMessages={directMessageChannels(members)}
         onStartDirectMessage={selectChannel}
+        onAddChannel={onAddChannel}
         className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
       />
       <ChannelRail
@@ -1677,6 +1896,7 @@ export function ChatView({
         onToggleSection={toggleRailSection}
         directMessages={directMessageChannels(members)}
         onStartDirectMessage={selectChannel}
+        onAddChannel={onAddChannel}
         collapsed={channelsCollapsed}
         onExpand={toggleChannels}
         className="hidden lg:flex"
@@ -1816,6 +2036,7 @@ export function ChatView({
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
               resolveAttachmentUrl={resolveAttachmentUrl}
+              taskStatusByTaskId={taskStatusByTaskId}
               onStartBrief={() =>
                 setComposerPrefill((current) => ({
                   text: FIRST_TEAM_BRIEF,
@@ -1828,7 +2049,30 @@ export function ChatView({
               decidingApprovals={decidingApprovals}
               failedApprovals={failedApprovals}
               onDecideApproval={onDecideApproval}
+              onRedeemBudgetPause={(agentId, noticeMessageId) =>
+                void redeemBudgetPause(agentId, noticeMessageId)
+              }
+              redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+              latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
             />
+            {budgetProximity && (
+              <p
+                role="status"
+                className="flex shrink-0 items-center gap-1.5 border-t border-status-blocked/30 bg-status-blocked-soft px-3 py-1.5 text-xs text-status-blocked-text"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0 flex-1">{budgetProximity.message}</span>
+                {onDismissBudgetProximity && (
+                  <button
+                    type="button"
+                    onClick={onDismissBudgetProximity}
+                    className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-status-blocked-soft"
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </p>
+            )}
             {consoleOnlyMember && (
               <p
                 role="status"
@@ -1896,6 +2140,16 @@ export function ChatView({
               // reply read here is the same false attribution as one read in
               // the channel, so the panel marks its rows from the same state.
               cognition={cognition}
+              // Issue #1846 review (Codex #3870168372): a budget-pause notice
+              // that answered a thread reply is journaled with THIS thread's
+              // parent, which routes it out of the main channel timeline and
+              // in here — the CTA has to be wired into this panel too, or a
+              // thread-parented notice is unreachable.
+              onRedeemBudgetPause={(agentId, noticeMessageId) =>
+                void redeemBudgetPause(agentId, noticeMessageId)
+              }
+              redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+              latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
             />
           )}
 
@@ -1905,7 +2159,15 @@ export function ChatView({
               others={outsideChannel}
               people={companyPeople}
               presence={presence}
-              leadId={active.kind === "channel" ? active.memberIds?.[0] : undefined}
+              leadId={
+                // An `auto` channel has no lead (issue #1835): its memberIds
+                // are the channel's membership in the host's order, not a
+                // hierarchy, so badging [0] would state a rank nothing
+                // confers — the host's own `desk_lead` is `None` for it.
+                active.kind === "channel" && !active.leadless
+                  ? active.memberIds?.[0]
+                  : undefined
+              }
               loading={loadingTeam}
               fromHost={fromHost}
               onToggleInbox={(m) => void toggleMemberInbox(m)}
@@ -1948,6 +2210,28 @@ export function ChatView({
       </div>
 
       <AddMemberDialog open={addOpen} onOpenChange={setAddOpen} onAdd={(fields) => void addMember(fields)} />
+      <ChannelCreateDialog
+        client={client}
+        company={company}
+        members={members}
+        open={channelCreateOpen}
+        onOpenChange={setChannelCreateOpen}
+        onCreated={(dto) => {
+          // Fold the new channel into the rail and land the operator in it —
+          // the same deskFromDto every fetched desk goes through, so a
+          // just-created channel is indistinguishable from a reloaded one.
+          //
+          // REPLACING the fallback set, not appending to it, when the rail was
+          // showing `defaultDesks()`: the company's first real channel is the
+          // event that ends the fallback's mandate, and appending beside it
+          // would keep fabricated rows in the rail — one of which could share
+          // the new channel's very id — until a reload (codex on #1872).
+          const desk = deskFromDto(dto);
+          setDesks((prev) => (desksAreFallback.current ? [desk] : [...(prev ?? []), desk]));
+          desksAreFallback.current = false;
+          selectChannel(desk.id);
+        }}
+      />
       <BudgetDialog
         member={budgetFor}
         onOpenChange={(open) => {
@@ -1974,6 +2258,17 @@ export function ChatView({
 function LoadingPane() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/*
+        `#/chat` has an `h1` in every state (codex review, #1785). The loaded
+        pane's is `ChatHeader`'s channel name; these three channel-less states
+        returned before it ever mounted, leaving a page with an `sr-only`
+        sentence and no heading at all.
+
+        `hidden` for the same reason Chat's own header is: the pane is the
+        content, and this state is a skeleton — there is nothing for a title
+        bar to sit above.
+      */}
+      <PageHeader title="Chat" hidden />
       <div className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
         <Skeleton className="size-4 rounded" />
         <Skeleton className="h-4 w-32 rounded" />
@@ -2003,6 +2298,9 @@ function EmptyPane({
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+      {/* See `LoadingPane`: the page keeps its name in every channel-less
+          state. The `h2` below names the *state*, not the page. */}
+      <PageHeader title="Chat" hidden />
       <div className="max-w-sm space-y-1.5">
         <h2 className="text-base font-semibold tracking-tight">{title}</h2>
         <p className="text-sm text-muted-foreground">{body}</p>

@@ -110,10 +110,13 @@ async fn state_with(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3318,10 +3321,13 @@ async fn state_with_manifest_and_defaults(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3363,10 +3369,13 @@ async fn state_with_manifest_and_overlays(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3601,7 +3610,7 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
         name: "Helper".to_string(),
         role: "Assistant".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
         model: None,
         harness: None,
     };
@@ -3925,10 +3934,13 @@ async fn state_with_source_dir(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();

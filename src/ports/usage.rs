@@ -85,6 +85,24 @@ pub enum SampleKind {
     /// company-driven model spend, and excluding it would let chat keep paying
     /// for classification after the tier budget was exhausted.
     TriageCall,
+    /// One completed responder selection — the tool-less model call an
+    /// unmentioned message in an `auto` channel makes to pick its best-fit
+    /// answerer (issue #1835).
+    ///
+    /// Its own kind for the reason [`Self::TriageCall`] is its own kind: it
+    /// belongs to no teammate — selection is what *picks* the teammate — so it
+    /// is charged to the whole-company bucket with no `run_id`, and "what is
+    /// routing costing us?" should be answerable without reading a teammate's
+    /// column. Distinct from `TriageCall` too: triage is driven by raw chat
+    /// volume everywhere, selection only by unmentioned messages in `auto`
+    /// channels, and conflating them would make the triage line move whenever
+    /// an operator created a channel.
+    ///
+    /// Counts toward the capability-tier token budget, exactly as triage does
+    /// — see [`tokens_in`](crate::metering::tokens_in) — and for the same
+    /// leak: selection is per-message spend, so a company past its ceiling
+    /// must not keep paying to route.
+    SelectorCall,
     /// One completed first-run setup pass — the single tool-less model call
     /// that turns three answers into a starting roster
     /// (`docs/spec/runtime/company-setup.md`).
@@ -104,6 +122,31 @@ pub enum SampleKind {
     /// Counted toward the capability-tier token budget exactly like planning —
     /// see [`tokens_in`](crate::metering::tokens_in).
     SetupCall,
+    /// One completed authoring assist — the single tool-less model call that
+    /// drafts text an operator will read and then keep or throw away
+    /// (issue #1776: a teammate's mandate or persona).
+    ///
+    /// A sibling of [`Self::PlanningCall`] and [`Self::SetupCall`] rather than
+    /// of [`Self::Inference`], for the reason those two are: the call belongs to
+    /// no teammate's turn. It is *about* a teammate, which is not the same
+    /// thing — the teammate did not run, and attributing the draft to it would
+    /// both corrupt "how much did Maya spend?" and let an operator's drafting
+    /// eat the daily cap of the very teammate they are describing. So it is
+    /// charged to the whole-company bucket
+    /// ([`UNATTRIBUTED_AGENT`](crate::metering::UNATTRIBUTED_AGENT)) with no
+    /// `run_id`.
+    ///
+    /// Its own kind rather than a reused [`Self::SetupCall`] because that one is
+    /// explicitly the once-per-company onboarding cost, and folding a recurring
+    /// authoring assist into it would make "what does onboarding a company
+    /// cost?" unanswerable — the exact question `SetupCall` was split out to
+    /// keep answerable.
+    ///
+    /// Counted toward the capability-tier token budget exactly like planning and
+    /// setup — see [`tokens_in`](crate::metering::tokens_in). Drafting is
+    /// company-driven model spend, and excluding it would let an operator keep
+    /// drafting after the tier budget was exhausted.
+    AuthoringCall,
 }
 
 /// One metered usage event.

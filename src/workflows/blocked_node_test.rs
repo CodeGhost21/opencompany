@@ -133,6 +133,7 @@ fn record() -> CompanyRecord {
         // Added by #902's desk-level tool ceiling after this fixture was
         // written. Empty means no desk narrows anything, which is what this
         // test's manifest already describes.
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
@@ -141,6 +142,8 @@ fn record() -> CompanyRecord {
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     }
 }
 

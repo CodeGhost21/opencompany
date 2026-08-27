@@ -91,6 +91,17 @@ pub enum RunStatus {
     Failed,
     /// Terminal: the attempt was cancelled before it could settle.
     Cancelled,
+    /// Terminal: the workflow compiler **declined by design** to automate the
+    /// work — "better done once than built into a workflow" (issue #1809).
+    ///
+    /// Neither an error nor an ordinary success: the builder was asked whether
+    /// the card should become a workflow and its honest answer was "don't". It
+    /// used to settle `Failed` — which made a correct refusal indistinguishable
+    /// from a model timeout — and then `Succeeded` (#873), which hid it among
+    /// completed work. Its own terminal state keeps the external "work that
+    /// stopped" surface from bucketing the best thing the compiler does as the
+    /// product breaking, without pretending nothing happened.
+    Declined,
 }
 
 impl RunStatus {
@@ -104,6 +115,7 @@ impl RunStatus {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Declined => "declined",
         }
     }
 
@@ -123,6 +135,7 @@ impl RunStatus {
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
+            "declined" => Self::Declined,
             _ => return None,
         })
     }
@@ -131,7 +144,10 @@ impl RunStatus {
     /// status — a re-run is a *new* attempt with its own ordinal, never a
     /// resurrection of this one.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Declined
+        )
     }
 
     /// Which of the three coarse phases this status sits in: `active`,
@@ -198,7 +214,7 @@ impl RunStatus {
             Self::WaitingApproval | Self::Paused => {
                 next == Self::Running || next.is_parked() || next.is_terminal()
             }
-            Self::Succeeded | Self::Failed | Self::Cancelled => false,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Declined => false,
         }
     }
 }
@@ -849,7 +865,7 @@ mod test {
     /// Every status, so a table-driven test cannot silently miss a new variant
     /// (adding one without extending this list fails the exhaustiveness check
     /// in [`all_statuses_are_listed`]).
-    const ALL: [RunStatus; 7] = [
+    const ALL: [RunStatus; 8] = [
         RunStatus::Pending,
         RunStatus::Running,
         RunStatus::WaitingApproval,
@@ -857,6 +873,7 @@ mod test {
         RunStatus::Succeeded,
         RunStatus::Failed,
         RunStatus::Cancelled,
+        RunStatus::Declined,
     ];
 
     #[test]
@@ -871,7 +888,8 @@ mod test {
                 | RunStatus::Paused
                 | RunStatus::Succeeded
                 | RunStatus::Failed
-                | RunStatus::Cancelled => (),
+                | RunStatus::Cancelled
+                | RunStatus::Declined => (),
             };
         }
         let mut seen: Vec<&str> = ALL.iter().map(|s| s.as_str()).collect();
@@ -927,6 +945,7 @@ mod test {
         assert_eq!(RunStatus::Succeeded.phase(), "terminal");
         assert_eq!(RunStatus::Failed.phase(), "terminal");
         assert_eq!(RunStatus::Cancelled.phase(), "terminal");
+        assert_eq!(RunStatus::Declined.phase(), "terminal");
     }
 
     /// The trap this whole projection exists for: a parked run has **no**

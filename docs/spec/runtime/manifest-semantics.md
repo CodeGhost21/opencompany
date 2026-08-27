@@ -21,9 +21,10 @@ each page under the 500-line cap.
   with the company-wide `[tools].allow` and `[budget]` — the most restrictive
   wins. Tool grants resolve through **three** levels,
   `[tools].allow ∩ [[group_chat]].tools ∩ [[agent]].tools`, every one of them
-  narrow-only and an empty one a pass-through; see
-  [runtime/tools.md](tools.md), which also covers why an empty grant list means
-  "inherit" rather than "nothing".
+  narrow-only and an absent one a pass-through; see
+  [runtime/tools.md](tools.md), which also covers why an absent grant means
+  "inherit" rather than "nothing" — and why, since #1804, an **explicit empty**
+  agent `tools` list (`[]`) is a deliberate deny-all rather than an inherit.
 
   **`delegates_to`** (issue #176) is the one per-agent key that is *not* a
   narrowing of a company-wide list: it is an **opt-in**. Empty — the default,

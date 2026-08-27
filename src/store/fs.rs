@@ -750,6 +750,12 @@ struct Meta {
     /// keeps those loading with the manifest's `[policy]` in charge.
     #[serde(default)]
     overlay_policy: Option<crate::ports::types::PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants (issue #1796).
+    /// Absent on meta files written before a connect surface could grant a
+    /// namespace, and `#[serde(default)]` reads that absence as "the manifest's
+    /// `[tools]` still decides" — exactly how those companies ran.
+    #[serde(default)]
+    overlay_tool_grants: Option<crate::ports::types::ToolGrantsOverride>,
     /// The operator-set per-desk tool ceilings. Absent on meta files written
     /// before desks could scope tools, and `#[serde(default)]` reads that
     /// absence as "no desk overrides a ceiling" — which leaves the manifest in
@@ -772,6 +778,14 @@ struct Meta {
     /// operator never answered; `#[serde(default)]` keeps those loading.
     #[serde(default)]
     setup: Option<crate::company::setup::SetupAnswers>,
+    /// Whether the operator has confirmed the company's display name
+    /// (issue #1843). See [`crate::ports::types::CompanyRecord::name_confirmed`].
+    #[serde(default)]
+    name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed (issue #1843). See
+    /// [`crate::ports::types::CompanyRecord::activation_completed_at`].
+    #[serde(default)]
+    activation_completed_at: Option<u64>,
 }
 
 impl Default for Meta {
@@ -791,10 +805,13 @@ impl Default for Meta {
             overlay_agent_edits: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 }
@@ -892,10 +909,13 @@ impl CompanyStore for FsCompanyStore {
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
             overlay_policy: meta.overlay_policy,
+            overlay_tool_grants: meta.overlay_tool_grants,
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
             template_provenance: meta.template_provenance,
             setup: meta.setup,
+            name_confirmed: meta.name_confirmed,
+            activation_completed_at: meta.activation_completed_at,
         }))
     }
 
@@ -918,10 +938,13 @@ impl CompanyStore for FsCompanyStore {
             overlay_agent_edits: record.overlay_agent_edits.clone(),
             overlay_retired_agents: record.overlay_retired_agents.clone(),
             overlay_policy: record.overlay_policy.clone(),
+            overlay_tool_grants: record.overlay_tool_grants.clone(),
             overlay_desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             template_provenance: record.template_provenance.clone(),
             setup: record.setup.clone(),
+            name_confirmed: record.name_confirmed,
+            activation_completed_at: record.activation_completed_at,
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
         Ok(())
@@ -2645,10 +2668,13 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         store.save(&record).await.unwrap();
 
@@ -2705,10 +2731,13 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -2766,10 +2795,13 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

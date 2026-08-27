@@ -25,6 +25,7 @@ import {
 import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -52,6 +53,7 @@ import {
   companyCovers,
   draftFrom,
   draftIsValid,
+  missingRequired,
   emptyDraft,
   grantCeiling,
   harnessEdit,
@@ -66,6 +68,9 @@ import {
   type AgentDraft,
   type AgentFieldKey,
 } from "@/lib/agent";
+import { draftAgentField } from "@/api/agent-copilot";
+import { getInferenceStatus, type CognitionPath } from "@/api/inference";
+import { FieldCopilot } from "@/views/team/FieldCopilot";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
@@ -199,6 +204,17 @@ export function AgentDetailView({
   const editing = editRequested && (agent?.editable.length ?? 0) > 0;
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
+  /**
+   * The cognition path this company booted onto (issue #1776).
+   *
+   * Gates the copilot the same way `WorkflowCreateDialog` gates its Draft
+   * button: on the offline `echo` brain there is no model to draft with, so the
+   * control is disabled with a sentence saying why rather than failing on click.
+   * `null` until the check settles, and on a host without the route — which
+   * leaves it enabled, because refusing to draft on a host we could not ask
+   * would break the control everywhere it actually works.
+   */
+  const [cognition, setCognition] = useState<CognitionPath | null>(null);
   /** An icon save is in flight — the picker is disabled until it settles, so two
       avatar PATCHes for the same teammate can never be pending at once and
       resolve out of order (the older one overwriting the newer choice). */
@@ -277,6 +293,37 @@ export function AgentDetailView({
       live = false;
     };
   }, [client, company]);
+
+  /**
+   * The required fields the draft leaves blank, so the form can say why Save is
+   * disabled instead of just being disabled (issue #1776).
+   *
+   * Empty until the teammate loads — there is nothing to require a value of.
+   */
+  const missing = agent ? missingRequired(draft, (key) => isEditable(agent, key)) : [];
+
+  // Issue #1776: read the cognition path while the edit form is open, so the
+  // copilot can say "no model is configured" instead of offering a draft that
+  // can only come back refused. Its own effect rather than a field on the boot
+  // read: a slow `/inference` must not delay the teammate itself appearing.
+  useEffect(() => {
+    if (!editing) return;
+    let live = true;
+    (async () => {
+      try {
+        const status = await getInferenceStatus(client, company);
+        if (live) setCognition(status.cognition);
+      } catch {
+        // A host without the route tells us nothing either way. `null` is not
+        // `echo`, so the control stays enabled and a refusal (with its reason)
+        // is what the operator would see instead.
+        if (live) setCognition(null);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [editing, client, company]);
 
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {
@@ -547,10 +594,13 @@ export function AgentDetailView({
    * ordinary edit by a member 403 the moment a stale tools value rode along.
    * Sent alone, a member never sends the key at all.
    */
-  async function saveTools(globs: string[]) {
+  async function saveTools(globs: string[] | null) {
     if (!agent) return;
     setSaving(true);
     try {
+      // Three-state (issue #1804): `null` resets to the standard company grant,
+      // `[]` is a deliberate deny-all, a non-empty list narrows. All three are
+      // meaningful on the wire, so the value is passed through untouched.
       const updated = await client.updateAgent(agentId, { tools: globs }, company);
       // A slow save must not clobber the active detail: only fold the response
       // in when the agent on screen is still the one we saved (the same guard
@@ -687,6 +737,31 @@ export function AgentDetailView({
           </ol>
         </nav>
 
+        {/*
+          The page's accessible name in the four states `Identity` does not
+          mount for (codex review, #1785). `Identity`'s `h1` is this page's
+          only heading and it renders only once the teammate has loaded, so a
+          direct `#/team/<id>` visit that was still loading — or that landed on
+          a removed teammate, an older host, or a failed read — was a page a
+          screen reader could not announce at all.
+
+          `hidden`, because the breadcrumb above already says where you are and
+          a title bar over a skeleton would be chrome about nothing.
+
+          The name is gated on `load === "ready"` and not merely on `agent`
+          being set (coderabbit review). `boot()` moves `load` to `"loading"`
+          on an `agentId` change but keeps the previous `agent` until the new
+          request settles, so keying off `agent` alone announced the teammate
+          you just navigated *away from* as the name of the page you navigated
+          *to* — a wrong name, which is worse than a generic one. The crumb has
+          the same shape and can afford it: it is visible text next to the
+          controls, changing in place, rather than the one string a screen
+          reader announces on arrival.
+        */}
+        {load !== "ready" || !agent ? (
+          <PageHeader title="Teammate" hidden />
+        ) : null}
+
         {load === "loading" && <Skeleton className="h-64 rounded-xl" />}
 
         {load === "missing" && (
@@ -799,6 +874,52 @@ export function AgentDetailView({
                       setDraft((d) => ({ ...d, [key]: value }))
                     }
                     readOnly={(key) => !isEditable(agent, key)}
+                    copilot={(key) =>
+                      key === "description" || key === "instructions" ? (
+                        <FieldCopilot
+                          field={key}
+                          // Addressed by id: this teammate exists, so the host
+                          // grounds the draft in its own record rather than in
+                          // anything this console sends.
+                          onTurn={(conversation) =>
+                            draftAgentField(client, company, agentId, key, conversation, {
+                              // The form's own values, not the host's. An
+                              // operator who took a draft and has not saved is
+                              // looking at something the record does not have,
+                              // and a copilot grounded in the record would
+                              // refine a version that is no longer on screen.
+                              description: draft.description,
+                              instructions: draft.instructions,
+                              // Identity too: both prompts are written FROM the
+                              // role, so a teammate repurposed on this form and
+                              // drafted for before Save would otherwise get a
+                              // mandate for the job it used to do.
+                              role: draft.role,
+                              name: draft.name,
+                            })
+                          }
+                          // Fills the form draft and nothing else. The Save
+                          // below is still what writes, which is what makes a
+                          // drafted persona no different from a typed one.
+                          onAccept={(text) => setDraft((d) => ({ ...d, [key]: text }))}
+                          // A blank role is refused here for the reason the
+                          // Add form refuses it: both briefs are written FROM
+                          // the role. The wire drops a blank one rather than
+                          // sending it, so the host would fall back to the
+                          // STORED role and draft for the job this teammate is
+                          // being moved off — the one thing the operator is
+                          // mid-way through changing.
+                          disabled={saving || cognition === "echo" || !draft.role.trim()}
+                          disabledNotice={
+                            cognition === "echo"
+                              ? "No model is configured, so the copilot can't draft yet."
+                              : !draft.role.trim()
+                                ? "Give this teammate a role first — the copilot drafts from it."
+                                : undefined
+                          }
+                        />
+                      ) : null
+                    }
                   />
                   {agent.instructionsOverridden && agent.blueprintInstructions?.trim() && (
                     <p
@@ -809,7 +930,22 @@ export function AgentDetailView({
                       restores: {agent.blueprintInstructions.trim()}
                     </p>
                   )}
-                  <div className="flex justify-end gap-2">
+                  <div className="flex items-center justify-end gap-2">
+                    {/* Why Save is dead, next to Save (issue #1776). A manifest
+                        teammate carries no name of its own, so this form opens
+                        with Name blank and the button already disabled — and
+                        until this line the only way to find that out was to
+                        guess. The fields themselves are marked too; this says
+                        it where the operator is looking when they wonder. */}
+                    {missing.length > 0 && (
+                      <p
+                        className="mr-auto text-2xs text-muted-foreground"
+                        data-testid="agent-save-blocked"
+                      >
+                        {missing.map((field) => field.label).join(" and ")}{" "}
+                        {missing.length > 1 ? "are" : "is"} required to save.
+                      </p>
+                    )}
                     <Button
                       variant="ghost"
                       onClick={() => {
@@ -1171,23 +1307,27 @@ function Tools({
 }: {
   agent: AgentDetailDto;
   saving: boolean;
-  onSave: (globs: string[]) => Promise<void>;
+  onSave: (globs: string[] | null) => Promise<void>;
 }) {
   const summary = summarizeGrants(agent.tools);
   const canEdit = isEditable(agent, "tools");
   const [editing, setEditing] = useState(false);
-  const [field, setField] = useState(agent.tools.requested.join(", "));
+  // `requested` is three-state since #1804 (`null` = standard, `[]` = deny-all,
+  // list = narrow); the text field only ever renders the concrete globs, so a
+  // `null`/`[]` grant both start from an empty box.
+  const requestedGlobs = agent.tools.requested ?? [];
+  const [field, setField] = useState(requestedGlobs.join(", "));
 
   // The teammate on screen can change under this card (a slow detail load, a
   // sibling route swap), and a draft left over from the previous one would be
   // saved onto the new teammate. Re-seed whenever the stored list changes.
   useEffect(() => {
-    setField(agent.tools.requested.join(", "));
+    setField((agent.tools.requested ?? []).join(", "));
     setEditing(false);
   }, [agent.id, agent.tools.requested]);
 
   const draft = parseToolGlobs(field);
-  const dirty = toolGlobsDiffer(agent.tools.requested, draft);
+  const dirty = toolGlobsDiffer(requestedGlobs, draft);
   // Live, before the save rather than after it: the intersection is the thing
   // operators get wrong, and a glob the desk-and-company ceiling does not allow
   // is stored happily and then confers nothing. Saying so while they type is the
@@ -1209,7 +1349,9 @@ function Tools({
           ? deskCeilingActive
             ? "This teammate lists no tools of its own, so it holds what its desk allows, narrowed by the company."
             : "This teammate lists no tools of its own, so it holds everything the company allows."
-          : "What this teammate asked for, narrowed by what its desk and the company allow."
+          : summary.deniedAll
+            ? "This teammate has been given an explicit empty grant, so it holds no tools at all."
+            : "What this teammate asked for, narrowed by what its desk and the company allow."
       }
       action={
         canEdit && !editing ? (
@@ -1242,13 +1384,12 @@ function Tools({
             can only ever take capability away — never add to it.
           </p>
           {draft.length === 0 && (
-            // Not a warning about losing tools — the opposite, and the
-            // inversion is exactly what an operator clearing this field
-            // expects to be told.
+            // Since #1804 the inversion runs the other way: an empty list is a
+            // deliberate deny-all, NOT the standard grant. An operator who
+            // wants the standard grant back must use "Reset to standard" below.
             <p className="text-xs text-status-blocked-text" data-testid="agent-tools-empty-warning">
-              {deskCeilingActive
-                ? "An empty list means the standard grant, not \"no tools\" — this teammate would hold what its desk and the company allow."
-                : "An empty list means the company's standard grant, not \"no tools\" — this teammate would hold everything the company allows."}
+              Saving an empty list is a deny-all — this teammate would hold no tools at all. To
+              give it the standard company grant instead, use “Reset to standard grant”.
             </p>
           )}
           {willNotApply.length > 0 && (
@@ -1263,19 +1404,40 @@ function Tools({
               variant="ghost"
               size="sm"
               onClick={() => {
-                setField(agent.tools.requested.join(", "));
+                setField(requestedGlobs.join(", "));
                 setEditing(false);
               }}
             >
               Cancel
             </Button>
+            {/* Reset to the standard grant (`null`) — a distinct action from
+                saving an empty list (`[]`, a deny-all) since #1804. Only shown
+                when the teammate is not already on the standard grant. */}
+            {!summary.standardGrant && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={saving}
+                onClick={() => {
+                  void onSave(null).then(
+                    () => setEditing(false),
+                    () => undefined,
+                  );
+                }}
+                data-testid="agent-tools-reset"
+              >
+                Reset to standard grant
+              </Button>
+            )}
             <Button
               size="sm"
               disabled={saving || !dirty}
               onClick={() => {
                 // The editor closes on success and stays open on a refusal;
                 // the toast is raised by the caller, so the rejection is
-                // swallowed here rather than left unhandled.
+                // swallowed here rather than left unhandled. An empty `draft`
+                // is a deliberate deny-all (`[]`), not a reset — that is the
+                // separate "Reset to standard grant" button above.
                 void onSave(draft).then(
                   () => setEditing(false),
                   () => undefined,
@@ -1290,12 +1452,16 @@ function Tools({
       )}
       {summary.effective.length === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="agent-tools-empty">
-          {/* Both ways of holding nothing land here, and they are not the same
-              fact. An agent that asked for nothing under a company that allows
-              nothing has been refused nothing. */}
+          {/* The ways of holding nothing land here, and they are not the same
+              fact. An agent on the standard grant under a company that allows
+              nothing has been refused nothing; a deny-all agent asked to hold
+              nothing; a narrowed agent asked for tools none of which are
+              covered. */}
           {summary.standardGrant
             ? "This teammate has no tools, because the company allows none."
-            : "This teammate has no tools. Nothing it asked for is covered by the company tool list."}
+            : summary.deniedAll
+              ? "This teammate has no tools: it was given an explicit empty (deny-all) grant."
+              : "This teammate has no tools. Nothing it asked for is covered by the company tool list."}
         </p>
       ) : (
         <div className="flex flex-wrap gap-2" data-testid="agent-tools">
@@ -1867,7 +2033,7 @@ function Section({
 }) {
   return (
     <Card>
-      <CardContent className="space-y-3 py-4">
+      <CardContent className="space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div className="space-y-1">
             <h3 className="font-medium">{title}</h3>
@@ -1883,8 +2049,8 @@ function Section({
 
 function EmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <Card>
-      <CardContent className="space-y-1 py-8 text-center">
+    <Card className="[--card-spacing:--spacing(8)]">
+      <CardContent className="space-y-1 text-center">
         <p className="font-medium">{title}</p>
         <p className="text-sm text-muted-foreground">{body}</p>
       </CardContent>
