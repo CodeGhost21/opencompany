@@ -822,10 +822,27 @@ impl CompanyStore for SqliteStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        // Every ordinary `save` call is, by definition, made by code that
-        // understands the activation funnel — see
-        // `CompanyStore::activation_gate_seen`'s doc comment.
-        self.save_gated(record, true).await
+        // Every ordinary `save` call against a `running` company is, by
+        // definition, made by code that understands the activation funnel —
+        // see `CompanyStore::activation_gate_seen`'s doc comment. That
+        // reasoning does NOT extend to a `paused`/`archived` record still
+        // waiting on its own first `running` boot to decide the marker (PR
+        // #1875 review finding, second round): `RuntimeBuilder::build`'s
+        // "existing but not running" arm carries the marker forward
+        // untouched for exactly this reason, but a write that reaches this
+        // method directly — bypassing `build` entirely, e.g.
+        // `company_logo::put_logo`'s plain load-modify-save, which never
+        // checks lifecycle — would stamp `true` regardless and poison the
+        // grandfather arm's `!gate_already_seen` guard before the record's
+        // own migration boot ever runs. So: stamp `true` only once the
+        // record itself says `running`; otherwise preserve whatever is
+        // already on file, same as `build`'s own "not running" arm does.
+        if record.lifecycle == "running" {
+            self.save_gated(record, true).await
+        } else {
+            let gate_seen = self.activation_gate_seen(&record.id).await?;
+            self.save_gated(record, gate_seen).await
+        }
     }
 
     async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
@@ -4080,6 +4097,12 @@ mod test {
     async fn conformance_isolation_by_company() {
         let s = store();
         conformance::assert_isolation_by_company(s.clone(), s.clone(), s.clone(), s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_paused_ordinary_save_preserves_activation_gate() {
+        let s = store();
+        conformance::assert_paused_ordinary_save_preserves_activation_gate(s).await;
     }
 
     #[tokio::test]
