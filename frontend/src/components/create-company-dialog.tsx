@@ -207,6 +207,33 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
       return;
     }
 
+    // Derive the id this submission will actually send, up front — before
+    // any validation and before the archive leg. `explicit` wins when the
+    // operator typed one into Advanced; otherwise this is the exact same
+    // fallback `resetReplacementId`/`autoCompanyId` compute further down for
+    // a fresh id, just computed here instead so the checks below can see it.
+    // Undoes a gap where the length check right after this validated only
+    // the raw (often still-blank) Advanced field: a reset's fallback id is
+    // `${request.company}-<suffix>`, so an existing company already close to
+    // the bound the check enforces produced a fallback that blew past it —
+    // discovered only after `provisionCompany` failed, with the old company
+    // already archived (codex review on #1828, PR comments 3874344483 and
+    // 3874326084).
+    const explicit = explicitId.trim();
+    const id =
+      explicit ||
+      (request.kind === "reset"
+        ? resetReplacementId(request.company)
+        : autoCompanyId(trimmedName));
+    // Whether `id` is one this client generated itself, rather than one the
+    // operator typed. NOT simply `!explicit`: a reset's Advanced field is
+    // pre-filled with a generated id the moment the dialog opens (see the
+    // `useEffect` above), so `explicit` is routinely non-blank even when the
+    // operator never touched the field. `idTouched` is what actually tracks
+    // operator intent — see its fuller explanation below, where this same
+    // value is used to gate the reconciliation lookup.
+    const selfGenerated = !idTouched || explicit === "";
+
     // Reject an id shape the host can never durably store, before the
     // destructive archive leg runs on a reset — not just before
     // provisioning. `explicitIdProblem` only checks the id's own shape
@@ -216,10 +243,24 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // handles, and on a reset that is discovered only after the old
     // company is already gone (codex review on #1828, PR comment
     // 3873186322). Applies to a plain create too — same host-side failure,
-    // just without the archive collateral.
-    const idProblem = explicitIdProblem(explicitId.trim());
+    // just without the archive collateral. Checked against `id` — the id
+    // that will actually be sent — not the raw Advanced field, so a
+    // self-generated fallback that landed over the bound is caught here
+    // too, not just an operator-typed one.
+    const idProblem = explicitIdProblem(id);
     if (idProblem) {
-      setError(idProblem);
+      // `selfGenerated`, not `explicit` — a reset's Advanced field usually
+      // already holds a generated id (see `selfGenerated`'s comment above),
+      // so testing blankness here would tell an operator who never typed
+      // anything to "leave the field blank", when it already is and that
+      // changes nothing.
+      setError(
+        !selfGenerated
+          ? idProblem
+          : request.kind === "reset"
+            ? `Couldn't generate a short enough replacement id for ${request.company} (would be ${id.length} characters) — type a shorter id in Advanced before continuing.`
+            : `Couldn't generate a short enough id for "${trimmedName}" (would be ${id.length} characters) — type a shorter id in Advanced before continuing.`,
+      );
       return;
     }
 
@@ -235,7 +276,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // just before provisioning, so a bad id never leaves the operator with
     // the old company already gone and no way to retry cleanly (codex review
     // on #1828, PR comments 3861770475 and 3862711330).
-    if (request.kind === "reset" && collidesWithArchived(explicitId.trim(), request.company)) {
+    if (request.kind === "reset" && collidesWithArchived(explicit, request.company)) {
       setError(
         `The replacement id can't be ${request.company} — that's the company being archived. Leave the field blank for an auto-generated id, or choose a different one.`,
       );
@@ -311,28 +352,25 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
       }
     }
 
-    const explicit = explicitId.trim();
-    // Both a reset and a plain create always send an explicit id, even if the
-    // operator cleared the Advanced field back to empty: falling through to
-    // the unset-id default would have the host derive one itself — on a
-    // reset, re-deriving the archived company's own id from the (possibly
-    // untouched) name field above (see `resetReplacementId`); on a create,
-    // an id this client can never safely reconcile against if the response
-    // is lost (see `autoCompanyId`).
-    const id =
-      explicit ||
-      (request.kind === "reset"
-        ? resetReplacementId(request.company)
-        : autoCompanyId(trimmedName));
-    // Whether `id` is one this client generated itself, rather than one the
-    // operator typed — declared outside the try below so the catch block can
-    // see it. Two cases count as ours: the field still holds exactly what
-    // the fallback above seeded it with (`!idTouched`), or the operator
-    // cleared it back to blank, which — per that same fallback — still lands
-    // on a freshly generated id, never the unset-id default. Anything else
-    // the operator has typed in is theirs; reconciling that by looking it up
+    // `explicit`/`id` are already computed above (before the length check
+    // and the archive leg) — both a reset and a plain create always send an
+    // explicit id, even if the operator cleared the Advanced field back to
+    // empty: falling through to the unset-id default would have the host
+    // derive one itself — on a reset, re-deriving the archived company's own
+    // id from the (possibly untouched) name field above (see
+    // `resetReplacementId`); on a create, an id this client can never safely
+    // reconcile against if the response is lost (see `autoCompanyId`).
+    //
+    // `selfGenerated` is already computed above (before the length check),
+    // for the same reason `id`/`explicit` were hoisted — needed there to
+    // pick the right validation message. Its own reasoning: whether `id` is
+    // one this client generated itself, rather than one the operator typed.
+    // Two cases count as ours: the field still holds exactly what the
+    // fallback above seeded it with (`!idTouched`), or the operator cleared
+    // it back to blank, which — per that same fallback — still lands on a
+    // freshly generated id, never the unset-id default. Anything else the
+    // operator has typed in is theirs; reconciling that by looking it up
     // could resolve to an unrelated, pre-existing company.
-    const selfGenerated = !idTouched || explicit === "";
     const autoId = selfGenerated ? id : "";
 
     // Persist a self-generated id into state immediately, so a *retry*
