@@ -313,7 +313,14 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
           try {
             await client.status(request.company);
             // Still addressable and live: the archive genuinely did not
-            // take.
+            // take. This is a DEFINITIVE outcome, so it overrides any
+            // `archiveMaybe` a still-earlier retry's own ambiguous
+            // reconciliation left set — leaving that stale would have
+            // Cancel/close call `onClose(true)` for a company this lookup
+            // just confirmed is still live, wrongly telling the parent to
+            // drop its persisted default and reload the picker (codex
+            // review on #1828, PR comment 3874326104).
+            setArchiveMaybe(false);
             setError(
               `Couldn't archive ${request.name}: ${describeProvisionError(err)} Nothing was changed.`,
             );

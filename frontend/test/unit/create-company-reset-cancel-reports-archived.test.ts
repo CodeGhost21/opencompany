@@ -239,4 +239,66 @@ describe("cancelling a reset after the archive already landed", () => {
 
     expect(onClose).toHaveBeenCalledExactlyOnceWith(true);
   });
+
+  // Codex review on #1828, PR comment 3874326104: the test above proves
+  // `archiveMaybe` gets set (and Cancel correctly reports `true`) when a
+  // retry's own reconciliation lookup is itself ambiguous. But nothing
+  // cleared that flag once a LATER retry's lookup came back definitive —
+  // `archiveMaybe` is only ever set, never unset, so a stale `true` from an
+  // earlier ambiguous attempt survived even after this attempt's own
+  // reconciliation lookup proved the company is still live. Cancel then
+  // called `onClose(true)` for a company this exact submission just
+  // confirmed was never archived, wrongly telling `ConnectionConsole` to
+  // drop the connection's persisted default and return to the picker.
+  it("clears a stale archiveMaybe once a later retry's lookup confirms the company is still live", async () => {
+    const lifecycle = vi.fn(() =>
+      Promise.reject(new ApiError(0, "network_error", "network error", true)),
+    );
+    let statusCalls = 0;
+    const status = vi.fn(() => {
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        // First attempt's reconciliation lookup is itself ambiguous — sets
+        // the stale `archiveMaybe` this test is about.
+        return Promise.reject(new ApiError(0, "network_error", "network error", true));
+      }
+      // The retry's reconciliation lookup this time succeeds: the company
+      // is definitively still live.
+      return Promise.resolve({ id: "acme", lifecycle: "running" } as unknown as CompanyStatus);
+    });
+    await open(stubClient({ lifecycle, status }), {
+      kind: "reset",
+      company: "acme",
+      name: "Acme Robotics",
+    });
+
+    await fillAdminEmail();
+    await act(async () => {
+      submitButton().click();
+    });
+    await settle();
+    // Confirms this reached the ambiguous branch that sets `archiveMaybe`,
+    // not some other error path.
+    expect(document.querySelector('[data-testid="create-company-error"]')?.textContent).toContain(
+      "Couldn't confirm",
+    );
+
+    // Retry — same submit button; `archived` is still false so the archive
+    // leg fires again.
+    await act(async () => {
+      submitButton().click();
+    });
+    await settle();
+    expect(document.querySelector('[data-testid="create-company-error"]')?.textContent).toContain(
+      "Nothing was changed",
+    );
+
+    await act(async () => {
+      cancelButton().click();
+    });
+
+    // Definitively not archived on this attempt — the earlier attempt's
+    // stale `archiveMaybe` must not still force `onClose(true)`.
+    expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+  });
 });
