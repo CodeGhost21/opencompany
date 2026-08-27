@@ -7366,7 +7366,6 @@ needs_reason = true
         assert_eq!(rebuilt.manifest.company.name, "Acme");
     }
 
-
     /// Issue #1796: a grant written through the **overlay** survives a rebuild,
     /// where the raw manifest write above does not.
     ///
@@ -7576,6 +7575,7 @@ needs_reason = true
         let store = crate::store::FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_tool_grants: None,
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
