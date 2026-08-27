@@ -1907,6 +1907,13 @@ pub struct HarnessPool {
     /// persona keeps an empty set and a stable fingerprint — no rebuild,
     /// byte-identical to the pre-#1530 behaviour.
     override_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the company's display name (PR #1875 review
+    /// finding). `build_roster` embeds `manifest.company.name` into every
+    /// agent's persona, and this is the axis that catches a `PATCH {scope}`
+    /// rename the same way [`Self::override_fingerprints`] catches a
+    /// per-agent persona edit — see [`company_name_fingerprint`]'s own doc
+    /// comment for the full staleness story.
+    company_name_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Per-company fingerprint of the operator `[policy]` override (issue #562),
     /// so a console tier change rebuilds the roster instead of waiting for a
     /// restart. Without this axis the override persists and is silently ignored:
@@ -2078,6 +2085,7 @@ impl HarnessPool {
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
             override_fingerprints: RwLock::new(HashMap::new()),
+            company_name_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
             pinned_policies: std::sync::Mutex::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
@@ -2232,6 +2240,10 @@ impl HarnessPool {
         // roster, so an edit unseen by any fingerprint would not reach the
         // system prompt until a restart.
         let override_fp = override_fingerprint(&overlay.agent_edits);
+        // PR #1875 review finding: the company's display name rides the same
+        // store read as the overlays above and goes stale the same way — see
+        // `company_name_fingerprint`'s own doc comment.
+        let company_name_fp = company_name_fingerprint(&overlay.company_name);
         // The policy axis. A cycle pins it to the snapshot the native gate was
         // re-applied from (so a mid-turn override reaches neither gate), and the
         // pin is released when the cycle ends. A plain `ensure` — the workflow
@@ -2409,6 +2421,7 @@ impl HarnessPool {
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
             let override_fingerprints = self.override_fingerprints.read().await;
+            let company_name_fingerprints = self.company_name_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
             let desk_fingerprints = self.desk_fingerprints.read().await;
             let grants_fingerprints = self.grants_fingerprints.read().await;
@@ -2422,6 +2435,7 @@ impl HarnessPool {
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
                 && override_fingerprints.get(&company.id) == Some(&override_fp)
+                && company_name_fingerprints.get(&company.id) == Some(&company_name_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
                 && desk_fingerprints.get(&company.id) == Some(&desk_fp)
                 && grants_fingerprints.get(&company.id) == Some(&grants_fp)
@@ -2511,6 +2525,15 @@ impl HarnessPool {
             Some(policy) => Some(policy_override_for(policy, &company.manifest.policy)),
             None => overlay.policy.clone(),
         };
+        // PR #1875 review finding: `build_roster` reads the company name off
+        // `fresh_company.manifest.company.name` directly (there is no overlay
+        // field for it — the rename route writes straight into the manifest,
+        // see `server::ops::company_profile`'s own doc comment for why). The
+        // live-resolved name from the same store read above is installed here
+        // for the same reason every overlay field above is: `company` may be
+        // a stale boot-time snapshot, and without this a rebuild triggered by
+        // some other axis would still hand every persona the stale name.
+        fresh_company.manifest.company.name = overlay.company_name.clone();
 
         // Issue #551 note — this rebuild deliberately touches no workspace.
         //
@@ -2571,6 +2594,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), override_fp);
+        self.company_name_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), company_name_fp);
         self.policy_fingerprints
             .write()
             .await
@@ -2651,6 +2678,7 @@ impl HarnessPool {
         self.skill_fingerprints.write().await.remove(company);
         self.budget_fingerprints.write().await.remove(company);
         self.override_fingerprints.write().await.remove(company);
+        self.company_name_fingerprints.write().await.remove(company);
         self.policy_fingerprints.write().await.remove(company);
         self.desk_fingerprints.write().await.remove(company);
         self.grants_fingerprints.write().await.remove(company);
@@ -2986,6 +3014,7 @@ impl HarnessPool {
     ) -> EffectiveOverlay {
         match deps.store.load(&company.id).await {
             Ok(Some(record)) => EffectiveOverlay {
+                company_name: record.manifest.company.name.clone(),
                 agents: record.overlay_agents,
                 agent_edits: record.overlay_agent_edits,
                 retired: record.overlay_retired_agents,
@@ -2997,6 +3026,7 @@ impl HarnessPool {
                 desk_tools: record.overlay_desk_tools,
             },
             _ => EffectiveOverlay {
+                company_name: company.manifest.company.name.clone(),
                 agents: company.overlay_agents.clone(),
                 agent_edits: company.overlay_agent_edits.clone(),
                 retired: company.overlay_retired_agents.clone(),
@@ -3049,6 +3079,20 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn budget_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.budget_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current company-name fingerprint for a company (test-only), so a
+    /// rename-freshness test can assert the roster was actually rebuilt after a
+    /// `PATCH {scope}` rename rather than inferring it (PR #1875 review
+    /// finding). Mirrors [`Self::override_fingerprint_of`]'s role for the
+    /// persona-override axis.
+    #[cfg(test)]
+    pub async fn company_name_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.company_name_fingerprints
+            .read()
+            .await
+            .get(company)
+            .copied()
     }
 
     /// The current persona-override fingerprint for a company (test-only), so a
@@ -4308,6 +4352,13 @@ pub(crate) struct EffectiveOverlay {
     /// The namespaces an operator granted from a connect surface (issue #1796).
     pub tool_grants: Option<crate::ports::types::ToolGrantsOverride>,
     pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
+    /// The company's current display name (issue #1875 review finding),
+    /// read live from [`HarnessDeps::store`] the same way every other field
+    /// on this struct is — `company: &CompanyRecord` may be a stale
+    /// boot-time snapshot, and `PATCH {scope}` (`server::ops::company_profile`)
+    /// writes a rename straight into `manifest.company.name` with no overlay
+    /// field to fingerprint separately.
+    pub company_name: String,
 }
 
 /// Fingerprints the routed workspace documents a roster's personas are built
@@ -4492,6 +4543,26 @@ fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
         entry.model.hash(&mut hasher);
         entry.harness.hash(&mut hasher);
     }
+    hasher.finish()
+}
+
+/// A stable fingerprint of a company's display name (PR #1875 review finding).
+///
+/// `build_roster` embeds `manifest.company.name` into every agent's persona
+/// (`build::build_agent`'s `company_name` argument), and that embedding is
+/// assembled once per cached roster, not once per turn — exactly the same
+/// staleness shape [`override_fingerprint`] exists to close for a per-agent
+/// persona edit. Without this axis, none of the other fingerprints move on a
+/// `PATCH {scope}` rename (`server::ops::company_profile::patch_company`), so
+/// the fast path in [`HarnessPool::ensure_impl`] keeps serving every agent's
+/// old-company-name persona until an unrelated axis happens to change or the
+/// process restarts.
+fn company_name_fingerprint(name: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -10178,6 +10249,71 @@ description = "Builds the product."
         // An unchanged `ensure` is a no-op: the axis is not thrashing the roster.
         pool.ensure(&rec, &deps).await.expect("ensure idempotent");
         assert_eq!(pool.override_fingerprint_of(&rec.id).await, Some(fp_reset));
+    }
+
+    /// A `PATCH {scope}` rename reaches the roster on the next dispatch (PR
+    /// #1875 review finding), mirroring
+    /// `a_persona_override_written_through_the_store_rebuilds_the_roster`
+    /// immediately above for the company-name axis. Before this fix, no
+    /// fingerprint moved on a rename, so the cached roster — and every
+    /// agent's persona, which embeds `manifest.company.name` — kept
+    /// answering to the old name until an unrelated axis happened to change
+    /// or the process restarted.
+    #[tokio::test]
+    async fn a_company_rename_written_through_the_store_rebuilds_the_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let rec = capped_record();
+        assert_eq!(rec.manifest.company.name, "Acme");
+
+        // A live store, so `ensure` re-resolves the name as production does —
+        // exactly the pattern the persona-override test above uses.
+        let live_store = Arc::new(LiveStore::default());
+        live_store.save(&rec).await.unwrap();
+
+        let mut deps = deps_with_plan(dir.path(), context.clone(), None, None);
+        deps.store = live_store.clone();
+
+        // ONE pool for the whole test — nothing below reconstructs it, so
+        // nothing below can smuggle in a restart.
+        let pool = HarnessPool::new();
+
+        // A. Blueprint name.
+        pool.ensure(&rec, &deps).await.expect("ensure A");
+        let fp_before = pool
+            .company_name_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        // B. `PATCH {scope}` renames the company (`server::ops::company_profile`
+        // writes straight into `manifest.company.name` and saves).
+        let mut renamed = rec.clone();
+        renamed.manifest.company.name = "New Name Inc.".to_string();
+        live_store.save(&renamed).await.unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure B");
+        let fp_after = pool
+            .company_name_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+
+        assert_ne!(
+            fp_before, fp_after,
+            "renaming the company must move the company-name fingerprint, or the \
+             cached roster is reused and every agent's persona keeps the old name \
+             until an unrelated axis changes or the process restarts"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "the same company, rebuilt in place — not a new process"
+        );
+
+        // An unchanged `ensure` is a no-op: the axis is not thrashing the roster.
+        pool.ensure(&rec, &deps).await.expect("ensure idempotent");
+        assert_eq!(
+            pool.company_name_fingerprint_of(&rec.id).await,
+            Some(fp_after)
+        );
     }
 
     /// An **overlay** teammate — one added from the console, with no manifest
