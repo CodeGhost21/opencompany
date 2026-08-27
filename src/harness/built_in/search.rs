@@ -1022,6 +1022,32 @@ mod tests {
         assert_eq!(resolve_provider(&response), "Exa");
     }
 
+    /// The label an operator actually reads for a call to `web_search`, folded
+    /// the way a real turn folds it: the loop supplies the humanized tool name,
+    /// [`StepLabels`] restores what the tool calls itself, and `fold_steps`
+    /// renders the row.
+    fn step_label(tools: &[Box<dyn Tool>]) -> String {
+        use crate::harness::steps::{StepLabels, fold_steps};
+        use oh::agent::progress::AgentProgress;
+
+        let labels = StepLabels::from_tools(tools);
+        let started = AgentProgress::ToolCallStarted {
+            call_id: "c1".into(),
+            tool_name: WEB_SEARCH_TOOL.into(),
+            // What the loop sends: no arguments, and a label derived from the
+            // name it was given.
+            arguments: Value::Null,
+            iteration: 1,
+            display_label: Some(oh::tools::traits::humanize_tool_name(WEB_SEARCH_TOOL)),
+            display_detail: None,
+        };
+        fold_steps(vec![labels.apply(started)])
+            .first()
+            .expect("a tool call folds to one step")
+            .label
+            .clone()
+    }
+
     #[test]
     fn the_tool_advertises_the_name_the_contract_pin_knows() {
         let tools = search_tools(
@@ -1044,6 +1070,11 @@ mod tests {
             tools[0].display_label(&json!({})).as_deref(),
             Some("Exa web search")
         );
+        // …and it survives the trip to the timeline. Asserting the trait method
+        // alone proved only that the tool holds an opinion: the turn loop labels
+        // a row from the tool's *name* and never asks, so the branded label
+        // reached no operator until `StepLabels` carried it across (#1857).
+        assert_eq!(step_label(&tools), "Exa web search");
         // The schema is the model's only instruction sheet for the budget.
         let schema = tools[0].parameters_schema();
         assert_eq!(
