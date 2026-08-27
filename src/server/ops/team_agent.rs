@@ -2031,10 +2031,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         record.overlay_agents.push(OverlayAgent {
             id: "scoped".to_string(),
@@ -2103,10 +2106,13 @@ agent = "claude"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -4397,10 +4403,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         record.overlay_agents.push(crate::ports::OverlayAgent {
             id: "growth".to_string(),
@@ -4484,10 +4493,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
