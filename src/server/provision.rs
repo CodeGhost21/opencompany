@@ -352,6 +352,11 @@ async fn provision(
     // defaults when none is configured).
     let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
         .with_id(id.clone())
+        // Issue #1739: a company provisioned after boot reports like one boot
+        // registered. The host's tracker is process-wide and lives on the state
+        // for exactly this reason — a second wiring path is a second place to
+        // forget.
+        .with_analytics(state.analytics())
         .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
         .with_host_base_url(state.config().host_base_url())
         // Issue #752: a provisioned tenant is a company like any other, so it
@@ -473,6 +478,11 @@ async fn register_and_report_status(
     tenant: &str,
     runtime: crate::runtime::CompanyRuntime,
 ) -> crate::Result<crate::runtime::types::CompanyStatus> {
+    // Issue #1739: on a host provisioned into an empty registry, boot had no
+    // runtime to read cognition from and the analytics envelope recorded the
+    // default descriptor (`custom`/`unknown`). Now there is one, so relabel it
+    // — otherwise every event this tenant ever sends is mislabeled.
+    state.analytics().observe_cognition(runtime.cognition());
     let runtime = std::sync::Arc::new(runtime);
     state.registry().insert(id.clone(), runtime.clone());
     // The durable row was written and verified above, before the build, so this

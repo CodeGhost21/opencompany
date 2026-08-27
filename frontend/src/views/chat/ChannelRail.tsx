@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock, PanelRight, SquarePen } from "lucide-react";
+import { ChevronRight, CircleDot, Hash, Lock, PanelRight, Plus, SquarePen } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -20,6 +20,12 @@ const UNREAD_IS_LOCAL = "Estimated in this browser — unread is not tracked on 
 
 interface Props {
   sections: ChannelSection[];
+  /**
+   * Opens the channel creator (issue #1835) — rendered as a "+" on the
+   * Channels section header. Absent (the rule for a control that would be
+   * refused) when the roster cannot staff a channel yet.
+   */
+  onAddChannel?: () => void;
   activeId: string | null;
   /** Channel id → unread count. Absent or 0 reads as caught up. */
   unread: Record<string, number>;
@@ -49,6 +55,7 @@ interface Props {
  */
 export function ChannelRail({
   sections,
+  onAddChannel,
   activeId,
   unread,
   mentions,
@@ -146,6 +153,7 @@ export function ChannelRail({
         <Section
           key={section.id}
           section={section}
+          onAdd={section.id === "channels" ? onAddChannel : undefined}
           activeId={activeId}
           unread={unread}
           mentions={mentions}
@@ -229,6 +237,7 @@ function Section({
   onSelect,
   open,
   onToggle,
+  onAdd,
 }: {
   section: ChannelSection;
   activeId: string | null;
@@ -237,6 +246,8 @@ function Section({
   onSelect: (id: string) => void;
   open: boolean;
   onToggle: () => void;
+  /** Renders a "+" beside the header — the Channels section's create door. */
+  onAdd?: () => void;
 }) {
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
@@ -247,11 +258,12 @@ function Section({
 
   return (
     <section className="group/section select-none px-2 pt-2">
+      <div className="flex items-center gap-0.5">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
       >
         <ChevronRight
           className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
@@ -280,6 +292,18 @@ function Section({
           </span>
         )}
       </button>
+      {onAdd && (
+        <button
+          type="button"
+          onClick={onAdd}
+          title="New channel"
+          aria-label="New channel"
+          className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <Plus className="size-3.5" aria-hidden />
+        </button>
+      )}
+      </div>
 
       {open && (
         <ul className="mt-0.5 flex flex-col gap-px">

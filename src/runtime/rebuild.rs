@@ -193,6 +193,11 @@ pub async fn rebuild_company(state: &AppState, id: &CompanyId) -> Result<Arc<Com
     };
 
     let successor = Arc::new(built);
+    // Issue #1739: this is the one thing that *changes* a host's cognition
+    // after boot. A first inference config rebuilds the runtime from `echo` to
+    // `harness`, and an envelope stamped at boot would keep saying `echo` for
+    // the life of the process.
+    state.analytics().observe_cognition(successor.cognition());
     state.registry().insert(id.clone(), successor.clone());
     tracing::info!(
         company = %id,

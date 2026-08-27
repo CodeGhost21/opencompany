@@ -3604,6 +3604,7 @@ dependencies = [
  "fs2",
  "futures",
  "getrandom 0.4.3",
+ "hmac",
  "jsonwebtoken",
  "log",
  "mime_guess",

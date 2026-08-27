@@ -142,16 +142,41 @@ export function ConnectionConsole({
   const reBoot = useCallback(
     (result?: SignIn) => {
       // Store the session *before* probing. A cross-origin sign-in's token is
-      // the only proof this connection has — no cookie was set — and adopting
-      // it replaces the client, so a probe that ran first would authenticate
-      // with the pre-sign-in client and conclude the host still refuses us.
-      if (result?.session) adoptSession(connectionId, result.session);
-      void probe(connectionId).then(() => {
+      // the only proof this connection has — no cookie was set — and adoption
+      // replaces the credential (in the client here, in the core on the
+      // desktop), so a probe that ran first would authenticate with the
+      // pre-sign-in credential and conclude the host still refuses us. Hence
+      // awaited, not fired: on the desktop the adoption is an IPC round trip,
+      // and "before" has to mean before.
+      void (async () => {
+        if (result?.session) {
+          try {
+            await adoptSession(connectionId, result.session);
+          } catch (error) {
+            // The session could not be kept — a locked keychain, a plain-HTTP
+            // host the core refuses to carry a credential to. Probing anyway
+            // would authenticate as nobody, 401, and land back on this screen
+            // wearing the generic "credential refused" face: a person who just
+            // signed in successfully, told their credential was wrong. So the
+            // sign-in view returns instead, carrying the refusal's own words —
+            // the core writes them for exactly this reading ("this host is not
+            // encrypted…" names an action; "sign-in failed" names nothing).
+            const reason =
+              error instanceof Error ? error.message : String(error ?? "the session could not be stored");
+            setPhase({
+              kind: "login",
+              company: defaultCompany,
+              notice: `You signed in, but this session could not be kept: ${reason}`,
+            });
+            return;
+          }
+        }
+        await probe(connectionId);
         setPhase({ kind: "loading" });
         setBootEpoch((n) => n + 1);
-      });
+      })();
     },
-    [connectionId],
+    [connectionId, defaultCompany],
   );
 
   useEffect(() => {

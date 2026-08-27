@@ -24,6 +24,7 @@ import {
 import { ApiError } from "@/api/types";
 import { ConsoleChrome } from "@/components/host-switcher";
 import { ManageHostsPage } from "@/components/manage-hosts";
+import { RouteLoading } from "@/components/route-loading";
 import { Button } from "@/components/ui/button";
 import { resolveConfig } from "@/config";
 import {
@@ -183,7 +184,19 @@ export function App() {
 
   if (styleguide) {
     return (
-      <Suspense fallback={null}>
+      /* `min-h-screen` because this boundary is the whole document — there is
+         no console shell around it for `RouteLoading`'s `flex-1` to grow
+         inside, and without a height the loading line sits flush against the
+         top of the window (measured in Chromium at 1440x900: a 20px-tall
+         holder at y=0). Every other route's boundary is already inside the
+         shell's flex column, so they pass it nothing and are unchanged. */
+      <Suspense
+        fallback={
+          <div className="flex min-h-screen">
+            <RouteLoading title="Styleguide" label="Loading styleguide…" />
+          </div>
+        }
+      >
         <StandaloneStyleguide />
       </Suspense>
     );
