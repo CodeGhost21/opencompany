@@ -136,7 +136,21 @@ fn classify_stop_reason(raw: &str) -> StopKind {
 /// platform-generated notice into it would leave the operator unable to tell
 /// how much of the text the agent actually said. `EndTurn` returns `None`;
 /// callers only invoke this for a non-`EndTurn` [`StopKind`].
-fn stop_reason_note(kind: StopKind, raw_stop_reason: &str) -> Option<String> {
+///
+/// Every arm is a **fixed** string — none of them interpolate
+/// `raw_stop_reason`, even the `Other` arm, which used to (PR #1880 review).
+/// A `stopReason` this fold does not recognise is unvalidated, unbounded text
+/// straight off the wire from an external ACP agent — the same class of risk
+/// the module doc already calls out for a tool call's `title` — and this
+/// `Note` step is not a private log line: it becomes an engine transcript
+/// entry (`workflows/caps::transcript_from_steps` maps `Note` to
+/// `"agent_message"`), which can be replayed as prior context for later
+/// engine reasoning. Interpolating the raw value there would hand an
+/// external agent a channel to inject diagnostic text, newlines, or an
+/// oversized payload into durable, operator- and agent-visible history. The
+/// raw value is still worth knowing for debugging — see `fold`'s bounded
+/// `tracing::warn!` right before this is called for `Other`.
+fn stop_reason_note(kind: StopKind) -> Option<String> {
     match kind {
         StopKind::EndTurn => None,
         StopKind::MaxTokens => Some("[stopped: hit the token limit before finishing]".to_string()),
@@ -145,11 +159,18 @@ fn stop_reason_note(kind: StopKind, raw_stop_reason: &str) -> Option<String> {
         }
         StopKind::Refusal => Some("[stopped: the agent declined to continue]".to_string()),
         StopKind::Cancelled => Some("[stopped: cancelled before finishing]".to_string()),
-        StopKind::Other => Some(format!(
-            "[stopped: unrecognized stop reason \"{raw_stop_reason}\"]"
-        )),
+        StopKind::Other => Some("[stopped: unrecognized stop reason]".to_string()),
     }
 }
+
+/// Bound on the raw `stopReason` logged for `StopKind::Other` (PR #1880
+/// review). A log line is a reasonable place for the diagnostic value —
+/// unlike a `TurnStep` or an engine error message, it is not replayed as
+/// context and not returned to any client — but it is still unvalidated wire
+/// text, so it gets the same UTF-8-safe char-count bound the rest of the crate
+/// applies before logging or persisting external content, sized for "enough
+/// to recognise the reason, not enough to flood the log".
+const UNKNOWN_STOP_REASON_LOG_CHARS: usize = 120;
 
 /// Builds the reply for a turn that produced no `MessageChunk` text.
 ///
@@ -242,6 +263,23 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
     // answer.
     let kind = classify_stop_reason(&turn.stop_reason);
 
+    if kind == StopKind::Other {
+        // Diagnostic only (PR #1880 review) — never the source for anything
+        // durable. `stop_reason_note`'s `Other` arm and `abnormal_stop` below
+        // both deliberately drop the raw value; this bounded copy is the only
+        // place it survives, and only in a log line, char-capped so a
+        // malformed/oversized `stopReason` cannot flood it either.
+        let bounded: String = turn
+            .stop_reason
+            .chars()
+            .take(UNKNOWN_STOP_REASON_LOG_CHARS)
+            .collect();
+        tracing::warn!(
+            stop_reason = %bounded,
+            "[harness::acp] unrecognized ACP stop reason"
+        );
+    }
+
     if reply.trim().is_empty() {
         reply = synthesize_empty_reply(&steps).to_string();
     }
@@ -249,11 +287,12 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
     // PR #1880 review: the stop-reason notice is platform-generated, not
     // agent-authored, so it lands as its own step rather than blurring into
     // `reply` above.
-    if let Some(note) = stop_reason_note(kind, &turn.stop_reason) {
+    let note = stop_reason_note(kind);
+    if let Some(note) = &note {
         steps.push(TurnStep {
             kind: TurnStepKind::Note,
             status: TurnStepStatus::Ok,
-            label: note,
+            label: note.clone(),
             ..TurnStep::default()
         });
     }
@@ -271,6 +310,19 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
         // `Refusal`/`Cancelled`/`Other` are surfaced as a step note instead,
         // and `EndTurn` needs no flag at all.
         hit_iteration_cap: matches!(kind, StopKind::MaxTurnRequests),
+        // PR #1880 review: `Refusal`/`Cancelled`/`Other` are not a resumable
+        // cap either — there is no checkpoint to continue from, unlike
+        // `hit_iteration_cap` above — so `HarnessAgentRunner` must not settle
+        // these as a plain `Succeeded`/`StopReason::Finished` the way it used
+        // to when `hit_iteration_cap == false` was the only signal it read.
+        // Reuses `note`'s text: both sinks want the same short, fixed,
+        // non-wire-derived notice, and `stop_reason_note`'s `Other` arm is
+        // already the one place that keeps the raw `stopReason` out of it.
+        abnormal_stop: matches!(
+            kind,
+            StopKind::Refusal | StopKind::Cancelled | StopKind::Other
+        )
+        .then(|| note.clone().unwrap_or_default()),
         // Issue #1032: nor is there a spend halt to report. The stop hooks are
         // installed around THIS crate's `agent.turn`, and an ACP turn does not
         // run through it — the external process bills and stops on its own
@@ -542,6 +594,30 @@ mod test {
             !outcome.hit_iteration_cap,
             "a refusal is not an iteration-cap pause"
         );
+        // PR #1880 review: `hit_iteration_cap == false` used to be the only
+        // signal `HarnessAgentRunner` read, so a refusal settled a workflow
+        // node `Succeeded`/`Finished` — indistinguishable from the agent
+        // having actually answered. This is the outcome-level fix, not just
+        // the note above: see `workflows::caps::mod::test::an_abnormal_acp_stop_fails_the_workflow_node`
+        // for the assertion that it actually stops the graph.
+        assert_eq!(
+            outcome.abnormal_stop.as_deref(),
+            Some("[stopped: the agent declined to continue]"),
+            "a refusal must carry a distinct abnormal-stop outcome, not just a note"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_turn_also_carries_an_abnormal_stop() {
+        // Same shape as refusal, different trigger: an operator-initiated (or
+        // upstream) cancel is just as much "not a resumable cap, not a clean
+        // finish" as a refusal is.
+        let outcome = fold(turn_with_stop_reason(vec![], "cancelled"));
+        assert_eq!(
+            outcome.abnormal_stop.as_deref(),
+            Some("[stopped: cancelled before finishing]")
+        );
+        assert!(!outcome.hit_iteration_cap);
     }
 
     #[test]
@@ -552,27 +628,72 @@ mod test {
         let outcome = fold(turn(vec![AcpUpdate::MessageChunk("all done".into())]));
         assert_eq!(outcome.reply, "all done");
         assert!(!outcome.hit_iteration_cap);
+        assert_eq!(
+            outcome.abnormal_stop, None,
+            "a clean end_turn is not an abnormal stop"
+        );
+    }
+
+    #[test]
+    fn a_max_turn_requests_stop_is_a_cap_not_an_abnormal_stop() {
+        // The cap path (issue #926 / #1880's `hit_iteration_cap` split) and
+        // the abnormal-stop path (this PR's review) are deliberately
+        // disjoint: a capped turn has a real, resumable checkpoint, which is
+        // exactly what `abnormal_stop` says there is none of.
+        let outcome = fold(turn_with_stop_reason(vec![], "max_turn_requests"));
+        assert!(outcome.hit_iteration_cap);
+        assert_eq!(
+            outcome.abnormal_stop, None,
+            "the cap flag already covers this stop; abnormal_stop must stay None"
+        );
     }
 
     #[test]
     fn an_unrecognized_stop_reason_is_surfaced_not_swallowed() {
         // A stop_reason this fold has never heard of must not silently pass
-        // for a clean end_turn — the raw string is carried into a note step
-        // so the operator (and whoever reads the ticket) can see exactly what
-        // ACP reported, without it being mistaken for the agent's own words.
+        // for a clean end_turn — it is carried into a note step so the
+        // operator (and whoever reads the ticket) can see the turn stopped
+        // abnormally.
+        //
+        // PR #1880 review: the raw string itself must NOT appear — an
+        // unrecognized `stopReason` is unvalidated, unbounded text straight
+        // off the wire from an external ACP agent, and this note step is not
+        // a private log line: `workflows/caps::transcript_from_steps` maps a
+        // `Note` step to `"agent_message"` in the engine transcript, which
+        // can be replayed as prior context for later engine reasoning. The
+        // fixed notice below carries the abnormal-stop signal without
+        // reopening that channel.
+        let raw = "some_new_reason_acp_added_later__with_diagnostic_junk_🔥";
         let outcome = fold(turn_with_stop_reason(
             vec![AcpUpdate::MessageChunk("partial thought".into())],
-            "some_new_reason_acp_added_later",
+            raw,
         ));
         assert_eq!(outcome.reply, "partial thought");
         assert!(
             outcome.steps.iter().any(|s| s.kind == TurnStepKind::Note
-                && s.label
-                    == "[stopped: unrecognized stop reason \"some_new_reason_acp_added_later\"]"),
-            "the raw stop_reason must be visible, not swallowed: {:?}",
+                && s.label == "[stopped: unrecognized stop reason]"),
+            "an unrecognized stop must still be surfaced as a step: {:?}",
+            outcome.steps
+        );
+        assert!(
+            outcome.steps.iter().all(|s| !s.label.contains(raw)),
+            "the raw wire value must never appear in a persisted step: {:?}",
             outcome.steps
         );
         assert!(!outcome.hit_iteration_cap);
+        assert_eq!(
+            outcome.abnormal_stop.as_deref(),
+            Some("[stopped: unrecognized stop reason]"),
+            "an unrecognized stop must carry a distinct abnormal-stop outcome, not just a note"
+        );
+        assert!(
+            !outcome
+                .abnormal_stop
+                .as_deref()
+                .unwrap_or_default()
+                .contains(raw),
+            "the raw wire value must never appear in the abnormal-stop message either"
+        );
     }
 
     #[test]
