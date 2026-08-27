@@ -2942,6 +2942,40 @@ impl HarnessPool {
         .await
     }
 
+    /// Whether the plan-level total-token ceiling is already spent — the bare
+    /// predicate behind [`total_ceiling_refusal`](Self::total_ceiling_refusal),
+    /// for callers that make a model call the refusal shape does not describe.
+    ///
+    /// The responder-selection pass (issue #1835) is the first: it runs
+    /// *before* a responder is chosen, so it has no agent to refuse as and no
+    /// `TurnOutcome` to hand back — but it is a real model call, and a tenant
+    /// past its ceiling must not keep paying for routing (codex on #1872).
+    /// One predicate, so "is the ceiling spent" cannot answer differently for
+    /// the gate and for the turn it gates.
+    ///
+    /// **Answers `false` wherever the ceiling cannot be evaluated** — no plan,
+    /// no total budget, no meter, or a failed spend query — which is exactly
+    /// what `total_ceiling_refusal` does with the same cases: it declines to
+    /// hard-refuse and defers to the per-namespace fail-closed roster. A gate
+    /// that instead blocked on an unreadable meter would take routing down on
+    /// a metering hiccup.
+    pub(crate) async fn total_ceiling_spent(company: &CompanyId, deps: &HarnessDeps) -> bool {
+        let Some(plan) = deps.plan.as_ref() else {
+            return false;
+        };
+        if plan.total_budget.is_none() {
+            return false;
+        }
+        let Some(meter) = deps.meter.as_deref() else {
+            return false;
+        };
+        let since = plan.period.period_start_millis(crate::ports::now_millis());
+        match meter.query(company, since).await {
+            Ok(samples) => plan.total_exhausted(capability_budget::tokens_in(&samples)),
+            Err(_) => false,
+        }
+    }
+
     /// The plan-level total-token ceiling, as a refusal or nothing.
     ///
     /// Extracted from [`run_inner`](Self::run_inner) so the confined turn

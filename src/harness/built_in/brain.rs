@@ -2685,8 +2685,43 @@ impl HarnessBrain {
             (record.id.clone(), desk_id, candidates)
         };
         match candidates.len() {
-            0 => None,
+            // Every member has left the roster since the channel was created —
+            // `POST …/desks` refuses an empty auto channel, but `DELETE
+            // …/team/{id}` can empty one later (codex on #1872). There is
+            // nobody to pick, so this defers to the caller's fallback ladder
+            // and the orchestrator answers, exactly as it does for any desk
+            // whose members have all gone. Refusing the deletion instead would
+            // be worse — a teammate you cannot remove because a channel names
+            // them — so the gap is closed by saying so rather than by
+            // pretending the channel still routes.
+            0 => {
+                tracing::warn!(
+                    company = %company,
+                    chat = %desk_id,
+                    "[selector] this channel has no roster members left, so there is nobody to \
+                     pick; the orchestrator is answering a message addressed to the channel"
+                );
+                None
+            }
             1 => Some(candidates[0].id.clone()),
+            // The plan-level total-token ceiling gates the selection too, not
+            // only the responder turn it precedes (codex on #1872). Selection
+            // runs *before* a responder exists, so `total_ceiling_refusal` has
+            // no agent to refuse as — but it is a real model call, and without
+            // this a tenant past its hard ceiling could keep paying to route
+            // by posting into an auto channel, one selector call per message,
+            // after the ceiling that is supposed to permit no model calls at
+            // all. Falling through to the deterministic first member costs
+            // nothing and is the same answer a lead desk would give.
+            _ if crate::harness::HarnessPool::total_ceiling_spent(&company, &self.deps).await => {
+                tracing::info!(
+                    company = %company,
+                    chat = %desk_id,
+                    "[selector] total token ceiling reached; routing to the channel's first \
+                     member without a selection call"
+                );
+                None
+            }
             _ => match self.selector_pass(&company).select(text, &candidates).await {
                 crate::harness::selector::SelectorVerdict::Member(id) => {
                     tracing::info!(
@@ -8438,6 +8473,17 @@ members = ["eng1", "eng2"]
         dir: &std::path::Path,
         reply: &str,
     ) -> (HarnessBrain, Arc<SelectingProvider>) {
+        brain_that_selects_with(dir, reply, None, None)
+    }
+
+    /// [`brain_that_selects`], plus an optional plan and usage meter, so a
+    /// test can place the company past its plan-level total-token ceiling.
+    fn brain_that_selects_with(
+        dir: &std::path::Path,
+        reply: &str,
+        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
+        meter: Option<Arc<dyn crate::ports::usage::UsageMeter>>,
+    ) -> (HarnessBrain, Arc<SelectingProvider>) {
         let provider = Arc::new(SelectingProvider {
             reply: reply.to_string(),
             selector_calls: std::sync::atomic::AtomicUsize::new(0),
@@ -8450,7 +8496,7 @@ members = ["eng1", "eng2"]
             serves: None,
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
-            meter: None,
+            meter,
             workspace_root: dir.to_path_buf(),
             mcp_home: None,
             workspace_git_enabled: false,
@@ -8478,7 +8524,7 @@ members = ["eng1", "eng2"]
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
             workflow_source_dir: None,
-            plan: None,
+            plan,
             media: None,
             composio: None,
             #[cfg(feature = "chargebee")]
@@ -8548,6 +8594,104 @@ members = ["eng1", "eng2"]
             None,
             "an out-of-membership pick must fall back, never route"
         );
+    }
+
+    /// Issue #1872 (codex P1): the plan-level total-token ceiling gates the
+    /// **selection**, not only the responder turn it precedes.
+    ///
+    /// Selection runs before a responder exists, so `total_ceiling_refusal`
+    /// has no agent to refuse as and never fired for it — meaning a tenant
+    /// past its hard ceiling could keep paying to route, one selector call per
+    /// message, after the ceiling that is supposed to permit no model calls at
+    /// all. Remove the `total_ceiling_spent` arm in `auto_channel_responder`
+    /// and this spends a call and answers `chief`.
+    #[tokio::test]
+    async fn an_exhausted_total_ceiling_routes_without_paying_for_a_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let meter = Arc::new(SpentMeter);
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: Default::default(),
+            total_budget: Some(10),
+        };
+        let (brain, provider) =
+            brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "which strategy are we running?")
+                .await,
+            None,
+            "past the ceiling the deterministic fallback answers, not a selection"
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a company past its hard ceiling must not pay to route"
+        );
+    }
+
+    /// Issue #1872 (codex P2): a channel emptied *after* creation.
+    ///
+    /// `POST …/desks` refuses an empty auto channel, but `DELETE …/team/{id}`
+    /// can retire its last roster-backed member later. There is then nobody to
+    /// pick, so this defers to the caller's ladder — the orchestrator answers,
+    /// as it does for any desk whose members have all gone — and spends
+    /// nothing doing it. Refusing the deletion instead would mean a teammate
+    /// you cannot remove because a channel names them.
+    #[tokio::test]
+    async fn a_channel_emptied_by_deletion_falls_back_without_paying() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_selects(dir.path(), "chief");
+        brain.mutate_record(|r| {
+            r.overlay_retired_agents = vec!["engineer".to_string(), "chief".to_string()];
+        });
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "who owns the retry logic?")
+                .await,
+            None,
+            "no candidates left: fall back rather than route to a retired teammate"
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    /// A meter whose every query reports spend past any ceiling a test sets.
+    struct SpentMeter;
+
+    #[async_trait]
+    impl crate::ports::usage::UsageMeter for SpentMeter {
+        async fn record(
+            &self,
+            _company: &CompanyId,
+            _sample: &crate::ports::usage::UsageSample,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn query(
+            &self,
+            _company: &CompanyId,
+            _since: u64,
+        ) -> crate::Result<Vec<crate::ports::usage::UsageSample>> {
+            Ok(vec![crate::ports::usage::UsageSample {
+                at_millis: 0,
+                agent: "someone".to_string(),
+                provider: "test".to_string(),
+                input_tokens: 10_000,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+                cost_usd: 0.0,
+                kind: crate::ports::usage::SampleKind::Inference,
+                run_id: None,
+                model: None,
+            }])
+        }
     }
 
     /// The short-circuits spend nothing: a lead desk never reaches the
