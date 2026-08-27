@@ -156,6 +156,40 @@ pub(crate) fn budget_pause_notice(pause: &crate::harness::BudgetPause) -> String
     format!("{BUDGET_PAUSE_NOTICE_PREFIX} {}", pause.summary)
 }
 
+/// The non-redeemable sibling of [`BUDGET_PAUSE_NOTICE_PREFIX`] (issue #1846
+/// review, Codex #3870562586 / #3870562590).
+///
+/// The console renders its "Add credits & resend" CTA off
+/// [`BUDGET_PAUSE_NOTICE_PREFIX`] alone — there is no structured wire field to
+/// key on yet, as that constant's own doc says. Two paths pause WITHOUT a
+/// marker the generic chat redeem can honour:
+///
+/// * the **confined workflow copilot** — `run_confined` bypasses `run_inner`,
+///   the only place that parks a marker, and `CONFINED_AGENT_ID` names no
+///   addressable teammate, so there is nothing to redeem and nothing safe to
+///   replay; and
+/// * an **approval continuation** — it runs through `run_steered_background`,
+///   so `run_inner` parks its marker with `background: true`, a shape
+///   `redeem_budget_pause` refuses outright
+///   (`src/server/ops/budget_pause.rs`).
+///
+/// Emitting the redeemable prefix on either put a button on screen that could
+/// only ever fail — a 404 for the first (no marker exists), a 400 for the
+/// second (the marker exists and is refused). This prefix carries the SAME
+/// information and deliberately does not match the console's
+/// `isBudgetPauseNotice`, so the notice renders as an ordinary system bubble
+/// with no unusable action on it. Pinned by
+/// `a_confined_copilot_pause_offers_no_redeem_cta` and
+/// `an_approval_continuation_pause_offers_no_redeem_cta`.
+pub(crate) const BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX: &str =
+    "⏸ Paused — out of credits (add credits, then start this again):";
+
+/// The unauthored bubble for a budget pause that carries no redeemable marker.
+/// See [`BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX`].
+pub(crate) fn budget_pause_notice_no_resend(pause: &crate::harness::BudgetPause) -> String {
+    format!("{BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX} {}", pause.summary)
+}
+
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
@@ -324,13 +358,20 @@ fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
 /// it to the copilot as an ordinary answer — exactly the #966 misattribution
 /// class `system_notice` exists to prevent, just one call site short of it.
 ///
-/// Emits the SAME unauthored notice copy the interactive path shows, with no
-/// CTA (nothing was parked to redeem) — the honest middle ground the review
-/// asked for, between a fabricated copilot reply and a redemption this agent
-/// id can never honour.
+/// Emits the unauthored notice through
+/// [`budget_pause_notice_no_resend`] — the honest middle ground between a
+/// fabricated copilot reply and a redemption this agent id can never honour.
+///
+/// Issue #1846 review (Codex #3870562586): this used to emit
+/// [`budget_pause_notice`], whose prefix is exactly what the console keys its
+/// "Add credits & resend" button off. The doc above already claimed "with no
+/// CTA" — but nothing enforced it, so the button rendered anyway and, with no
+/// marker ever parked for `CONFINED_AGENT_ID`, every click did a GET that
+/// returned `null` followed by a POST that 404'd. The no-resend prefix makes
+/// the claim true.
 fn confined_turn_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
     match &outcome.budget_paused {
-        Some(pause) => system_notice(budget_pause_notice(pause)),
+        Some(pause) => system_notice(budget_pause_notice_no_resend(pause)),
         None => confined_bubble(outcome),
     }
 }
@@ -734,10 +775,21 @@ impl HarnessBrain {
             // fires, so the bubble rendered as a normal (if oddly-worded)
             // answer with no "Add credits & resend" CTA — even though a
             // marker was sitting there, parked and redeemable, the whole time.
-            // Swap in the SAME notice text the interactive and confined-turn
-            // paths already emit so the console recognises and renders it.
+            // Swap in the unauthored pause notice so the bubble reads as the
+            // runtime terminal state it is rather than as an answer.
+            //
+            // Issue #1846 review (Codex #3870562590): the NO-RESEND prefix,
+            // not the redeemable one. `run_steered_background` means
+            // `run_inner` parks this marker with `background: true`, and
+            // `redeem_budget_pause` refuses exactly that shape
+            // (`src/server/ops/budget_pause.rs`) — so offering the CTA here
+            // reserved the marker, restored it, and returned 400 on every
+            // click. Resuming an approval continuation needs the grant's own
+            // identity, which the generic chat-message redeem path does not
+            // carry; until it does, the honest surface is a notice with no
+            // button rather than a button that cannot work.
             Ok(outcome) => match &outcome.budget_paused {
-                Some(pause) => budget_pause_notice(pause),
+                Some(pause) => budget_pause_notice_no_resend(pause),
                 None => outcome.reply,
             },
             Err(err) => {
@@ -10383,16 +10435,90 @@ agent = "claude"
             "the pre-fix defect: falling through to confined_bubble would attribute the pause \
              notice to the copilot itself"
         );
+        // Issue #1846 review (Codex #3870562586): the NO-RESEND prefix. This
+        // assertion used to require `BUDGET_PAUSE_NOTICE_PREFIX`, which is
+        // precisely what the console keys its "Add credits & resend" button
+        // off — and `run_confined` never parks a marker, so that button could
+        // only ever 404. Asserting the negative too: the whole defect is the
+        // two prefixes being conflated, and a test that only checked the new
+        // one would still pass if the redeemable prefix were ever made a
+        // prefix of it.
         assert!(
-            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
-            "the console's SystemPill only renders the highlighted pause card for this exact \
-             prefix: {}",
+            bubble
+                .text
+                .starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "a confined pause parks no marker, so it must carry the non-redeemable prefix: {}",
+            bubble.text
+        );
+        assert!(
+            !bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: this prefix renders an Add-Credits CTA whose GET returns null \
+             and whose POST 404s, because CONFINED_AGENT_ID never has a marker: {}",
             bubble.text
         );
         assert!(
             bubble.text.to_ascii_lowercase().contains("add credits"),
             "the actionable ask survives into the notice: {}",
             bubble.text
+        );
+    }
+
+    /// Issue #1846 review (Codex #3870562590) — **the regression.** An approval
+    /// continuation that pauses for credits must not advertise a redeem the
+    /// server refuses.
+    ///
+    /// The continuation runs through `run_steered_background`, so `run_inner`
+    /// parks its marker with `background: true`, and `redeem_budget_pause`
+    /// rejects exactly that shape with a 400 (`src/server/ops/budget_pause.rs`).
+    /// Emitting `BUDGET_PAUSE_NOTICE_PREFIX` therefore put a button on screen
+    /// that reserved the marker, restored it, and failed — every single click.
+    ///
+    /// This pins the notice BUILDER rather than driving a whole continuation:
+    /// the defect is entirely in which prefix that arm chooses, and the two
+    /// constants are what the console branches on.
+    #[test]
+    fn an_approval_continuation_pause_offers_no_redeem_cta() {
+        let pause = crate::harness::BudgetPause {
+            agent: "maya".to_string(),
+            summary: "Add credits to your account, then start this again.".to_string(),
+        };
+
+        let notice = budget_pause_notice_no_resend(&pause);
+
+        assert!(
+            notice.starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "{notice}"
+        );
+        assert!(
+            !notice.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: a background-parked marker is refused by the redeem route, so \
+             this prefix's CTA can only ever return 400: {notice}"
+        );
+        assert!(
+            notice.to_ascii_lowercase().contains("add credits"),
+            "the operator still has to be told the lever: {notice}"
+        );
+        assert!(
+            notice.contains(&pause.summary),
+            "the provider's own summary survives into the notice: {notice}"
+        );
+    }
+
+    /// The two prefixes must stay genuinely distinct: the console decides
+    /// whether to render an actionable button by `startsWith`, so if the
+    /// redeemable prefix were ever edited to become a prefix of the
+    /// non-redeemable one, every no-resend notice would silently regain the
+    /// broken CTA. Cheap coupling test, mirrored on the frontend by
+    /// `isBudgetPauseNotice`'s own fixtures.
+    #[test]
+    fn the_redeemable_and_no_resend_prefixes_are_not_prefixes_of_each_other() {
+        assert!(
+            !BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "a no-resend notice would match `isBudgetPauseNotice` and regain the CTA"
+        );
+        assert!(
+            !BUDGET_PAUSE_NOTICE_PREFIX.starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "a redeemable notice would stop matching and lose its working CTA"
         );
     }
 

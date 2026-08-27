@@ -1453,7 +1453,19 @@ impl<'a> DelegationRunner<'a> {
         // plus the teammate reply, and surface THAT as the operator bubble — so
         // the orchestrator comes back with the answer in one coherent
         // conversation.
-        if !desk_replies.is_empty() {
+        //
+        // Issue #1846 review (Codex #3870516681): "answered" is the load-bearing
+        // word, and a desk that paused for lack of credits has NOT answered —
+        // `desk.reply` is the pause placeholder. Relaying it anyway fired a
+        // second inference call at the same exhausted provider, which paused
+        // too and parked a SECOND marker, this one for the responder. That
+        // marker has no notice pointing at it (the operator only ever sees the
+        // first delegate's pause), so it is unreachable, and being newer it can
+        // supersede a live CTA on an older notice — disabling the one button
+        // that would have worked. Skipped entirely instead; the fold below
+        // keeps the delegate's own text on the operator bubble, so nothing the
+        // operator would have read is lost.
+        if !desk_replies.is_empty() && budget_paused.is_none() {
             let relay_prompt = build_relay_prompt(message, &desk_replies);
             self.queue.clear();
             let relay = self
@@ -1570,6 +1582,15 @@ impl<'a> DelegationRunner<'a> {
                 );
             }
             budget_paused = budget_paused.or(relay.budget_paused);
+        } else if !desk_replies.is_empty() {
+            // The relay was skipped because a desk paused (see above). Fold the
+            // delegate's text onto the operator bubble directly, in the same
+            // shape `build_relay_prompt` would have handed the relay turn, so
+            // skipping it drops nothing — the pause itself is surfaced
+            // separately from `budget_paused` by the caller.
+            for (member, reply) in &desk_replies {
+                operator_reply.push_str(&format!("\n\n{member} replied:\n{reply}"));
+            }
         }
         // Drained after the relay, not before it: a relay turn carries the same
         // inline `create_workflow` tool, so draining at the responder's turn
@@ -7698,6 +7719,85 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             cards[0].column, COLUMN_PAUSED,
             "a pause must not read as a completed answer: {:?}",
             cards[0]
+        );
+    }
+
+    /// Issue #1846 review (Codex #3870516681) — **the regression.** A desk
+    /// that paused for lack of credits has not ANSWERED, so there is nothing
+    /// for the CEO relay to hand back.
+    ///
+    /// Before this fix the fold pushed the delegate's pause placeholder into
+    /// `desk_replies`, whose non-empty check launched the relay anyway: a
+    /// second inference call at the same exhausted provider, which paused too
+    /// and parked a SECOND marker — this one for the RESPONDER, with no notice
+    /// anywhere pointing at it. Being newer, that orphan supersedes the live
+    /// CTA on the delegate's own notice, disabling the one button that would
+    /// have worked.
+    ///
+    /// The script deliberately supplies only TWO turns: the responder's
+    /// hand-off and the delegate's pause. A relay would need a third, so if
+    /// the gate ever regresses, `ScriptedTurns` runs dry and this fails loudly
+    /// rather than silently parking an extra marker.
+    #[tokio::test]
+    async fn a_delegates_budget_pause_does_not_launch_the_ceo_relay() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::budget_paused(
+                    "Paused — engineer's turn ran out of inference budget/credits.",
+                    "engineer",
+                    "Paused — engineer's turn ran out of inference budget/credits, so it \
+                     stopped instead of failing silently.",
+                ),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            out.budget_paused.is_some(),
+            "sanity: the delegate's pause still folds through to the operator"
+        );
+        assert_eq!(
+            out.budget_paused.as_ref().map(|p| p.agent.as_str()),
+            Some("engineer"),
+            "the pause named must be the delegate's, not a relay's: {:?}",
+            out.budget_paused
+        );
+
+        // Asserted on the CALLS, not on the parked markers: the marker
+        // registry is process-global and keyed by company id, and every
+        // `Fixture::nested()` shares the manifest's one id — so a sibling test
+        // parking for "chief" would make a marker assertion here pass or fail
+        // on test-execution order rather than on this behaviour. The relay
+        // launching at all is the defect; the orphan marker is its downstream
+        // consequence.
+        let calls = turns.calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "exactly two turns: the responder's hand-off and the delegate's paused turn. A \
+             third is the CEO relay firing into the same exhausted provider — the pre-fix \
+             defect, which parks a second, unreachable marker for the responder: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(_, prompt)| prompt.contains("You delegated this to your team")),
+            "no call may carry a relay prompt — that sentence is `build_relay_prompt`'s and \
+             nothing else's: {calls:?}"
+        );
+
+        assert!(
+            out.reply.contains("engineer"),
+            "skipping the relay must not drop the delegate's text from the bubble: {}",
+            out.reply
         );
     }
 
