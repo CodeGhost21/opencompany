@@ -31,8 +31,8 @@ use crate::error::OpenCompanyError;
 use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
-use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
+use crate::ports::runs::{RunFilter, RunOutcome, RunStatus};
+use crate::ports::tasks::{COLUMN_TODO, TaskRecord, column_label};
 use crate::ports::types::MessageIntent;
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
@@ -79,7 +79,13 @@ pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 /// **An operator message is not only what the operator typed.** For a message
 /// addressed to a desk or teammate, the cycle appends a briefing of that
 /// target's open cards before the brain ever sees it — so `text` arrives as
-/// `<what the operator wrote>` + this marker + `<a list of card titles>`.
+/// `<what the operator wrote>` + this marker + `<a list of card lines>`.
+///
+/// Since issue #1859 each line carries more than a title: the card's board
+/// column ([`column_label`]) and, when at least one attempt has run, the
+/// latest attempt's 1-based ordinal and [`RunStatus`] — so the briefing (and
+/// the model reading it) can distinguish "todo, never attempted" from "paused
+/// on its second attempt" instead of rendering every open card identically.
 ///
 /// This exists as a shared constant because issue #442 needs to read the
 /// operator's own words back out of that: it decides whether a message asks for
@@ -1203,16 +1209,40 @@ impl<'a> CycleRunner<'a> {
             else {
                 continue;
             };
-            let mut lines: Vec<String> = open
+            let mut lines: Vec<String> = Vec::new();
+            for c in open
                 .iter()
                 .filter(|c| assignment_matches(record, target.as_str(), &c.assignee))
-                .map(|c| match &c.note {
-                    Some(note) if !note.trim().is_empty() => {
-                        format!("- {} — {}", c.title, first_line(note, 120))
-                    }
-                    _ => format!("- {}", c.title),
-                })
-                .collect();
+            {
+                // Issue #1859: the latest attempt's ordinal + status, when one
+                // has run. `list_runs` orders newest-first, so the first row is
+                // the latest attempt; a card nobody has attempted yet queries
+                // clean and simply omits the clause rather than claiming an
+                // attempt that never happened.
+                let attempt_clause = match self
+                    .rt
+                    .runs()
+                    .list_runs(
+                        &self.rt.id,
+                        &RunFilter::for_task(c.id.as_str()).with_limit(1),
+                    )
+                    .await
+                    .unwrap_or_default()
+                    .first()
+                {
+                    Some(run) => format!(" · attempt {} {}", run.attempt, run.status.as_str()),
+                    None => String::new(),
+                };
+                let column = column_label(&c.column);
+                lines.push(match &c.note {
+                    Some(note) if !note.trim().is_empty() => format!(
+                        "- {} [{column}{attempt_clause}] — {}",
+                        c.title,
+                        first_line(note, 120)
+                    ),
+                    _ => format!("- {} [{column}{attempt_clause}]", c.title),
+                });
+            }
             if lines.is_empty() {
                 continue;
             }
@@ -3557,6 +3587,117 @@ mod test {
             );
         }
         assert!(matches!(events[4], CompanyEvent::ScheduleFired { .. }));
+    }
+
+    /// Issue #1859: the handed-task briefing distinguishes real board state
+    /// instead of rendering every open card as a bare title. Two cards, two
+    /// different shapes: a paused card with two attempts (the latest failed)
+    /// renders `[Paused · attempt 2 failed]` — the LATEST attempt, not the
+    /// first, which succeeded; a to-do card nobody has attempted yet renders
+    /// `[To-do]` with the attempt clause omitted entirely rather than
+    /// claiming an attempt that never happened.
+    #[tokio::test]
+    async fn handed_task_briefing_carries_column_and_attempt_status() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let card = |id: &str, title: &str, column: &str| TaskRecord {
+            id: id.to_string(),
+            title: title.to_string(),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+        rt.tasks()
+            .upsert(
+                rt.id(),
+                &card(
+                    "t-paused",
+                    "Investigate the flaky nightly job",
+                    crate::ports::tasks::COLUMN_PAUSED,
+                ),
+            )
+            .await
+            .unwrap();
+        rt.tasks()
+            .upsert(
+                rt.id(),
+                &card("t-todo", "Draft the launch memo", COLUMN_TODO),
+            )
+            .await
+            .unwrap();
+
+        // Two attempts at the paused card: the first succeeded, the second
+        // (newest) failed — the briefing must report the LATEST.
+        let mut r1 = rt
+            .runs()
+            .create_run(
+                rt.id(),
+                crate::ports::runs::NewRun::for_task("r1", "t-paused", "ceo"),
+            )
+            .await
+            .unwrap();
+        r1.status = RunStatus::Succeeded;
+        rt.runs().put_run(rt.id(), &r1).await.unwrap();
+        let mut r2 = rt
+            .runs()
+            .create_run(
+                rt.id(),
+                crate::ports::runs::NewRun::for_task("r2", "t-paused", "ceo"),
+            )
+            .await
+            .unwrap();
+        r2.status = RunStatus::Failed;
+        rt.runs().put_run(rt.id(), &r2).await.unwrap();
+        // t-todo gets no run at all.
+
+        let record = rt.store.load(rt.id()).await.unwrap().unwrap();
+        let mut events = vec![CompanyEvent::OperatorMessage {
+            text: "what are you working on?".into(),
+            by: Some(operator()),
+            chat: Some("ceo".into()),
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }];
+
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(&record, &mut events)
+            .await;
+
+        let CompanyEvent::OperatorMessage { text, .. } = &events[0] else {
+            unreachable!("fixture is an operator message");
+        };
+        assert!(
+            text.contains("- Investigate the flaky nightly job [Paused · attempt 2 failed]"),
+            "the paused card must show its column and its LATEST attempt's status: {text}"
+        );
+        assert!(
+            text.contains("- Draft the launch memo [To-do]"),
+            "a never-attempted card must show its column with no attempt clause: {text}"
+        );
+        assert!(
+            !text.contains("Draft the launch memo [To-do · attempt"),
+            "a card with zero runs must never claim an attempt: {text}"
+        );
     }
 
     // ── Issue #1725: a bare greeting must not run the agentic loop ──
