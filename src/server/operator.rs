@@ -31,12 +31,11 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
-use crate::ports::UserRole;
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, CompanyRecord, EventSeq,
-    OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent,
-    TurnStep, Verdict,
+    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, OutboundMessage,
+    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent, TurnStep,
+    Verdict,
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
@@ -73,10 +72,6 @@ pub fn router() -> Router<AppState> {
             "/api/v1/companies/{id}/approvals/{aid}",
             post(resolve_approval),
         )
-        .route(
-            "/api/v1/companies/{id}/approvals/{aid}/extend",
-            post(extend_approval),
-        )
         // Single-company aliases (no id; resolved via the sole registered company).
         .route("/api/v1/company/chat", post(operator_chat_single))
         .route("/api/v1/company/chat/history", get(chat_history_single))
@@ -89,10 +84,6 @@ pub fn router() -> Router<AppState> {
             post(react_to_message_single),
         )
         .route("/api/v1/company/approvals", get(list_approvals_single))
-        .route(
-            "/api/v1/company/approvals/{aid}/extend",
-            post(extend_approval_single),
-        )
         .route(
             "/api/v1/company/approvals/{aid}",
             post(resolve_approval_single),
@@ -114,6 +105,11 @@ pub fn router() -> Router<AppState> {
         // Desk member ordering / hierarchy (issue #131): set the operator's
         // explicit member order for a desk. Registered under both scope forms.
         .merge(scoped("/desks/{desk_id}/order", put(set_desk_order)))
+        // The always-present, durable Operator feed — its own surface, not a
+        // desk (issue #1757 rework). Read-only identity lookup: the console
+        // pins it below a divider in the chat rail rather than folding it
+        // into `GET {scope}/desks`.
+        .merge(scoped("/operator-channel", get(operator_channel)))
         // The company → operator attention feed (issue #66): a live SSE stream of
         // the attention-worthy events already on the company's event log, under
         // both scope forms.
@@ -195,100 +191,83 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     overlay_created: false,
                 }
             });
-            // An overlay desk standing where `#general` does is not projected:
-            // the console would show it as the company-wide line, offer the
-            // edit and delete controls a desk row carries, and every one of
-            // them would be refused (`is_general_channel`). The rule this file
-            // follows is not to offer a control that will be refused. Nothing
-            // is lost by hiding it — its transcript is already folded into
-            // `#general` by `is_general_chat`, and that channel's membership is
-            // the whole roster, a superset of whatever this desk held.
-            let overlay_desks = record
-                .overlay_desks
-                .iter()
-                .filter(|desk| !shadows_general_channel(desk))
-                .map(|desk| {
-                    let members = record.effective_desk_members(&desk.id);
-                    // For an overlay desk the founding members are `desk.members`;
-                    // anything beyond them came from the desk-member overlay.
-                    let overlay_members = members
-                        .iter()
-                        .filter(|m| !desk.members.contains(m))
-                        .cloned()
-                        .collect();
-                    DeskDto {
-                        id: desk.id.clone(),
-                        name: desk.name.clone(),
-                        description: desk.description.clone(),
-                        members,
-                        overlay_members,
-                        responder: desk.responder,
-                        overlay_created: true,
-                    }
-                });
+            let overlay_desks = record.overlay_desks.iter().map(|desk| {
+                let members = record.effective_desk_members(&desk.id);
+                // For an overlay desk the founding members are `desk.members`;
+                // anything beyond them came from the desk-member overlay.
+                let overlay_members = members
+                    .iter()
+                    .filter(|m| !desk.members.contains(m))
+                    .cloned()
+                    .collect();
+                DeskDto {
+                    id: desk.id.clone(),
+                    name: desk.name.clone(),
+                    description: desk.description.clone(),
+                    members,
+                    overlay_members,
+                    responder: desk.responder,
+                    overlay_created: true,
+                }
+            });
             manifest_desks.chain(overlay_desks).collect()
         })
+        // A company that failed to load surfaces no desks — the console falls
+        // back to its static default threads (issue #1757 rework: the Operator
+        // feed is its own surface now, fetched through `GET
+        // {scope}/operator-channel` rather than injected here).
         .unwrap_or_default();
     Ok(Json(desks))
 }
 
-/// Whether `desk_id` names the built-in `#general` channel rather than a desk
-/// (issue #1743).
-///
-/// `#general` is the company-wide conversation this host has always folded
-/// every General spelling into — `general`, `General`, `main`, and the empty
-/// string all name it, which is exactly what
-/// [`is_general_chat`](crate::server::chat_history::is_general_chat) decides.
-/// It is deliberately **not** a desk: it has no lead, no hierarchy, and its
-/// membership is the whole roster derived at read time, so there is nothing for
-/// a desk mutation to change. Every one of them is therefore refused with a
-/// reason rather than answered with a bare `404`, which is a different fact —
-/// an id the host reserves is not an id nobody created.
-///
-/// Guarded on the **manifest** on purpose: a company whose blueprint really
-/// does declare a `[[group_chat]]` with one of those ids keeps behaving exactly
-/// as it did. This only ever replaces the "no such desk" answer; it never takes
-/// a desk away from a manifest that has one.
-///
-/// Deliberately *not* `desk_exists`, which also admits operator-created overlay
-/// desks. `create_desk` refuses these ids now, but it did not before issue
-/// #1743 — so an instance can be carrying a persisted overlay desk called
-/// `general` or `main`, and exempting it would leave the channel this issue
-/// promises is permanent staffable, reorderable and deletable after all. Such a
-/// desk is excluded from `GET .../desks` too ([`shadows_general_channel`]), so
-/// the refusal is never a control the console offered.
-fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
-    let declared = record
-        .manifest
-        .group_chats
-        .iter()
-        .any(|c| c.id == desk_id || c.name.eq_ignore_ascii_case(desk_id));
-    !declared && crate::server::chat_history::is_general_chat(Some(desk_id))
+/// The identity of the company's always-present, durable Operator feed
+/// (issue #1757 rework). Mirrors `OperatorChannelDto` in
+/// `frontend/src/api/types.ts`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorChannelDto {
+    /// The channel id — the `desk` query param `GET
+    /// {scope}/chat/history?desk=<id>` reads its transcript through.
+    id: String,
+    /// Always "Operator" — the console's pinned-row label.
+    name: String,
+    /// The channel's purpose line, shown under the name in the pinned row.
+    description: String,
 }
 
-/// Whether an operator-created overlay desk stands where the built-in
-/// `#general` channel does (issue #1743).
+/// `GET {scope}/operator-channel` — the identity of the company's dedicated,
+/// durable Operator feed: where "what happened and what needs you" workflow
+/// reports and the owner/no-mailbox fallback land. A pinned surface, not a
+/// desk — the console renders it as its own row below a divider rather than
+/// folding it into `GET {scope}/desks`, and it carries no member or mutation
+/// routes.
 ///
-/// **By id, and only by id** — because that is exactly what
-/// [`CompanyRecord::resolve_desk_id`](crate::ports::types::CompanyRecord::resolve_desk_id)
-/// refuses. It declines to match an overlay desk against a General key, so a
-/// desk merely *named* `General` no longer shadows anything: it is addressed by
-/// its own id, its lead still answers there, `delegate_to_desk` still reaches
-/// it, and every write to it still works. Hiding it here would take a live desk
-/// and its transcript out of Chat while the API kept routing to it — the
-/// mirror image of the defect this projection exists to prevent.
-///
-/// A desk whose **id** is a General spelling is a different matter: no key
-/// resolves it, so there is nothing left to address and every desk write aimed
-/// at it is refused. Creation refuses both spellings now, but neither was
-/// refused before, so both are reachable persisted state rather than a
-/// hypothesis.
-///
-/// Only overlay desks. A manifest desk answering to one of those spellings is
-/// the blueprint's own General desk, which this host has always honoured, and
-/// it keeps the company-wide line along with its row here.
-fn shadows_general_channel(desk: &crate::ports::types::OverlayDesk) -> bool {
-    crate::server::chat_history::is_general_chat(Some(&desk.id))
+/// `id` resolves through
+/// [`CompanyRecord::operator_feed_channel`](crate::ports::types::CompanyRecord::operator_feed_channel)
+/// — ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL), or
+/// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+/// for the one grandfathered company shape where a roster teammate already
+/// owns that id — so this and delivery
+/// (`workflows::delivery::send_to_channel_adapter`) always agree on where the
+/// feed lives. A company that fails to load, or has no record yet, still gets
+/// the default id, so the console always has a channel to point its history
+/// read at.
+async fn operator_channel(scope: ScopedCompany) -> Json<OperatorChannelDto> {
+    let id = scope
+        .runtime
+        .store()
+        .load(scope.id())
+        .await
+        .ok()
+        .flatten()
+        .map(|record| record.operator_feed_channel().to_string())
+        .unwrap_or_else(|| crate::runtime::OPERATOR_CHANNEL.to_string());
+    Json(OperatorChannelDto {
+        id,
+        name: "Operator".to_string(),
+        description: "Workflow reports and notifications — what happened and what needs you"
+            .to_string(),
+    })
 }
 
 /// The path of a desk sub-resource (`desk_id`).
@@ -341,14 +320,6 @@ async fn add_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
-    // The built-in `#general` channel is not a desk and never was — refuse the
-    // write with the reason rather than letting it fall through to the
-    // desk-not-found answer below (issue #1743).
-    if is_general_channel(&record, &desk_id) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
-        )));
-    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). A manifest-only check meant a desk
     // created in the console could be reordered and deleted but never staffed
@@ -406,14 +377,6 @@ async fn set_desk_order(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
-    // The built-in `#general` channel is not a desk and never was — refuse the
-    // write with the reason rather than letting it fall through to the
-    // desk-not-found answer below (issue #1743).
-    if is_general_channel(&record, &desk_id) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
-        )));
-    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). `desk_exists` covers both (the same
     // check `effective_desk_members` uses), so an operator-created desk can be
@@ -470,14 +433,6 @@ async fn remove_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
-    // The built-in `#general` channel is not a desk and never was — refuse the
-    // write with the reason rather than letting it fall through to the
-    // desk-not-found answer below (issue #1743).
-    if is_general_channel(&record, &desk_id) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
-        )));
-    }
     // First validate that the desk exists at all — otherwise a caller supplying
     // an unknown desk_id gets a desk-scoped 404 rather than a confusing
     // member-scoped one (Greptile feedback). Existence spans both blueprint and
@@ -621,24 +576,17 @@ async fn create_desk(
             "invalid desk id {id:?} — use lowercase letters, digits, and underscores"
         ))));
     }
-    // A desk that claimed one of the General spellings would shadow the
-    // built-in `#general` channel: the console would show two `#general` rows
-    // and the host would route messages addressed to it at this desk's lead
-    // instead of the orchestrator (issue #1743). Refused at creation, which
-    // costs nothing — no manifest can reach this path, so no existing company
-    // loses a desk.
-    //
-    // The **display name** is reserved for the same reason and not a weaker
-    // one: `resolve_desk_id` matches a desk by id *or* by case-insensitive
-    // name, so `{"id": "ops", "name": "General"}` shadows the channel just as
-    // thoroughly — `everyone_desk` folds the built-in `main` thread to
-    // `General`, that lookup then selects this desk, and `@everyone` on the
-    // company-wide line expands to its members instead of the roster.
-    if crate::server::chat_history::is_general_chat(Some(&id))
-        || crate::server::chat_history::is_general_chat(Some(&name))
-    {
+    // Issue #1757: `operator` is reserved for the built-in, read-only Operator
+    // system channel — `desk_exists` alone would miss this, since the system
+    // channel is never a manifest or overlay desk. Without this, a created
+    // overlay desk with this id would collide with the system channel in the
+    // desk list, and every message to it would be refused by the read-only
+    // guard in `chat_and_emit`, which treats any `chat_id == OPERATOR_CHANNEL`
+    // as the system feed regardless of where it came from.
+    if id == crate::runtime::OPERATOR_CHANNEL {
         return Err(ApiError(OpenCompanyError::Conflict(
-            language::GENERAL_CHANNEL_RESERVED.to_string(),
+            "the id \"operator\" is reserved for the built-in Operator channel — choose a different id"
+                .to_string(),
         )));
     }
     if record.desk_exists(&id) {
@@ -717,14 +665,6 @@ async fn delete_desk(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
 
-    // The built-in `#general` channel is not a desk and never was — refuse the
-    // write with the reason rather than letting it fall through to the
-    // desk-not-found answer below (issue #1743).
-    if is_general_channel(&record, &desk_id) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
-        )));
-    }
     // A manifest desk belongs to the blueprint — never deletable at runtime.
     if record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
@@ -795,6 +735,12 @@ async fn company_events(
         .as_ref()
         .map(|actor| Viewer::User(actor.id.clone()))
         .unwrap_or(Viewer::Operator);
+    // Threaded into the projection below so a live `AgentReply` from the
+    // owner-fallback pseudo-author is gated the same way a reload's
+    // `history_for_desk` already gates it (issue #1781 review, Codex P1) — a
+    // non-admin must never see the admin-only report just because they had
+    // the stream open when it landed.
+    let is_admin = scope.is_admin;
     let subscription = scope.runtime.events().subscribe(&company);
     // Roster display labels for mention chips. Held in a shared lock rather
     // than captured once: the stream outlives membership changes that can add
@@ -838,7 +784,7 @@ async fn company_events(
         let authors = authors
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let event = project_stream_item_for_viewer(&item, &authors, &viewer)
+        let event = project_stream_item_for_viewer(&item, &authors, &viewer, is_admin)
             .map(|value| Ok(Event::default().data(value.to_string())));
         std::future::ready(event)
     });
@@ -896,9 +842,12 @@ fn project_stream_item_for_viewer(
     item: &EventStreamItem,
     authors: &std::collections::HashMap<String, String>,
     viewer: &Viewer,
+    is_admin: bool,
 ) -> Option<serde_json::Value> {
     match item {
-        EventStreamItem::Event(stored) => project_event_for_viewer(stored, authors, viewer),
+        EventStreamItem::Event(stored) => {
+            project_event_for_viewer(stored, authors, viewer, is_admin)
+        }
         EventStreamItem::Gap { missed } => Some(serde_json::json!({
             "type": "stream_gap",
             "missed": missed,
@@ -923,15 +872,34 @@ fn project_stream_item_for_viewer(
 ///
 /// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
 /// reaches the console only by being listed here on purpose.
+///
+/// [`Viewer::Operator`] is always admin here, same as `Chat.history`'s
+/// GraphQL resolver treats the platform bearer (issue #1781 review, Codex
+/// P1) — this test helper's callers all use that viewer.
 #[cfg(test)]
 fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
-    project_event_for_viewer(stored, &std::collections::HashMap::new(), &Viewer::Operator)
+    project_event_for_viewer(
+        stored,
+        &std::collections::HashMap::new(),
+        &Viewer::Operator,
+        true,
+    )
 }
 
+/// `is_admin` gates an owner-fallback `AgentReply` — journaled under
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+/// — the same way [`history_for_desk`](crate::server::chat_history::history_for_desk)
+/// already gates it for a reload (issue #1781 review, Codex P1): a non-admin
+/// viewer must never see the admin-only report just because it landed while
+/// their SSE stream was open. The row is dropped outright rather than
+/// projected with a redacted body — this stream has no partial-reveal shape
+/// for any other event either, and a live listener that cannot see the row on
+/// reload should not see it live.
 fn project_event_for_viewer(
     stored: &StoredEvent,
     authors: &std::collections::HashMap<String, String>,
     viewer: &Viewer,
+    is_admin: bool,
 ) -> Option<serde_json::Value> {
     use serde_json::json;
 
@@ -954,6 +922,11 @@ fn project_event_for_viewer(
             mentions,
             ..
         } => {
+            // See this fn's doc: an owner-fallback report is admin-only, live
+            // exactly as it is on reload (issue #1781 review, Codex P1).
+            if !is_admin && agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR {
+                return None;
+            }
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
@@ -2268,7 +2241,10 @@ async fn accept_chat_turn(
     runtime.ensure_running().await?;
     runtime.ensure_accepting().map_err(ApiError)?;
 
-    runtime.ensure_desk_writable(desk).await.map_err(ApiError)?;
+    // Issue #1682: resolve the client's attachment ids to durable references
+    // before the journal write, so a bad reference refuses the send outright —
+    // on the same terms a malformed `parent` does — rather than journaling a
+    // message that points at a file this company does not have.
     let attachments = resolve_attachments(runtime, id, &message.attachments).await?;
 
     let message_event = CompanyEvent::OperatorMessage {
@@ -2442,6 +2418,18 @@ async fn chat_and_emit(
         .chat
         .clone()
         .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
+    // Issue #1757: the Operator channel is a **read-only** aggregation surface —
+    // a "what happened" feed of workflow reports, not a conversation. Refuse a
+    // send addressed to it rather than journaling an `OperatorMessage` under the
+    // `operator` line (which would both make it writable and mix chatter into the
+    // report feed). The frontend hides its send box; this is the safety net.
+    //
+    // The check (migration carve-outs, error text) lives on `CompanyRuntime`
+    // itself now — `ensure_desk_writable` — so the ACP `session/prompt` route
+    // (issue #1781 review, Codex P1), which journals straight to
+    // `runtime.events()` without ever calling this function, runs the exact
+    // same guard rather than a second hand-copied one that could drift.
+    runtime.ensure_desk_writable(&desk).await?;
     // Issue #364: a thread reply names its parent by id. Rejected here rather
     // than dropped, so a console sending a malformed parent learns that its
     // reply would have landed in the channel instead of quietly finding it
@@ -2661,13 +2649,7 @@ async fn join_chat_turn(
 ///
 /// Runs inside the spawned turn (issue #882) so the record survives a client or
 /// proxy that gave up waiting.
-///
-/// `pub(crate)` since issue #1846 review (Codex #3870168362): the budget-pause
-/// redeem route (`server::ops::budget_pause`) re-enters `run_cycle`/
-/// `run_journaled_cycle` directly rather than through `spawn_chat_turn`, so it
-/// has no other path to this — and used to skip it entirely, discarding the
-/// redeemed turn's `CycleReport` and leaving its answer never journaled.
-pub(crate) async fn journal_chat_replies(
+async fn journal_chat_replies(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
     desk: &str,
@@ -3085,30 +3067,50 @@ async fn resolve_desk(
     })
 }
 
-/// Resolves who is reading a desk's history, for the `mine` flag. Reuses
-/// [`chat_actor`]'s auth (session cookie or platform credential, tenant
-/// address-authorization, temporary-password gate) so a history read can
-/// never see more than a matching chat send could.
+/// Resolves who is reading a desk's history, for the `mine` flag, plus
+/// whether they may see an [`MessageView::admin_only`] row (issue #1781
+/// review, Codex P1). Reuses [`chat_actor`]'s auth (session cookie or platform
+/// credential, tenant address-authorization, temporary-password gate) for the
+/// `Viewer` itself, so a history read can never see more than a matching chat
+/// send could.
+///
+/// The admin check is a **second**, independent lookup
+/// ([`current_user`](crate::server::users::routes::current_user)) rather than
+/// widening [`Actor`] with a role: `Actor` is shared with the *send* path
+/// (`OperatorMessage::by`), where a role has no bearing on whether a
+/// signed-in human may post, so adding one there would be dead weight on every
+/// other caller. Safe to run after `chat_actor` already succeeded — this can
+/// only **narrow** what the viewer sees (gate an extra row), never widen
+/// their access, so it needs none of `chat_actor`'s own refusal gates
+/// (address authorization, temporary-password) repeated: those already ran
+/// for this exact request via `chat_actor`, and a `current_user` that somehow
+/// disagreed would only make `is_admin` `false`, the fail-safe direction.
 async fn history_viewer(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
-    runtime: &CompanyRuntime,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<(Viewer, bool), crate::server::Rejection> {
     let actor = chat_actor(headers, state, company, peer).await?;
-    Ok(match actor {
+    let is_admin = match &actor {
+        // A signed-in human: only an active admin sees an admin-only row.
         Some(actor) if actor.kind == ActorKind::User => {
-            let is_admin = runtime
-                .users()
-                .get_user(company, &actor.id)
+            crate::server::users::routes::current_user(headers, state, company, peer)
                 .await
-                .map_err(|_| crate::server::Rejection::from(unauthorized_response()))?
-                .is_some_and(|user| user.role == UserRole::Admin);
-            (Viewer::User(actor.id), is_admin)
+                .is_some_and(|principal| principal.role.may_administer())
         }
-        _ => (Viewer::Operator, true),
-    })
+        // No person behind this credential — a platform/machine bearer, or
+        // (pre-attribution) nobody at all. `Viewer::Operator` already carries
+        // full, unrestricted access everywhere else this type is used; an
+        // admin-only row is not a narrower case than the rest of a company's
+        // history, which this same credential can already read in full.
+        _ => true,
+    };
+    let viewer = match actor {
+        Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
+        _ => Viewer::Operator,
+    };
+    Ok((viewer, is_admin))
 }
 
 /// Shared body for both scope forms of `GET .../chat/history`.
@@ -3120,7 +3122,7 @@ async fn chat_history_response(
     peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
-    let (viewer, is_admin) = history_viewer(headers, state, company, &runtime, peer).await?;
+    let (viewer, is_admin) = history_viewer(headers, state, company, peer).await?;
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref()).await?;
     let limit = query
         .limit
@@ -3202,7 +3204,7 @@ async fn attribution_audit_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
-    let _viewer = history_viewer(headers, state, company, runtime.as_ref(), peer).await?;
+    let (_viewer, _is_admin) = history_viewer(headers, state, company, peer).await?;
     let record = runtime
         .store()
         .load(runtime.id())
@@ -3809,74 +3811,6 @@ async fn resolve_approval_single(
         .map_err(|error| IntoResponse::into_response(error).into())
 }
 
-/// The answer to an extend: the approval's new deadline, so the console can
-/// redraw the countdown without re-fetching the whole approvals list.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExtendReceiptDto {
-    /// Always `true` — a failure is an error response instead. Present so the
-    /// body is self-describing rather than an empty object.
-    extended: bool,
-    /// The approval's new default-deny instant (epoch-millis), the extension
-    /// time plus the gate's current TTL — the same number the card now projects.
-    expires_at_millis: f64,
-}
-
-async fn run_extend(
-    runtime: Arc<CompanyRuntime>,
-    approval_id: String,
-    actor: Actor,
-) -> Result<Response, ApiError> {
-    runtime.ensure_running().await?;
-    let id = ApprovalId::new(approval_id);
-    // `extend_approval` refuses an unknown/already-decided id with `NotFound`,
-    // which maps to 404 — so an operator extending something that has since
-    // resolved or expired is told, not silently answered 200.
-    let expires_at_millis = runtime.extend_approval(&id, actor).await?;
-    Ok(Json(ExtendReceiptDto {
-        extended: true,
-        expires_at_millis: expires_at_millis as f64,
-    })
-    .into_response())
-}
-
-/// `POST /api/v1/companies/{id}/approvals/{aid}/extend` (issue #1805).
-async fn extend_approval(
-    CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path((id, aid)): Path<(String, String)>,
-) -> Result<Response, crate::server::Rejection> {
-    let company = CompanyId::new(&id);
-    if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp.into());
-    }
-    let runtime = lookup(&state, &id)?;
-    let actor = resolving_actor(auth);
-    run_extend(runtime, aid, actor)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())
-}
-
-/// `POST /api/v1/company/approvals/{aid}/extend` (single-company alias).
-async fn extend_approval_single(
-    CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path(aid): Path<String>,
-) -> Result<Response, crate::server::Rejection> {
-    let runtime = sole(&state)?;
-    let id = runtime.id().clone();
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp.into());
-    }
-    if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp.into());
-    }
-    let actor = resolving_actor(auth);
-    run_extend(runtime, aid, actor)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())
-}
-
 #[cfg(test)]
 mod test {
     use axum::body::{Body, to_bytes};
@@ -3885,6 +3819,7 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::types::CompanyRecord;
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
     use crate::store::FsCompanyStore;
@@ -5438,105 +5373,94 @@ mode = "full"
         assert_eq!(body["members"][1], "ceo");
 
         // The list now carries the manifest desk and the created overlay desk.
+        // The Operator feed is its own surface (issue #1757 rework) — it is
+        // fetched through `GET {scope}/operator-channel`, not injected here.
         let desks = get_desks(&app, &cookie).await;
         let arr = desks.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 2, "{arr:?}");
         assert_eq!(arr[0]["id"], "studio"); // manifest desk first
         assert_eq!(arr[1]["id"], "growth_desk");
         assert_eq!(arr[1]["overlayCreated"], true);
     }
 
-    /// Every desk mutation aimed at the built-in `#general` channel is refused
-    /// with a reason, under **every** spelling the host folds into the General
-    /// conversation (issue #1743).
-    ///
-    /// The point of the assertion is the pair: a `409` **and** the sentence.
-    /// Before this, each of these was a bare `404`/`CompanyNotFound` — "there
-    /// is no such desk" — which is a different and wrong claim. `#general` is
-    /// not missing; it is reserved, and the caller needs to be told which.
-    ///
-    /// There is no `PATCH …/desks/{id}` route on this host at all, so this is
-    /// the complete desk mutation surface: delete, staff, unstaff, reorder.
+    /// Issue #1835, both wire directions. A create that never mentions
+    /// `responder` — every existing caller, and the org chart today — answers
+    /// and lists with **no** `responder` key at all, so old consoles see the
+    /// pre-#1835 shape byte-for-byte. A create with `responder: "auto"`
+    /// answers and lists `"auto"`, and the mode survives the store round-trip
+    /// rather than collapsing back to a lead desk.
     #[tokio::test]
-    async fn every_desk_mutation_aimed_at_general_is_refused_with_a_reason() {
+    async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
 
-        for spelling in ["general", "General", "GENERAL", "main", "Main"] {
-            let cases: [(&str, String, &str); 4] = [
-                ("DELETE", format!("/api/v1/company/desks/{spelling}"), ""),
-                (
-                    "POST",
-                    format!("/api/v1/company/desks/{spelling}/members"),
-                    r#"{"agent_id":"eng"}"#,
-                ),
-                (
-                    "DELETE",
-                    format!("/api/v1/company/desks/{spelling}/members/ceo"),
-                    "",
-                ),
-                (
-                    "PUT",
-                    format!("/api/v1/company/desks/{spelling}/order"),
-                    r#"{"ordered_member_ids":["ceo"]}"#,
-                ),
-            ];
-            for (method, uri, body) in cases {
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
                 let response = app
-                    .clone()
                     .oneshot(
                         Request::builder()
-                            .method(method)
-                            .uri(&uri)
+                            .method("POST")
+                            .uri("/api/v1/company/desks")
                             .header("cookie", &cookie)
                             .header("content-type", "application/json")
-                            .body(Body::from(body.to_string()))
+                            .body(Body::from(body))
                             .unwrap(),
                     )
                     .await
                     .unwrap();
-                assert_eq!(
-                    response.status(),
-                    StatusCode::CONFLICT,
-                    "{method} {uri} must be refused, not answered 404"
-                );
+                assert_eq!(response.status(), StatusCode::CREATED);
                 let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                let text = String::from_utf8_lossy(&bytes);
-                assert!(
-                    text.contains("company-wide channel"),
-                    "{method} {uri} must say why: got {text}"
-                );
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
             }
-        }
+        };
+
+        let lead = post(r#"{"name":"Growth desk","members":["eng"]}"#).await;
+        assert!(
+            lead.get("responder").is_none(),
+            "a mode never stated must not appear on the wire: {lead}"
+        );
+        let auto =
+            post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
+        assert_eq!(auto["responder"], "auto", "{auto}");
+
+        // The list re-reads the store, so this is the round-trip half: the
+        // manifest desk and the defaulted create stay keyless, the channel
+        // keeps its mode.
+        let desks = get_desks(&app, &cookie).await;
+        let arr = desks.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert!(arr[0].get("responder").is_none(), "manifest desk: {desks}");
+        assert!(
+            arr[1].get("responder").is_none(),
+            "defaulted create: {desks}"
+        );
+        assert_eq!(arr[2]["responder"], "auto", "{desks}");
     }
 
-    /// A desk create that would shadow the built-in channel is refused (409),
-    /// whichever spelling it asks for and whether the id is given explicitly or
-    /// derived from the name (issue #1743).
-    ///
-    /// Shadowing is not a cosmetic collision: a desk named `general` would take
-    /// over routing for the company-wide line, so a message meant for the
-    /// orchestrator would be answered by that desk's lead instead.
+    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
+    /// the selector would have no candidates and the first-member fallback no
+    /// first member, so its unmentioned messages would silently fall to the
+    /// orchestrator, contradicting the channel's own model. A **lead** desk
+    /// keeps its right to start empty and be staffed from the org chart.
+    /// Revert the guard in `create_desk` and the first assertion answers 201.
     #[tokio::test]
-    async fn a_desk_cannot_be_created_that_would_shadow_the_general_channel() {
+    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
 
-        for body in [
-            r#"{"name":"Anything","id":"general"}"#,
-            r#"{"name":"Anything","id":"main"}"#,
-            r#"{"name":"General"}"#,
-            r#"{"name":"Main"}"#,
-        ] {
-            let response = app
-                .clone()
-                .oneshot(
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
                     Request::builder()
                         .method("POST")
                         .uri("/api/v1/company/desks")
@@ -5546,304 +5470,32 @@ mode = "full"
                         .unwrap(),
                 )
                 .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
-            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            assert!(
-                String::from_utf8_lossy(&bytes).contains("reserved"),
-                "body {body} must be told the id is reserved"
-            );
-        }
-
-        // Nothing was created: the desk list still holds only the manifest desk.
-        let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1);
-        assert_eq!(desks[0]["id"], "studio");
-    }
-
-    /// `#general` is **not** a desk, and `GET …/desks` says so by not listing it
-    /// (issue #1743).
-    ///
-    /// This is the guarantee that keeps every desk-shaped surface honest
-    /// without any of them needing a special case: the org chart, the assignee
-    /// picker and the desk counts all read this route, so a channel that is
-    /// absent here can never be offered a rename, a delete, a lead or a seat.
-    /// The console's own no-affordance requirement falls out of it rather than
-    /// being enforced by hiding buttons.
-    #[tokio::test]
-    async fn the_general_channel_is_not_a_desk_and_is_not_listed_as_one() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        let desks = get_desks(&app, &cookie).await;
-        for desk in desks.as_array().unwrap() {
-            let id = desk["id"].as_str().unwrap();
-            assert!(
-                !crate::server::chat_history::is_general_chat(Some(id)),
-                "the desk list must not carry the built-in channel, found {id}"
-            );
-        }
-    }
-
-    /// An overlay desk carrying an explicit, unreserved id but the reserved
-    /// **display name** shadows the channel just as thoroughly (issue #1743).
-    ///
-    /// `resolve_desk_id` matches a desk by id *or* by case-insensitive name, so
-    /// `{"id": "ops", "name": "General"}` is selected when
-    /// `HarnessBrain::everyone_desk` folds the built-in `main` thread to
-    /// `General` — and `@everyone` on the company-wide line then expands to
-    /// that desk's members instead of the roster. The id check alone missed it
-    /// because the id is only *derived* from the name when none is supplied.
-    #[tokio::test]
-    async fn a_desk_cannot_take_the_general_display_name_under_another_id() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        for body in [
-            r#"{"id":"ops","name":"General"}"#,
-            r#"{"id":"ops","name":"general"}"#,
-            r#"{"id":"ops","name":"Main"}"#,
-        ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/v1/company/desks")
-                        .header("cookie", &cookie)
-                        .header("content-type", "application/json")
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
-        }
-
-        let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1, "nothing was created");
-    }
-
-    /// An overlay desk carrying a reserved **display name** under its own id is
-    /// still a desk, and is still projected (issue #1743).
-    ///
-    /// `resolve_desk_id` declines to match an overlay desk against a General
-    /// key at all, so `{id: "ops", name: "General"}` shadows nothing: `ops`
-    /// resolves it, its lead answers there, `delegate_to_desk` reaches it, and
-    /// every desk write to it is allowed. Hiding it would take a live desk and
-    /// its transcript out of Chat while the API went on routing to it — the
-    /// mirror image of the defect this projection exists to prevent, and a
-    /// worse one, because nothing would say where the conversation went.
-    ///
-    /// Creation still refuses that display name
-    /// ([`a_desk_cannot_take_the_general_display_name_under_another_id`]); this
-    /// is only about state already on disk.
-    #[tokio::test]
-    async fn an_overlay_desk_named_general_under_its_own_id_is_still_projected() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        {
-            let id = CompanyId::new("acme");
-            let runtime = state.registry().get(&id).unwrap();
-            let store = runtime.store();
-            let mut record = store.load(&id).await.unwrap().unwrap();
-            record.overlay_desks.push(crate::ports::types::OverlayDesk {
-                id: "ops".to_string(),
-                name: "General".to_string(),
-                description: None,
-                responder: Default::default(),
-                members: vec!["ceo".to_string()],
-            });
-            // The resolver is the reason this row is safe to project.
-            assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
-            assert_eq!(record.resolve_desk_id("General"), None);
-            assert_eq!(record.resolve_desk_id("main"), None);
-            store.save(&record).await.unwrap();
-        }
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        let desks = get_desks(&app, &cookie).await;
-        let ops = desks
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["id"] == "ops")
-            .unwrap_or_else(|| panic!("the desk must still be listed: {desks}"));
-        assert_eq!(ops["name"], "General");
-        assert_eq!(ops["overlayCreated"], true);
-
-        // And it takes desk writes under its own id, like any other desk.
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/company/desks/ops/members")
-                    .header("cookie", &cookie)
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"agent_id":"eng"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        // While the General *key* still names the channel, not this desk.
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/api/v1/company/desks/General")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-    }
-
-    /// An overlay desk persisted **before** the ids were reserved is still not
-    /// the built-in channel (issue #1743).
-    ///
-    /// `create_desk` accepted `general` and `main` until this issue, so this is
-    /// state an upgraded instance can be carrying. Guarding the immutability
-    /// checks on `desk_exists` would have exempted it — leaving the channel
-    /// this issue promises is permanent staffable, reorderable and deletable
-    /// after all, which is the whole claim rather than an edge of it.
-    #[tokio::test]
-    async fn a_pre_existing_overlay_desk_does_not_become_the_general_channel() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        // Persisted as an upgraded instance would be carrying it — through the
-        // store the handlers read, not through the create route, which now
-        // refuses this id.
-        {
-            let id = CompanyId::new("acme");
-            let runtime = state.registry().get(&id).unwrap();
-            let store = runtime.store();
-            let mut record = store.load(&id).await.unwrap().unwrap();
-            record.overlay_desks.push(crate::ports::types::OverlayDesk {
-                id: "general".to_string(),
-                name: "Legacy general".to_string(),
-                description: None,
-                responder: Default::default(),
-                members: vec!["ceo".to_string()],
-            });
-            store.save(&record).await.unwrap();
-        }
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        // Not projected, so no desk surface can offer it a control at all.
-        let desks = get_desks(&app, &cookie).await;
-        for desk in desks.as_array().unwrap() {
-            assert_ne!(
-                desk["id"], "general",
-                "a shadowing overlay desk must not be listed: {desks}"
-            );
-        }
-
-        // And every write aimed at it is refused with the channel's reason,
-        // not answered as if it were an ordinary desk.
-        for (method, uri, body) in [
-            (
-                "POST",
-                "/api/v1/company/desks/general/members",
-                Some(r#"{"agent_id":"eng"}"#),
-            ),
-            ("DELETE", "/api/v1/company/desks/general", None),
-        ] {
-            let mut req = Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("cookie", &cookie);
-            if body.is_some() {
-                req = req.header("content-type", "application/json");
+                .unwrap()
             }
-            let response = app
-                .clone()
-                .oneshot(req.body(body.map_or_else(Body::empty, Body::from)).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::CONFLICT, "{method} {uri}");
-        }
-    }
+        };
 
-    /// A company whose **blueprint** really declares a desk with one of those
-    /// ids keeps it, and keeps every write that has always worked on it
-    /// (issue #1743).
-    ///
-    /// The reservation replaces the "no such desk" answer and nothing else. A
-    /// guard that refused on the id alone would have taken a desk away from
-    /// every company that authored one, which is a migration, not a feature.
-    #[tokio::test]
-    async fn a_manifest_desk_named_general_is_left_exactly_as_it_was() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let manifest: CompanyManifest = toml::from_str(
-            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
-             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
-             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
-             [[group_chat]]\nid = \"general\"\nname = \"General\"\nmembers = [\"ceo\"]\n",
-        )
-        .unwrap();
-        let state = state_with_manifest(&home, manifest).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            body.contains("at least one member"),
+            "the refusal names the reason, not a generic 400: {body}"
+        );
 
-        // It is listed as the desk it is.
-        let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1);
-        assert_eq!(desks[0]["id"], "general");
-
-        // Staffing it still works — the pre-#1743 behaviour, unchanged.
-        let add = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/company/desks/general/members")
-                    .header("cookie", &cookie)
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"agent_id":"eng"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(add.status(), StatusCode::NO_CONTENT);
-
-        // And deleting it is still refused as a *blueprint* desk, with the
-        // blueprint's reason rather than the reserved-channel one.
-        let delete = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/api/v1/company/desks/general")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(delete.status(), StatusCode::CONFLICT);
-        let bytes = to_bytes(delete.into_body(), usize::MAX).await.unwrap();
-        assert!(String::from_utf8_lossy(&bytes).contains("blueprint"));
+        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
+        assert_eq!(
+            empty_lead.status(),
+            StatusCode::CREATED,
+            "an empty lead desk is still legal — it gains members from the org chart"
+        );
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
-    /// manifest desk is 409, and an unknown member is 400.
+    /// manifest desk is 409, an unknown member is 400, and — issue #1757 — an
+    /// id (explicit or name-derived) colliding with the reserved `operator`
+    /// system channel is 409 even though it is not a manifest or overlay desk
+    /// `desk_exists` would otherwise catch.
     #[tokio::test]
     async fn create_desk_validates_name_id_and_members() {
         let home_dir = home();
@@ -5859,6 +5511,11 @@ mode = "full"
                 r#"{"name":"Ghost desk","members":["ghost"]}"#,
                 StatusCode::BAD_REQUEST,
             ),
+            (
+                r#"{"name":"Operator","id":"operator"}"#,
+                StatusCode::CONFLICT,
+            ),
+            (r#"{"name":"operator"}"#, StatusCode::CONFLICT),
         ];
         for (body, want) in cases {
             let response = app
@@ -5933,8 +5590,11 @@ mode = "full"
         assert_eq!(delete.status(), StatusCode::NO_CONTENT);
 
         let desks = get_desks(&app, &cookie).await;
-        assert_eq!(desks.as_array().unwrap().len(), 1);
-        assert_eq!(desks[0]["id"], "studio");
+        // Only the manifest desk remains — the Operator feed is its own
+        // surface now (issue #1757 rework), not injected into this list.
+        let arr = desks.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "{arr:?}");
+        assert_eq!(arr[0]["id"], "studio");
 
         // Deleting it again is a 404.
         let gone = app
@@ -6211,8 +5871,11 @@ mode = "full"
 
     #[tokio::test]
     async fn desks_route_returns_the_company_desks() {
-        // The default test manifest defines no group chats, so the route answers
-        // 200 with an empty list (the console then falls back to its defaults).
+        // The default test manifest defines no group chats, so the route
+        // answers 200 with an empty list — the console falls back to its
+        // static default threads. The Operator feed is a separate surface
+        // (issue #1757 rework), fetched through `GET
+        // {scope}/operator-channel`, and no longer folded into this list.
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
@@ -6231,7 +5894,337 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value.as_array().unwrap().len(), 0);
+        let desks = value.as_array().unwrap();
+        assert!(desks.is_empty(), "{desks:?}");
+    }
+
+    async fn get_operator_channel(app: &axum::Router, cookie: &str) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/operator-channel")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Issue #1757 rework: `GET {scope}/operator-channel` returns the
+    /// dedicated feed's identity — never folded into `list_desks` any more —
+    /// and `list_desks` carries zero operator logic: the real desks are all
+    /// it returns.
+    #[tokio::test]
+    async fn operator_channel_route_returns_the_feed_identity_and_is_absent_from_desks() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(channel["id"], "operator");
+        assert_eq!(channel["name"], "Operator");
+        assert!(
+            channel["description"]
+                .as_str()
+                .unwrap()
+                .contains("what happened"),
+            "{channel}"
+        );
+
+        let desks = get_desks(&app, &cookie).await;
+        assert!(
+            desks
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|d| d["id"] != "operator"),
+            "list_desks must carry zero operator logic: {desks:?}"
+        );
+    }
+
+    /// Issue #1757 rework: the always-present Operator feed is its own
+    /// surface — `GET {scope}/operator-channel` names it, `list_desks` never
+    /// does — and posting to it is still refused (it is a read-only report
+    /// feed).
+    #[tokio::test]
+    async fn the_operator_channel_is_a_separate_surface_and_stays_read_only() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        let ids: Vec<&str> = desks.iter().map(|d| d["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["studio"], "list_desks carries only real desks");
+
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(channel["id"], "operator");
+        assert_eq!(channel["name"], "Operator");
+
+        // A send addressed to it is refused (read-only), never journaled.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi","chat":"operator"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_client_error(),
+            "posting to the operator channel must be refused, got {}",
+            response.status()
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_lowercase();
+        assert!(body.contains("read-only"), "{body}");
+    }
+
+    /// Issue #1781 review (CodeRabbit): `CompanyRuntime::ensure_desk_writable`
+    /// re-loads the record on every operator-channel send (to catch a
+    /// grandfathered desk/teammate colliding with the reserved id) and
+    /// propagates a real `store().load` failure with `?` rather than folding
+    /// it into "no real recipient". Collapsing it would misreport a store
+    /// outage as the ordinary read-only refusal — same 4xx, same message,
+    /// same "read-only" wording an operator would wrongly believe.
+    ///
+    /// Corrupting `company.toml` on disk after the app is built (rather than
+    /// mocking `CompanyStore`) exercises the real `FsCompanyStore::load`
+    /// error path — `Err(OpenCompanyError::Store("invalid company.toml: …"))`
+    /// — which has no `Store` arm in `ApiError::status` and therefore falls
+    /// to the catch-all `INTERNAL_SERVER_ERROR`. A collapsed-to-`false` read
+    /// would instead surface as `InvalidRequest` (400) with the read-only
+    /// wording, so the status code and body together distinguish the two.
+    #[tokio::test]
+    async fn a_failing_store_load_is_not_collapsed_into_the_read_only_refusal() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Corrupt the on-disk manifest so the next `store().load()` — the one
+        // `ensure_desk_writable` runs fresh on every send — fails instead of
+        // returning `Some(record)`.
+        let toml_path = crate::store::Bundle::new(&home, &CompanyId::new("acme")).company_toml();
+        tokio::fs::write(&toml_path, b"not valid toml [[[")
+            .await
+            .expect("corrupt company.toml");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi","chat":"operator"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a store load failure must propagate as itself, not the read-only 4xx"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_lowercase();
+        assert!(
+            !body.contains("read-only"),
+            "a store outage must not be misreported as the ordinary read-only refusal: {body}"
+        );
+    }
+
+    /// Issue #1757 migration: `operator` was not a reserved id before this
+    /// issue, and a stored manifest is never re-validated on load
+    /// (`CompanyManifest::from_stored_toml` skips validation on purpose, so
+    /// tightening a rule never strands an already-running company) — so a
+    /// company provisioned earlier can already have a real `[[group_chat]]`
+    /// using that id. Built directly with `toml::from_str` (bypassing
+    /// `into_validated`, the same way a stored manifest reaches
+    /// `CompanyRuntime` without going through it) to stand in for exactly
+    /// that: data that predates the guard. Without the carve-outs in
+    /// `list_desks` and `chat_and_emit`, this desk would be shadowed by a
+    /// synthetic, read-only duplicate under the same id the moment this
+    /// feature shipped, and every send to it would be refused. This proves
+    /// it is grandfathered instead: listed once, not flagged `system`, and
+    /// still writable.
+    #[tokio::test]
+    async fn a_manifest_desk_predating_the_reserved_operator_id_stays_writable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Ops Room\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        assert_eq!(desks.len(), 1, "no duplicate synthetic entry: {desks:?}");
+        assert_eq!(desks[0]["id"], "operator");
+        assert_eq!(
+            desks[0]["name"], "Ops Room",
+            "the real desk's own name, not the synthetic channel's: {desks:?}"
+        );
+        assert!(
+            desks[0].get("system").is_none(),
+            "grandfathered desk is a real desk (system defaults false and is \
+             omitted), not the system channel: {desks:?}"
+        );
+
+        // A send addressed to it must go through — this is the pre-existing
+        // desk's own line, not the (absent) synthetic system channel.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"ship the landing page","chat":"operator"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "a pre-existing desk that already owns the `operator` id must stay \
+             writable, got {}",
+            response.status()
+        );
+    }
+
+    /// Issue #1757 migration, the other namespace: a **teammate**, not a desk,
+    /// already named `operator`. `ChatView` addresses a DM by the teammate's
+    /// bare id (issue #364), so a message meant for this person also arrives
+    /// here as `chat == "operator"` — the same shape as a send meant for the
+    /// system feed. `desk_exists` alone cannot tell them apart: it only walks
+    /// `group_chats` and `overlay_desks`, never the roster, so a company that
+    /// named a manifest agent "Operator" before this feature shipped would
+    /// find that teammate's DM permanently refused, with the console giving no
+    /// way to rename or migrate out of the collision (`RESERVED_AGENT_IDS` and
+    /// `mint_agent_id` only stop a *future* mint). `is_roster_agent` closes the
+    /// same gap `desk_exists` closes for desks.
+    #[tokio::test]
+    async fn a_manifest_agent_predating_the_reserved_operator_id_stays_dm_able() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // A DM addressed to the grandfathered teammate — by its bare id, the
+        // same address `ChatView` sends — must go through rather than be
+        // refused as a send to the read-only system channel.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"status update please","chat":"operator"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "a pre-existing teammate that already owns the `operator` id must \
+             stay DM-able, got {}",
+            response.status()
+        );
+    }
+
+    /// Issue #1757 rework, the read side of the grandfather case the test
+    /// above covers on the write side: a company whose roster names a
+    /// teammate `operator` (no desk of the same id) must have `GET
+    /// {scope}/operator-channel` answer at the disjoint collision-fallback
+    /// id, not the literal `operator` one — a direct post to the visible
+    /// read-only feed and the teammate's own DM must stay distinguishable
+    /// (`chat_id == "operator"` for the DM, the fallback id for the feed) —
+    /// and that fallback id must itself stay refused as read-only.
+    #[tokio::test]
+    async fn the_operator_channel_diverts_off_a_grandfathered_teammates_operator_line() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state.clone());
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(
+            channel["id"],
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the feed must not claim the literal `operator` id once a \
+             teammate already holds it: {channel:?}"
+        );
+
+        // list_desks carries no operator logic at all, so it is untouched by
+        // this collision either way — nothing to assert there but its
+        // absence of the teammate, which the DM test above already covers.
+
+        // The disjoint fallback id is unmintable and system-only: a direct post
+        // to it must stay refused exactly like the literal `operator` id is,
+        // even though nothing minted it as a desk.
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"text":"hello","chat":"{}"}}"#,
+                        crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the disjoint system-feed address must stay read-only"
+        );
     }
 
     /// Issue #65: the console's default thread addresses sends with
@@ -7589,138 +7582,6 @@ mode = "full"
         );
     }
 
-    // -- Extend the deadline (issue #1805) ----------------------------------
-
-    /// Parks one effect in BOTH the gate and the journal under a fixed id, at a
-    /// controllable instant — the gate is what `extend_approval` asks whether an
-    /// id is live, and the journal is what projects the deadline, so an extend
-    /// test needs both seeded exactly as a real park leaves them.
-    async fn park_for_extend(
-        runtime: &Arc<CompanyRuntime>,
-        id: &str,
-        at_millis: u64,
-    ) -> ApprovalId {
-        use crate::runtime::journal::{ApprovalConversation, TaskLink};
-        let approval = ApprovalId::new(id);
-        let effect = crate::ports::types::Effect {
-            kind: "payment.send".into(),
-            group: crate::ports::types::EffectGroup::Spend,
-            amount_usd: Some(1_200.0),
-            established_thread: false,
-            first_time_counterparty: false,
-            payload: serde_json::json!({ "to": "vendor@example.test" }),
-            agent: Some("ceo".into()),
-            run_id: None,
-        };
-        runtime
-            .approval_gate
-            .rehydrate(approval.clone(), effect.clone(), at_millis);
-        runtime
-            .journal
-            .record_parked(
-                &approval,
-                &effect,
-                at_millis,
-                TaskLink::Unlinked,
-                ApprovalConversation::default(),
-                None,
-            )
-            .await
-            .unwrap();
-        approval
-    }
-
-    fn extend_request_with_cookie(approval_id: &ApprovalId, cookie: String) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/v1/company/approvals/{approval_id}/extend"))
-            .header("cookie", cookie)
-            .body(Body::empty())
-            .unwrap()
-    }
-
-    fn extend_request(approval_id: &ApprovalId) -> Request<Body> {
-        extend_request_with_cookie(
-            approval_id,
-            crate::server::test_support::fixed_cookie("acme"),
-        )
-    }
-
-    async fn body_json(response: Response) -> serde_json::Value {
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    /// The keystone (issue #1805): extending a parked approval pushes its
-    /// deadline out to a fresh full window, and the receipt names the new one —
-    /// the console can redraw the countdown without re-fetching the list.
-    #[tokio::test]
-    async fn extending_a_parked_approval_moves_its_deadline() {
-        let home_dir = home();
-        let state = state_with_company(home_dir.path(), "running").await;
-        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-        // Parked long ago, so its original deadline is `1_000 + ttl`.
-        let id = park_for_extend(&runtime, "appr-ext", 1_000).await;
-        let before = runtime.pending_approvals()[0]
-            .expires_at_millis
-            .expect("a deadline is projected");
-
-        let app = router(state);
-        let response = app.oneshot(extend_request(&id)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_json(response).await;
-
-        let after = runtime.pending_approvals()[0]
-            .expires_at_millis
-            .expect("a deadline is still projected");
-        assert!(
-            after > before,
-            "the deadline moved out: before={before} after={after}"
-        );
-        assert!(body["extended"].as_bool().unwrap());
-        assert_eq!(
-            body["expiresAtMillis"].as_f64().unwrap() as u64,
-            after,
-            "the receipt's deadline is the one the card now projects"
-        );
-    }
-
-    /// Extending something that is not parked — an unknown id, or one already
-    /// resolved or expired — is a 404, not a 200 over nothing.
-    #[tokio::test]
-    async fn extending_an_unknown_approval_is_404() {
-        let home_dir = home();
-        let state = state_with_company(home_dir.path(), "running").await;
-        let app = router(state);
-        let response = app
-            .oneshot(extend_request(&ApprovalId::new("does-not-exist")))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    /// The route is guarded by the same company auth as resolve: a member — an
-    /// authenticated user of the company — may extend a deadline, exactly as
-    /// they may resolve. Keeping a stalled run alive is not an admin-only lever.
-    #[tokio::test]
-    async fn a_member_may_extend_an_approval_deadline() {
-        let home_dir = home();
-        let state = state_with_company(home_dir.path(), "running").await;
-        crate::server::test_support::seed_fixed_member(&state, "acme").await;
-        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-        let id = park_for_extend(&runtime, "appr-member-ext", 1_000).await;
-
-        let app = router(state);
-        let response = app
-            .oneshot(extend_request_with_cookie(
-                &id,
-                crate::server::test_support::member_cookie("acme"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
     /// The dotted kind the stalled brain parks once its follow-up turn gets
     /// past the barrier. Parking journals durably (`record_parked`), so its
     /// presence in `pending_approvals()` is proof the continuation reached the
@@ -8922,6 +8783,7 @@ mode = "full"
             &EventStreamItem::Gap { missed: 44 },
             &std::collections::HashMap::new(),
             &Viewer::Operator,
+            true,
         )
         .expect("a gap must reach the console");
         assert_eq!(
@@ -8991,8 +8853,9 @@ mode = "full"
             steps: Vec::new(),
         });
         let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
-        let value = super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()))
-            .expect("agent_reply is an attention signal");
+        let value =
+            super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()), false)
+                .expect("agent_reply is an attention signal");
         assert_eq!(
             value["mentions"],
             serde_json::json!([
@@ -9001,6 +8864,59 @@ mode = "full"
             ])
         );
     }
+
+    /// Issue #1781 review, Codex P1: `history_for_desk` already hides an
+    /// owner-fallback report from a non-admin on reload; this proves the live
+    /// SSE projection agrees, rather than handing a non-admin console the full
+    /// admin-only text the instant it lands.
+    #[test]
+    fn drops_owner_fallback_report_from_a_non_admin_viewer() {
+        let event = stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "operator".into(),
+            agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+            text: "no admin has a mailbox".into(),
+            steps: Vec::new(),
+        });
+
+        let non_admin = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::User("member-1".into()),
+            false,
+        );
+        assert!(
+            non_admin.is_none(),
+            "a non-admin viewer must not receive the admin-only report live: {non_admin:?}"
+        );
+
+        let admin = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::User("admin-1".into()),
+            true,
+        )
+        .expect("an admin viewer still receives the report live");
+        assert_eq!(
+            admin["agentId"],
+            crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+        );
+
+        // The Operator viewer (issue #66's original, unrestricted principal)
+        // must see it too — same as `project_event`'s `is_admin: true` default.
+        let operator = super::project_event_for_viewer(
+            &event,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("the operator viewer still receives the report live");
+        assert_eq!(operator["text"], "no admin has a mailbox");
+    }
+
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
@@ -11341,114 +11257,6 @@ mode = "full"
             runtime.mention_context(&id, &[], "Engineering").await,
             "engineering",
             "a desk with a lead still stores its canonical id"
-        );
-    }
-
-    /// Issue #1835, both wire directions. A create that never mentions
-    /// `responder` — every existing caller, and the org chart today — answers
-    /// and lists with **no** `responder` key at all, so old consoles see the
-    /// pre-#1835 shape byte-for-byte. A create with `responder: "auto"`
-    /// answers and lists `"auto"`, and the mode survives the store round-trip
-    /// rather than collapsing back to a lead desk.
-    #[tokio::test]
-    async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        let post = |body: &'static str| {
-            let app = app.clone();
-            let cookie = cookie.clone();
-            async move {
-                let response = app
-                    .oneshot(
-                        Request::builder()
-                            .method("POST")
-                            .uri("/api/v1/company/desks")
-                            .header("cookie", &cookie)
-                            .header("content-type", "application/json")
-                            .body(Body::from(body))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(response.status(), StatusCode::CREATED);
-                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
-            }
-        };
-
-        let lead = post(r#"{"name":"Growth desk","members":["eng"]}"#).await;
-        assert!(
-            lead.get("responder").is_none(),
-            "a mode never stated must not appear on the wire: {lead}"
-        );
-        let auto =
-            post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
-        assert_eq!(auto["responder"], "auto", "{auto}");
-
-        // The list re-reads the store, so this is the round-trip half: the
-        // manifest desk and the defaulted create stay keyless, the channel
-        // keeps its mode.
-        let desks = get_desks(&app, &cookie).await;
-        let arr = desks.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
-        assert!(arr[0].get("responder").is_none(), "manifest desk: {desks}");
-        assert!(
-            arr[1].get("responder").is_none(),
-            "defaulted create: {desks}"
-        );
-        assert_eq!(arr[2]["responder"], "auto", "{desks}");
-    }
-
-    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
-    /// the selector would have no candidates and the first-member fallback no
-    /// first member, so its unmentioned messages would silently fall to the
-    /// orchestrator, contradicting the channel's own model. A **lead** desk
-    /// keeps its right to start empty and be staffed from the org chart.
-    /// Revert the guard in `create_desk` and the first assertion answers 201.
-    #[tokio::test]
-    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
-        let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_manifest(&home, desk_manifest()).await;
-        let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
-
-        let post = |body: &'static str| {
-            let app = app.clone();
-            let cookie = cookie.clone();
-            async move {
-                app.oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/v1/company/desks")
-                        .header("cookie", &cookie)
-                        .header("content-type", "application/json")
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-            }
-        };
-
-        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
-        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
-        let body = String::from_utf8_lossy(&bytes).to_string();
-        assert!(
-            body.contains("at least one member"),
-            "the refusal names the reason, not a generic 400: {body}"
-        );
-
-        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
-        assert_eq!(
-            empty_lead.status(),
-            StatusCode::CREATED,
-            "an empty lead desk is still legal — it gains members from the org chart"
         );
     }
 }
