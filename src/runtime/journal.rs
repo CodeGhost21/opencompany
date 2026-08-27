@@ -992,6 +992,17 @@ struct State {
 struct BlockedStash {
     workflow_id: String,
     input: Value,
+    /// Whether this stash's `BlockedNodeStashed` append has actually landed
+    /// (issue #1825, P1 — found by chatgpt-codex-connector).
+    ///
+    /// Set on insert by [`replay`](RuntimeJournal::replay), since a record it
+    /// folds is durable by construction. Starts `false` for a live insert made
+    /// by [`record_blocked_node_stashed`](RuntimeJournal::record_blocked_node_stashed)
+    /// ahead of its own append, and flips to `true` only once that append
+    /// actually returns `Ok`. The settle-time fallback call reads this — not
+    /// mere presence in the map — to decide whether there is still an append
+    /// worth retrying.
+    durable: bool,
 }
 
 impl State {
@@ -1294,9 +1305,16 @@ impl RuntimeJournal {
                 input,
                 ..
             } => {
-                state
-                    .blocked_stashes
-                    .insert(turn, BlockedStash { workflow_id, input });
+                state.blocked_stashes.insert(
+                    turn,
+                    BlockedStash {
+                        workflow_id,
+                        input,
+                        // A record `replay` folds is durable by construction —
+                        // it was read back from the journal it describes.
+                        durable: true,
+                    },
+                );
             }
             JournalRecord::BlockedNodeReleased { turn } => {
                 state.blocked_stashes.remove(&turn);
@@ -1656,15 +1674,32 @@ impl RuntimeJournal {
     /// (issue #1825, P1 second follow-up) — and again, redundantly, from the
     /// runner's block-settle pass, which called this first and alone until
     /// that follow-up. Both calls for one node carry the same `(turn,
-    /// workflow_id, input)`, so the second is a first-write-wins no-op rather
-    /// than a second source of truth: this skips the durable append too, not
-    /// only the in-memory insert, once a turn is already stashed — the same
-    /// tier `arm` itself skips at for the identical reason, now applied one
-    /// durability level up so the settle pass's fallback call does not double
-    /// every blocked node's `BlockedNodeStashed` write forever. Best-effort at
-    /// the call site either way: a failed durable write leaves the in-memory
-    /// stash serving the common (no-restart) case, exactly as a failed gate
-    /// journal leaves its live queue in place.
+    /// workflow_id, input)`, so once the append has actually landed the
+    /// second call is a first-write-wins no-op rather than a second source of
+    /// truth — the same tier `arm` itself skips at for the identical reason,
+    /// now applied one durability level up so the settle pass's fallback call
+    /// does not double every blocked node's `BlockedNodeStashed` write
+    /// forever. Best-effort at the call site either way: a failed durable
+    /// write leaves the in-memory stash serving the common (no-restart) case,
+    /// exactly as a failed gate journal leaves its live queue in place.
+    ///
+    /// # Retrying a failed first append (issue #1825, P1 — found by
+    /// chatgpt-codex-connector)
+    ///
+    /// The in-memory insert below lands before the append that durably backs
+    /// it, so a transient failure on the park-time call still leaves `turn` in
+    /// `blocked_stashes` — otherwise a resolve landing before the settle-time
+    /// fallback would find no stash to release even though the in-memory arm
+    /// (this call's sibling) says the node is blocked. But that same
+    /// in-memory presence used to be read as "already durable": the
+    /// settle-time fallback's call would see the entry, assume its own append
+    /// was the redundant second write, and return without ever appending —
+    /// so the durable record was never retried, and a restart landing before
+    /// the run re-dispatches rehydrates nothing for an approval card that is
+    /// still sitting there, clickable. [`BlockedStash::durable`] is what closes
+    /// that: it is only set once an append for this stash has actually
+    /// returned `Ok`, so a call that finds the turn present but not yet
+    /// durable retries the append instead of skipping it.
     pub async fn record_blocked_node_stashed(
         &self,
         turn: &str,
@@ -1673,22 +1708,33 @@ impl RuntimeJournal {
     ) -> Result<()> {
         {
             let mut state = self.state.lock().expect("journal state poisoned");
-            if state.blocked_stashes.contains_key(turn) {
-                // Already stashed — either this run's own park-time write
-                // already landed and the settle pass is the redundant call,
-                // or a retry of this same call raced itself. Either way the
-                // facts are identical (one node parks under one turn), so a
-                // second durable append would only double the flush for no
-                // new information.
-                return Ok(());
+            match state.blocked_stashes.get(turn) {
+                Some(existing) if existing.durable => {
+                    // Already durably recorded — either this run's own
+                    // park-time write already landed and the settle pass is
+                    // the redundant call, or a retry of this same call raced
+                    // itself. Either way the facts are identical (one node
+                    // parks under one turn), so a second durable append would
+                    // only double the flush for no new information.
+                    return Ok(());
+                }
+                Some(_) => {
+                    // In memory, but its first durable append never landed —
+                    // fall through and retry below instead of returning early
+                    // and leaving the in-memory state misrepresent durability
+                    // forever.
+                }
+                None => {
+                    state.blocked_stashes.insert(
+                        turn.to_string(),
+                        BlockedStash {
+                            workflow_id: workflow_id.to_string(),
+                            input: input.clone(),
+                            durable: false,
+                        },
+                    );
+                }
             }
-            state.blocked_stashes.insert(
-                turn.to_string(),
-                BlockedStash {
-                    workflow_id: workflow_id.to_string(),
-                    input: input.clone(),
-                },
-            );
         }
         self.append(&JournalRecord::BlockedNodeStashed {
             turn: turn.to_string(),
@@ -1696,7 +1742,18 @@ impl RuntimeJournal {
             input: input.clone(),
             at_millis: crate::ports::now_millis(),
         })
-        .await
+        .await?;
+        // Reached only once the append actually landed. A concurrent release
+        // (the turn resolved and retired between the block above and here)
+        // leaves nothing for `and_modify` to touch — correctly: there is no
+        // stash left to mark durable, and none should be resurrected here.
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_stashes
+            .entry(turn.to_string())
+            .and_modify(|stash| stash.durable = true);
+        Ok(())
     }
 
     /// Retires a blocked-node stash once its run has re-dispatched (or its block
@@ -4378,6 +4435,133 @@ mod test {
             "a released turn must not linger in the live approval set — it \
              must be retired the moment release lands, not only on the next \
              reload's replay"
+        );
+    }
+
+    /// A [`JournalStore`] whose `append_journal` fails exactly once — the
+    /// park-time write's transient failure — then passes every later append
+    /// straight through to an in-memory backend, including a retry of the
+    /// very same record. Mirrors `FailNJournalStore` in
+    /// `blocked_node_continuation_test`, scoped down to this module's own
+    /// unit tests via [`RuntimeJournal::with_store`].
+    struct FailOnceJournalStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    impl FailOnceJournalStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::ports::journal::MemoryJournalStore::default(),
+                failed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl JournalStore for FailOnceJournalStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: Durability,
+        ) -> crate::Result<()> {
+            if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "FailOnceJournalStore: forced failure on the first append".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// Issue #1825 (P1 — found by chatgpt-codex-connector): a park-time
+    /// `record_blocked_node_stashed` whose first durable append fails
+    /// transiently must have that append retried by the settle-time fallback
+    /// call, not silently skipped.
+    ///
+    /// # The bug this reproduces
+    ///
+    /// The in-memory insert lands before the append that backs it durably, so
+    /// the first (failing) call still leaves `turn` in `blocked_stashes` —
+    /// that half is correct and load-bearing (a resolve landing before settle
+    /// must still find an in-memory stash to release). But the early-return
+    /// guard used to read that in-memory presence as proof the append had
+    /// already landed: the settle-time fallback's call (the *same*
+    /// `(turn, workflow_id, input)`, by construction) would see the entry,
+    /// assume it was the redundant second write, and return `Ok(())` without
+    /// ever appending. A restart between that skipped retry and the run
+    /// re-dispatching then replays no `BlockedNodeStashed` line at all — the
+    /// approval card is still there, clickable, but `BlockedNodeQueue::rearm`
+    /// has nothing to rebuild the stash from.
+    ///
+    /// # Why this proves the fix
+    ///
+    /// `FailOnceJournalStore` fails only the very first append, so the second
+    /// `record_blocked_node_stashed` call — standing in for the settle-time
+    /// fallback — hits a store that is willing to succeed. Pre-fix, the
+    /// early-return means that willingness is never tested: the assertion
+    /// that a fresh reload actually replays the stash fails, because nothing
+    /// durable was ever written. Post-fix the second call retries the append,
+    /// it lands, and a reload rehydrates `turn-1`.
+    #[tokio::test]
+    async fn a_stash_whose_first_durable_append_failed_is_retried_and_lands() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(FailOnceJournalStore::new());
+        let journal = RuntimeJournal::with_store(store.clone(), company.clone());
+        let input = serde_json::json!({ "request": "quarterly numbers" });
+
+        // Park time: the first append fails transiently. The in-memory stash
+        // still has to be there for a fast resolve to release, so this must
+        // not be lost even though the call itself reports an error.
+        let first = journal
+            .record_blocked_node_stashed("turn-1", "wf-1", &input)
+            .await;
+        assert!(
+            first.is_err(),
+            "the forced first-append failure must surface, not be swallowed"
+        );
+        assert_eq!(
+            journal.blocked_stashes(),
+            vec![("turn-1".to_string(), "wf-1".to_string(), input.clone())],
+            "the in-memory stash must still be there after a failed append — a resolve \
+             landing before the next retry has to find it"
+        );
+
+        // Settle time: the fallback calls the same method with the same
+        // facts. The store is willing to succeed now — the fix must actually
+        // retry the append instead of taking the early return.
+        let second = journal
+            .record_blocked_node_stashed("turn-1", "wf-1", &input)
+            .await;
+        assert!(
+            second.is_ok(),
+            "the retry must re-attempt the durable append rather than silently reporting \
+             success off the in-memory presence alone: {second:?}"
+        );
+
+        // The proof that it actually landed, not merely that `Ok` came back:
+        // a fresh journal over the same store replays the stash from the
+        // durable line.
+        let reloaded = RuntimeJournal::with_store(store, company);
+        reloaded.load().await.unwrap();
+        assert_eq!(
+            reloaded.blocked_stashes(),
+            vec![("turn-1".to_string(), "wf-1".to_string(), input)],
+            "a restart must rehydrate this stash — the retried append is the only durable \
+             record of it, and pre-fix it was never written at all"
         );
     }
 }
