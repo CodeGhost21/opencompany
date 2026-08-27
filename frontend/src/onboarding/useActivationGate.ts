@@ -64,6 +64,15 @@ export function useActivationGate(
    * network call instead of polling a settled answer forever.
    */
   const activated = useRef(false);
+  /**
+   * Set once `resolveActivationReadError` settles a read as a definitive
+   * `404` — this host predates the route (PR #1875 review finding, round 6).
+   * That answer can never change on a later tick either, the same way
+   * `activated` never un-sets — without this, every tick after the first 404
+   * still calls `getActivation` again, so a legacy-host tab keeps requesting
+   * a route it already learned does not exist for the lifetime of the mount.
+   */
+  const terminal = useRef(false);
   /** Pending fast retry from a read `resolveActivationReadError` did not settle. */
   const retryTimer = useRef<ReturnType<typeof setTimeout>>();
 
@@ -75,7 +84,7 @@ export function useActivationGate(
   };
 
   const load = useCallback(async () => {
-    if (activated.current) return;
+    if (activated.current || terminal.current) return;
     clearRetry();
     const gen = ++generation.current;
     try {
@@ -91,7 +100,12 @@ export function useActivationGate(
         // A host predating this route: definitively no such funnel, and
         // retrying will not change that. `status` stays `null` —
         // `shouldShowOnboardingGate`'s own `!status` guard keeps the gate off
-        // permanently, same as before this fix.
+        // permanently, same as before this fix. `terminal` stops every later
+        // tick from re-requesting a route this host already answered it does
+        // not have (PR #1875 review finding, round 6) — same shape as
+        // `activated` just below, for the other permanent answer this hook
+        // can land on.
+        terminal.current = true;
         setChecked(true);
         return;
       }
@@ -109,6 +123,7 @@ export function useActivationGate(
   useEffect(() => {
     if (!enabled) return;
     activated.current = false;
+    terminal.current = false;
     setChecked(false);
     setStatus(null);
     void load();
