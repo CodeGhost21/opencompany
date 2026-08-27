@@ -3741,6 +3741,34 @@ impl HarnessPool {
                 marker_id = %marker.id,
                 "[budget-pause] parked a re-issue marker; the operator can redeem it once credits are added"
             );
+        } else if let Some(stale) =
+            crate::runtime::grants::budget_pauses_for(company).redeem(agent_id)
+        {
+            // Issue #1846 review (Codex #3868962381): this turn just
+            // completed WITHOUT pausing, which is proof the account that
+            // blocked the LAST turn now has budget again — whether the
+            // operator got there by clicking "Add credits & resend" (which
+            // already took the marker itself, so `redeem` here finds nothing)
+            // or, as the notice's own copy also invites, by manually adding
+            // credits and resending the message from the composer, bypassing
+            // the CTA/redeem route entirely. Only the second path used to
+            // leave the marker parked: nothing but a click on THIS specific
+            // CTA ever consumed it, so a manual resend left a stale marker
+            // and its stale CTA sitting on the old notice indefinitely.
+            // Clicking it later would silently re-dispatch the OLD message a
+            // second time — a duplicate, and for a non-idempotent request, a
+            // duplicate side effect the operator never asked for.
+            //
+            // `redeem`, not a peek-then-drop: single atomic take, same as
+            // every other consumer of this set, so a concurrent CTA click
+            // racing this retire cannot double-consume the same marker.
+            tracing::info!(
+                company = %company,
+                agent = %agent_id,
+                marker_id = %stale.id,
+                "[budget-pause] retired a stale re-issue marker; this agent's turn succeeded \
+                 without it, so the pause it named is already resolved"
+            );
         }
         // Issue #242: fold this turn's spend into the attempt it belongs to.
         // Per turn, not once at the end, so a redirect re-run and a delegate's
@@ -7384,6 +7412,144 @@ description = "Builds the product."
             marker.summary
         );
         assert_eq!(marker.summary, pause.summary);
+    }
+
+    /// Issue #1846 review (Codex #3868962381) — **the regression.** The
+    /// budget-pause notice's own copy gives the operator TWO ways to recover:
+    /// click "Add credits & resend" (the CTA, which redeems the marker), or
+    /// add credits and resend the message themselves from the composer. Only
+    /// the first path used to retire the parked marker — `redeem`/
+    /// `redeem_matching` are the sole consumers of `BudgetPauseSet`'s entries.
+    /// A manual resend that succeeds bypasses both entirely, so the marker
+    /// (and the stale "Add credits & resend" CTA on the old notice) stayed
+    /// parked indefinitely. Clicking that stale CTA later would silently
+    /// re-dispatch the OLD message a second time.
+    ///
+    /// Proof this pins the fix and not a coincidence: the marker parked
+    /// (directly, bypassing the turn machinery entirely so this test does not
+    /// depend on how many attempts the vendored harness's own internal retry
+    /// consumes before a budget-exhausted body reaches `classify_turn` — see
+    /// the sibling regression tests' "scripted 10 deep" comments for why that
+    /// count is not this crate's contract to assume) must be gone after ONE
+    /// ordinary successful `pool.run` call for the SAME agent — reverting the
+    /// retire branch in `run_inner` (this file) makes the final `peek` below
+    /// find the marker still parked instead of `None`.
+    #[tokio::test]
+    async fn a_successful_turn_retires_a_stale_reissue_marker_for_the_same_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-retire-regress");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            // Always succeeds — the "operator manually added credits and
+            // resent" half of the scenario, NOT the redeem route, which is
+            // the whole point: nothing here ever calls `redeem`/
+            // `redeem_matching`.
+            provider: Arc::new(ScriptedProvider::new(vec![
+                Ok(
+                    "Here's today's standup summary.".to_string()
+                );
+                4
+            ])),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        // Park the stale marker directly — standing in for an earlier turn
+        // that genuinely paused. `redeem`/`redeem_matching` are the only
+        // consumers this fix's `else` branch is NOT one of, so parking it
+        // this way exercises the exact same retire path a real pause would.
+        crate::runtime::grants::budget_pauses_for(&company).park(
+            "ceo",
+            Some("general".to_string()),
+            "Please summarize today's standup notes.",
+            "Paused — ceo's turn ran out of inference budget/credits.",
+            crate::ports::now_millis(),
+            crate::runtime::grants::RedeemContext::default(),
+        );
+        assert!(
+            crate::runtime::grants::budget_pauses_for(&company)
+                .peek("ceo")
+                .is_some(),
+            "the stale marker must be parked before the run this test exercises"
+        );
+
+        // The "manually add credits and resend" half of the scenario: an
+        // ordinary successful `run`, NOT the redeem route — nothing here
+        // ever calls `redeem`/`redeem_matching` on the marker parked above.
+        let outcome = pool
+            .run(
+                &company,
+                "ceo",
+                "Please summarize today's standup notes.",
+                &deps,
+                None,
+            )
+            .await
+            .expect("this run succeeds against the scripted reply");
+        assert!(
+            outcome.budget_paused.is_none(),
+            "this attempt must NOT pause — this scenario is about a resend that succeeds"
+        );
+
+        assert!(
+            crate::runtime::grants::budget_pauses_for(&company)
+                .peek("ceo")
+                .is_none(),
+            "the stale marker parked above must be retired once this agent has a successful \
+             turn again, even though nothing ever redeemed it"
+        );
     }
 
     /// This file's own default `park()` call site — the top-level turn, not
