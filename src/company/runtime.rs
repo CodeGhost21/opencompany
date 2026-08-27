@@ -985,20 +985,29 @@ impl CompanyRuntime {
             .map(|t| t.column);
         let dispatch = task_enters_in_progress(prev_column.as_deref(), &task.column);
         let plan = task_enters_planning(prev_column.as_deref(), &task.column);
-        // Issue #1865: a card re-entering In Progress is a fresh attempt, so
-        // any bounce chip left over from a *previous* failed attempt is stale
-        // the moment this one starts — a card mid-retry must not go on
-        // advertising the reason its last try came back. Cloned rather than
-        // mutating the caller's `task` in place: this is the single write
-        // site for REST mutations and the caller may hold or re-render its own
-        // copy afterwards.
-        let write: std::borrow::Cow<'_, TaskRecord> = if dispatch && task.bounced.is_some() {
-            let mut cleared = task.clone();
-            cleared.bounced = None;
-            std::borrow::Cow::Owned(cleared)
-        } else {
-            std::borrow::Cow::Borrowed(task)
-        };
+        // Issue #1865: a card re-entering In Progress **or** Planning is a
+        // fresh attempt, so any bounce chip left over from a *previous* failed
+        // attempt is stale the moment this one starts — a card mid-retry must
+        // not go on advertising the reason its last try came back. Planning
+        // included (Codex review): "Plan first" on a bounced card is exactly
+        // as much a fresh attempt as a direct re-dispatch, and the planning
+        // pass's own settle paths (`settle_blocked`/`settle_failed` in
+        // `harness::built_in::planning`) write back to To-do through the plain
+        // `TaskStore::upsert` port, not through here — so if this call sat out
+        // the planning edge, the stale chip would ride the card all the way
+        // through the pass and reappear on a To-do that has nothing to do with
+        // the dispatch failure it names. Cloned rather than mutating the
+        // caller's `task` in place: this is the single write site for REST
+        // mutations and the caller may hold or re-render its own copy
+        // afterwards.
+        let write: std::borrow::Cow<'_, TaskRecord> =
+            if (dispatch || plan) && task.bounced.is_some() {
+                let mut cleared = task.clone();
+                cleared.bounced = None;
+                std::borrow::Cow::Owned(cleared)
+            } else {
+                std::borrow::Cow::Borrowed(task)
+            };
         self.ops.tasks.upsert(&self.id, &write).await?;
         if dispatch {
             self.dispatch_task(task).await;
@@ -3879,6 +3888,78 @@ mod tests {
         assert!(
             runtime.is_busy(),
             "a poisoned run supervisor must report busy rather than panic in the handler"
+        );
+    }
+
+    /// Codex review (#1865): "Plan first" on a bounced card is a fresh
+    /// attempt exactly like a re-dispatch, so the stale bounce chip must not
+    /// survive the To-do → Planning edge either.
+    ///
+    /// No harness/planner wired — the default shape ~200 callers use — so
+    /// `plan_task`'s spawn is a no-op and this exercises only the synchronous
+    /// clearing `upsert_task` does before it, matching the inert-board
+    /// pattern `runtime::builder::test` already uses for the sibling
+    /// dispatch edge.
+    #[tokio::test]
+    async fn planning_first_clears_a_stale_bounce_chip_same_as_a_redispatch() {
+        use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO, TaskRecord};
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .expect("manifest");
+        let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(crate::ports::types::CompanyId::new("acme"))
+            .build()
+            .await
+            .expect("runtime");
+        let runtime = std::sync::Arc::new(runtime);
+
+        let card = TaskRecord {
+            id: "card-1".to_string(),
+            title: "Draft the spec".to_string(),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            // A stale chip from a dispatch attempt that already bounced.
+            bounced: Some("a previous run's dispatch failed".to_string()),
+        };
+        runtime
+            .upsert_task(&card)
+            .await
+            .expect("seed the bounced card in To-do");
+
+        let mut planned = card.clone();
+        planned.column = COLUMN_PLANNING.to_string();
+        runtime
+            .upsert_task(&planned)
+            .await
+            .expect("drag it into Planning");
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|t| t.id == "card-1")
+            .expect("card survives");
+        assert_eq!(
+            after.bounced, None,
+            "entering Planning must clear the previous dispatch's bounce chip, not carry it \
+             through to whatever the planning pass settles next"
         );
     }
 
