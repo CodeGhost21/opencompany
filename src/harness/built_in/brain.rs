@@ -613,6 +613,11 @@ impl HarnessBrain {
             tool: String,
             instruction: String,
             origin_thread: Option<String>,
+            /// The thread within `origin_thread` the approval was raised in
+            /// (#1890). Both grant kinds already record it; dropping it here
+            /// would resume a threaded approval against unparented channel
+            /// history instead of the conversation that prompted it.
+            origin_parent: Option<crate::ports::types::EventSeq>,
         }
 
         let grants = self.deps.approval_requests.grants();
@@ -631,6 +636,7 @@ impl HarnessBrain {
                 tool: grant.tool,
                 agent: grant.agent,
                 origin_thread: grant.origin_thread,
+                origin_parent: grant.origin_parent,
             }
         } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
             // No exact-arguments pin, and deliberately so: a standing grant
@@ -647,6 +653,7 @@ impl HarnessBrain {
                 tool: standing.tool,
                 agent: standing.agent,
                 origin_thread: standing.origin_thread,
+                origin_parent: standing.origin_parent,
             }
         } else {
             return Ok(None);
@@ -743,12 +750,15 @@ impl HarnessBrain {
         let drained = match self
             .delegation_runner(run_turn.as_ref(), &record)
             .drain_and_execute(
-                // The channel, with no thread (#1890). A parked approval
-                // records `origin_thread` and no root, so there is nothing
-                // honest to narrow to — the resumed turn is scoped exactly as
-                // it was before the root joined the key. Threading a grant's
-                // origin is the `origin_parent` sub-issue on #1890.
-                crate::runtime::delegation::ChatTarget::channel(grant.origin_thread.as_deref()),
+                // The conversation the approval was raised in (#1890) — both
+                // halves of it. A grant records `origin_parent` beside
+                // `origin_thread` for exactly this reason, so a threaded
+                // approval resumes in its own thread rather than against the
+                // channel's unparented history.
+                crate::runtime::delegation::ChatTarget::in_thread(
+                    grant.origin_thread.as_deref(),
+                    grant.origin_parent,
+                ),
                 delegation::MessageContext::default(),
                 delegation::HandOffs::Run,
             )

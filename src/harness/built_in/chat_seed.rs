@@ -294,14 +294,29 @@ pub async fn build_chat_seed(
     let mut pending: Vec<(String, String)> = Vec::new();
     let mut collected: Vec<(String, String)> = Vec::with_capacity(window);
     let mut found_self = false;
+    // Set once the requested root has been collected. Nothing older can belong
+    // to the thread — a child always sequences after the message it answers —
+    // so the backward walk is finished the moment the root is in hand. Without
+    // it a short thread never fills `window`, and because the current message
+    // sets `found_self` on the first page the `SELF_SEARCH_BUDGET` guard below
+    // is already disabled: every rebind into a 3-message thread walked the
+    // entire company journal (codex review finding).
+    let mut reached_root = false;
     let mut scanned_raw: usize = 0;
     let mut cursor = None;
 
     loop {
-        if found_self && collected.len() >= window {
+        if reached_root || (found_self && collected.len() >= window) {
             break;
         }
-        if !found_self && scanned_raw >= SELF_SEARCH_BUDGET {
+        // The budget bounds the WHOLE walk, not only the pre-boundary search.
+        // A conversation sparser than `window` — a short thread, or a channel
+        // whose recent traffic is mostly threaded and therefore not its own —
+        // can never satisfy the `collected.len() >= window` exit, so without
+        // this it reads to the head of the log. A seed is a recent window;
+        // returning a shorter one is a degradation, reading the whole journal
+        // on every rebind is a defect.
+        if scanned_raw >= SELF_SEARCH_BUDGET {
             break;
         }
         let page = match events.read_before(company, cursor, EVENT_PAGE).await {
@@ -351,6 +366,10 @@ pub async fn build_chat_seed(
                 continue;
             }
 
+            // The root is the oldest event this thread can hold, whichever
+            // accumulator it lands in.
+            let is_root = thread_root == Some(stored.seq);
+
             if !found_self {
                 if role == "user"
                     && !current_message.is_empty()
@@ -358,16 +377,28 @@ pub async fn build_chat_seed(
                 {
                     found_self = true;
                     collected.push((role.to_string(), text));
+                    if is_root {
+                        reached_root = true;
+                        break;
+                    }
                 } else {
                     pending.push((role.to_string(), text));
                     if pending.len() > window {
                         pending.truncate(window);
+                    }
+                    if is_root {
+                        reached_root = true;
+                        break;
                     }
                 }
                 continue;
             }
 
             collected.push((role.to_string(), text));
+            if is_root {
+                reached_root = true;
+                break;
+            }
             if collected.len() == window {
                 break;
             }
@@ -448,6 +479,42 @@ mod tests {
         ) -> crate::Result<Vec<StoredEvent>> {
             Ok(self
                 .0
+                .iter()
+                .filter(|e| e.seq.value() >= seq.value())
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+        fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
+            Box::pin(stream::empty())
+        }
+    }
+
+    /// A [`FixedLog`] that counts how many PAGES the projector pulled, so a scan
+    /// bound is observable rather than merely asserted. Pages, not events: the
+    /// trait's default `read_before` reads forward and reverses, so an event
+    /// count says more about the fixture than about the walk.
+    #[derive(Default)]
+    struct CountingLog {
+        events: Vec<StoredEvent>,
+        scanned: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl EventLog for CountingLog {
+        async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
+            unreachable!("the seed projector only reads")
+        }
+        async fn read_from(
+            &self,
+            _id: &CompanyId,
+            seq: EventSeq,
+            limit: usize,
+        ) -> crate::Result<Vec<StoredEvent>> {
+            self.scanned
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self
+                .events
                 .iter()
                 .filter(|e| e.seq.value() >= seq.value())
                 .take(limit)
@@ -947,6 +1014,62 @@ mod tests {
                 ("user".to_string(), "make it shorter".to_string()),
             ],
             "the boundary must be this thread's own message, not the sibling's: {seed:?}"
+        );
+    }
+
+    /// A short thread must not walk the whole company journal to seed itself.
+    ///
+    /// The regression this pins: the current message is the newest event, so
+    /// `found_self` is set on the first page and the pre-boundary budget stops
+    /// applying — and a 3-message thread can never reach `CHAT_SEED_WINDOW`, so
+    /// the `collected.len() >= window` exit is unreachable too. With no bound
+    /// left, every rebind kept paging backwards through years of older channel
+    /// history that could not possibly belong to the thread (codex review
+    /// finding). The root is the oldest event the thread can hold, so the walk
+    /// is finished the moment it is in hand.
+    ///
+    /// The history is deliberately OLDER than the thread: a newest-first walk
+    /// meets the thread immediately and everything behind it is the waste.
+    #[tokio::test]
+    async fn a_short_thread_stops_scanning_at_its_root() {
+        // ~4 pages of unrelated channel history, then the thread on top.
+        const OLD: u64 = 2100;
+        let mut events: Vec<StoredEvent> = (0..OLD)
+            .map(|seq| operator(seq, Some("growth"), &format!("old line {seq}")))
+            .collect();
+        events.push(operator(OLD, Some("growth"), "root"));
+        events.push(reply_in(OLD + 1, "growth", "an answer", OLD));
+        events.push(operator_in(OLD + 2, Some("growth"), "follow-up", OLD));
+
+        let log = Arc::new(CountingLog {
+            events,
+            scanned: Default::default(),
+        });
+        let events: Arc<dyn EventLog> = log.clone();
+        let seed = build_chat_seed(
+            &events,
+            &CompanyId::new("acme"),
+            "growth",
+            "growth",
+            Some(EventSeq::new(OLD)),
+            CHAT_SEED_WINDOW,
+            "follow-up",
+        )
+        .await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "root".to_string()),
+                ("agent".to_string(), "an answer".to_string()),
+                ("user".to_string(), "follow-up".to_string()),
+            ],
+            "the thread's own turns, whole: {seed:?}"
+        );
+        let pages = log.scanned.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            pages, 1,
+            "the root is on the first newest-first page, so the walk is done \
+             there — it pulled {pages} pages"
         );
     }
 
