@@ -773,9 +773,10 @@ pub fn composio_brief(toolkits: &[String]) -> String {
         "Do NOT use `http_request`, `curl` or `web_fetch` against a connected provider's API (for \
          example `api.github.com`) — those tools call it with no credential and it answers 401 or \
          403; only the Composio tools carry the company's connection. And do not promise an action \
-         you have no tool for: you have no browser and cannot open a page or \"review it on \
-         GitHub\" by hand, so either carry the action out through a Composio tool or say plainly \
-         that you cannot.",
+         before checking you hold a tool that can carry it out: unless you were separately granted \
+         a browser tool, you have no browser and cannot open a page or \"review it on GitHub\" by \
+         hand — either run the action through a Composio tool (or a browser tool you actually \
+         hold) or say plainly that you cannot.",
     );
     brief
 }
@@ -1421,6 +1422,27 @@ mod tests {
         let lower = brief.to_lowercase();
         assert!(lower.contains("no browser"), "{brief}");
         assert!(lower.contains("do not promise"), "{brief}");
+    }
+
+    /// PR #1780 review (round 5): `composio_brief` is rendered whenever the
+    /// Composio tools are wired, with no view of whether the agent was
+    /// SEPARATELY granted an MCP browser tool (Browserbase and friends —
+    /// `build_agent`'s MCP bridge is wholly independent of the Composio grant,
+    /// see `build.rs`). The old wording claimed "you have no browser" as an
+    /// unconditional fact, which is false on that combination and could make
+    /// the agent refuse a browser action it actually holds a tool for. The
+    /// claim must be qualified on "unless separately granted a browser tool"
+    /// (or equivalent), not stated as an absolute.
+    #[test]
+    fn the_composio_brief_does_not_unconditionally_deny_holding_a_browser_tool() {
+        let brief = composio_brief(&["github".to_string()]);
+        let lower = brief.to_lowercase();
+        assert!(
+            lower.contains("unless you were separately granted a browser tool")
+                || lower.contains("unless separately granted a browser tool"),
+            "the no-browser claim must be qualified, not absolute, since MCP can grant one \
+             independently of Composio: {brief}"
+        );
     }
 
     /// A non-empty allowlist names exactly those toolkits, lowercased, so the
