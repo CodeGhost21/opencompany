@@ -7337,6 +7337,47 @@ async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
     id
 }
 
+/// [`seed_proposal_card`], with the assignee set to whatever the caller
+/// passes rather than the hardcoded `"ceo"` — for proving the owning-desk
+/// default against a card assigned directly to a desk (issue #1882 review),
+/// where `assignee` is the desk's own canonical id rather than a teammate's.
+async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &str) -> String {
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("company");
+    let id = crate::ports::generate_id();
+    let record = TaskRecord {
+        id: id.clone(),
+        title: "Automate the weekly digest".to_string(),
+        note: None,
+        column: "in_review".to_string(),
+        priority: "medium".to_string(),
+        assignee: assignee.to_string(),
+        updated_at_millis: 1,
+        origin_chat_id: None,
+        parent_task_id: None,
+        output: None,
+        plan: None,
+        planning_attempts: Vec::new(),
+        deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
+        workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
+            summary: "Email the digest".to_string(),
+            ops,
+            generated_at_millis: 1,
+            run_id: "run-build-1".to_string(),
+        }),
+        origin_run_id: None,
+        origin_workflow_id: None,
+    };
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &record)
+        .await
+        .expect("seed the proposal card");
+    id
+}
+
 /// A valid two-node graph (trigger → agent) whose agent names a real roster
 /// teammate. `schedule` arms the trigger when `Some`.
 fn digest_ops(schedule: Option<&str>) -> Value {
@@ -7479,6 +7520,45 @@ async fn applying_a_proposal_with_a_blank_owner_desk_still_defaults_it() {
         file.owner_desk.as_deref(),
         Some("engineering"),
         "a blank ownerDesk must default the same as an omitted one: {file:?}"
+    );
+}
+
+/// **Regression, issue #1882 review — a desk-assigned card must default to
+/// its own desk.** `runtime::assignee::AssigneeResolution::canonical` stores
+/// a desk assignment as the desk's own canonical id, not a teammate id — so
+/// `record.assignee` can BE `"engineering"` directly. Before the fix, the
+/// defaulting fallback only checked desk MEMBERSHIP (`desk_of_member`), which
+/// a desk id is never a member of, so a card already naming its owning desk
+/// still produced an ownerless workflow.
+#[tokio::test]
+async fn applying_a_proposal_for_a_desk_assigned_card_defaults_to_that_desk() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card_assigned(&state, digest_ops(None), "engineering").await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "a card assigned straight to a desk must default owner_desk to that desk: {file:?}"
     );
 }
 
