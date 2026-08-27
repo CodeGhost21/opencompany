@@ -5805,6 +5805,63 @@ mode = "full"
         assert!(body.contains("read-only"), "{body}");
     }
 
+    /// Issue #1781 review (CodeRabbit): `CompanyRuntime::ensure_desk_writable`
+    /// re-loads the record on every operator-channel send (to catch a
+    /// grandfathered desk/teammate colliding with the reserved id) and
+    /// propagates a real `store().load` failure with `?` rather than folding
+    /// it into "no real recipient". Collapsing it would misreport a store
+    /// outage as the ordinary read-only refusal — same 4xx, same message,
+    /// same "read-only" wording an operator would wrongly believe.
+    ///
+    /// Corrupting `company.toml` on disk after the app is built (rather than
+    /// mocking `CompanyStore`) exercises the real `FsCompanyStore::load`
+    /// error path — `Err(OpenCompanyError::Store("invalid company.toml: …"))`
+    /// — which has no `Store` arm in `ApiError::status` and therefore falls
+    /// to the catch-all `INTERNAL_SERVER_ERROR`. A collapsed-to-`false` read
+    /// would instead surface as `InvalidRequest` (400) with the read-only
+    /// wording, so the status code and body together distinguish the two.
+    #[tokio::test]
+    async fn a_failing_store_load_is_not_collapsed_into_the_read_only_refusal() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Corrupt the on-disk manifest so the next `store().load()` — the one
+        // `ensure_desk_writable` runs fresh on every send — fails instead of
+        // returning `Some(record)`.
+        let toml_path = crate::store::Bundle::new(&home, &CompanyId::new("acme")).company_toml();
+        tokio::fs::write(&toml_path, b"not valid toml [[[")
+            .await
+            .expect("corrupt company.toml");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi","chat":"operator"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a store load failure must propagate as itself, not the read-only 4xx"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_lowercase();
+        assert!(
+            !body.contains("read-only"),
+            "a store outage must not be misreported as the ordinary read-only refusal: {body}"
+        );
+    }
+
     /// Issue #1757 migration: `operator` was not a reserved id before this
     /// issue, and a stored manifest is never re-validated on load
     /// (`CompanyManifest::from_stored_toml` skips validation on purpose, so
