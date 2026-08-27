@@ -107,14 +107,18 @@ jobs:
       # the two-step form makes WHICH renderer ran visible in the job log rather
       # than hiding a degraded release behind a green step.
       #
-      # The 5-minute cap is above the generator's own 300s abort, so a hung API
-      # is caught by the script (which then exits non-zero and hands over to the
-      # fallback) rather than by the step, which would kill the job outright.
+      # The step cap must sit ABOVE the generator's own 300s OpenAI abort, so
+      # that a hung API is caught by the SCRIPT — which names the timeout and
+      # exits non-zero — rather than by the step, which kills the process and
+      # reports only "timed out". At `timeout-minutes: 5` the two were both 300s
+      # and the step budget additionally covered `gh release view`, `git log`,
+      # and one `gh pr view` per PR, so the step always won and the script's
+      # error path was unreachable. 10 minutes leaves room for those lookups.
       - name: Generate release notes (AI)
         id: ai-notes
         if: inputs.notes_ai
         continue-on-error: true
-        timeout-minutes: 5
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
