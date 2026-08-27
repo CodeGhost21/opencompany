@@ -54,6 +54,7 @@ import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
 import { useIsDesktop } from "@/hooks/use-mobile";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
+import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
@@ -413,6 +414,8 @@ export function ChatView({
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  // The rail's "+" (issue #1835) — chat's own door for creating a channel.
+  const [channelCreateOpen, setChannelCreateOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
   // Whether the transcript is actually on screen. At `lg` (≥1024) the rail and
   // transcript share the viewport (`hidden lg:flex`), so it is visible even
@@ -1665,6 +1668,15 @@ export function ChatView({
     }
   }
 
+  /**
+   * The rail's create affordance (issue #1835) — or `undefined`, which is the
+   * rule this codebase follows for a control that would be refused: absent,
+   * not disabled. A starter roster (`!fromHost`) has no saved teammates to
+   * staff a channel with, and an empty roster has nobody at all.
+   */
+  const onAddChannel =
+    fromHost && members.length > 0 ? () => setChannelCreateOpen(true) : undefined;
+
   function selectChannel(id: string) {
     onNavigate(id);
     setMobilePane("chat");
@@ -1692,6 +1704,7 @@ export function ChatView({
         onToggleSection={toggleRailSection}
         directMessages={directMessageChannels(members)}
         onStartDirectMessage={selectChannel}
+        onAddChannel={onAddChannel}
         className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
       />
       <ChannelRail
@@ -1704,6 +1717,7 @@ export function ChatView({
         onToggleSection={toggleRailSection}
         directMessages={directMessageChannels(members)}
         onStartDirectMessage={selectChannel}
+        onAddChannel={onAddChannel}
         collapsed={channelsCollapsed}
         onExpand={toggleChannels}
         className="hidden lg:flex"
@@ -1933,7 +1947,15 @@ export function ChatView({
               others={outsideChannel}
               people={companyPeople}
               presence={presence}
-              leadId={active.kind === "channel" ? active.memberIds?.[0] : undefined}
+              leadId={
+                // An `auto` channel has no lead (issue #1835): its memberIds
+                // are the channel's membership in the host's order, not a
+                // hierarchy, so badging [0] would state a rank nothing
+                // confers — the host's own `desk_lead` is `None` for it.
+                active.kind === "channel" && !active.leadless
+                  ? active.memberIds?.[0]
+                  : undefined
+              }
               loading={loadingTeam}
               fromHost={fromHost}
               onToggleInbox={(m) => void toggleMemberInbox(m)}
@@ -1976,6 +1998,21 @@ export function ChatView({
       </div>
 
       <AddMemberDialog open={addOpen} onOpenChange={setAddOpen} onAdd={(fields) => void addMember(fields)} />
+      <ChannelCreateDialog
+        client={client}
+        company={company}
+        members={members}
+        open={channelCreateOpen}
+        onOpenChange={setChannelCreateOpen}
+        onCreated={(dto) => {
+          // Fold the new channel into the rail and land the operator in it —
+          // the same deskFromDto every fetched desk goes through, so a
+          // just-created channel is indistinguishable from a reloaded one.
+          const desk = deskFromDto(dto);
+          setDesks((prev) => [...(prev ?? []), desk]);
+          selectChannel(desk.id);
+        }}
+      />
       <BudgetDialog
         member={budgetFor}
         onOpenChange={(open) => {
