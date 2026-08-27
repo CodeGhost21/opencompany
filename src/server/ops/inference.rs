@@ -1532,6 +1532,19 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["source"], "managed");
         assert_eq!(dto["keyConfigured"], false);
         assert!(dto.get("key").is_none(), "status DTO must not carry a key");
+        // `defaultTierModels` must actually be on the wire, not just the DTO
+        // struct — the frontend preset (issue #1838) reads it off this exact
+        // response, so a field that only exists in Rust and never serializes
+        // would leave the console silently falling back to a stale local copy.
+        let expected_chat_v1 = inference::DEFAULT_TIER_MODELS
+            .iter()
+            .find(|(tier, _)| *tier == "chat-v1")
+            .map(|(_, model)| *model)
+            .expect("chat-v1 must have a documented default");
+        assert_eq!(
+            dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
+            "defaultTierModels must be present on the managed-default status response: {dto}"
+        );
 
         // Switch to OpenRouter with a write-only key + a tier→model map.
         let (status, resp, raw) = send(
@@ -1563,6 +1576,13 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["source"], "runtime");
         assert_eq!(dto["keyConfigured"], true);
         assert!(!raw.contains(TOKEN), "GET status leaked the token: {raw}");
+        // defaultTierModels is independent of the tenant's own `models` map —
+        // it must still be the shipped default here even though this company
+        // now has a runtime override with its own chat-v1/reasoning-v1 entries.
+        assert_eq!(
+            dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
+            "defaultTierModels must not follow the tenant's own model override: {dto}"
+        );
     }
 
     #[tokio::test]
