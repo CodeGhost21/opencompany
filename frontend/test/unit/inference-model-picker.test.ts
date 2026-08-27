@@ -275,6 +275,38 @@ describe("raw OpenRouter registry ids vs the proxy's own passthrough shape (issu
       "reasoning-v1": "reasoning-v1",
     });
   });
+
+  it("keeps a passthrough id with surrounding whitespace (issue #1838 follow-up, seventh instance)", async () => {
+    // The shape check used to run on the untrimmed value: a leading space
+    // fails `startsWith("openrouter/")`, so a pasted id with surrounding
+    // whitespace was misclassified as a raw catalog id and dropped here —
+    // even though `save()`'s own trim pass, which runs *after* this strip,
+    // would otherwise have normalized it to the exact same accepted form.
+    const { client, puts } = clientFor(
+      status(
+        "openrouter",
+        { "chat-v1": "  openrouter/anthropic/claude-3-opus  ", "reasoning-v1": "reasoning-v1" },
+        true,
+      ),
+      [{ id: "openrouter/anthropic/claude-3-opus", name: "Claude 3 Opus (passthrough)" }],
+    );
+
+    await mount(client);
+
+    const button = container.querySelector('[data-testid="inference-remove-key"]') as HTMLButtonElement;
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { key?: string; models?: Record<string, string> };
+    expect(body.models).toEqual({
+      "chat-v1": "openrouter/anthropic/claude-3-opus",
+      "reasoning-v1": "reasoning-v1",
+    });
+  });
 });
 
 describe("clearing a tier override back to the tier default (issue #1838 follow-up)", () => {

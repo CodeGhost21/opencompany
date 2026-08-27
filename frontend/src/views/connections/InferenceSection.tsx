@@ -253,11 +253,21 @@ function modelItems(models: InferenceModel[]): Record<string, string> {
  * forward a raw registry id straight through under the same "already the
  * proxy's own form" exemption meant for ids the proxy actually accepts.
  * Counting the segments is what actually distinguishes the two shapes.
+ *
+ * Trimmed before any shape check (issue #1838 follow-up, seventh instance):
+ * this runs inside `stripProxyIncompatible`, which `save()` calls *before*
+ * its own trim pass over `models` (surrounding whitespace only gets cleaned
+ * up after this check would already have run). Untrimmed, a pasted
+ * ` openrouter/anthropic/model ` fails `startsWith("openrouter/")` on the
+ * leading space and gets classified as a raw catalog id — silently dropped
+ * here even though it is exactly the three-segment passthrough form the
+ * proxy accepts and the later trim would have normalized it to.
  */
 function isRawCatalogId(value: string): boolean {
-  if (!value.includes("/")) return false;
-  if (!value.startsWith("openrouter/")) return true;
-  return value.split("/").length < 3;
+  const trimmed = value.trim();
+  if (!trimmed.includes("/")) return false;
+  if (!trimmed.startsWith("openrouter/")) return true;
+  return trimmed.split("/").length < 3;
 }
 
 /**
@@ -266,6 +276,13 @@ function isRawCatalogId(value: string): boolean {
  * through, so the rule can't drift out of sync with itself between the
  * live-edit effect, `save()`, and `removeKey()` the way three separate partial
  * implementations of it already had (issue #1838 follow-up).
+ *
+ * Also the one place a kept value is trimmed (issue #1838 follow-up, seventh
+ * instance): `save()` trims `models` again after this runs, but `removeKey()`
+ * sends `carriedModels` straight to the wire with no trim pass of its own —
+ * so a kept id has to come out of here already normalized, or a pasted
+ * ` openrouter/anthropic/model ` would survive Remove Key with its whitespace
+ * intact even though it correctly survives the shape check.
  */
 function stripProxyIncompatible<T extends string>(
   models: Partial<Record<T, string>>,
@@ -273,7 +290,7 @@ function stripProxyIncompatible<T extends string>(
   const next = {} as Partial<Record<T, string>>;
   for (const key of Object.keys(models) as T[]) {
     const value = models[key];
-    if (value && !isRawCatalogId(value)) next[key] = value;
+    if (value && !isRawCatalogId(value)) next[key] = value.trim();
   }
   return next;
 }
