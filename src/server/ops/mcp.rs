@@ -384,7 +384,7 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<
     // manifest one is. Without this level a teammate on a desk whose ceiling
     // omits `mcp:*` still read back here as reaching every server the company
     // grants, while the harness gives it no such tools.
-    let desk_narrowed = |id: &str, tools: &[String]| {
+    let desk_narrowed = |id: &str, tools: Option<&[String]>| {
         let desk_tools = record.agent_desk_tools(id);
         let desk_refs: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
         agent_scoped_grants(allow, &desk_refs, tools)
@@ -394,7 +394,7 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<
         .map(|agent| {
             (
                 roster_agent(&agent.id),
-                desk_narrowed(&agent.id, &agent.tools),
+                desk_narrowed(&agent.id, agent.tools.as_deref()),
             )
         })
         .collect();
@@ -421,7 +421,7 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<
         // grant.
         grants.push((
             roster_agent(&overlay.id),
-            desk_narrowed(&overlay.id, &overlay.tools),
+            desk_narrowed(&overlay.id, overlay.tools.as_deref()),
         ));
     }
     grants
@@ -1074,12 +1074,15 @@ role = "Chief Executive"
     }
 
     fn teammate(id: &str, tools: Vec<&str>) -> OverlayAgent {
+        // An empty argument list means "the standard grant" (`None`), matching
+        // every caller's pre-#1804 intent; a non-empty list is a narrowed grant.
+        let tools: Vec<String> = tools.into_iter().map(str::to_string).collect();
         OverlayAgent {
             id: id.to_string(),
             name: id.to_string(),
             role: "Growth".to_string(),
             description: None,
-            tools: tools.into_iter().map(str::to_string).collect(),
+            tools: (!tools.is_empty()).then_some(tools),
             model: None,
             harness: None,
         }
@@ -1221,7 +1224,8 @@ role = "Chief Executive"
             .overlay_agent_edits
             .push(crate::ports::types::AgentOverride {
                 agent_id: "ceo".to_string(),
-                tools: Some(vec!["mcp:notion".to_string()]),
+                // Double-option since #1804: `Some(Some(globs))` narrows.
+                tools: Some(Some(vec!["mcp:notion".to_string()])),
                 ..Default::default()
             });
         let grants = roster_grants(&scoped);
@@ -1235,15 +1239,15 @@ role = "Chief Executive"
             "an override `tools` line replaces the manifest's, narrowed by allow"
         );
 
-        // Clearing the override (`tools: []` means "the company's standard
-        // grant", the same empty-means-inherit rule as the manifest field)
-        // restores the blueprint-wide reachability.
+        // Resetting the override to the standard grant (`Some(None)` since
+        // #1804 — NOT `Some(Some([]))`, which is a deny-all) restores the
+        // blueprint-wide reachability.
         let mut inherited = record(vec![]);
         inherited
             .overlay_agent_edits
             .push(crate::ports::types::AgentOverride {
                 agent_id: "ceo".to_string(),
-                tools: Some(Vec::new()),
+                tools: Some(None),
                 ..Default::default()
             });
         let grants = roster_grants(&inherited);

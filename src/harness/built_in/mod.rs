@@ -3918,7 +3918,7 @@ pub(crate) fn build_roster(
         // its desk exactly as a manifest one is.
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
-        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
+        let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -3989,7 +3989,7 @@ pub(crate) fn build_roster(
         // half its members would not be a ceiling.
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
-        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
+        let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -4317,36 +4317,37 @@ mod tests {
             name: "Scoped".into(),
             role: "Researcher".into(),
             description: None,
-            tools: vec!["docs.*".into(), "payment.send".into()],
+            tools: Some(vec!["docs.*".into(), "payment.send".into()]),
             model: None,
             harness: None,
         };
         let manifest = overlay_agent_to_manifest(&scoped);
         assert_eq!(
             manifest.tools,
-            vec!["docs.*".to_string(), "payment.send".to_string()],
+            Some(vec!["docs.*".to_string(), "payment.send".to_string()]),
             "the overlay's own grant must reach the manifest shape"
         );
         assert_eq!(
-            agent_effective_grants(&allow, &manifest.tools),
+            agent_effective_grants(&allow, manifest.tools.as_deref()),
             vec!["docs.*".to_string()],
             "narrow-only: the un-allowed `payment.send` is intersected out"
         );
 
-        // An empty overlay grant is the standard company-wide grant, unchanged.
+        // An absent (`None`) overlay grant is the standard company-wide grant.
+        // Since #1804 this is `None`, NOT an empty list (which is a deny-all).
         let standard = OverlayAgent {
             id: "std".into(),
             name: "Std".into(),
             role: "Generalist".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         };
         let manifest = overlay_agent_to_manifest(&standard);
-        assert!(manifest.tools.is_empty());
+        assert!(manifest.tools.is_none());
         assert_eq!(
-            agent_effective_grants(&allow, &manifest.tools),
+            agent_effective_grants(&allow, manifest.tools.as_deref()),
             allow,
             "an empty grant falls back to the full company allow-list"
         );
@@ -4363,7 +4364,7 @@ mod tests {
             name: "Alex".into(),
             role: "Content Writer".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         };
@@ -4384,7 +4385,7 @@ mod tests {
     /// restarted, the same staleness the tier/skill fingerprints guard against.
     #[test]
     fn overlay_fingerprint_moves_on_a_tools_only_edit() {
-        let one = |tools: Vec<String>| {
+        let one = |tools: Option<Vec<String>>| {
             vec![OverlayAgent {
                 id: "a".into(),
                 name: "A".into(),
@@ -4395,9 +4396,10 @@ mod tests {
                 harness: None,
             }]
         };
-        let standard = one(Vec::new());
-        let scoped = one(vec!["docs.*".into()]);
-        let scoped_more = one(vec!["docs.*".into(), "email".into()]);
+        // `None` = standard grant, `Some(list)` = narrowed (issue #1804).
+        let standard = one(None);
+        let scoped = one(Some(vec!["docs.*".into()]));
+        let scoped_more = one(Some(vec!["docs.*".into(), "email".into()]));
 
         assert_ne!(
             overlay_fingerprint(&standard, &[], &[]),
@@ -4412,7 +4414,7 @@ mod tests {
         // Identical grants → identical fingerprint (no spurious rebuild).
         assert_eq!(
             overlay_fingerprint(&scoped, &[], &[]),
-            overlay_fingerprint(&one(vec!["docs.*".into()]), &[], &[])
+            overlay_fingerprint(&one(Some(vec!["docs.*".into()])), &[], &[])
         );
     }
 
@@ -4429,7 +4431,7 @@ mod tests {
                 name: "A".into(),
                 role: "r".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: model.map(str::to_string),
                 harness: harness.map(str::to_string),
             }]
@@ -5201,7 +5203,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: Some("Owns acquisition experiments.".into()),
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -5270,7 +5272,7 @@ description = "Builds the product."
             name: "Impostor".into(),
             role: "Shadow CEO".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -5396,7 +5398,7 @@ description = "Builds the product."
             name: "Dana".into(),
             role: "Designer".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -6995,7 +6997,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -8321,7 +8323,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -8541,7 +8543,7 @@ budget_usd_daily = 0.0
             description: None,
             tier: None,
             harness: None,
-            tools: Vec::new(),
+            tools: None,
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
@@ -8666,7 +8668,7 @@ budget_usd_daily = 0.0
             description: None,
             tier: None,
             harness: None,
-            tools: Vec::new(),
+            tools: None,
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,

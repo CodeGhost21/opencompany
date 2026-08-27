@@ -461,7 +461,7 @@ kind = "built_in"
                 name: "Writer".into(),
                 role: "Content Writer".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             }],

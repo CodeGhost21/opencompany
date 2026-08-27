@@ -5437,7 +5437,7 @@ members = ["engineer"]
                 name: "Nova".into(),
                 role: "Growth".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             })
@@ -6108,7 +6108,7 @@ members = ["eng1", "eng2"]
                 name: "Cto".to_string(),
                 role: "CTO".to_string(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             }],
