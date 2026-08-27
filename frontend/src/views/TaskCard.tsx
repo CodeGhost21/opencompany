@@ -191,6 +191,9 @@ export function TaskItem({
           Workflow
         </div>
       )}
+      {task.column === "todo" && task.bounced && (
+        <BouncedBadgeRow reason={task.bounced} />
+      )}
       {task.plan && <PlanBadgeRow plan={task.plan} />}
       {showsOutputLink(task) && <OutputLinkRow task={task} />}
       {task.stage === "paused" && (
@@ -334,6 +337,31 @@ function showsOutputLink(task: Task): boolean {
  * stops the card host-side, and a badge that counted them would tell an
  * operator to go fix something that is not blocking anything.
  */
+/**
+ * The board's bounce chip (issue #1865): a card in `todo` because a run
+ * FAILED, distinct from one nobody has touched yet.
+ *
+ * Before this, a card returned to `todo` after a failed dispatch looked
+ * identical to a fresh one — `todo` was both the failure state and the
+ * unstarted state, so an operator had to open every card in the column to
+ * tell a bounced retry candidate apart from work nobody had picked up. The
+ * host clears `task.bounced` the moment the card re-enters `in_progress`, so
+ * this reads as stale for exactly as long as the card sits untouched — never
+ * once a fresh attempt is under way.
+ *
+ * `AlertTriangle` + destructive styling, matching {@link PlanBadgeRow}'s
+ * blocking-prerequisite row: both name a reason the card needs a human look
+ * rather than the machine simply finishing it.
+ */
+function BouncedBadgeRow({ reason }: { reason: string }) {
+  return (
+    <div className="mt-2 flex items-start gap-1.5 text-2xs font-medium text-destructive">
+      <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+      <span className="line-clamp-2">bounced: {reason}</span>
+    </div>
+  );
+}
+
 function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
   const { blocking, approval, unchecked } = tallyPrerequisites(plan);
   if (blocking > 0) {
