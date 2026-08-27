@@ -29,6 +29,7 @@ import {
   buildManifestToml,
   collidesWithArchived,
   describeProvisionError,
+  explicitIdProblem,
   resetReplacementId,
   wasAlreadyArchived,
   wasAmbiguousProvisionOutcome,
@@ -187,6 +188,22 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     const emailProblem = adminEmailProblem(adminEmail, true);
     if (emailProblem) {
       setError(emailProblem);
+      return;
+    }
+
+    // Reject an id shape the host can never durably store, before the
+    // destructive archive leg runs on a reset — not just before
+    // provisioning. `explicitIdProblem` only checks the id's own shape
+    // (independent of collisions, checked separately below); an id past
+    // its length bound reaches `FsCompanyStore::load` as a non-`NotFound`
+    // I/O error instead of the ordinary outcomes this client already
+    // handles, and on a reset that is discovered only after the old
+    // company is already gone (codex review on #1828, PR comment
+    // 3873186322). Applies to a plain create too — same host-side failure,
+    // just without the archive collateral.
+    const idProblem = explicitIdProblem(explicitId.trim());
+    if (idProblem) {
+      setError(idProblem);
       return;
     }
 

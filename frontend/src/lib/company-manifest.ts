@@ -339,3 +339,40 @@ export function collidesWithArchived(candidateId: string, archivedId: string): b
   const delimiter = archivedId.indexOf("--");
   return delimiter !== -1 && candidateId === archivedId.slice(delimiter + 2);
 }
+
+/**
+ * A conservative upper bound on an operator-typed company id's length.
+ *
+ * `FsCompanyStore` derives a company's on-disk directory name straight from
+ * its id (`Bundle::new`, `store/paths.rs`): `slug` maps every input
+ * character to exactly one filesystem-safe byte, so an id's character count
+ * IS its slugged directory component's byte length — before the host may
+ * additionally prepend a `<tenant>--` namespace prefix
+ * (`namespaced_company_id`, `runtime/types.rs`) this client can never see
+ * (see {@link collidesWithArchived}'s comment). `NAME_MAX` is 255 bytes on
+ * every filesystem this host targets; this budget leaves generous headroom
+ * for that invisible prefix, the same way `SECRET_FILENAME_BUDGET`
+ * (`store/paths.rs`) stays clear of the same ceiling for secret filenames.
+ */
+export const MAX_EXPLICIT_ID_LENGTH = 128;
+
+/**
+ * Whether `candidateId`, typed into the Advanced id field, is safe to send
+ * at all — independent of whether it collides with anything.
+ *
+ * Past {@link MAX_EXPLICIT_ID_LENGTH}, `FsCompanyStore::load`'s directory
+ * read fails with a non-`NotFound` I/O error instead of the ordinary
+ * `company_exists` / "not found" outcomes this client already handles via
+ * {@link describeProvisionError} — a raw, unfriendly failure. Checked
+ * before the archive leg runs, not just before provisioning, for the same
+ * reason {@link collidesWithArchived} is: on a reset, an id this client
+ * could have refused for free is instead discovered only when
+ * `provisionCompany` is called, after the old company is already archived
+ * (codex review on #1828, PR comment 3873186322).
+ */
+export function explicitIdProblem(candidateId: string): string | null {
+  if (candidateId.length > MAX_EXPLICIT_ID_LENGTH) {
+    return `That id is too long (${candidateId.length} characters) — keep it under ${MAX_EXPLICIT_ID_LENGTH} characters. Leave the field blank for an auto-generated id.`;
+  }
+  return null;
+}
