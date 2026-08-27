@@ -356,6 +356,41 @@ describe("raw OpenRouter registry ids vs the proxy's own passthrough shape (issu
       "reasoning-v1": "reasoning-v1",
     });
   });
+
+  it("strips a bare, unnamespaced model id typed on the proxied path (issue #1838 follow-up, ninth instance, PR #1838 review)", async () => {
+    // `model_for_tier` honours an override verbatim on the proxied path
+    // regardless of its shape — the platform endpoint's curated tier
+    // registry only knows the four tier names it mirrors from
+    // DEFAULT_TIER_MODELS. A slashless id like `gpt-4o` used to read as "a
+    // bare tier id, not an override at all" purely because it contained no
+    // `/`, and rode straight through Save. The endpoint does not recognize
+    // `gpt-4o` as a tier, so the request fails instead of the incompatible
+    // value being dropped the way the console's own warning promises. Only
+    // an *exact* tier name (`chat-v1`, `reasoning-v1`, `agentic-v1`,
+    // `vision-v1`) or the three-segment `openrouter/<author>/<model>`
+    // passthrough is actually proxy-safe.
+    const { client, puts } = clientFor(
+      status(
+        "openrouter",
+        { "chat-v1": "gpt-4o", "reasoning-v1": "reasoning-v1" },
+        true,
+      ),
+      [],
+    );
+
+    await mount(client);
+
+    const button = container.querySelector('[data-testid="inference-remove-key"]') as HTMLButtonElement;
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+
+    expect(puts).toHaveLength(1);
+    const body = puts[0] as { key?: string; models?: Record<string, string> };
+    expect(body.models).toEqual({ "reasoning-v1": "reasoning-v1" });
+  });
 });
 
 describe("clearing a tier override back to the tier default (issue #1838 follow-up)", () => {
@@ -713,8 +748,11 @@ describe("proxy-incompatible overrides survive an unready catalog (issue #1838 f
     // already drops `chat-v1`'s raw catalog id, leaving `models` and
     // `baseline` in agreement — nothing to distinguish old vs. new behavior
     // yet. Typing a key closes the window; while it's closed, type a genuine
-    // hand-typed draft into `reasoning-v1` (not raw-catalog-shaped, so the
-    // strip never touches it) and a fresh raw catalog id into `chat-v1`.
+    // hand-typed draft into `reasoning-v1` — a *different* tier's bare name
+    // (`agentic-v1`), which `isProxyCompatible` keeps as-is since any of the
+    // four tier names is a valid proxy passthrough regardless of which field
+    // it was typed into, so the strip never touches it — and a fresh raw
+    // catalog id into `chat-v1`.
     // Clearing the key reopens the window: the strip effect fires again and
     // must fold *only* `chat-v1` into baseline. The old code replaced
     // `baseline.models` wholesale with the full stripped snapshot, which
@@ -755,13 +793,13 @@ describe("proxy-incompatible overrides survive an unready catalog (issue #1838 f
     expect(reasoningInput).not.toBeNull();
 
     await act(async () => setValue(keyInput, "sk-test")); // closes the proxied window
-    await act(async () => setValue(reasoningInput, "custom-draft")); // genuine operator draft
+    await act(async () => setValue(reasoningInput, "agentic-v1")); // genuine operator draft
     await act(async () => setValue(chatInput, "openai/reasoning")); // fresh raw id to strip
     await act(async () => setValue(keyInput, "")); // reopens the window; strip fires again
     await act(async () => {});
 
     expect(chatInput).toHaveProperty("value", "");
-    expect(reasoningInput).toHaveProperty("value", "custom-draft");
+    expect(reasoningInput).toHaveProperty("value", "agentic-v1");
 
     // Switching provider now must still ask before discarding reasoning-v1's
     // draft. If the strip effect wrongly promoted it into baseline, this
@@ -783,7 +821,7 @@ describe("proxy-incompatible overrides survive an unready catalog (issue #1838 f
     expect(document.body.querySelector('[data-slot="alert-dialog-content"]')).not.toBeNull();
     expect(container.querySelector<HTMLInputElement>("input#inference-model-reasoning-v1")).toHaveProperty(
       "value",
-      "custom-draft",
+      "agentic-v1",
     );
   });
 });

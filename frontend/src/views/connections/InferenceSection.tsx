@@ -229,11 +229,28 @@ function modelItems(models: InferenceModel[]): Record<string, string> {
 }
 
 /**
- * Whether `value` has the shape of a raw OpenRouter registry id
- * (`<author>/<model>`) — the form `model_for_tier` forwards to the platform
- * proxy verbatim and the proxy rejects — as opposed to the proxy's own
- * explicit `openrouter/<author>/<model>` passthrough form, which it accepts,
- * or a bare tier id, which is not an override at all.
+ * Whether `value`, once trimmed, is one of the exact two shapes the
+ * platform's subscription proxy accepts for a tier override: a bare tier
+ * name (`model_for_tier` reads that as "not really an override — let the
+ * platform resolve this tier itself"), or the proxy's own explicit
+ * three-segment `openrouter/<author>/<model>` passthrough form. Everything
+ * else — including a raw OpenRouter registry id (`<author>/<model>`), which
+ * `model_for_tier` forwards to the proxy verbatim and the proxy rejects — is
+ * incompatible.
+ *
+ * Whitelisting the two accepted shapes, not blacklisting the one known-bad
+ * one (issue #1838 follow-up, ninth instance): an earlier version asked "is
+ * this shaped like a raw catalog id?" and treated everything else, including
+ * *any* slashless string, as a safe bare-tier passthrough. `model_for_tier`
+ * honours an override verbatim on the proxied path regardless of its shape
+ * (see `src/company/inference.rs`), so an operator typing a real but
+ * unnamespaced model id out of direct-path habit — `gpt-4o`, `llama3`, no
+ * `/` in sight — read as "a bare tier id, not an override at all" and rode
+ * straight through Save. The platform endpoint's curated tier registry does
+ * not know `gpt-4o`; the request fails instead of the incompatible value
+ * being dropped the way the console's own warning promises. Naming the tier
+ * names outright closes that gap without reopening the ones the shape-based
+ * check below still exists to catch.
  *
  * Shape-based rather than catalog-membership-based on purpose (issue #1838
  * follow-up, third and fourth instance): checking membership in the loaded
@@ -259,15 +276,16 @@ function modelItems(models: InferenceModel[]): Record<string, string> {
  * its own trim pass over `models` (surrounding whitespace only gets cleaned
  * up after this check would already have run). Untrimmed, a pasted
  * ` openrouter/anthropic/model ` fails `startsWith("openrouter/")` on the
- * leading space and gets classified as a raw catalog id — silently dropped
- * here even though it is exactly the three-segment passthrough form the
- * proxy accepts and the later trim would have normalized it to.
+ * leading space and gets classified as incompatible — silently dropped here
+ * even though it is exactly the three-segment passthrough form the proxy
+ * accepts and the later trim would have normalized it to.
  */
-function isRawCatalogId(value: string): boolean {
+function isProxyCompatible(value: string): boolean {
   const trimmed = value.trim();
+  if ((TIERS as readonly string[]).includes(trimmed)) return true;
   if (!trimmed.includes("/")) return false;
-  if (!trimmed.startsWith("openrouter/")) return true;
-  return trimmed.split("/").length < 3;
+  if (!trimmed.startsWith("openrouter/")) return false;
+  return trimmed.split("/").length >= 3;
 }
 
 /**
@@ -290,7 +308,7 @@ function stripProxyIncompatible<T extends string>(
   const next = {} as Partial<Record<T, string>>;
   for (const key of Object.keys(models) as T[]) {
     const value = models[key];
-    if (value && !isRawCatalogId(value)) next[key] = value.trim();
+    if (value && isProxyCompatible(value)) next[key] = value.trim();
   }
   return next;
 }
