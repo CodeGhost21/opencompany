@@ -2283,7 +2283,12 @@ impl RuntimeBuilder {
                     Arc::new(ManifestApprovalGate::new(self.manifest.policy.clone()))
                 });
                 for pending in journal.pending() {
-                    gate.rehydrate(pending.id, pending.effect, pending.at_millis);
+                    // Rehydrate from the deadline anchor, not `at_millis`
+                    // (issue #1805): for a never-extended approval the two are
+                    // equal, but for an extended one the anchor carries the
+                    // operator's pushed-out deadline, so the live sweeper comes
+                    // back enforcing the extension instead of the original park.
+                    gate.rehydrate(pending.id, pending.effect, pending.deadline_anchor_millis);
                 }
                 gate
             }

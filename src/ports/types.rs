@@ -849,6 +849,19 @@ pub enum CompanyEvent {
         /// Who resolved it.
         by: Actor,
     },
+    /// An operator extended a parked approval's deadline (issue #1805).
+    ///
+    /// The audit counterpart to the extend lever: it says *who* bought a stalled
+    /// request more time and *when*, so a run that would have default-denied over
+    /// a weekend leaves a trail naming the person who kept it alive. Thin like
+    /// [`ApprovalParked`](Self::ApprovalParked) — the moved deadline itself is
+    /// projected onto the card from the journal, not carried on the event.
+    ApprovalExtended {
+        /// The approval whose deadline was pushed out.
+        approval_id: ApprovalId,
+        /// Who extended it.
+        by: Actor,
+    },
     /// Feedback was filed against the company.
     FeedbackFiled {
         /// Free-form feedback text.
@@ -1909,6 +1922,7 @@ impl CompanyEvent {
             Self::A2aTaskReceived { .. } => "A2aTaskReceived",
             Self::ApprovalParked { .. } => "ApprovalParked",
             Self::ApprovalResolved { .. } => "ApprovalResolved",
+            Self::ApprovalExtended { .. } => "ApprovalExtended",
             Self::FeedbackFiled { .. } => "FeedbackFiled",
             Self::PaymentReceived { .. } => "PaymentReceived",
             Self::LifecycleChanged { .. } => "LifecycleChanged",
@@ -2046,6 +2060,7 @@ impl CompanyEvent {
             | Self::A2aTaskReceived { .. }
             | Self::ApprovalParked { .. }
             | Self::ApprovalResolved { .. }
+            | Self::ApprovalExtended { .. }
             | Self::FeedbackFiled { .. }
             | Self::PaymentReceived { .. }
             | Self::LifecycleChanged { .. }

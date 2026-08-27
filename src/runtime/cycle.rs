@@ -2209,6 +2209,10 @@ fn cycle_task_id(
             | CompanyEvent::WorkspaceChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
+            // Issue #1805: an operator's deadline extension is a record of a
+            // decision, not a work trigger — it names no card and competes with
+            // none, exactly like the park it defers.
+            | CompanyEvent::ApprovalExtended { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
             // A reaction (issue #364) is a reader's response to a message that
             // already exists. It starts no work and rivals no conversation, so
@@ -2408,6 +2412,10 @@ fn cycle_conversation(
             | CompanyEvent::WorkspaceChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
+            // Issue #1805: an operator's deadline extension is a record of a
+            // decision, not a work trigger — it names no card and competes with
+            // none, exactly like the park it defers.
+            | CompanyEvent::ApprovalExtended { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
             // A reaction (issue #364) is a reader's response to a message that
             // already exists. It starts no work and rivals no conversation, so
