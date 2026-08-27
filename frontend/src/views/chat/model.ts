@@ -3,8 +3,20 @@
 
 import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
 import { isBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
-import { clearTaskCard, type ChatMessage, type Reaction } from "@/lib/chat";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import {
+  clearTaskCard,
+  generalAwareChannel,
+  MAIN_THREAD_ID,
+  type ChatMessage,
+  type Reaction,
+} from "@/lib/chat";
+import {
+  defaultDesks,
+  deskClaimsGeneralChannel,
+  GENERAL_CHANNEL,
+  isGeneralChannel,
+  type Desk,
+} from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
 
 /**
@@ -20,7 +32,11 @@ import { initials as nameInitials, type TeamMember } from "@/lib/team";
  * whole company (issue #369).
  */
 export function deskFromDto(d: DeskDto): Desk {
-  const slug = d.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const slug = d.name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
   return {
     id: d.id,
     channel: slug || d.id,
@@ -28,6 +44,7 @@ export function deskFromDto(d: DeskDto): Desk {
     blurb: d.description ?? "",
     members: d.members,
     overlayMembers: d.overlayMembers,
+    overlayCreated: d.overlayCreated,
     responder: d.responder,
   };
 }
@@ -150,7 +167,10 @@ export interface HistoryHydration {
 }
 
 /** Before a company's rehydration pass has begun: everything is still pending. */
-export const HISTORY_UNSTARTED: HistoryHydration = { discovered: false, byChannel: {} };
+export const HISTORY_UNSTARTED: HistoryHydration = {
+  discovered: false,
+  byChannel: {},
+};
 
 /**
  * No rehydration is happening or ever will — for a `ChatView` mounted without a
@@ -159,7 +179,10 @@ export const HISTORY_UNSTARTED: HistoryHydration = { discovered: false, byChanne
  * track hydration renders exactly as it did before, rather than spinning on a
  * pass that is never coming.
  */
-export const HISTORY_UNTRACKED: HistoryHydration = { discovered: true, byChannel: {} };
+export const HISTORY_UNTRACKED: HistoryHydration = {
+  discovered: true,
+  byChannel: {},
+};
 
 /**
  * Whether we know enough about `channelId` to state that it is empty.
@@ -170,7 +193,10 @@ export const HISTORY_UNTRACKED: HistoryHydration = { discovered: true, byChannel
  * with no `chat/history`), and holding a spinner on it forever is worse than
  * the wrong claim this exists to prevent.
  */
-export function historyReady(hydration: HistoryHydration, channelId: string): boolean {
+export function historyReady(
+  hydration: HistoryHydration,
+  channelId: string,
+): boolean {
   const status = hydration.byChannel[channelId];
   if (status) return status === "ready";
   return hydration.discovered;
@@ -223,6 +249,66 @@ export interface ChannelSection {
 }
 
 /**
+ * The channel the company-wide line actually renders in.
+ *
+ * `main` — the built-in channel — in every ordinary company. A blueprint that
+ * declares a `[[group_chat]]` under a General id is grandfathered by the host
+ * (`is_general_channel` is guarded on `!record.desk_exists`), and
+ * {@link buildChannels} then lets that desk own the line and adds no built-in
+ * channel beside it; here that desk's own id is the answer.
+ *
+ * One place, because two answers to "where does the main line render" is
+ * precisely how a message ends up somewhere nothing is listening.
+ */
+function generalChannelId(desks: Desk[]): string {
+  return desks.find(deskClaimsGeneralChannel)?.id ?? MAIN_THREAD_ID;
+}
+
+/**
+ * The built-in `#general` channel: the company-wide line, in every company,
+ * from first boot (issue #1743).
+ *
+ * # It is not a desk, and that is the point
+ *
+ * Every other channel here is a desk, and a desk has a lead and a hierarchy.
+ * "Everyone" has neither, so `#general` is deliberately absent from
+ * `GET .../desks` — which is what keeps every desk-shaped surface honest for
+ * free: the org chart, the assignee picker and the desk counts all read that
+ * route, so none of them can offer this channel a lead, a seat, a rename or a
+ * delete. The console renders no edit or delete affordance on it because there
+ * is nothing to render one from, not because a button is hidden. The host
+ * refuses those writes anyway, with a reason (`GENERAL_CHANNEL_IMMUTABLE`).
+ *
+ * # Membership is derived, never stored
+ *
+ * `memberIds` is the roster this render was handed, in roster order. Nothing
+ * anywhere records who is in `#general`, so a teammate added a minute ago is a
+ * member with no write and the two cannot drift. The host derives the same set
+ * the same way when it expands `@everyone` here.
+ *
+ * # Who answers a message that mentions nobody
+ *
+ * The orchestrator — the same teammate that has always answered the company's
+ * main line, one turn per message. `isOrchestrator` is the host's own roster
+ * rule read off `GET .../team`, never re-derived from `tier`; a host that does
+ * not answer it leaves every row `undefined`, and the purpose line then simply
+ * does not make the claim.
+ */
+function generalChannel(members: TeamMember[]): Channel {
+  const orchestrator = members.find((m) => m.isOrchestrator);
+  return {
+    id: MAIN_THREAD_ID,
+    name: GENERAL_CHANNEL,
+    voice: orchestrator?.name ?? "Your company",
+    kind: "channel",
+    purpose: orchestrator
+      ? `Everyone's here. ${orchestrator.name} picks up anything you don't @-mention.`
+      : "Everyone's here — the whole company on one line",
+    memberIds: members.map((m) => m.id),
+  };
+}
+
+/**
  * The channel list.
  *
  * `desks` become the `#channels` — they are the standing lines you can
@@ -242,25 +328,49 @@ export function buildChannels(
   desks: Desk[] = defaultDesks(),
   transcripts: Transcripts = {},
 ): ChannelSection[] {
-  const channels: Channel[] = desks.map((d) => ({
-    id: d.id,
-    name: d.channel,
-    voice: d.name,
-    kind: "channel" as const,
-    // An `auto` channel with no blurb of its own states its routing rule —
-    // the honest line about who answers, in place of a rank nothing confers
-    // (issue #1835). An operator-written blurb still wins.
-    purpose:
-      d.blurb ||
-      (d.responder === "auto" ? "Best fit picks up anything you don't @-mention" : d.blurb),
-    tone: d.tone,
-    memberIds: d.members,
-    leadless: d.responder === "auto" || undefined,
-  }));
+  // A desk that answers to a General spelling owns the company-wide line, and
+  // the built-in channel steps aside for it rather than doubling it.
+  //
+  // This is the host's own rule, not a console one: `is_general_channel`
+  // (`src/server/operator.rs`) is guarded on `!record.desk_exists(desk_id)`, so
+  // a blueprint that declares `[[group_chat]] id = "general"` — or `"main"` —
+  // keeps its desk, its lead, its writes, and `responder_for` routes messages
+  // addressed there to that lead. A rail that showed a second, lead-less
+  // `#general` beside it, or hid the desk and named the orchestrator as who
+  // answers, would state something the host does not do. `channelIdForThread`
+  // below already scans the desks before folding the General spellings, for
+  // exactly this reason.
+  //
+  // Desk *creation* refuses every General spelling, so such a desk can only
+  // come from a blueprint — and `defaultDesks()` no longer fabricates one, so
+  // "a desk claims it" is now a fact about the company rather than about which
+  // fallback set the console happened to be holding.
+  const claimed = desks.some(deskClaimsGeneralChannel);
+  const channels: Channel[] = [
+    ...(claimed ? [] : [generalChannel(members)]),
+    ...desks.map((d) => ({
+      id: d.id,
+      name: d.channel,
+      voice: d.name,
+      kind: "channel" as const,
+      // An `auto` channel with no blurb of its own states its routing rule —
+      // the honest line about who answers, in place of a rank nothing confers
+      // (issue #1835). An operator-written blurb still wins.
+      purpose:
+        d.blurb ||
+        (d.responder === "auto" ? "Best fit picks up anything you don't @-mention" : d.blurb),
+      tone: d.tone,
+      memberIds: d.members,
+      leadless: d.responder === "auto" || undefined,
+    })),
+  ];
 
   const dms = directMessageChannels(members)
     .filter((dm) => (transcripts[dm.id]?.length ?? 0) > 0)
-    .sort((a, b) => latestMessageAt(transcripts[b.id]) - latestMessageAt(transcripts[a.id]));
+    .sort(
+      (a, b) =>
+        latestMessageAt(transcripts[b.id]) - latestMessageAt(transcripts[a.id]),
+    );
 
   return [
     { id: "channels", label: "Channels", channels },
@@ -268,36 +378,66 @@ export function buildChannels(
   ];
 }
 
-/** Every roster teammate as a DM target, including conversations not yet started. */
+/**
+ * Every roster teammate as a DM target, including conversations not yet
+ * started.
+ *
+ * **Including a teammate whose id is a General spelling** (issue #1743). This
+ * used to exclude one, and the reason was sound while it held: a DM was
+ * addressed on the host by the teammate's bare id, so for such a teammate the
+ * DM's address *was* the company-wide line — the host folded it
+ * (`is_general_chat`, since issue #65) and answered as the orchestrator, and a
+ * row here opened a line that was not private, not that teammate's, and whose
+ * replies rendered in `#general`.
+ *
+ * That is no longer how it is addressed. `ChatView` sends `dm:<id>` for exactly
+ * this teammate, `chat_responder` unwraps it (`chat_responder("dm:main") ==
+ * Some("main")`), and `channelIdForThread` maps the frames back — so the DM is
+ * private, is that teammate's, and reads back under its own transcript. Keeping
+ * the filter would have left that route working and unreachable: no row in the
+ * picker, and `directMessageForId` rejecting even an explicit `#/chat/dm:main`
+ * link, which is the one address the rest of this change exists to honour.
+ *
+ * `mint_agent_id` reserves `main` and `General`, so only a blueprint can declare
+ * one; this is not a teammate anybody can create.
+ */
 export function directMessageChannels(members: TeamMember[]): Channel[] {
-  return members.map((m) => ({
-    id: dmChannelId(m),
-    name: m.name,
-    kind: "dm" as const,
-    // The teammate's **description**, which is the field parallel to a desk's
-    // `blurb` above — both answer "what is this line for", and neither repeats
-    // what the title already said. This used to read `m.role`, an identity
-    // field in a description slot, and that is precisely what made the header
-    // say the same words twice (issue #1180): `fromDto` falls back
-    // `dto.name?.trim() || dto.role`, so a company that names roles rather than
-    // people has name === role, and the title and the slot after the divider
-    // resolved to one string. The role is still the fallback — for a teammate
-    // the host *did* name it is a real second fact — and {@link channelSubtitle}
-    // is what declines to render even that when it just echoes the title.
-    purpose: m.description.trim() || m.role,
-    tone: m.tone,
-    member: m,
-  }));
+  return members
+    .map((m) => ({
+      id: dmChannelId(m),
+      name: m.name,
+      kind: "dm" as const,
+      // The teammate's **description**, which is the field parallel to a desk's
+      // `blurb` above — both answer "what is this line for", and neither repeats
+      // what the title already said. This used to read `m.role`, an identity
+      // field in a description slot, and that is precisely what made the header
+      // say the same words twice (issue #1180): `fromDto` falls back
+      // `dto.name?.trim() || dto.role`, so a company that names roles rather than
+      // people has name === role, and the title and the slot after the divider
+      // resolved to one string. The role is still the fallback — for a teammate
+      // the host *did* name it is a real second fact — and {@link channelSubtitle}
+      // is what declines to render even that when it just echoes the title.
+      purpose: m.description.trim() || m.role,
+      tone: m.tone,
+      member: m,
+    }));
 }
 
 /** A DM target addressed by `id`, whether or not it is in the rail yet. */
-export function directMessageForId(members: TeamMember[], id: string | null): Channel | null {
+export function directMessageForId(
+  members: TeamMember[],
+  id: string | null,
+): Channel | null {
   if (!id) return null;
-  return directMessageChannels(members).find((channel) => channel.id === id) ?? null;
+  return (
+    directMessageChannels(members).find((channel) => channel.id === id) ?? null
+  );
 }
 
 function latestMessageAt(messages: ChatMessage[] | undefined): number {
-  return messages?.reduce((latest, message) => Math.max(latest, message.at), 0) ?? 0;
+  return (
+    messages?.reduce((latest, message) => Math.max(latest, message.at), 0) ?? 0
+  );
 }
 
 /**
@@ -313,8 +453,44 @@ function latestMessageAt(messages: ChatMessage[] | undefined): number {
  * journaled under the old one. An id does not change when a person's name does,
  * which is the entire reason to prefer it.
  */
+export const DM_PREFIX = "dm:";
+
 export function dmChannelId(member: TeamMember): string {
-  return `dm:${member.id}`;
+  return `${DM_PREFIX}${member.id}`;
+}
+
+/**
+ * The **host thread** a teammate's DM is addressed on — not always the same
+ * string as {@link dmChannelId}, which is its console-local channel id.
+ *
+ * Issue #364 re-keyed DMs onto the bare teammate id, and for every ordinary
+ * teammate that is still what this answers. The exception is a teammate whose
+ * id is itself a General spelling: the host folds that bare key to the
+ * company-wide line before it ever reaches the roster — deliberately, so `main`
+ * cannot be captured by a teammate called `main` — and answers it as the
+ * orchestrator. Addressed bare, that DM was writable and unreadable at once.
+ *
+ * So exactly that one teammate is addressed prefixed, which `chat_responder`
+ * unwraps and resolves (`chat_responder("dm:main") == Some("main")`).
+ *
+ * **Every seam that turns a roster member into a thread id has to ask this**,
+ * not only the sender: the live thread → channel map, the rehydration targets
+ * that recover history after a reload, and the Approvals page resolving an
+ * origin back to its conversation. Any one of them left on the bare id puts
+ * that DM's replies, its recovered history, or its approval link back on the
+ * company's line (issue #1743).
+ */
+export function dmThreadId(member: TeamMember): string {
+  return isGeneralChannel(member.id) ? dmChannelId(member) : member.id;
+}
+
+/** The teammate a thread addresses, whether it is bare or `dm:`-prefixed. */
+export function memberForThread(members: TeamMember[], threadId: string): TeamMember | null {
+  return (
+    members.find((m) => dmThreadId(m) === threadId) ??
+    members.find((m) => dmChannelId(m) === threadId) ??
+    null
+  );
 }
 
 /**
@@ -327,7 +503,10 @@ export function dmChannelId(member: TeamMember): string {
  */
 export function legacyDmChannelId(member: TeamMember): string {
   const name = member.name.trim();
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
   return `dm:${slug ? `${slug}-` : ""}${nameHash(name)}`;
 }
 
@@ -338,7 +517,10 @@ export function legacyDmChannelId(member: TeamMember): string {
  * Resolves the current id first, then the pre-#364 name-derived form, so an old
  * link keeps working without the old id ever becoming addressable again.
  */
-export function resolveDmChannelId(id: string, members: TeamMember[]): string | null {
+export function resolveDmChannelId(
+  id: string,
+  members: TeamMember[],
+): string | null {
   if (!id.startsWith("dm:")) return null;
   const match = members.find(
     (m) => dmChannelId(m) === id || legacyDmChannelId(m) === id,
@@ -371,7 +553,8 @@ export function channelIdFromSegment(segment: string | null): string | null {
 
 function nameHash(name: string): string {
   let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  for (let i = 0; i < name.length; i++)
+    hash = (hash * 31 + name.charCodeAt(i)) | 0;
   return (hash >>> 0).toString(36);
 }
 
@@ -396,11 +579,76 @@ export function channelIdForThread(
   members: TeamMember[],
 ): string | null {
   if (desks.some((d) => d.id === threadId)) return threadId;
+  // The built-in `#general` channel is in no desk list, so it has to be
+  // resolved by name (issue #1743). The host journals this one conversation
+  // under four ids — `""`, `main`, `General`, `general` — and folds them on
+  // read; a thread carrying any of them belongs to the one channel that
+  // renders it. Without this, an approval raised on the company's main line
+  // matched no channel and stayed stranded on the Approvals page.
+  //
+  // **Before the roster**, and in this order for a reason. `responder_for`
+  // resolves a chat key desk-first, then the General fold, and only then the
+  // roster; this mirrors it, so the console never claims a thread belongs
+  // somewhere the host would answer from somewhere else. A teammate whose id
+  // *is* one of these spellings — which `mint_agent_id` reserves, though a
+  // manifest can still declare one — therefore keeps its DM under `dm:<id>`
+  // while the bare key stays the company's line, which is also what
+  // `GET chat/history?desk=main` returns: the folded General conversation, not
+  // that teammate's transcript.
+  //
+  // When a desk does own the line, every *other* spelling follows it there:
+  // `buildChannels` renders no built-in channel beside such a desk, so
+  // answering `main` for a company whose line is `#general` names a channel
+  // that does not exist, and whatever was addressed there — a live frame, an
+  // unread badge, an approval's "Asked in" link — lands in a bucket the
+  // operator cannot open.
+  if (isGeneralChannel(threadId)) {
+    return generalChannelId(desks);
+  }
   const member = members.find((m) => m.id === threadId);
-  return member ? dmChannelId(member) : null;
+  if (member) return dmChannelId(member);
+  // The prefixed form, last, exactly as `chat_responder` unwraps it.
+  //
+  // A teammate whose id *is* a General spelling cannot be addressed bare — the
+  // fold above answers first and the company's line wins, which is deliberate
+  // (`chat_responder("main") == None`, "a teammate called `main` does not
+  // inherit the company's line"). `ChatView` therefore addresses that one DM as
+  // `dm:<id>`, which the host does answer. The frames it emits carry that
+  // prefixed key, so without this arm they resolved to no channel at all and
+  // the reply never appeared — the DM was writable and unreadable at once.
+  const prefixed = threadId.startsWith(DM_PREFIX) ? threadId.slice(DM_PREFIX.length) : null;
+  const dmMember = prefixed ? members.find((m) => m.id === prefixed) : null;
+  return dmMember ? dmChannelId(dmMember) : null;
 }
 
-export function findChannel(sections: ChannelSection[], id: string | null): Channel | null {
+/**
+ * The channel that renders `threadId`, given the shell's thread → channel map.
+ *
+ * The map holds one entry per id the company can be addressed on, which cannot
+ * cover the General spellings exhaustively: the host compares them
+ * case-insensitively (`is_general_chat`) and then emits on live events the raw
+ * id it was addressed with, so an API client posting to `MAIN` produces frames
+ * keyed `MAIN` and a four-literal map misses them. A missed frame is not a
+ * cosmetic loss — the reply and the working indicator simply do not appear
+ * until polling happens to recover the durable history.
+ *
+ * So: exact match first, then the same question the host asks.
+ */
+export function channelForThread(
+  map: Readonly<Record<string, string>>,
+  threadId: string,
+): string | null {
+  // One implementation, in `lib/chat.ts`, because `dispatchMarkerPlacement`
+  // lives there and has to resolve a thread the same way (issue #1743). A
+  // second copy here is how three of the four live-frame consumers ended up
+  // indexing the map directly and missing every casing the host accepts.
+  return generalAwareChannel(map, threadId);
+}
+
+export function findChannel(
+  sections: ChannelSection[],
+  id: string | null,
+): Channel | null {
   if (!id) return null;
   for (const s of sections) {
     const hit = s.channels.find((c) => c.id === id);
@@ -436,7 +684,10 @@ export function firstChannel(sections: ChannelSection[]): Channel | null {
  * teammate removed since the desks were fetched) drops out rather than
  * rendering a placeholder for somebody who isn't there.
  */
-export function channelMembers(channel: Channel, roster: TeamMember[]): TeamMember[] | null {
+export function channelMembers(
+  channel: Channel,
+  roster: TeamMember[],
+): TeamMember[] | null {
   if (!channel.memberIds) return null;
   const byId = new Map(roster.map((m) => [m.id, m]));
   return channel.memberIds
@@ -499,7 +750,10 @@ export function channelSubtitle(channel: Channel): string | null {
  * claims that the channel has no history, and neither may be made before the
  * host has answered (issue #934).
  */
-export function channelIntroSentence(channel: Channel, loading: boolean): string {
+export function channelIntroSentence(
+  channel: Channel,
+  loading: boolean,
+): string {
   const subtitle = channelSubtitle(channel);
   if (loading) return subtitle ? sentence(subtitle) : "";
   if (channel.kind === "dm") {
@@ -542,9 +796,15 @@ function sentence(s: string): string {
  * `buildChannels` already sets it from `member.tone`, which was id-seeded from
  * the start.
  */
-export function dmFace(channel: Channel): { name: string; tone?: string; avatar?: string } | null {
+export function dmFace(
+  channel: Channel,
+): { name: string; tone?: string; avatar?: string } | null {
   if (channel.kind !== "dm" || !channel.member) return null;
-  return { name: channel.name, tone: channel.tone, avatar: channel.member.avatar };
+  return {
+    name: channel.name,
+    tone: channel.tone,
+    avatar: channel.member.avatar,
+  };
 }
 
 /**
@@ -636,8 +896,10 @@ export function senderOf(
   // is what identifies the line, and a name there would read as somebody else.
   // Only the face is yours — which is the half a reader scanning a busy channel
   // actually picks their own lines out by.
-  if (m.from === "you") return { key: "you", name: "You", kind: "you", avatar: youAvatar };
-  if (m.from === "system") return { key: "system", name: "System", kind: "system" };
+  if (m.from === "you")
+    return { key: "you", name: "You", kind: "you", avatar: youAvatar };
+  if (m.from === "system")
+    return { key: "system", name: "System", kind: "system" };
 
   const named = m.channel?.trim().toLowerCase() ?? "";
   if (named && !COMPANY_VOICE.has(named)) {
@@ -668,7 +930,9 @@ export function senderOf(
 }
 
 function titleize(s: string): string {
-  return s.replace(/[._-]+/g, " ").replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1));
+  return s
+    .replace(/[._-]+/g, " ")
+    .replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1));
 }
 
 export const initials = nameInitials;
@@ -916,7 +1180,10 @@ export function buildTimelineItems(
   }
 
   for (const [key, batch] of batches) {
-    batch.sort((a, b) => a.at_millis - b.at_millis || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    batch.sort(
+      (a, b) =>
+        a.at_millis - b.at_millis || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
     const verdicts: Record<string, Verdict> = {};
     for (const approval of batch) {
       const verdict = decided[approval.id]?.verdict;
@@ -944,7 +1211,10 @@ export function buildTimelineItems(
 /* ---- formatting ---- */
 
 export function formatTime(at: number): string {
-  return new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return new Date(at).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 export function sameDay(a: number, b: number): boolean {
@@ -958,7 +1228,11 @@ export function formatDay(at: number): string {
   yesterday.setDate(today.getDate() - 1);
   if (d.toDateString() === today.toDateString()) return "Today";
   if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  return d.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
 }
 
 /* ---- reactions ---- */
@@ -991,7 +1265,10 @@ export function toggleReaction(
 }
 
 /** Whether the reader has already reacted to a message with this emoji. */
-export function hasReacted(reactions: Reaction[] | undefined, emoji: string): boolean {
+export function hasReacted(
+  reactions: Reaction[] | undefined,
+  emoji: string,
+): boolean {
   return !!reactions?.some((r) => r.emoji === emoji && r.mine);
 }
 
@@ -1011,7 +1288,9 @@ export interface ReactionChip {
  * Chips keep first-reacted order rather than sorting by count, so a message's
  * reactions do not reshuffle under the reader as others react.
  */
-export function reactionChips(reactions: Reaction[] | undefined): ReactionChip[] {
+export function reactionChips(
+  reactions: Reaction[] | undefined,
+): ReactionChip[] {
   const chips: ReactionChip[] = [];
   const byEmoji = new Map<string, ReactionChip>();
   for (const row of reactions ?? []) {
@@ -1041,7 +1320,10 @@ export function reactionChips(reactions: Reaction[] | undefined): ReactionChip[]
  *
  * Returns the same object when nothing changed, so React sees no new state.
  */
-export function clearTaskCardEverywhere(transcripts: Transcripts, taskId: string): Transcripts {
+export function clearTaskCardEverywhere(
+  transcripts: Transcripts,
+  taskId: string,
+): Transcripts {
   let changed = false;
   const next: Transcripts = {};
   for (const [channelId, messages] of Object.entries(transcripts)) {

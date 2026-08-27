@@ -2527,6 +2527,15 @@ impl HarnessBrain {
         {
             return responder;
         }
+        // The built-in `#general` channel (issue #1743) — the one key that
+        // resolves to nobody *on purpose*. `chat_responder` declines it so both
+        // callers answer as their own orchestrator, which is what this host has
+        // always done for the company's main line. It is not the #884 case the
+        // warning below exists for: nothing was misaddressed, so logging it
+        // would bury the real misroutes under the console's most-used channel.
+        if crate::server::chat_history::is_general_chat(Some(chat)) {
+            return self.responder.clone();
+        }
         tracing::warn!(
             company = %self.record().id,
             chat = %chat,
@@ -2543,10 +2552,36 @@ impl HarnessBrain {
     /// broadcast from the console's default thread — which sends
     /// `chat: "main"`, an alias `resolve_desk_id` does not know — expands
     /// against the General desk rather than no desk at all.
-    fn everyone_desk(chat: Option<&str>) -> &str {
+    ///
+    /// **A real desk answering to that key wins, whatever it is spelled like.**
+    /// A blueprint may declare `[[group_chat]] id = "main"` (or `"general"`),
+    /// which this host grandfathers — `is_general_channel` is guarded on
+    /// `!desk_exists`, so the desk keeps its members and `responder_for` routes
+    /// to its lead. Folding that key to `General` asks `resolve_desk_id` for a
+    /// name no such desk has, which misses, and `@everyone` then expands to the
+    /// **whole roster** instead of the desk that was actually addressed — a
+    /// broadcast escaping the scope of the one case the fold exists to keep
+    /// working. Asking the record first costs one lookup and cannot be wrong.
+    fn everyone_desk(record: &CompanyRecord, chat: Option<&str>) -> String {
         match chat {
-            Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => chat,
-            _ => crate::server::ops::language::DEFAULT_DESK,
+            Some(chat)
+                if record.resolve_desk_id(chat).is_some()
+                    || !crate::server::chat_history::is_general_chat(Some(chat)) =>
+            {
+                chat.to_string()
+            }
+            // A General alias resolves to whichever desk claims the line, not
+            // to the literal `DEFAULT_DESK`. A blueprint desk declared
+            // `id = "main", name = "Front office"` claims it by id, so
+            // `resolve_desk_id("General")` misses and the guard above falls
+            // through — and expanding `@everyone` against a desk called
+            // `General` that does not exist scoped the broadcast to the entire
+            // roster, while the channel it was posted in is that desk and its
+            // lead answers there. The alias and the raw key have to name the
+            // same membership or `@everyone` means two different things in one
+            // channel (issue #1743).
+            _ => crate::runtime::delegation_tools::general_claimant(record)
+                .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
         }
     }
 
@@ -3162,10 +3197,10 @@ impl HarnessBrain {
                     // `resolve_desk_id` does not recognise that console-only
                     // alias, so a broadcast from the main thread would otherwise
                     // expand against no desk at all.
-                    let addressed_desk = Self::everyone_desk(chat.as_deref());
+                    let addressed_desk = Self::everyone_desk(&self.record(), chat.as_deref());
                     let also_mentioned = crate::runtime::mentions::mentioned_agents(
                         &self.record(),
-                        addressed_desk,
+                        &addressed_desk,
                         mentions,
                         Some(&responder),
                     );
@@ -6295,11 +6330,103 @@ members = ["engineer"]
     /// other General-desk spellings — to the General desk id before expanding.
     #[test]
     fn everyone_desk_folds_the_main_thread_alias_to_general() {
-        assert_eq!(HarnessBrain::everyone_desk(None), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("main")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("General")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("eng_desk")), "eng_desk");
+        let record = record_with_desk();
+        assert_eq!(HarnessBrain::everyone_desk(&record, None), "General");
+        assert_eq!(HarnessBrain::everyone_desk(&record, Some("")), "General");
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("main")),
+            "General"
+        );
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("General")),
+            "General"
+        );
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("eng_desk")),
+            "eng_desk"
+        );
+    }
+
+    /// A blueprint that declares a desk under one of the General spellings is
+    /// grandfathered by this host — `is_general_channel` is guarded on
+    /// `!desk_exists`, the desk keeps its members, and `responder_for` routes
+    /// to its lead. The fold must not run over it: asking `resolve_desk_id`
+    /// for the *name* `General` misses a desk called anything else, and
+    /// `@everyone` would then expand to the whole roster instead of the two
+    /// people actually on the line — a broadcast escaping the scope of the one
+    /// case the fold exists to preserve.
+    #[test]
+    fn a_grandfathered_general_desk_keeps_its_own_membership() {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+
+[[group_chat]]
+id = "main"
+name = "Front office"
+members = ["ceo", "engineer"]
+"#,
+        )
+        .expect("valid manifest");
+        let mut record = record_with_desk();
+        record.manifest.group_chats = manifest.group_chats;
+
+        // The raw key, not the General fold: this desk answers to it.
+        assert_eq!(HarnessBrain::everyone_desk(&record, Some("main")), "main");
+
+        // Every folded alias names the same membership as the raw key. A desk
+        // that claims the line by *id* is missed by `resolve_desk_id("General")`,
+        // so the alias used to fall through to a `General` desk that does not
+        // exist — scoping `@everyone` to the whole roster in a channel whose
+        // own lead answers (issue #1743).
+        for alias in ["", "General", "general", "MAIN"] {
+            assert_eq!(
+                HarnessBrain::everyone_desk(&record, Some(alias)),
+                "main",
+                "the alias {alias:?} must scope @everyone to the claiming desk"
+            );
+        }
+        // And with no such desk, the fold still applies as before.
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record_with_desk(), Some("main")),
+            "General"
+        );
+
+        let mentions = [crate::ports::types::Mention {
+            target: crate::ports::types::MentionTarget::Everyone,
+            text: "@everyone".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let expanded = crate::runtime::mentions::mentioned_agents(
+            &record,
+            &HarnessBrain::everyone_desk(&record, Some("main")),
+            &mentions,
+            None,
+        );
+        assert_eq!(
+            expanded,
+            vec!["ceo".to_string(), "engineer".to_string()],
+            "a broadcast stays inside the desk that was addressed"
+        );
+        assert!(
+            !expanded.contains(&"chief".to_string()),
+            "and does not reach a teammate who is not on it: {expanded:?}"
+        );
     }
 
     /// The default responder is the `orchestrator`-tier agent, even when it is
@@ -6337,6 +6464,118 @@ members = ["engineer"]
         let (brain, _tasks) = brain_with_desk(dir.path());
         assert_eq!(brain.responder_for(Some("engineer")), "engineer");
         assert_eq!(brain.responder_for(Some("chief")), "chief");
+    }
+
+    // ── Issue #1743: who answers the built-in `#general` channel ──
+
+    /// An **overlay** desk that took a General spelling before those were
+    /// reserved must not answer the company-wide line.
+    ///
+    /// `create_desk` accepted `main` until issue #1743, so this is persisted
+    /// state rather than a hypothesis. Such a desk is already hidden from
+    /// `GET .../desks` and refused every mutation, but hiding a desk does not
+    /// stop it routing: `desk_lead` resolves through
+    /// `CompanyRecord::resolve_desk_id`, which used to match it, so the console
+    /// rendered `#general` and named the orchestrator as who answers while this
+    /// desk's lead answered instead. The resolver declines the key now, and the
+    /// arm below it hands the line back to the orchestrator.
+    #[test]
+    fn responder_for_does_not_let_a_hidden_overlay_desk_answer_the_general_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        brain.mutate_record(|r| {
+            r.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "main".into(),
+                name: "Front office".into(),
+                description: None,
+                responder: Default::default(),
+                members: vec!["engineer".into()],
+            })
+        });
+        for spelling in ["", "main", "Main", "general", "General"] {
+            assert_eq!(
+                brain.responder_for(Some(spelling)),
+                "chief",
+                "the orchestrator answers the company-wide line as {spelling:?}"
+            );
+        }
+        // The desk is not retired — it simply has no General key any more, and
+        // the desk it is still routes to its own lead.
+        assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+    }
+
+    /// A **teammate** whose id is a General spelling keeps its DM, and does not
+    /// take the company-wide line with it (issue #1743).
+    ///
+    /// `mint_agent_id` reserves `main` and `General`, but a manifest can still
+    /// declare one, and a manifest is not something this host overrules. Before
+    /// this, `resolve_roster_agent_id` matched the bare key and that teammate
+    /// answered every unaddressed message — while `GET chat/history?desk=main`
+    /// returned the *folded General conversation* (`is_general_chat` has folded
+    /// `""`, `main`, `General` and `general` into one since issue #65). The
+    /// responder and the transcript disagreed about whose conversation it was.
+    /// The bare key is the line; `dm:<id>` is the teammate.
+    #[test]
+    fn responder_for_gives_the_general_line_to_the_orchestrator_not_a_teammate_called_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        brain.mutate_record(|r| {
+            r.overlay_agents.push(OverlayAgent {
+                id: "main".into(),
+                name: "Mainard".into(),
+                role: "Analyst".into(),
+                description: None,
+                tools: None,
+                model: None,
+                harness: None,
+            })
+        });
+        assert!(
+            brain.record().is_roster_agent("main"),
+            "the teammate really is on the roster, so the old arm would have matched"
+        );
+        assert_eq!(
+            brain.responder_for(Some("main")),
+            "chief",
+            "the bare key is the company's line, whatever a teammate is called"
+        );
+        assert_eq!(
+            brain.responder_for(Some("dm:main")),
+            "main",
+            "and the teammate keeps its own DM, addressed the way the console addresses one"
+        );
+    }
+
+    /// The grandfathered case the two tests above must not break: a
+    /// `[[group_chat]]` the **blueprint** declares under a General spelling is
+    /// the company's own General desk, and its lead still answers it.
+    #[test]
+    fn responder_for_still_routes_a_blueprint_general_desk_to_its_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let declared = toml::from_str::<CompanyManifest>(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+
+[[group_chat]]
+id = "main"
+name = "Front office"
+members = ["engineer"]
+"#,
+        )
+        .expect("valid manifest")
+        .group_chats;
+        brain.mutate_record(|r| r.manifest.group_chats.extend(declared));
+        assert_eq!(
+            brain.responder_for(Some("main")),
+            "engineer",
+            "a blueprint desk keeps the line and its lead keeps answering it"
+        );
     }
 
     // ── Issue #884 D2: an unresolvable chat key is no longer silent ──
