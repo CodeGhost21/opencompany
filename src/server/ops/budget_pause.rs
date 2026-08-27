@@ -143,6 +143,17 @@ async fn redeem_budget_pause(
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Query(RedeemQuery { id }): Query<RedeemQuery>,
 ) -> Result<Json<BudgetPauseDto>, ApiError> {
+    // Issue #1846 review (Codex #3870271005): the SAME durable-lifecycle gate
+    // `accept_chat_turn` (`src/server/operator.rs`) runs as its own first
+    // line, checked here BEFORE reserving the marker or journaling anything.
+    // `run_cycle`/`run_journaled_cycle` only check `ensure_accepting`
+    // (process-local quiescing, e.g. mid-rebuild) — never the durable
+    // `lifecycle` field a `paused`/`archived` company sets — so without this,
+    // clicking a stale "Add credits & resend" CTA on a company an operator
+    // had explicitly stopped could still reserve the marker and execute a
+    // fresh agent turn, bypassing the exact stop every other write path
+    // honours.
+    company.runtime.ensure_running().await?;
     let pauses = budget_pauses_for(company.id());
     // Reserved (atomically removed) up front, not merely peeked — see this
     // function's doc comment. A concurrent second request's own `redeem`
@@ -952,6 +963,66 @@ mod tests {
         assert!(
             recording.last.lock().unwrap().is_none(),
             "a refused background redeem must never reach the brain"
+        );
+
+        let still_parked = budget_pauses_for(&id)
+            .peek("ceo")
+            .expect("the marker must survive the refusal, not be dropped");
+        assert_eq!(still_parked.id, marker.id);
+    }
+
+    /// Issue #1846 review (Codex #3870271005) — **the regression.** This
+    /// route never checked the company's durable `lifecycle` field the way
+    /// `accept_chat_turn` (`src/server/operator.rs`) does as its own first
+    /// line. `run_cycle`/`run_journaled_cycle` only refuse on process-local
+    /// quiescing (a runtime mid-rebuild), never on an operator having
+    /// explicitly paused or archived the company — so a stale "Add credits &
+    /// resend" CTA on a stopped company could still reserve the marker and
+    /// execute a fresh agent turn.
+    #[tokio::test]
+    async fn redeem_refuses_on_a_paused_company() {
+        let home = home();
+        let company = "acme-redeem-paused-company";
+        let recording = Arc::new(RecordingBrain::default());
+        let state = state_with_brain(home.path(), company, recording.clone()).await;
+        let id = CompanyId::new(company);
+
+        let marker = budget_pauses_for(&id).park(
+            "ceo",
+            Some("general".to_string()),
+            "ship the API",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
+
+        // Flip the company to `paused`, the same durable field
+        // `ensure_running` reads — same store, same path `state_with_brain`
+        // itself wrote the initial `running` record to.
+        let store = FsCompanyStore::new(home.path().to_path_buf());
+        let mut record = store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("the company record exists");
+        record.lifecycle = "paused".to_string();
+        store.save(&record).await.unwrap();
+
+        let (status, _resp, raw) = send(
+            &state,
+            company,
+            "POST",
+            "/api/v1/company/agents/ceo/budget-pause/redeem",
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "a paused company must refuse the redeem, not execute a fresh turn: {raw}"
+        );
+        assert!(
+            recording.last.lock().unwrap().is_none(),
+            "a refused redeem on a paused company must never reach the brain"
         );
 
         let still_parked = budget_pauses_for(&id)
