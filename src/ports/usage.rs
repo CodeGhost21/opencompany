@@ -85,6 +85,24 @@ pub enum SampleKind {
     /// company-driven model spend, and excluding it would let chat keep paying
     /// for classification after the tier budget was exhausted.
     TriageCall,
+    /// One completed responder selection — the tool-less model call an
+    /// unmentioned message in an `auto` channel makes to pick its best-fit
+    /// answerer (issue #1835).
+    ///
+    /// Its own kind for the reason [`Self::TriageCall`] is its own kind: it
+    /// belongs to no teammate — selection is what *picks* the teammate — so it
+    /// is charged to the whole-company bucket with no `run_id`, and "what is
+    /// routing costing us?" should be answerable without reading a teammate's
+    /// column. Distinct from `TriageCall` too: triage is driven by raw chat
+    /// volume everywhere, selection only by unmentioned messages in `auto`
+    /// channels, and conflating them would make the triage line move whenever
+    /// an operator created a channel.
+    ///
+    /// Counts toward the capability-tier token budget, exactly as triage does
+    /// — see [`tokens_in`](crate::metering::tokens_in) — and for the same
+    /// leak: selection is per-message spend, so a company past its ceiling
+    /// must not keep paying to route.
+    SelectorCall,
     /// One completed first-run setup pass — the single tool-less model call
     /// that turns three answers into a starting roster
     /// (`docs/spec/runtime/company-setup.md`).

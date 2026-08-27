@@ -60,6 +60,7 @@ pub mod planning;
 /// the roster it is building exists). See [`roster_build`].
 pub mod roster_build;
 pub mod search;
+pub mod selector;
 pub mod triage;
 mod types;
 mod usage;
@@ -83,6 +84,7 @@ pub use planning::{planning_sample, record_planning_usage};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };
+pub use selector::{record_selector_usage, selector_sample};
 pub use triage::{record_triage_usage, triage_sample};
 pub use types::{
     AgentTokens, CategorySpend, Direction, Finances, ProviderCalls, Transaction, Usage, UsagePoint,
