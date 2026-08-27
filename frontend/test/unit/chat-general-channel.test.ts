@@ -18,6 +18,8 @@ import {
   channelForThread,
   channelIdForThread,
   channelMembers,
+  directMessageChannels,
+  directMessageForId,
 } from "@/views/chat/model";
 
 /**
@@ -283,6 +285,28 @@ describe("resolving a host thread to the general channel", () => {
     // An ordinary teammate is reachable either way, so no existing DM moved.
     expect(channelIdForThread("eng", DESKS, withMain)).toBe("dm:eng");
     expect(channelIdForThread("dm:eng", DESKS, withMain)).toBe("dm:eng");
+  });
+
+  /**
+   * ...and the DM is reachable from the console, which is the third half.
+   *
+   * `directMessageChannels` used to filter this teammate out, correctly: while
+   * the DM was addressed by the bare id, a row here opened the company's line
+   * under that teammate's name. The prefixed address removes that reason, and
+   * leaving the filter in place would have left the new route working and
+   * unreachable — no row in the New message picker, and `directMessageForId`
+   * rejecting an explicit `#/chat/dm:main` link, which is the one address the
+   * rest of this change exists to honour.
+   */
+  it("offers that teammate as a DM target, now that the address is its own", () => {
+    const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
+    const ids = directMessageChannels(withMain).map((c) => c.id);
+    expect(ids).toContain("dm:main");
+    // And the deep link resolves, which is what the picker's row opens.
+    expect(directMessageForId(withMain, "dm:main")?.name).toBe("Mainard");
+    // Every other teammate is still offered exactly once.
+    expect(ids).toContain("dm:eng");
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   /**

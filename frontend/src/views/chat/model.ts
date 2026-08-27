@@ -284,23 +284,27 @@ export function buildChannels(
  * Every roster teammate as a DM target, including conversations not yet
  * started.
  *
- * **Except a teammate whose id is a General spelling** (issue #1743). A DM is
- * addressed on the host by the teammate's bare id — `ChatView` sends
- * `chat: member.id`, and `chat/history?desk=<id>` is where its transcript comes
- * from — so for such a teammate the DM's address *is* the company-wide line.
- * The host folds it (`is_general_chat`, since issue #65) and answers it as the
- * orchestrator, so a row here would open a line that is not private, is not
- * that teammate's, and whose replies render in `#general` instead.
+ * **Including a teammate whose id is a General spelling** (issue #1743). This
+ * used to exclude one, and the reason was sound while it held: a DM was
+ * addressed on the host by the teammate's bare id, so for such a teammate the
+ * DM's address *was* the company-wide line — the host folded it
+ * (`is_general_chat`, since issue #65) and answered as the orchestrator, and a
+ * row here opened a line that was not private, not that teammate's, and whose
+ * replies rendered in `#general`.
  *
- * `mint_agent_id` reserves `main` and `General`, so only a blueprint can
- * declare one; this is not a teammate anybody can create. Nothing is lost by
- * leaving it out — that teammate is on the roster, so it is in `#general`, in
- * its members pane, `@`-mentionable there, and on the org chart. What is
- * dropped is a second door onto a conversation that already has one.
+ * That is no longer how it is addressed. `ChatView` sends `dm:<id>` for exactly
+ * this teammate, `chat_responder` unwraps it (`chat_responder("dm:main") ==
+ * Some("main")`), and `channelIdForThread` maps the frames back — so the DM is
+ * private, is that teammate's, and reads back under its own transcript. Keeping
+ * the filter would have left that route working and unreachable: no row in the
+ * picker, and `directMessageForId` rejecting even an explicit `#/chat/dm:main`
+ * link, which is the one address the rest of this change exists to honour.
+ *
+ * `mint_agent_id` reserves `main` and `General`, so only a blueprint can declare
+ * one; this is not a teammate anybody can create.
  */
 export function directMessageChannels(members: TeamMember[]): Channel[] {
   return members
-    .filter((m) => !isGeneralChannel(m.id))
     .map((m) => ({
       id: dmChannelId(m),
       name: m.name,
