@@ -1702,6 +1702,17 @@ impl CompanyRuntime {
     /// another task is the same class of untrue statement as the one being fixed.
     ///
     /// A no-op for every other receipt.
+    ///
+    /// Also files the same `approval_expired` notification
+    /// [`sweep_expired_approvals`](Self::sweep_expired_approvals) files when
+    /// *it* is the one to discover the deadline (issue #1865, Codex review on
+    /// PR #1883). Both callers reach the identical outcome — a parked
+    /// approval that ran out unanswered — and `notify_approval_expired` is
+    /// invoked from nowhere else, so before this an expiry notified when the
+    /// sweeper found it first and stayed silent when a late resolve found it
+    /// instead. Best-effort and after the retirement, same ordering as the
+    /// sweep: a notification that could not be filed must not undo a
+    /// default-deny that already happened.
     async fn retire_if_expired(
         self: &Arc<Self>,
         id: &ApprovalId,
@@ -1711,7 +1722,9 @@ impl CompanyRuntime {
             return Ok(());
         }
         self.retire_approval(id, ExpiryReason::Ttl, now_millis())
-            .await
+            .await?;
+        self.notify_approval_expired(id).await;
+        Ok(())
     }
 
     /// Pushes a parked approval's deadline out to a fresh full TTL window,
@@ -4734,6 +4747,56 @@ mod tests {
             .await
             .unwrap();
         approval
+    }
+
+    /// Issue #1865 (Codex review on PR #1883): a late resolve that discovers
+    /// an approval already past its deadline owes the SAME "expired
+    /// unanswered" notification the sweep loop files when it discovers the
+    /// identical deadline first.
+    ///
+    /// `notify_approval_expired` used to be invoked from nowhere but
+    /// `sweep_expired_approvals`, so `retire_if_expired` — the path a late
+    /// `resolve_approval_spawned`/`resolve_approval_amended_spawned` takes
+    /// when `settle_approval` answers `ResolveReceipt::Expired` — ran the
+    /// whole four-step `retire_approval` transaction and never told anybody.
+    /// The exact same expiry notified when the sweeper found it and stayed
+    /// silent when an operator's late click found it instead.
+    #[tokio::test]
+    async fn a_late_resolve_that_discovers_an_expiry_files_the_same_notification_as_the_sweep() {
+        use crate::ports::types::{Actor, ActorKind, Verdict};
+        use crate::runtime::grants::GrantScope;
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+        // Parked at epoch 0 — unambiguously past any TTL, the same trick
+        // `expired_approval_is_labelled_as_an_expiry_and_carries_its_wait`
+        // (src/server/ops/write_test.rs) uses.
+        let id = seed_parked(&rt, "appr-late", 0).await;
+
+        let by = Actor {
+            kind: ActorKind::Operator,
+            id: "owner".into(),
+        };
+        let (receipt, follow_up) = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, by, GrantScope::Once)
+            .await
+            .unwrap();
+        assert!(
+            receipt.expired(),
+            "an epoch-0 park must read as expired, not approved: {receipt:?}"
+        );
+        super::join_follow_up(follow_up).await.unwrap();
+
+        let notifications = rt.notifications().list(rt.id(), "owner").await.unwrap();
+        assert!(
+            notifications
+                .iter()
+                .any(|n| n.notification.kind == "approval_expired"
+                    && n.notification.subject.id == id.as_ref()),
+            "a late resolve that discovers an expiry must file the same \
+             approval_expired notification the sweep files, got {notifications:?}"
+        );
     }
 
     /// Issue #971 (the projection this issue builds on): a card's deadline is the
