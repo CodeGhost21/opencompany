@@ -1650,30 +1650,46 @@ impl RuntimeJournal {
 
     /// Stashes a blocked agent node's continuation facts durably (issue #1816).
     ///
-    /// Called from the runner's block-settle in lockstep with the in-memory
-    /// [`BlockedNodeQueue::arm`](crate::runtime::blocked_nodes::BlockedNodeQueue::arm),
-    /// so the fast path and the durable record carry the same `(turn,
-    /// workflow_id, input)`. Best-effort at the call site: a failed durable write
-    /// leaves the in-memory stash serving the common (no-restart) case, exactly
-    /// as a failed gate journal leaves its live queue in place.
+    /// Called from `HarnessAgentRunner::park_gated_calls` at park time, in
+    /// lockstep with the in-memory
+    /// [`BlockedNodeQueue::arm`](crate::runtime::blocked_nodes::BlockedNodeQueue::arm)
+    /// (issue #1825, P1 second follow-up) — and again, redundantly, from the
+    /// runner's block-settle pass, which called this first and alone until
+    /// that follow-up. Both calls for one node carry the same `(turn,
+    /// workflow_id, input)`, so the second is a first-write-wins no-op rather
+    /// than a second source of truth: this skips the durable append too, not
+    /// only the in-memory insert, once a turn is already stashed — the same
+    /// tier `arm` itself skips at for the identical reason, now applied one
+    /// durability level up so the settle pass's fallback call does not double
+    /// every blocked node's `BlockedNodeStashed` write forever. Best-effort at
+    /// the call site either way: a failed durable write leaves the in-memory
+    /// stash serving the common (no-restart) case, exactly as a failed gate
+    /// journal leaves its live queue in place.
     pub async fn record_blocked_node_stashed(
         &self,
         turn: &str,
         workflow_id: &str,
         input: &Value,
     ) -> Result<()> {
-        self.state
-            .lock()
-            .expect("journal state poisoned")
-            .blocked_stashes
-            .entry(turn.to_string())
-            // First write wins, mirroring `BlockedNodeQueue::arm`: every gated
-            // call one node parked shares one turn and one input, so a repeat
-            // arm carries identical facts.
-            .or_insert_with(|| BlockedStash {
-                workflow_id: workflow_id.to_string(),
-                input: input.clone(),
-            });
+        {
+            let mut state = self.state.lock().expect("journal state poisoned");
+            if state.blocked_stashes.contains_key(turn) {
+                // Already stashed — either this run's own park-time write
+                // already landed and the settle pass is the redundant call,
+                // or a retry of this same call raced itself. Either way the
+                // facts are identical (one node parks under one turn), so a
+                // second durable append would only double the flush for no
+                // new information.
+                return Ok(());
+            }
+            state.blocked_stashes.insert(
+                turn.to_string(),
+                BlockedStash {
+                    workflow_id: workflow_id.to_string(),
+                    input: input.clone(),
+                },
+            );
+        }
         self.append(&JournalRecord::BlockedNodeStashed {
             turn: turn.to_string(),
             workflow_id: workflow_id.to_string(),

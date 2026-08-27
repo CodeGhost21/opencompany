@@ -1477,6 +1477,40 @@ impl HarnessAgentRunner {
             .blocked_nodes
             .arm(node_turn, &self.workflow_id, &self.trigger_input);
 
+        // Issue #1825 (P1, second follow-up — found by chatgpt-codex-connector):
+        // the in-memory arm above only helps the no-restart case. The durable
+        // mirror this node's stash needs to survive a restart —
+        // `record_blocked_node_stashed`'s `BlockedNodeStashed` — used to be
+        // written only from `stash_blocked_agent_nodes`, after settle, same as
+        // the in-memory arm was before the fix above. `park_and_journal` below
+        // is what makes the first card in this node's batch host-durable and
+        // clickable; a process that dies after that write lands but before the
+        // settle pass's durable stash runs leaves a restart with a recoverable
+        // card and no matching stash for it to release — approving it then
+        // consumes the card against nothing, identical in shape to the
+        // in-memory race the arm above closes, one durability tier up. Writing
+        // it here, before any card is durable, closes that window the same
+        // way. Best-effort, matching every other park-time write in this
+        // function: a failed durable stash still leaves the in-memory arm
+        // above serving the common (no-restart) case, and failing the node
+        // over an approvals-queue write would be the wrong trade.
+        if let Err(error) = parking
+            .journal
+            .record_blocked_node_stashed(node_turn, &self.workflow_id, &self.trigger_input)
+            .await
+        {
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                node_turn,
+                %error,
+                "workflow agent node: a blocked node's continuation facts could not be \
+                 durably stashed at park time; the in-memory stash still covers a resolve \
+                 without a restart, and the block-settle pass's own stash write remains as \
+                 a fallback"
+            );
+        }
+
         for request in requests {
             push_tool(&mut summary.tools, &request.tool);
             // The delivery precedent: a workflow run has no board card behind it
@@ -2665,6 +2699,114 @@ mod tests {
         );
         assert_eq!(stashed.workflow_id, "wf-1825-p1");
         assert_eq!(stashed.input, trigger_input);
+    }
+
+    /// Issue #1825 (P1, second follow-up — found by chatgpt-codex-connector):
+    /// `park_gated_calls` must durably stash a blocked node's continuation
+    /// facts itself, before it parks a single call, not leave the durable
+    /// mirror to `stash_blocked_agent_nodes`'s block-settle pass alone.
+    ///
+    /// # The race this closes
+    ///
+    /// The test above proves the *in-memory* arm can no longer be outrun by
+    /// an operator acting on a just-published card. But `park_and_journal`
+    /// (inside the loop this test also drives) is what makes that card
+    /// **host-durable** and clickable across a restart — and until this fix,
+    /// nothing durable backed the in-memory arm until
+    /// `stash_blocked_agent_nodes` ran, which is strictly later: only once
+    /// the agent has returned and the engine has settled. A process that
+    /// died in that window left a restart with a recoverable card
+    /// (`ApprovalParked` is `Durability::Host` for a workflow-scoped effect)
+    /// and no matching `BlockedNodeStashed` record for `BlockedNodeQueue`'s
+    /// own `rearm` to rebuild a stash from — approving the recovered card
+    /// then consumed it against nothing, the identical shape the in-memory
+    /// race above closes, one durability tier up.
+    ///
+    /// # Why this drives `park_gated_calls` directly, and reads the journal
+    ///
+    /// Exactly like the test above: no `stash_blocked_agent_nodes` block-
+    /// settle pass runs anywhere here, so a durable stash observed right
+    /// after `park_gated_calls` returns can only have come from the park-time
+    /// write this fix adds. Pre-fix this assertion fails: `blocked_stashes()`
+    /// is empty, because nothing durable is written until settle. Post-fix it
+    /// holds this run's own trigger input, proving the durable record cannot
+    /// outrun the card that redeems it either.
+    #[tokio::test]
+    async fn park_gated_calls_durably_stashes_before_any_block_settle_pass_runs() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+        use crate::ports::types::{Effect, EffectGroup};
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p1b-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let queue = deps.approval_requests.clone();
+        let trigger_input = json!({ "request": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1825-p1b"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1825-p1b"),
+        );
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1825-p1b".to_string(),
+            "run-1825-p1b".to_string(),
+            None,
+            trigger_input.clone(),
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+
+        let claim = queue.claim(ApprovalScope::Run("run-1825-p1b".to_string()));
+        claim
+            .scoped(async {
+                queue.push(ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "gated".to_string(),
+                    effect: Effect {
+                        kind: "shell".to_string(),
+                        group: EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: json!({ "cmd": "rm -rf /" }),
+                        agent: Some("ceo".to_string()),
+                        run_id: None,
+                    },
+                });
+            })
+            .await;
+
+        // The real call a turn's tool loop makes. No block-settle pass runs
+        // anywhere in this test.
+        claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
+
+        let stashed = journal
+            .blocked_stashes()
+            .into_iter()
+            .find(|(turn, ..)| turn == &node_turn)
+            .expect(
+                "the durable stash must be written by park_gated_calls itself, before any \
+                 block-settle pass runs — a restart landing after this node's card goes \
+                 durable must always find a matching stash to rebuild from",
+            );
+        assert_eq!(stashed.1, "wf-1825-p1b");
+        assert_eq!(stashed.2, trigger_input);
     }
 
     /// Queues `count` gated calls in a run's scope, drains them through
