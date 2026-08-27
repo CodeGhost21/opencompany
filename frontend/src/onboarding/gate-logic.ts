@@ -30,13 +30,17 @@ export interface GateDecisionInput {
    * Whether the signed-in user is this company's admin — `null` before that
    * read has landed (PR #1875 review finding).
    *
-   * None of the three steps this gate blocks on can be cleared by anyone
+   * Two of the three steps this gate blocks on cannot be cleared by anyone
    * else: naming the company (`PATCH {scope}`) is `require_admin`-gated on
    * the host, and `OAuthView` disables every connect control unless
-   * `/auth/me` reports `role === "admin"`. An invited member's only way past
-   * an unconditional gate was "Skip for now" — session-scoped by design (see
-   * `onboarding/state.ts`), so it re-traps them every new tab — which made
-   * this screen a dead end for exactly the people it cannot ask anything of.
+   * `/auth/me` reports `role === "admin"`. (The third — running a workflow —
+   * is not admin-gated; see `shouldPollActivationForRole`'s doc for why that
+   * still doesn't make the gate itself safe to show a member: two blockers
+   * they cannot clear is already a dead end.) An invited member's only way
+   * past an unconditional gate was "Skip for now" — session-scoped by design
+   * (see `onboarding/state.ts`), so it re-traps them every new tab — which
+   * made this screen a dead end for exactly the people it cannot ask
+   * anything of.
    */
   isAdmin: boolean | null;
 }
@@ -66,7 +70,7 @@ export function shouldShowOnboardingGate(input: GateDecisionInput): boolean {
   // the one round trip it takes to learn which.
   if (!input.checked || !input.status) return false;
 
-  // PR #1875 review finding: an invited member cannot act on any of the
+  // PR #1875 review finding: an invited member cannot act on two of the
   // three steps below (see `isAdmin`'s own doc comment), so the gate must
   // never be their dead end. `null` — the admin read has not landed yet — is
   // held here the same way `checked`/`status` are just above: an admin who
@@ -167,26 +171,41 @@ export function shouldPollActivation(status: ActivationStatus | null): boolean {
 
 /**
  * Whether `useActivationGate`'s poll should run at all, given what is known
- * about the signed-in user's admin status (PR #1875 review finding, round 5).
+ * about the signed-in user's admin status (PR #1875 review finding, round 5;
+ * corrected round 7).
  *
- * None of the three funnel steps this gate blocks on can be cleared by
- * anyone but this company's admin — see `GateDecisionInput.isAdmin`'s own
- * doc comment: naming and the integration connect are `require_admin`-gated
- * routes on the host, and the funnel only latches once all three line up
- * simultaneously, so an admin action is always the domino that completes it
- * regardless of who ran the workflow step. A confirmed non-admin's poll can
- * therefore never be the read that observes the funnel go complete — it only
- * repeats `compute_and_latch`'s whole-journal scan (and, in Composio builds,
- * a connection lookup) for every invited member's open tab, for as long as
- * the company stays unactivated.
+ * Round 5's premise was that none of the three funnel steps this gate blocks
+ * on can be cleared by anyone but this company's admin, so a confirmed
+ * non-admin's poll could never be the read that observes the funnel go
+ * complete. That holds for the first two steps — naming and the integration
+ * connect are both `require_admin`-gated routes on the host — but not the
+ * third: `POST {scope}/workflows/{wid}/run` (`src/server/ops/workflows.rs`)
+ * is gated by `ScopedCompany`, the same guard `GET {scope}/activation`
+ * itself uses, not `AdminScopedCompany`. Any signed-in member can run a
+ * workflow.
  *
- * `null` — the admin check has not landed yet — still polls, deliberately:
- * this mirrors `shouldShowOnboardingGate`'s own `isAdmin === null` guard,
- * which holds rather than guesses. Stopping the poll on the same unresolved
- * state would cost a real admin their fast first activation read for as long
- * as `isGateAdmin` is still in flight (PR #1875 review finding, round 2's
- * same concern, applied here). Only a definitive `false` stops it.
+ * That makes a confirmed non-admin's poll load-bearing in exactly the
+ * scenario round 5 tried to save load on: an admin confirms the name,
+ * connects an integration, then closes their tab before running a workflow.
+ * A member picks up where they left off and runs one from the ordinary
+ * shell — the funnel's last domino, cleared by someone this predicate had
+ * decided could never move it. Had that member's own tab already stopped
+ * polling on `isAdmin === false`, and the admin's tab is gone, nothing left
+ * running calls `GET {scope}/activation` — the only production caller of
+ * `compute_and_latch` — so `activation_completed_at` never gets stamped
+ * until an admin happens to open the console again, arriving late and
+ * mistimed.
+ *
+ * There is no cheaper role-based split that stays correct: a non-admin's
+ * poll only looks provably useless from a single read taken while the first
+ * two steps are still incomplete, and a *later* admin action (from a
+ * different tab or session) can make it useful again without this tab ever
+ * re-reading that change. So every role polls exactly alike now — same as
+ * `shouldPollActivation` already governs by `isActivated` alone, independent
+ * of role. This predicate keeps taking `isAdmin` so call sites keep naming
+ * the input `useActivationGate`'s `enabled` was originally wired to, in case
+ * a real role-aware split is worth re-deriving later; today it isn't safe.
  */
-export function shouldPollActivationForRole(isAdmin: boolean | null): boolean {
-  return isAdmin !== false;
+export function shouldPollActivationForRole(_isAdmin: boolean | null): boolean {
+  return true;
 }

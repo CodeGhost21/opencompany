@@ -212,9 +212,21 @@ describe("shouldPollActivation", () => {
 
 // PR #1875 review finding, round 5: the shell wired the poll's `enabled` to
 // a bare `true`, so every invited member's tab kept polling `compute_and_latch`
-// for as long as the company stayed unactivated — even though none of the
-// three funnel steps can ever be cleared by a non-admin, so that poll can
-// never be the read that observes the funnel complete.
+// for as long as the company stayed unactivated — even though (round 5
+// believed) none of the three funnel steps can ever be cleared by a
+// non-admin, so that poll can never be the read that observes the funnel
+// complete.
+//
+// Round 5's premise was wrong (PR #1875 review finding, round 7):
+// `POST {scope}/workflows/{wid}/run` is gated by `ScopedCompany`, not
+// `AdminScopedCompany` — any signed-in member can run a workflow, which is
+// the funnel's third step. An admin who confirms the name, connects an
+// integration, then closes their tab before running a workflow, can have a
+// member complete the funnel from the ordinary shell. If that member's own
+// tab had already stopped polling (round 5's `isAdmin === false` check),
+// nothing left calls `GET {scope}/activation` — the only production caller
+// of `compute_and_latch` — so `activation_completed_at` never gets stamped
+// until an admin happens to reopen the console.
 describe("shouldPollActivationForRole", () => {
   it("keeps polling before the admin check has landed — must not cost a real admin their fast first read", () => {
     expect(shouldPollActivationForRole(null)).toBe(true);
@@ -224,7 +236,7 @@ describe("shouldPollActivationForRole", () => {
     expect(shouldPollActivationForRole(true)).toBe(true);
   });
 
-  it("stops for a confirmed non-admin — this is what round 5 was filed about", () => {
-    expect(shouldPollActivationForRole(false)).toBe(false);
+  it("keeps polling for a confirmed non-admin too (round 7) — a member can still be the read that observes the workflow step complete after an admin who already cleared the other two steps closes their tab", () => {
+    expect(shouldPollActivationForRole(false)).toBe(true);
   });
 });
