@@ -724,6 +724,40 @@ impl SqliteStore {
             .or_insert_with(|| broadcast::channel(256).0)
             .clone()
     }
+
+    /// The shared body of `save` and `save_importing`: upserts the company
+    /// row, stamping `overlay_json`'s `activation_gate_seen` with whatever
+    /// the caller passes rather than always `true`. See
+    /// `CompanyStore::save_importing`'s doc comment for why the two callers
+    /// need different values.
+    async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
+        let manifest_toml = toml::to_string(&record.manifest)
+            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
+        let overlay_json = serde_json::to_string(&OverlayBlob::from_record_gated(
+            record,
+            activation_gate_seen,
+        ))?;
+        let conn = self.conn();
+        // Append-only: `save` upserts the company row and never touches ledger.
+        conn.execute(
+            "INSERT INTO company (company_id, manifest_toml, lifecycle, overlay_json, updated_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(company_id) DO UPDATE SET \
+               manifest_toml = excluded.manifest_toml, \
+               lifecycle = excluded.lifecycle, \
+               overlay_json = excluded.overlay_json, \
+               updated_ms = excluded.updated_ms",
+            params![
+                record.id.as_ref(),
+                manifest_toml,
+                record.lifecycle,
+                overlay_json,
+                now_millis() as i64
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -788,29 +822,14 @@ impl CompanyStore for SqliteStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        let manifest_toml = toml::to_string(&record.manifest)
-            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        let overlay_json = serde_json::to_string(&OverlayBlob::from_record(record))?;
-        let conn = self.conn();
-        // Append-only: `save` upserts the company row and never touches ledger.
-        conn.execute(
-            "INSERT INTO company (company_id, manifest_toml, lifecycle, overlay_json, updated_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
-             ON CONFLICT(company_id) DO UPDATE SET \
-               manifest_toml = excluded.manifest_toml, \
-               lifecycle = excluded.lifecycle, \
-               overlay_json = excluded.overlay_json, \
-               updated_ms = excluded.updated_ms",
-            params![
-                record.id.as_ref(),
-                manifest_toml,
-                record.lifecycle,
-                overlay_json,
-                now_millis() as i64
-            ],
-        )
-        .map_err(sql_err)?;
-        Ok(())
+        // Every ordinary `save` call is, by definition, made by code that
+        // understands the activation funnel — see
+        // `CompanyStore::activation_gate_seen`'s doc comment.
+        self.save_gated(record, true).await
+    }
+
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        self.save_gated(record, gate_seen).await
     }
 
     /// PR #1875 review finding: `overlay_json` is the same blob `save` above

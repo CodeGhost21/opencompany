@@ -3948,7 +3948,24 @@ pub struct OverlayBlob {
 
 impl OverlayBlob {
     /// Builds a blob from a record's overlay collections and provenance.
+    /// Always stamps `activation_gate_seen: true` — correct for every
+    /// ordinary save, which by definition is activation-aware code. Bundle
+    /// import needs to preserve a *different* value when replaying a legacy
+    /// record; see [`Self::from_record_gated`].
     pub fn from_record(record: &CompanyRecord) -> Self {
+        Self::from_record_gated(record, true)
+    }
+
+    /// Like [`Self::from_record`], but lets the caller supply the
+    /// activation-gate-seen marker explicitly instead of always stamping
+    /// `true`.
+    ///
+    /// The one caller that needs this is bundle import
+    /// (`CompanyStore::save_importing`, see its own doc comment): replaying a
+    /// legacy pre-#1843 record must land with the marker still `false`, or
+    /// `RuntimeBuilder::build`'s grandfather back-fill can never fire on the
+    /// restored company's next boot (PR #1875 review finding).
+    pub fn from_record_gated(record: &CompanyRecord, activation_gate_seen: bool) -> Self {
         Self {
             agents: record.overlay_agents.clone(),
             desk_members: record.overlay_desk_members.clone(),
@@ -3966,15 +3983,7 @@ impl OverlayBlob {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
-            // Every call site that builds a blob to persist is, by
-            // definition, activation-aware code — see this field's own doc
-            // comment. Deriving it from a hardcoded `true` here rather than a
-            // `CompanyRecord` field (there is none) means the sqlite and
-            // mongodb backends both get the stamp for free through this one
-            // shared builder, instead of each needing its own copy of the
-            // logic (PR #1875 review finding — that duplication is exactly
-            // how the mongodb backend missed it the first time).
-            activation_gate_seen: true,
+            activation_gate_seen,
         }
     }
 

@@ -789,6 +789,35 @@ impl MongoStore {
         }
         Ok(out)
     }
+
+    /// The shared body of `save` and `save_importing`: upserts the company
+    /// document, stamping `overlay_json`'s `activation_gate_seen` with
+    /// whatever the caller passes rather than always `true`. See
+    /// `CompanyStore::save_importing`'s doc comment for why the two callers
+    /// need different values.
+    async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
+        let manifest_toml = toml::to_string(&record.manifest)
+            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
+        let overlay_json = serde_json::to_string(&OverlayBlob::from_record_gated(
+            record,
+            activation_gate_seen,
+        ))?;
+        // Append-only: `save` upserts the company document, never the ledger.
+        self.collection("companies")
+            .update_one(
+                doc! {"company_id": record.id.as_ref()},
+                doc! {"$set": {
+                    "manifest_toml": manifest_toml,
+                    "lifecycle": &record.lifecycle,
+                    "overlay_json": overlay_json,
+                    "updated_ms": now_millis() as i64,
+                }},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -854,24 +883,14 @@ impl CompanyStore for MongoStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        let manifest_toml = toml::to_string(&record.manifest)
-            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        let overlay_json = serde_json::to_string(&OverlayBlob::from_record(record))?;
-        // Append-only: `save` upserts the company document, never the ledger.
-        self.collection("companies")
-            .update_one(
-                doc! {"company_id": record.id.as_ref()},
-                doc! {"$set": {
-                    "manifest_toml": manifest_toml,
-                    "lifecycle": &record.lifecycle,
-                    "overlay_json": overlay_json,
-                    "updated_ms": now_millis() as i64,
-                }},
-            )
-            .with_options(UpdateOptions::builder().upsert(true).build())
-            .await
-            .map_err(mongo_err)?;
-        Ok(())
+        // Every ordinary `save` call is, by definition, made by code that
+        // understands the activation funnel — see
+        // `CompanyStore::activation_gate_seen`'s doc comment.
+        self.save_gated(record, true).await
+    }
+
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        self.save_gated(record, gate_seen).await
     }
 
     /// PR #1875 review finding: the hosted platform selects this backend for

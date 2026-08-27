@@ -853,6 +853,43 @@ impl FsCompanyStore {
     fn bundle(&self, id: &CompanyId) -> Bundle {
         Bundle::new(self.root.clone(), id)
     }
+
+    /// The shared body of `save` and `save_importing`: writes the manifest
+    /// and meta file, stamping `activation_gate_seen` with whatever the
+    /// caller passes rather than always `true`. See
+    /// `CompanyStore::save_importing`'s doc comment for why the two callers
+    /// need different values.
+    async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
+        let bundle = self.bundle(&record.id);
+        bundle.ensure_dirs().await?;
+
+        let toml_src = toml::to_string(&record.manifest)
+            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
+        write_atomic(&bundle.company_toml(), &toml_src).await?;
+
+        let meta = Meta {
+            lifecycle: record.lifecycle.clone(),
+            overlay_agents: record.overlay_agents.clone(),
+            overlay_desk_members: record.overlay_desk_members.clone(),
+            overlay_desk_order: record.overlay_desk_order.clone(),
+            overlay_desks: record.overlay_desks.clone(),
+            overlay_workflows: record.overlay_workflows.clone(),
+            overlay_budgets: record.overlay_budgets.clone(),
+            overlay_agent_edits: record.overlay_agent_edits.clone(),
+            overlay_retired_agents: record.overlay_retired_agents.clone(),
+            overlay_policy: record.overlay_policy.clone(),
+            overlay_tool_grants: record.overlay_tool_grants.clone(),
+            overlay_desk_tools: record.overlay_desk_tools.clone(),
+            disabled_workflows: record.disabled_workflows.clone(),
+            template_provenance: record.template_provenance.clone(),
+            setup: record.setup.clone(),
+            name_confirmed: record.name_confirmed,
+            activation_completed_at: record.activation_completed_at,
+            activation_gate_seen,
+        };
+        write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -937,38 +974,14 @@ impl CompanyStore for FsCompanyStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        let bundle = self.bundle(&record.id);
-        bundle.ensure_dirs().await?;
+        // Every ordinary `save` call is, by definition, made by code that
+        // understands the activation funnel — see
+        // `CompanyStore::activation_gate_seen`'s doc comment.
+        self.save_gated(record, true).await
+    }
 
-        let toml_src = toml::to_string(&record.manifest)
-            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        write_atomic(&bundle.company_toml(), &toml_src).await?;
-
-        let meta = Meta {
-            lifecycle: record.lifecycle.clone(),
-            overlay_agents: record.overlay_agents.clone(),
-            overlay_desk_members: record.overlay_desk_members.clone(),
-            overlay_desk_order: record.overlay_desk_order.clone(),
-            overlay_desks: record.overlay_desks.clone(),
-            overlay_workflows: record.overlay_workflows.clone(),
-            overlay_budgets: record.overlay_budgets.clone(),
-            overlay_agent_edits: record.overlay_agent_edits.clone(),
-            overlay_retired_agents: record.overlay_retired_agents.clone(),
-            overlay_policy: record.overlay_policy.clone(),
-            overlay_tool_grants: record.overlay_tool_grants.clone(),
-            overlay_desk_tools: record.overlay_desk_tools.clone(),
-            disabled_workflows: record.disabled_workflows.clone(),
-            template_provenance: record.template_provenance.clone(),
-            setup: record.setup.clone(),
-            name_confirmed: record.name_confirmed,
-            activation_completed_at: record.activation_completed_at,
-            // Every `save` call in this build is, by definition, made by
-            // code that understands the activation funnel — see
-            // `CompanyStore::activation_gate_seen`'s doc comment.
-            activation_gate_seen: true,
-        };
-        write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
-        Ok(())
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        self.save_gated(record, gate_seen).await
     }
 
     async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {

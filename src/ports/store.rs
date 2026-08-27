@@ -41,6 +41,31 @@ pub trait CompanyStore: Send + Sync {
     async fn activation_gate_seen(&self, _id: &CompanyId) -> Result<bool> {
         Ok(false)
     }
+
+    /// Persists a record exactly like [`Self::save`], except the
+    /// activation-gate-seen marker is set to the caller-supplied
+    /// `gate_seen` instead of always `true`.
+    ///
+    /// `save` stamps `true` unconditionally because every OTHER call site
+    /// really is activation-aware code doing a normal write. Bundle import
+    /// (`BundleContents::write_via_ports`) is the one exception: it is
+    /// *replaying* a company's prior state, and when that state predates
+    /// activation tracking entirely (`BundleMeta::activation_gate_seen`
+    /// decoded `false` via its own `#[serde(default)]`), stamping `true` on
+    /// arrival would falsely mark the restored company as already seen by
+    /// activation-aware code — which blocks `RuntimeBuilder::build`'s
+    /// pre-#1843 grandfather back-fill on the imported company's very next
+    /// boot and shows an established operator the fresh-company onboarding
+    /// gate (PR #1875 review finding).
+    ///
+    /// Default implementation ignores `gate_seen` and forwards to `save` —
+    /// correct for any store that has not overridden
+    /// [`Self::activation_gate_seen`] either, since that default always
+    /// answers `false` regardless of what a save stamped.
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        let _ = gate_seen;
+        self.save(record).await
+    }
 }
 
 /// Per-company write serialization: a shared mutex map, keyed by company id, so
