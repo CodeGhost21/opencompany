@@ -1018,9 +1018,25 @@ export function InferenceSection({
                         OpenRouter returned no models. Enter model ids directly.
                       </p>
                     )}
+                    {/*
+                      `kind !== "idle"` is a no-op here — the effect above
+                      only ever sets "idle" when `provider !== "openrouter"`,
+                      which the surrounding check already excludes. Left in
+                      as a defensive guard against that invariant changing,
+                      not a live branch.
+
+                      "loading" used to be excluded like "idle", but a
+                      keyless company's free-text input (`useFreeText` below
+                      is true here because `wouldSaveProxied` is one of its
+                      conditions) is already editable and Save-able during a
+                      cold catalog fetch, which can run for up to ten
+                      seconds. Withholding the warning until "ready" left
+                      that whole window silent: an id typed and saved while
+                      still loading was dropped by `stripProxyIncompatible`
+                      with no explanation (issue #1838 follow-up).
+                    */}
                     {provider === "openrouter" &&
                       modelCatalog.kind !== "idle" &&
-                      modelCatalog.kind !== "loading" &&
                       wouldSaveProxied && (
                         <p
                           className="text-xs text-muted-foreground"

@@ -157,6 +157,34 @@ describe("OpenRouter tier model pickers", () => {
     expect(container.querySelector('[data-testid="inference-model-select-chat-v1"]')).toBeNull();
   });
 
+  it("shows the proxied warning while the catalog is still loading for a keyless company (PR #1838 review)", async () => {
+    // `wouldSaveProxied` already renders an editable free-text field and
+    // leaves Save enabled the instant `modelCatalog.kind` is "loading" — see
+    // `useFreeText` above, which includes `wouldSaveProxied` in its OR
+    // regardless of catalog state. The proxied clarification used to be
+    // gated to exclude "loading", so a keyless operator who typed a raw
+    // `<author>/<model>` id and hit Save during a cold catalog fetch (which
+    // can run for up to ten seconds) got no warning at all before
+    // `stripProxyIncompatible` silently dropped it.
+    const inference = status("openrouter", { "chat-v1": "chat-v1" }, false);
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        // Never resolves — the registry request is permanently in flight.
+        if (path.endsWith("/inference/models")) return new Promise(() => {});
+        return inference;
+      },
+      put: async () => ({ status: inference, note: "" }),
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    expect(container.querySelector('[data-testid="inference-model-select-chat-v1"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="inference-model-catalog-proxied"]'),
+    ).not.toBeNull();
+  });
+
   it("clears a catalog-picked id from the tier field once the form would save proxied", async () => {
     // Mirrors what a key-clear leaves behind: a company stores a raw
     // `<author>/<model>` id (exactly what the catalog select writes) while no
