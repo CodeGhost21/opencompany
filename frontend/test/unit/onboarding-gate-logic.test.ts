@@ -7,6 +7,7 @@ import {
   resolveActivationReadError,
   resolveGateAdminCheckError,
   shouldPollActivation,
+  shouldPollActivationForRole,
   shouldShowOnboardingGate,
 } from "@/onboarding/gate-logic";
 
@@ -206,5 +207,24 @@ describe("shouldPollActivation", () => {
 
   it("stops once the latch is set — nothing left for the poll to notice", () => {
     expect(shouldPollActivation(complete)).toBe(false);
+  });
+});
+
+// PR #1875 review finding, round 5: the shell wired the poll's `enabled` to
+// a bare `true`, so every invited member's tab kept polling `compute_and_latch`
+// for as long as the company stayed unactivated — even though none of the
+// three funnel steps can ever be cleared by a non-admin, so that poll can
+// never be the read that observes the funnel complete.
+describe("shouldPollActivationForRole", () => {
+  it("keeps polling before the admin check has landed — must not cost a real admin their fast first read", () => {
+    expect(shouldPollActivationForRole(null)).toBe(true);
+  });
+
+  it("keeps polling for a confirmed admin", () => {
+    expect(shouldPollActivationForRole(true)).toBe(true);
+  });
+
+  it("stops for a confirmed non-admin — this is what round 5 was filed about", () => {
+    expect(shouldPollActivationForRole(false)).toBe(false);
   });
 });

@@ -164,3 +164,29 @@ export function resolveActivationReadError(error: unknown): ActivationReadOutcom
 export function shouldPollActivation(status: ActivationStatus | null): boolean {
   return status?.isActivated !== true;
 }
+
+/**
+ * Whether `useActivationGate`'s poll should run at all, given what is known
+ * about the signed-in user's admin status (PR #1875 review finding, round 5).
+ *
+ * None of the three funnel steps this gate blocks on can be cleared by
+ * anyone but this company's admin — see `GateDecisionInput.isAdmin`'s own
+ * doc comment: naming and the integration connect are `require_admin`-gated
+ * routes on the host, and the funnel only latches once all three line up
+ * simultaneously, so an admin action is always the domino that completes it
+ * regardless of who ran the workflow step. A confirmed non-admin's poll can
+ * therefore never be the read that observes the funnel go complete — it only
+ * repeats `compute_and_latch`'s whole-journal scan (and, in Composio builds,
+ * a connection lookup) for every invited member's open tab, for as long as
+ * the company stays unactivated.
+ *
+ * `null` — the admin check has not landed yet — still polls, deliberately:
+ * this mirrors `shouldShowOnboardingGate`'s own `isAdmin === null` guard,
+ * which holds rather than guesses. Stopping the poll on the same unresolved
+ * state would cost a real admin their fast first activation read for as long
+ * as `isGateAdmin` is still in flight (PR #1875 review finding, round 2's
+ * same concern, applied here). Only a definitive `false` stops it.
+ */
+export function shouldPollActivationForRole(isAdmin: boolean | null): boolean {
+  return isAdmin !== false;
+}
