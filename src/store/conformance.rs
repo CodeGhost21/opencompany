@@ -1437,6 +1437,7 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        bounced: None,
     };
 
     tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();

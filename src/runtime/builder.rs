@@ -5878,6 +5878,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
             planning_attempts: Vec::new(),
         };
 
@@ -6254,6 +6255,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
