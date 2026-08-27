@@ -2854,7 +2854,20 @@ export function AppShell({
             />
           )}
           {view === "observatory" && (
-          <Suspense fallback={<RouteLoading title="Observatory" label="Loading observatory…" />}>
+          <Suspense
+            fallback={
+              <RouteLoading
+                // `ObservatoryView` titles itself `runId ? "Run" : "Observatory"`,
+                // and on a cold direct visit to `#/observatory/<runId>` this
+                // boundary is the whole page — so announcing "Observatory" told
+                // someone who had bookmarked a run they were on the index, and
+                // corrected itself only once the chunk landed. Same rule, same
+                // `sub`, as the finance boundary above.
+                title={sub ? "Run" : "Observatory"}
+                label={sub ? "Loading run…" : "Loading observatory…"}
+              />
+            }
+          >
             <ObservatoryView
               client={client}
               company={company}

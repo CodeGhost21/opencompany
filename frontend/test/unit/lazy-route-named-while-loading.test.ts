@@ -347,3 +347,24 @@ describe("the finance fallback names every subpage", () => {
     expect(financeFallbackTitle("not-a-page")).toBe("Finances");
   });
 });
+
+/**
+ * The Observatory boundary names a run, for the same reason the finance one
+ * names a subpage.
+ *
+ * `ObservatoryView` titles itself `runId ? "Run" : "Observatory"`, and a cold
+ * direct visit to `#/observatory/<runId>` is exactly when the boundary *is* the
+ * page — so the index heading was announced to someone who had bookmarked a
+ * run, and only corrected itself once the chunk arrived.
+ */
+describe("the observatory fallback names a direct run", () => {
+  it("follows the same rule the loaded view uses", () => {
+    const shell = readFileSync(join(SRC, "components/app-shell.tsx"), "utf8");
+    expect(shell).toContain('title={sub ? "Run" : "Observatory"}');
+    expect(shell).not.toContain('<RouteLoading title="Observatory"');
+
+    const view = readFileSync(join(SRC, "views/observatory/ObservatoryView.tsx"), "utf8");
+    // The rule is copied, so it has to keep matching the view it stands in for.
+    expect(view).toContain('title={runId ? "Run" : "Observatory"}');
+  });
+});
