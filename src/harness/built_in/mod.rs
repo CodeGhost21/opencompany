@@ -11499,6 +11499,58 @@ budget_usd_daily = 0.0
             );
         }
 
+        /// An UNADDRESSED threaded message still binds to its thread.
+        ///
+        /// A codex review on #1896 read `run_with_steer`'s `if let Some(incoming)
+        /// = turn_chat_id` guard and concluded that a client sending `parent`
+        /// without `chat` loses its root, so sibling threads on the default desk
+        /// keep sharing one history. That is not what happens: `turn_chat_id`
+        /// comes from the turn-stream route, which already falls back to
+        /// `DEFAULT_DESK` when no desk was addressed.
+        ///
+        /// This test exists because the obvious "fix" — normalizing the id where
+        /// the target is built — is actively harmful: the same `chat_id` reaches
+        /// card creation and a card's `origin_chat_id`, where `None` means "no
+        /// conversation raised this card" and `chat_history::owns` deliberately
+        /// routes it to no desk. Pinning the real behaviour here is what stops
+        /// that being re-applied.
+        #[tokio::test]
+        async fn an_unaddressed_message_still_binds_to_its_thread() {
+            let fx = fixture();
+            let rec = record();
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            // `chat_id: None` — the operator addressed no desk — with a root.
+            pool.run(
+                &rec.id,
+                "ceo",
+                "first",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::in_thread(None, Some(EventSeq::new(1))),
+            )
+            .await
+            .expect("unaddressed threaded turn");
+
+            let agent = {
+                let guard = pool.agents.read().await;
+                guard
+                    .get(&rec.id)
+                    .and_then(|roster| roster.iter().find(|a| a.agent_id == "ceo"))
+                    .cloned()
+                    .expect("the agent stays resident")
+            };
+            assert_eq!(
+                *agent.bound_chat.lock().await,
+                Some((
+                    crate::server::ops::language::DEFAULT_DESK.to_string(),
+                    Some(EventSeq::new(1))
+                )),
+                "an unaddressed turn binds to the General desk AND keeps its \
+                 thread root — the stream route already supplies the fallback"
+            );
+        }
+
         /// The binding must not depend on the event log being wired
         /// (coderabbit review finding).
         ///

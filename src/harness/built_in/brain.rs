@@ -3291,20 +3291,28 @@ impl HarnessBrain {
                     // conversation, exactly where every message went before the
                     // root was part of the key.
                     //
-                    // The id is normalized to the General desk when the message
-                    // named no chat (codex review finding). An unaddressed post
-                    // is journaled with `chat: None` but routes to General, and
-                    // `run_with_steer` only binds a thread `if let Some(incoming)
-                    // = turn_chat_id` — so a `None` id threw the root away and
-                    // sibling threads on the default desk went on sharing one
-                    // history, which is the whole defect on the surface most
-                    // clients actually use. `is_general_chat` already folds
-                    // `None` into General everywhere else; this makes the
-                    // binding agree with it.
-                    let chat_target = crate::runtime::delegation::ChatTarget::in_thread(
-                        Some(chat_id.unwrap_or(crate::server::ops::language::DEFAULT_DESK)),
-                        *parent,
-                    );
+                    // `chat_id` is passed through AS THE OPERATOR SENT IT —
+                    // `None` when they addressed no desk — and is deliberately
+                    // NOT normalized to `DEFAULT_DESK` here. A codex review on
+                    // #1896 read the `if let Some(incoming) = turn_chat_id`
+                    // guard in `run_with_steer` and concluded an unaddressed
+                    // threaded message loses its root; it does not.
+                    // `turn_chat_id` is derived from the turn-stream route,
+                    // which already falls back to `DEFAULT_DESK` when the
+                    // caller addressed no desk (see `LiveRoute::Chat`'s
+                    // construction), so an unaddressed chat turn binds to
+                    // General and keeps its thread like any other.
+                    //
+                    // Normalizing here instead would be actively wrong: this
+                    // same `chat_id` reaches card creation, a card's
+                    // `origin_chat_id`, and `is_copilot_thread` — and a `None`
+                    // origin means "no conversation raised this card", which
+                    // `chat_history::owns` treats as belonging to no desk at
+                    // all. Turning that into `Some("General")` would post
+                    // board-marker lines into the operator's main line, which
+                    // is the exact bug that arm is documented to prevent.
+                    let chat_target =
+                        crate::runtime::delegation::ChatTarget::in_thread(chat_id, *parent);
                     // Issue #989: the dispatch-start baseline for "did this
                     // responder write anything it did not publish?" — taken
                     // before the turn runs, for the same reason run_task's own
