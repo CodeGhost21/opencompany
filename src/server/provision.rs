@@ -856,26 +856,37 @@ async fn archive(
         return resp;
     }
     let response = transition(&state, &auth, &id, "archived").await;
-    // Cleanup is gated on the archive having actually persisted, not on
-    // `response` being a full 200. `CompanyRuntime::set_lifecycle`
-    // (`src/company/runtime.rs`) writes `lifecycle: "archived"` to the store
-    // BEFORE it appends the `LifecycleChanged` audit event, and `transition`
-    // above then re-reads `status()` after that — so a failure in either the
-    // event append or that re-read surfaces here as a non-200 `response` even
-    // though the durable record really is archived. Re-reading status
-    // directly, the same way the create/reset console dialog's own
-    // reconciliation does client-side (`create-company-dialog.tsx`, commit
-    // 1191ad67e), catches both failure points so an already-archived company
-    // is never left registered — still occupying its tenant/global quota slot
-    // and still showing up in `listCompanies()` — for a request whose write
-    // already succeeded (issue #1828 comment 3875046440).
-    let archived = match state.registry().get(&id) {
-        Some(runtime) => runtime
-            .status()
-            .await
-            .map(|status| status.lifecycle == "archived")
-            .unwrap_or(false),
-        None => false,
+    // `response.status() == OK` is sufficient proof on its own: `transition`
+    // already re-read `status()` after `set_lifecycle` and its body already
+    // confirms `lifecycle: "archived"`. Re-reading a THIRD time to
+    // reconfirm what the response already proved is pure downside — a
+    // transient failure on that redundant read must not undo a response
+    // that already succeeded (issue #1828 comment 3875203599).
+    //
+    // The extra read below is reserved for reconciling a non-`OK` response.
+    // `CompanyRuntime::set_lifecycle` (`src/company/runtime.rs`) writes
+    // `lifecycle: "archived"` to the store BEFORE it appends the
+    // `LifecycleChanged` audit event, and `transition` above then re-reads
+    // `status()` after that — so a failure in either the event append or
+    // that re-read surfaces here as a non-200 `response` even though the
+    // durable record really is archived. Re-reading status directly, the
+    // same way the create/reset console dialog's own reconciliation does
+    // client-side (`create-company-dialog.tsx`, commit 1191ad67e), catches
+    // both failure points so an already-archived company is never left
+    // registered — still occupying its tenant/global quota slot and still
+    // showing up in `listCompanies()` — for a request whose write already
+    // succeeded (issue #1828 comment 3875046440).
+    let archived = if response.status() == StatusCode::OK {
+        true
+    } else {
+        match state.registry().get(&id) {
+            Some(runtime) => runtime
+                .status()
+                .await
+                .map(|status| status.lifecycle == "archived")
+                .unwrap_or(false),
+            None => false,
+        }
     };
     if archived {
         state.registry().remove(&id);

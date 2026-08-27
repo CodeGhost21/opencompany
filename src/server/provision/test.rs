@@ -1947,3 +1947,91 @@ async fn archive_removes_from_registry_even_when_the_status_read_fails() {
          after the archive write already landed"
     );
 }
+
+// ── issue #1828 comment 3875203599: the response's own OK is proof enough ──
+
+/// Same rebuild-over-the-existing-record shape as
+/// `build_runtime_with_archive_status_read_failing` above, but with a store
+/// whose FOURTH `load` call fails instead of its third. The first three
+/// loads are unchanged (`build()`'s rebuild check, `set_lifecycle`'s own
+/// load, `transition`'s post-`set_lifecycle` `status()`) and all SUCCEED
+/// here, so `transition` returns an ordinary `200` whose body already
+/// confirms `lifecycle: "archived"`. The fourth load is `archive`'s own
+/// extra, redundant `runtime.status()` re-read on top of that.
+async fn build_runtime_with_redundant_archive_read_failing(
+    home: &std::path::Path,
+    id: &CompanyId,
+) -> crate::runtime::CompanyRuntime {
+    let inner = Arc::new(FsCompanyStore::new(home.to_path_buf()));
+    let store = Arc::new(FlakyLoadStore::new(inner, 4));
+    let manifest: CompanyManifest = toml::from_str(ACME_TOML).unwrap();
+    RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .with_store(store)
+        .build()
+        .await
+        .expect("build succeeds — its own save is unaffected by a later load failing")
+}
+
+/// The regression codex flagged in 890aac128 itself (PR #1828 comment
+/// 3875203599): cleanup was rewritten to depend EXCLUSIVELY on a second,
+/// redundant `runtime.status()` re-read — even on the ordinary path where
+/// `transition`'s response already came back `200`, meaning its OWN
+/// `status()` read (the third `load` above) already succeeded and already
+/// confirmed `lifecycle: "archived"`. Re-reading a fourth time to reconfirm
+/// what the response body already proved was pure downside: a transient
+/// failure on that redundant read flipped `archived` to `false` via
+/// `unwrap_or(false)`, so the handler still returned the original successful
+/// `200` while leaving the archived runtime and its owner registered — a
+/// reset at quota then could not provision its replacement because the
+/// retired company still occupied the slot. `response.status() == OK` must
+/// be sufficient on its own; the extra read exists only to reconcile
+/// non-`OK` responses (the `archive_removes_from_registry_even_when_the_
+/// status_read_fails` test above).
+#[tokio::test]
+async fn archive_removes_from_registry_when_the_response_already_confirms_it_even_if_the_redundant_read_fails()
+ {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+
+    // Provision normally first, so the durable record exists exactly as it
+    // would for a real company (matching `build()`'s rebuild-inherit path
+    // the flaky-load helper below relies on for its first `load` call).
+    let state = platform_state(&home, None);
+    let app = router(state.clone());
+    let provisioned = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+    assert_eq!(provisioned.status(), StatusCode::CREATED);
+
+    // Swap the registered runtime for one whose FOURTH load — the extra
+    // read `archive` performs on top of `transition`'s own status() read —
+    // is made to fail. The third load (transition's) still succeeds.
+    let flaky_runtime = build_runtime_with_redundant_archive_read_failing(&home, &id).await;
+    state.registry().insert(id.clone(), Arc::new(flaky_runtime));
+
+    let app = router(state.clone());
+    let archived = app
+        .oneshot(post_req(
+            "/api/v1/companies/acme/archive",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        archived.status(),
+        StatusCode::OK,
+        "transition's own status() read (the third load) succeeded and already confirmed \
+         lifecycle: \"archived\" in the response body — only the redundant fourth read was \
+         made to fail"
+    );
+
+    assert!(
+        state.registry().get(&id).is_none(),
+        "the response itself already proved the archive landed — a transient failure on the \
+         extra, redundant status() re-read must not leave an already-archived company still \
+         registered and occupying its quota slot"
+    );
+}
