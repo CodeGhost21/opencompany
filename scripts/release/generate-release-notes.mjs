@@ -269,8 +269,19 @@ function priorAuthorKeys(from) {
   return keys;
 }
 
+// Keyed on the DISPLAY NAME, not name+email as OpenHuman's original does.
+// Contributors here routinely commit under two addresses — a personal one and
+// GitHub's `…@users.noreply.github.com` — and a name+email key lists them
+// twice: once carrying their PRs, once as a bare credit line with none. Worse,
+// the second row also reads as a first-time contributor, so the same person is
+// welcomed to a project they have been committing to for months.
+//
+// Two distinct people sharing a display name would merge, which is the cost.
+// For a credits list that is the cheaper mistake, and the email is still on the
+// record for anyone who needs to tell them apart.
 export function authorKey(author) {
-  return `${String(author.authorName || '').toLowerCase()} <${String(author.authorEmail || '').toLowerCase()}>`;
+  const name = String(author.authorName || '').trim().toLowerCase();
+  return name || String(author.authorEmail || '').trim().toLowerCase();
 }
 
 export function collectContributorStats(commits, priorKeys) {
