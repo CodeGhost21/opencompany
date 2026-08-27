@@ -890,7 +890,22 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             "inference response requested a tool call that failed to parse{detail}"
         )));
     }
-    if content.is_empty() && tool_calls.is_empty() && !raw_tool_call_requested && genuinely_finished
+    // An array-shaped `content` refusal part can coexist with a `"text"`-typed
+    // part in the *same* array — e.g. a short lead-in sentence followed by
+    // `{"type":"refusal",…}`. `extract_content_text` only concatenates the
+    // text part, so `content` is already nonempty by the time we get here;
+    // gating the whole refusal-precedence block on `content.is_empty()`
+    // would skip it entirely and let the turn "succeed" with just the
+    // leaked text fragment, silently discarding the provider's actual
+    // safety response instead of surfacing it (Codex review on #1779,
+    // comment 3875001349). Detect the array refusal independent of whether
+    // `content` is empty so it can still override already-nonempty leaked
+    // text, not just leaked reasoning.
+    let array_refusal = extract_array_refusal_text(payload.pointer("/choices/0/message/content"));
+    if tool_calls.is_empty()
+        && !raw_tool_call_requested
+        && genuinely_finished
+        && (content.is_empty() || array_refusal.is_some())
     {
         // A nonempty `message.refusal` is the provider's own visible safety
         // response — it wins over any `reasoning`/`reasoning_content` the
@@ -901,17 +916,17 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         // refusal into the array-shaped `content` field itself, as a
         // `{"type":"refusal","refusal":"…"}` part — `extract_content_text`
         // only concatenates `"text"`-typed parts, so that part contributes
-        // nothing and `content` came back empty above; without this
-        // fallback the scalar lookup below would also find nothing and let
-        // the reasoning promotion leak the same withheld content via the
-        // array channel instead of the scalar one (Codex review on #1779,
+        // nothing on its own; without this fallback the scalar lookup below
+        // would also find nothing and let the reasoning promotion (or, in
+        // the mixed-array case above, the leaked text) leak the same
+        // withheld content instead of the refusal (Codex review on #1779,
         // comment 3874381270).
         let refusal = payload
             .pointer("/choices/0/message/refusal")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .or_else(|| extract_array_refusal_text(payload.pointer("/choices/0/message/content")));
+            .or(array_refusal);
         if let Some(refusal) = refusal {
             content = refusal;
         } else {
@@ -2231,6 +2246,33 @@ mod tests {
                         { "type": "refusal", "refusal": "I can't help with that." }
                     ],
                     "reasoning": "The user wants help with something I should decline."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A mixed array: a `"text"`-typed part alongside a `{"type":"refusal",…}`
+    /// part in the same `content` array. `extract_content_text` concatenates
+    /// only the text part, so `content` is already nonempty by the time the
+    /// refusal-precedence block is reached — without checking for an array
+    /// refusal independent of `content`'s emptiness, the block is skipped
+    /// entirely and the turn "succeeds" with just the leaked text fragment,
+    /// silently discarding the provider's actual safety response (Codex
+    /// review on #1779, comment 3875001349).
+    #[test]
+    fn a_refusal_wins_over_leaked_text_when_content_array_mixes_text_and_refusal_parts() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Sure, here's a start: " },
+                        { "type": "refusal", "refusal": "I can't help with that." }
+                    ]
                 }
             }]
         });
