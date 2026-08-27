@@ -406,6 +406,22 @@ export const MAX_EXPLICIT_ID_LENGTH = 128;
  * #1828, PR comment 3875297936). Requiring `slug(candidateId) ===
  * candidateId` up front is the only way this client can guarantee an id it
  * sends now still resolves to the same id later.
+ *
+ * That guarantee has one hole `slug` itself can't close: `slug` allowlists
+ * `.` and passes it through unmodified at any position, including trailing —
+ * `slug("acme.") === "acme."`, so the stability check above accepts it. But
+ * Windows Win32 path handling strips a trailing period from a path
+ * component before the directory is ever created (already documented and
+ * defended against for secret filenames' `percent_encode`, `store/paths.rs`
+ * ~line 239) — on a Windows-backed desktop or self-hosted host, the
+ * directory `slug` names `acme.` lands on disk as `acme`. `list`
+ * reconstructs the id from that directory name on every read, so the
+ * bundle is created under `acme.` and comes back after a restart as `acme`
+ * — the same silent-identity-change failure mode as the space/slash case
+ * above, just reached through the OS's path normalization instead of
+ * `slug`'s own folding, so `slug(candidateId) === candidateId` alone can't
+ * see it (codex review on #1828, PR comment 3875745309). A trailing period
+ * is refused outright, the same way the two reserved dot-segments are.
  */
 const SLUG_SAFE_ID = /^[A-Za-z0-9._-]+$/;
 
@@ -415,6 +431,9 @@ export function explicitIdProblem(candidateId: string): string | null {
   }
   if (candidateId === "." || candidateId === "..") {
     return `"${candidateId}" isn't a usable id — it's a reserved path segment. Choose a different id, or leave the field blank for an auto-generated one.`;
+  }
+  if (candidateId.endsWith(".")) {
+    return `An id can't end with a period — Windows silently drops a trailing "." from the folder name, so the company could come back under a different id after a restart there. Choose a different id, or leave the field blank for an auto-generated one.`;
   }
   if (!SLUG_SAFE_ID.test(candidateId)) {
     return `That id can only use letters, numbers, ".", "_", and "-" — anything else (like a space or "/") is silently replaced with "_" on disk, so the company would come back under a different id after a restart. Choose a different id, or leave the field blank for an auto-generated one.`;

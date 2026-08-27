@@ -179,3 +179,34 @@ describe("explicitIdProblem — slug-stability (issue #1828 comment 3875297936)"
     expect(explicitIdProblem(tooLong)).toContain("too long");
   });
 });
+
+/**
+ * Codex review on #1828 (PR comment 3875745309): `slug` (`store/paths.rs`)
+ * allowlists `.` and passes it through unmodified at any position, so
+ * `slug("acme.") === "acme."` and the slug-stability check above cannot see
+ * a trailing period as a problem. Windows Win32 path handling strips a
+ * trailing period from a path component before the directory is ever
+ * created — the same hazard already documented and defended against for
+ * secret filenames (`percent_encode`, `store/paths.rs`) — so on a
+ * Windows-backed host `acme.` is created on disk as `acme`, and `list`
+ * reconstructs the id from that directory name on the next read: the
+ * bundle is created under `acme.` and comes back as `acme` after a restart.
+ */
+describe("explicitIdProblem — trailing period (issue #1828 comment 3875745309)", () => {
+  it("rejects an id ending in a period, which Windows strips from the folder name", () => {
+    const problem = explicitIdProblem("acme.");
+    expect(problem).not.toBeNull();
+    expect(problem).toContain("end with a period");
+  });
+
+  it("still rejects the reserved dot-segments ahead of the trailing-period check", () => {
+    // "." and ".." both end in a period too, but they need their own,
+    // more specific "reserved path segment" message.
+    expect(explicitIdProblem(".")).toContain("reserved path segment");
+    expect(explicitIdProblem("..")).toContain("reserved path segment");
+  });
+
+  it("accepts an interior period — only a trailing one is a Windows hazard", () => {
+    expect(explicitIdProblem("acme.corp")).toBeNull();
+  });
+});
