@@ -5,10 +5,10 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import { type ActivationStatus, confirmCompanyName } from "@/api/activation";
 import { ApiError } from "@/api/types";
+import { RouteLoading } from "@/components/route-loading";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { OAuthView } from "@/views/OAuthView";
 
@@ -148,7 +148,7 @@ export function OnboardingGate({
                 )}
                 {step.id === "integration" && <OAuthView client={client} company={company} />}
                 {step.id === "workflow" && (
-                  <Suspense fallback={<Skeleton className="h-64 rounded-xl" />}>
+                  <Suspense fallback={<RouteLoading title="Workflows" label="Loading canvas…" />}>
                     <WorkflowsView client={client} company={company} />
                   </Suspense>
                 )}
