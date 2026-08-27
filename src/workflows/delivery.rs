@@ -209,8 +209,13 @@ pub struct WorkflowDeliveryDeps {
     /// The `Debug` impl prints its presence only, never the address, the same
     /// stance the mail handle takes.
     pub bootstrap_admin: Option<String>,
-    /// Wired delivery adapters. The interactive `operator` adapter may be
-    /// present for cycle responses but is rejected for workflow delivery.
+    /// Wired delivery adapters. The interactive `operator` adapter is never
+    /// present here — `RuntimeBuilder::build` drops it by identity and
+    /// substitutes a durable, journal-backed
+    /// [`DurableOperatorChannel`](crate::runtime::channel::DurableOperatorChannel)
+    /// under the same id, so `operator` is a first-class delivery target
+    /// (`post_to_operator`, `send_to_channel_adapter`), not a rejected one
+    /// (issue #1757).
     pub channels: Vec<Arc<dyn ChannelAdapter>>,
     /// What a cold `email` recipient is parked on (issue #227). `None` fails
     /// closed to the pre-#227 behaviour: the report is `skipped`, never a
