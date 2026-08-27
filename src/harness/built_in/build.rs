@@ -371,6 +371,22 @@ pub fn build_agent(
     // Unlike `media` the grant is the ordinary namespace rule (a bare `*`
     // confers it): publishing spends nothing and reaches nothing outside the
     // company's own board.
+    // Issue #1861: every agent can ask. Unconditional and ungated — a question
+    // is not a capability, it is the alternative to guessing, and an agent
+    // narrow enough to have no other tools is the one most likely to need it.
+    //
+    // Safe to wire everywhere because both drains exist: a chat or task turn
+    // parks what this stages through `park_approval_requests`, a workflow agent
+    // node through `park_gated_calls`. There is no belt on which the question
+    // would stage into a queue nothing empties — the `media` failure mode the
+    // publish gate below guards against.
+    tools.push(Box::new(
+        crate::harness::built_in::blockers::EscalateToHumanTool::new(
+            deps.approval_requests.clone(),
+            manifest_agent.id.clone(),
+        ),
+    ));
+
     let publishing = wants_files && deps.artifacts.is_some();
     if publishing {
         tools.push(Box::new(crate::harness::publish::PublishArtifactTool::new(
@@ -2585,6 +2601,12 @@ mod tests {
             "read_workspace_state",
             "shell",
             "web_fetch",
+            // Issue #1861: intrinsic, on every belt and gated by nothing. The
+            // ability to ask a person a question is not a capability an agent
+            // can be too narrow to hold — a narrow agent is the one most likely
+            // to hit something only the operator can answer, and its
+            // alternatives are guessing or going quiet.
+            "escalate_to_human",
         ];
         // The global baseline installs skills in every company (issue: global
         // agents/skills/workflows), so the three skill read tools are on every

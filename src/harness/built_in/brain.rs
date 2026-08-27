@@ -1348,7 +1348,13 @@ impl HarnessBrain {
                 .stamp_run(approvals_before, sink.run_id()),
             None => 0,
         };
-        let settled = lifecycle::settled_run_status(run_end, parked);
+        // Issue #1861: and how many of them were *questions* rather than
+        // decisions. Counted from the same boundary `stamp_run` stamps from, so
+        // the two describe one set — and unconditionally, because a card with
+        // no attempt row still parks its blocker and still must not land in
+        // review with an unanswered question on it.
+        let blockers = self.deps.approval_requests.blockers_since(approvals_before);
+        let settled = lifecycle::settled_run_status_with_blockers(run_end, parked, blockers);
 
         // ── Issues #244 + #339: record what the run produced, then say so on
         //    the card — both **before** the one card write ────────────────────
@@ -2758,7 +2764,7 @@ impl HarnessBrain {
         let payload = BlockerPayload {
             kind: class.kind,
             source: class.source,
-            step,
+            step: Some(step),
             reason: reason.to_string(),
             needed: class.needed.to_string(),
         };
@@ -10590,9 +10596,9 @@ agent = "claude"
         assert_eq!(payload.source, BlockerSource::Provider);
         assert_eq!(
             payload.step,
-            BlockerStep::Task {
+            Some(BlockerStep::Task {
                 task_id: "t-1".to_string()
-            }
+            })
         );
         assert!(
             !payload.needed.trim().is_empty(),

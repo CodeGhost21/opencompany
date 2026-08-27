@@ -265,8 +265,10 @@ tool in order to influence it. Anything substantial handed to a desk is opened a
 automatically, and so is anything substantial an operator asks a desk or teammate directly — the \
 hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for the same work, \
 and never prefer one over the other to get something tracked. Reach for `spawn_task` only for work \
-that belongs on the board but must NOT start in this turn: something for later, for somebody else, \
-or waiting on a person. \
+that belongs on the board but must NOT start in this turn: something for later, or for somebody \
+else. Work that is waiting on a PERSON is not a card — a card notifies nobody and resumes \
+nothing. When you cannot proceed without something only the operator can give you, call \
+`escalate_to_human` with the question; the work parks and their answer restarts it. \
 WHEN YOU CAN DO THE WORK IN THIS TURN, DO IT — do not park it as a card for later. Asked to \
 capture a repeatable process (\"create a workflow that…\"), author it NOW with `create_workflow` — \
 a trigger plus agent / tool / condition / output steps — and say it is ready; it is enabled \

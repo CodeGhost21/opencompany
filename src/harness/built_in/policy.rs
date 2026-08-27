@@ -700,6 +700,38 @@ impl ApprovalRequestQueue {
     /// Scoped to the current bucket since #439, so "the entries its own turns
     /// added" is now true by construction rather than by a boundary that a
     /// concurrent run could invalidate.
+    /// How many requests queued **since** `from` are blockers (issue #1861).
+    ///
+    /// Counted the same way [`stamp_run`](Self::stamp_run) stamps — over this
+    /// scope's bucket from the same boundary — so the two describe one set of
+    /// requests rather than two overlapping ones.
+    ///
+    /// `run_task` needs it to settle honestly. A turn that raised a question
+    /// has not succeeded, and it has not failed either; without this the
+    /// ending would come from the turn's own outcome and a turn that escalated
+    /// and then produced prose would land `in_review` with an unanswered
+    /// question attached to it.
+    ///
+    /// Keyed on the effect kind's [`BLOCKER_EFFECT_PREFIX`] rather than on a
+    /// flag: the kind is what the journal, the console and the approvals feed
+    /// all read, so a request that says `blocker.*` to them and something else
+    /// here could not happen.
+    ///
+    /// [`BLOCKER_EFFECT_PREFIX`]: crate::ports::blockers::BLOCKER_EFFECT_PREFIX
+    pub fn blockers_since(&self, from: usize) -> usize {
+        let scope = Self::current_scope();
+        let guard = self.inner.lock().expect("approval request queue");
+        let Some(bucket) = guard.get(&scope) else {
+            return 0;
+        };
+        let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
+        bucket
+            .iter()
+            .skip(from)
+            .filter(|request| request.effect.kind.starts_with(&prefix))
+            .count()
+    }
+
     pub fn stamp_run(&self, from: usize, run_id: &str) -> usize {
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");

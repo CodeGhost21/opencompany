@@ -293,3 +293,257 @@ mod test {
         assert!(AGENT_QUESTION_BLOCKER.kind.parks());
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// The agent's own door (issue #1861)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The `escalate_to_human` tool name.
+pub const ESCALATE_TO_HUMAN_TOOL: &str = "escalate_to_human";
+
+/// Lets an agent stop and **ask**, instead of guessing or going quiet.
+///
+/// Before this, a teammate that hit real ambiguity — "staging or prod?", "which
+/// of these two contradictory briefs is current?" — had two options and both
+/// were bad: pick one and be silently wrong, or produce prose explaining that
+/// it could not proceed, which reads as a completed turn. The orchestrator
+/// brief even pointed at `spawn_task` for "work waiting on a person", which
+/// opens a card that notifies nobody and resumes nothing.
+///
+/// This is the third option. The question parks as a durable
+/// [`Information`](BlockerKind::Information) blocker on the operator's queue,
+/// through the same path a gated tool call parks on, so it survives a restart
+/// and expires through the approval TTL rather than waiting forever.
+///
+/// # Why it stages rather than parks directly
+///
+/// The tool has no host handle — tools receive arguments and nothing else — so
+/// it pushes onto the shared [`ApprovalRequestQueue`] exactly as the approval
+/// policy does for a gated call, and the turn's drain parks it. Both drains
+/// exist: a chat or task turn drains through `park_approval_requests`, a
+/// workflow agent node through `park_gated_calls`. There is no path on which an
+/// agent can raise a question that nothing will deliver.
+///
+/// # What it deliberately does not do
+///
+/// It does not end the turn. The agent asks and keeps working with what it has;
+/// the *run* is what parks, because a turn that queued a blocker settles
+/// [`Blocked`](crate::ports::runs::RunStatus::Blocked) rather than reporting a
+/// result nobody has confirmed. Ending the turn from inside a tool would
+/// discard whatever the agent had already produced, which is the opposite of
+/// what a question is for.
+pub struct EscalateToHumanTool {
+    requests: crate::harness::built_in::policy::ApprovalRequestQueue,
+    agent: String,
+}
+
+impl EscalateToHumanTool {
+    /// Builds the tool over the shared approval-request queue, for one agent.
+    pub fn new(
+        requests: crate::harness::built_in::policy::ApprovalRequestQueue,
+        agent: String,
+    ) -> Self {
+        Self { requests, agent }
+    }
+}
+
+#[async_trait::async_trait]
+impl openhuman_core::openhuman::tools::traits::Tool for EscalateToHumanTool {
+    fn name(&self) -> &str {
+        ESCALATE_TO_HUMAN_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Ask the operator a question you cannot answer yourself, when the work genuinely cannot \
+         proceed without it — a missing prerequisite, a choice only they can make, two \
+         instructions that contradict each other. Provide the `question` in plain words, and \
+         optionally the `context` you already gathered. The card parks and waits for their \
+         answer rather than failing. Use it instead of guessing, and instead of finishing with \
+         prose explaining that you were stuck. Do NOT use it for something you can look up, for \
+         something a teammate would know, or to confirm a decision you have already been given."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "What you need the operator to tell you, in one or two plain sentences."
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional: what you already tried or found, so they can answer without re-deriving it."
+                }
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> openhuman_core::openhuman::tools::traits::PermissionLevel {
+        openhuman_core::openhuman::tools::traits::PermissionLevel::Write
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> anyhow::Result<openhuman_core::openhuman::tools::traits::ToolResult> {
+        use openhuman_core::openhuman::tools::traits::ToolResult;
+
+        let question = args
+            .get("question")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("`question` is required"))?
+            .to_string();
+        let context = args
+            .get("context")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+
+        // The reason a person reads is the question plus whatever the agent
+        // already worked out — not a wrapper sentence about escalation, which
+        // would push the actual question down the card.
+        let reason = match context {
+            Some(context) => format!("{question}\n\nWhat {} already has: {context}", self.agent),
+            None => question.clone(),
+        };
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: AGENT_QUESTION_BLOCKER.kind,
+            source: AGENT_QUESTION_BLOCKER.source,
+            // No step: a question asked mid-conversation has no card behind it,
+            // and where one does exist the approval's own task link already
+            // names it. See `BlockerPayload::step`.
+            step: None,
+            reason: reason.clone(),
+            needed: AGENT_QUESTION_BLOCKER.needed.to_string(),
+        };
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+            // `None`, even though an agent did raise this and the field exists
+            // to name one. `Some(agent)` means "a tool call openhuman blocked",
+            // and approving one mints a single-use grant and re-dispatches the
+            // agent to run that exact call again — which here would call
+            // `escalate_to_human` a second time and park the same question.
+            // Carrying the operator's answer back into the turn is #1863; until
+            // it lands, approving a blocker is deliberately inert.
+            agent: None,
+            // Stamped by the dispatch boundary's `stamp_run`, which retro-fills
+            // every request this turn queued.
+            run_id: None,
+        };
+        self.requests
+            .push(crate::harness::built_in::policy::ApprovalRequest {
+                tool: ESCALATE_TO_HUMAN_TOOL.to_string(),
+                reason,
+                effect,
+            });
+
+        Ok(ToolResult::success(format!(
+            "Raised your question with the operator: \"{question}\". This card parks until they \
+             answer, so do not ask it again — carry on with anything else you can do without it."
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tool_test {
+    use super::*;
+    use crate::harness::built_in::policy::ApprovalRequestQueue;
+    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+    use openhuman_core::openhuman::tools::traits::Tool;
+
+    fn tool(queue: &ApprovalRequestQueue) -> EscalateToHumanTool {
+        EscalateToHumanTool::new(queue.clone(), "engineer".to_string())
+    }
+
+    #[tokio::test]
+    async fn a_question_parks_as_an_information_blocker() {
+        let queue = ApprovalRequestQueue::default();
+        let result = tool(&queue)
+            .execute(serde_json::json!({ "question": "staging or prod?" }))
+            .await
+            .expect("the tool runs");
+        assert!(
+            !result.is_error,
+            "asking is not a failure: {}",
+            result.text()
+        );
+
+        let drained = queue.drain(8);
+        assert_eq!(drained.requests.len(), 1);
+        let request = &drained.requests[0];
+        assert_eq!(request.tool, ESCALATE_TO_HUMAN_TOOL);
+        assert_eq!(request.effect.kind, "blocker.information");
+
+        let payload: BlockerPayload =
+            serde_json::from_value(request.effect.payload.clone()).expect("payload round-trips");
+        assert_eq!(payload.kind, BlockerKind::Information);
+        assert_eq!(payload.source, BlockerSource::AgentQuestion);
+        assert_eq!(
+            payload.step, None,
+            "a question asked mid-turn names no step; the approval's task link does"
+        );
+        assert!(payload.reason.contains("staging or prod?"));
+    }
+
+    /// The context the agent already gathered rides along, so the operator can
+    /// answer without re-deriving it — and it is joined into the reason rather
+    /// than dropped into a field nothing renders yet.
+    #[tokio::test]
+    async fn gathered_context_reaches_the_question() {
+        let queue = ApprovalRequestQueue::default();
+        tool(&queue)
+            .execute(serde_json::json!({
+                "question": "which brief is current?",
+                "context": "the Jan and Mar briefs contradict on pricing"
+            }))
+            .await
+            .expect("the tool runs");
+
+        let drained = queue.drain(8);
+        let payload: BlockerPayload =
+            serde_json::from_value(drained.requests[0].effect.payload.clone()).expect("payload");
+        assert!(payload.reason.contains("which brief is current?"));
+        assert!(payload.reason.contains("contradict on pricing"));
+        assert!(
+            payload.reason.contains("engineer"),
+            "the context is attributed to the agent that gathered it"
+        );
+    }
+
+    /// A blank question is refused rather than parked: an empty card reaches a
+    /// person with nothing to answer and still costs them the interruption.
+    #[tokio::test]
+    async fn an_empty_question_is_refused_and_parks_nothing() {
+        let queue = ApprovalRequestQueue::default();
+        assert!(
+            tool(&queue)
+                .execute(serde_json::json!({ "question": "   " }))
+                .await
+                .is_err()
+        );
+        assert!(queue.drain(8).requests.is_empty());
+    }
+
+    /// Approving an escalation must not re-dispatch the agent into calling the
+    /// same tool again — see the `agent` field's note.
+    #[tokio::test]
+    async fn an_escalation_mints_no_grant() {
+        let queue = ApprovalRequestQueue::default();
+        tool(&queue)
+            .execute(serde_json::json!({ "question": "staging or prod?" }))
+            .await
+            .expect("runs");
+        assert!(queue.drain(8).requests[0].effect.agent.is_none());
+    }
+}

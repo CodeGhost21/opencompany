@@ -200,8 +200,19 @@ pub struct BlockerPayload {
     pub kind: BlockerKind,
     /// Where the stop came from. Explains.
     pub source: BlockerSource,
-    /// The step that stopped, for the resume tiers.
-    pub step: BlockerStep,
+    /// The step that stopped, for the resume tiers — or `None` when the
+    /// blocker is not attached to one.
+    ///
+    /// `None` is a real case, not a missing value: an agent that calls
+    /// `escalate_to_human` mid-conversation is asking a question without a card
+    /// or a node behind it. Where a card *does* exist, the approval record's
+    /// own `TaskLink` already names it — `record_parked` stamps that from the
+    /// cycle's task context — so this field is not the only path back to the
+    /// work. It carries what that link cannot: a **node** inside a workflow
+    /// run, which is what #1864's node-level restart needs and a task link has
+    /// no way to express.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<BlockerStep>,
     /// What happened, in the words a person should read.
     pub reason: String,
     /// What would unblock it — the question being asked, or the action being
@@ -301,9 +312,9 @@ mod test {
         let payload = BlockerPayload {
             kind: BlockerKind::Infrastructure,
             source: BlockerSource::Provider,
-            step: BlockerStep::Task {
+            step: Some(BlockerStep::Task {
                 task_id: "task-1".to_string(),
-            },
+            }),
             reason: "the model id `gpt-nonexistent` was rejected".to_string(),
             needed: "a model id this provider serves".to_string(),
         };

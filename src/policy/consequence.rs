@@ -402,6 +402,17 @@ const DECLARED: &[Declared] = &[
     d("create_workflow", EffectGroup::Other, Reach::Nothing),
     d("assign_task", EffectGroup::Other, Reach::Nothing),
     d("review_task", EffectGroup::Other, Reach::Nothing),
+    // Issue #1861: `escalate_to_human` stages a question on this company's own
+    // approval queue and nothing leaves the company — the same class as
+    // `spawn_task`, which also puts something in front of the operator. It is
+    // strictly *less* consequential than the card: a card assigns work and can
+    // be dispatched, whereas an unanswered question expires through the
+    // approval TTL having changed nothing.
+    //
+    // `Reach::Nothing` also has to hold for the tool to be usable at all. The
+    // gate guessing from the name would be free to park the escalation itself,
+    // which would ask the operator to approve being asked a question.
+    d("escalate_to_human", EffectGroup::Other, Reach::Nothing),
     // Issue #661 (M7). `read_workflow` is a pure read of this company's own
     // saved graphs — the same class as `query_company`, which already lists
     // them.
