@@ -163,11 +163,10 @@ describe("channel creation guards (#1872 review)", () => {
   it("replaces the fallback desk set with the first real channel instead of appending beside it", () => {
     const src = chatView();
     // loadDesks marks when the rail is showing defaultDesks() rather than the
-    // host's own list — keyed on *real* (non-system) desks, not raw response
-    // length, since the always-present Operator system channel (issue #1757)
-    // means a desk-less company's `/desks` answer is never actually empty
-    // (see `resolveDesks` in `chat/model.ts`).
-    expect(src).toContain("desksAreFallback.current = !dtos.some((d) => !d.system);");
+    // host's own list — keyed on raw response length now that the Operator
+    // feed is its own surface (issue #1757 rework) and no longer an entry
+    // `list_desks` returns.
+    expect(src).toContain("desksAreFallback.current = dtos.length === 0;");
     // …and onCreated replaces that set outright: the first real channel ends
     // the fallback's mandate, and appending beside it would keep fabricated
     // rows — one of which could share the new channel's id — until reload.

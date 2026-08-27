@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TeamMember } from "@/lib/team";
 import { ThreadPanel } from "@/views/chat/ThreadPanel";
-import type { Channel } from "@/views/chat/model";
+import { operatorChannelFrom } from "@/views/chat/model";
 
 /**
  * Issue #1757 follow-up (codex + CodeRabbit review on the Operator channel
@@ -20,16 +20,18 @@ import type { Channel } from "@/views/chat/model";
  * These pin that a read-only thread disables the composer the same way the
  * main one does, and that neither a click nor Enter reaches `onSend` at all —
  * not just that the request would eventually be rejected server-side.
+ *
+ * Issue #1757 rework: the Operator channel is its own surface now (`GET
+ * {scope}/operator-channel`), not an entry `list_desks` returns, so the
+ * fixture channel is built through `operatorChannelFrom` — the same
+ * projection `ChatView` uses — rather than a hand-rolled literal.
  */
 
-const CHANNEL: Channel = {
+const CHANNEL = operatorChannelFrom({
   id: "operator",
   name: "Operator",
-  voice: "Operator",
-  kind: "channel",
-  purpose: "",
-  system: true,
-};
+  description: "Workflow reports and notifications",
+});
 
 const MEMBERS: TeamMember[] = [];
 
