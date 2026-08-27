@@ -80,8 +80,8 @@ test('collectContributorStats flags first-time contributors', () => {
     ].join('\x1e'),
   );
   // Case-insensitive on purpose: git records whatever casing the author's
-  // config carries, and "Ada <ADA@example.com>" is not a new contributor.
-  const prior = new Set(['ada <ADA@example.com>'.toLowerCase()]);
+  // config carries, and "ADA" is not a new contributor.
+  const prior = new Set(['ADA'.toLowerCase()]);
 
   const stats = collectContributorStats(commits, prior);
   assert.deepEqual(
@@ -91,6 +91,25 @@ test('collectContributorStats flags first-time contributors', () => {
       ['Bo', 1, [2], true],
     ],
   );
+});
+
+test('collectContributorStats merges one person committing under two emails', () => {
+  // The real shape this guards: a contributor whose PR merges land under their
+  // personal address and whose web edits land under GitHub's noreply one. Keyed
+  // on name+email they appeared twice — once with the PRs, once as a bare line
+  // that also claimed to be a first-time contributor.
+  const commits = parseGitLog(
+    [
+      ['a1', 'feat: a (#1)', 'Ada', 'ada@example.com', '2026-08-01T00:00:00Z'].join('\x1f'),
+      ['a2', 'docs: b (#2)', 'Ada', '1234+ada@users.noreply.github.com', '2026-08-02T00:00:00Z'].join('\x1f'),
+    ].join('\x1e'),
+  );
+
+  const stats = collectContributorStats(commits, new Set(['ada']));
+  assert.equal(stats.length, 1);
+  assert.equal(stats[0].commits, 2);
+  assert.deepEqual(stats[0].prs, [1, 2]);
+  assert.equal(stats[0].isNew, false);
 });
 
 test('groupPullRequestsByHighlight buckets by keyword and never drops a PR', () => {
@@ -117,10 +136,7 @@ test('renderDeterministicNotes emits every PR link and omits an empty new-contri
       ['b2', 'fix: console nav (#2)', 'Bo', 'bo@example.com', '2026-08-02T00:00:00Z'].join('\x1f'),
     ].join('\x1e'),
   );
-  const contributors = collectContributorStats(
-    commits,
-    new Set(['ada <ada@example.com>', 'bo <bo@example.com>']),
-  );
+  const contributors = collectContributorStats(commits, new Set(['ada', 'bo']));
   const pullRequests = [
     { number: 1, title: 'feat: ledger fold', url: 'https://x/1', author: 'ada', labels: [], commits: [] },
     { number: 2, title: 'fix: console nav', url: 'https://x/2', author: 'bo', labels: [], commits: [] },
