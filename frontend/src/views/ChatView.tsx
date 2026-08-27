@@ -1568,20 +1568,42 @@ export function ChatView({
    * over the SSE feed like any other, so there is nothing to inject here on
    * success — only the busy state and a failure toast.
    *
+   * Re-reads the live marker via {@link OpenCompanyClient.getBudgetPause}
+   * immediately before redeeming, and sends its id (issue #1846 review, Codex
+   * #3866418876 / #3866802268): this card can only ever have been rendered
+   * from a chat-transcript notice, and the click can lag that render by
+   * however long the operator took to notice it. A background turn (a
+   * workflow node, an unstreamed task) pausing for the SAME agent in the
+   * meantime re-parks with no chat destination, which
+   * {@link isBudgetPauseNoticeSuperseded} cannot see — a chat-less park never
+   * touches the transcript it watches — so without this read-back the click
+   * would silently redeem and re-dispatch the background turn's message
+   * under the operator's own "add credits" intent instead of theirs.
+   *
    * A 404 means the marker is already gone: redeemed from another tab,
    * expired with the process, or already handled. Read as a (delayed) success
    * rather than an error — the operator's intent ("get this moving again") is
    * either already satisfied or nothing this click can fix by retrying.
+   *
+   * A 409 means the live re-read above raced a background park between the
+   * `GET` and the `POST` — the server's own atomic check caught what the
+   * read-back could only narrow the window on, not close outright. Same
+   * "nothing this click can fix by retrying blindly" shape as the 404: the
+   * operator is told to look again rather than have their click silently
+   * redeem the wrong marker.
    */
   async function redeemBudgetPause(agentId: string) {
     if (redeemingBudgetPauseAgent) return;
     setRedeemingBudgetPauseAgent(agentId);
     try {
-      await client.redeemBudgetPause(agentId, company);
+      const live = await client.getBudgetPause(agentId, company);
+      await client.redeemBudgetPause(agentId, company, live?.id);
       toast.success("Resending the stalled message.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         toast("Nothing to resend — that pause was already handled.");
+      } else if (error instanceof ApiError && error.status === 409) {
+        toast("That pause has changed since it was shown — check the latest message and try again.");
       } else {
         toast.error(
           error instanceof Error && error.message
