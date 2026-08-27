@@ -23,6 +23,25 @@ import { OAuthView } from "@/views/OAuthView";
 // the common case of a pasted document.
 const COMPANY_NAME_MAX_CHARS = 200;
 
+/**
+ * Clamps `value` to `COMPANY_NAME_MAX_CHARS`, counting Unicode scalar values —
+ * the same definition of "character" the host enforces with `chars().count()`
+ * (`src/server/ops/company_profile.rs`) — rather than UTF-16 code units.
+ *
+ * PR #1875 review finding: the native `maxLength` attribute this field used
+ * to carry counts UTF-16 code units, not scalar values. A name built from
+ * 101-200 astral characters (most emoji, some scripts) passes the host's
+ * `chars().count() <= 200` check, but each such character consumes two
+ * UTF-16 units — so `maxLength={200}` silently refused input past 100 of
+ * them, well inside what the API accepts. `Array.from` iterates by code
+ * point, which is exactly `chars().count()`'s definition (same technique as
+ * `titleFromMessage`, `lib/chat.ts`, and `documentSlug`, `api/memory.ts`).
+ */
+export function clampToCompanyNameLimit(value: string): string {
+  const points = Array.from(value);
+  return points.length <= COMPANY_NAME_MAX_CHARS ? value : points.slice(0, COMPANY_NAME_MAX_CHARS).join("");
+}
+
 const WorkflowsView = lazy(() =>
   import("@/views/WorkflowsView").then((m) => ({ default: m.WorkflowsView })),
 );
@@ -217,12 +236,11 @@ function NameStep({
         <Input
           id="gate-company-name"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => setName(clampToCompanyNameLimit(e.target.value))}
           onKeyDown={(e) => {
             if (e.key === "Enter") void confirm();
           }}
           placeholder="Acme Inc."
-          maxLength={COMPANY_NAME_MAX_CHARS}
           autoFocus
         />
       </div>
