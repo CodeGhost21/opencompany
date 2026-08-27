@@ -280,29 +280,8 @@ pub fn reject_desk_target(record: &CompanyRecord, key: &str) -> Option<String> {
     // An `Auto` channel (issue #1835) is refused with its own reason, before
     // the leadless-desk arm below can claim it: that arm's wording — "has no
     // member on the roster" — would be a lie about a channel full of members.
-    // The real reason is that a hand-off to a desk is a hand-off to its lead,
-    // and this channel has none by design; its answerer is picked per message.
-    // `with_leads` below already excludes such channels from "desks that can
-    // take work", because `desk_lead` is `None` for them by definition.
-    if !record.desk_responder_mode(&desk_id).is_lead() {
-        let with_leads = desk_list(
-            desk_ids(record)
-                .into_iter()
-                .filter(|id| desk_lead(record, id).is_some())
-                .collect(),
-        );
-        return Some(match with_leads {
-            Some(list) => format!(
-                "The \"{desk_id}\" channel has no lead — who answers there is picked per \
-message, not by rank — so `delegate_to_desk` has no one to hand this to. Desks that can \
-take work: {list}."
-            ),
-            None => format!(
-                "The \"{desk_id}\" channel has no lead — who answers there is picked per \
-message, not by rank — so `delegate_to_desk` has no one to hand this to, and no other \
-desk has a lead either. Answer directly instead of delegating."
-            ),
-        });
+    if let Some(reason) = reject_auto_channel_target(record, &desk_id) {
+        return Some(reason);
     }
     if desk_lead(record, &desk_id).is_some() {
         return None;
@@ -321,6 +300,52 @@ Desks that can take work: {list}."
         None => format!(
             "The \"{desk_id}\" desk has no member on the roster, so nothing can be handed to it, \
 and no other desk has a lead either. Answer directly instead of delegating."
+        ),
+    })
+}
+
+/// Why an [`Auto`](crate::ports::types::ResponderMode::Auto) channel cannot
+/// take a `delegate_to_desk` hand-off (issue #1835) — or `None` when
+/// `desk_id` is an ordinary lead desk.
+///
+/// A hand-off to a desk is a hand-off to **its lead**, and an auto channel has
+/// none by design: its answerer is chosen per message. So the refusal says
+/// that, rather than reusing the leadless-desk wording ("has no member on the
+/// roster"), which would be a lie about a channel full of members.
+///
+/// **Public because both delegation paths must refuse identically.** The
+/// harness tool reaches it through [`reject_desk_target`]; the hosted
+/// device-side handler (`runtime::cycle`) calls it directly, because that path
+/// deliberately does *not* refuse an ordinary leadless desk — there a hand-off
+/// is a durable card on the board, visible whether or not anyone leads the
+/// desk yet. An auto channel is the one case it must still refuse, and codex
+/// caught the two paths disagreeing: the hosted one accepted the channel and
+/// wrote a card noting "no lead member on the roster yet", which is both false
+/// and permanently so.
+///
+/// Takes a **resolved** desk id, as `desk_responder_mode` does.
+pub fn reject_auto_channel_target(record: &CompanyRecord, desk_id: &str) -> Option<String> {
+    if record.desk_responder_mode(desk_id).is_lead() {
+        return None;
+    }
+    // `desk_lead` is `None` for an auto channel by definition, so this list
+    // excludes them without a second mode check.
+    let with_leads = desk_list(
+        desk_ids(record)
+            .into_iter()
+            .filter(|id| desk_lead(record, id).is_some())
+            .collect(),
+    );
+    Some(match with_leads {
+        Some(list) => format!(
+            "The \"{desk_id}\" channel has no lead — who answers there is picked per \
+message, not by rank — so `delegate_to_desk` has no one to hand this to. Desks that can \
+take work: {list}."
+        ),
+        None => format!(
+            "The \"{desk_id}\" channel has no lead — who answers there is picked per \
+message, not by rank — so `delegate_to_desk` has no one to hand this to, and no other \
+desk has a lead either. Answer directly instead of delegating."
         ),
     })
 }
