@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyEvent;
-use crate::runtime::grants::{BudgetPauseMarker, RedeemMatch, budget_pauses_for};
+use crate::runtime::grants::{BudgetPauseMarker, BudgetPauseSet, RedeemMatch, budget_pauses_for};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -237,29 +237,91 @@ async fn redeem_budget_pause(
     // and approval paths.
     //
     // Awaiting the `JoinHandle` is drop-safe: dropping it abandons only the
-    // *waiting*, so the redispatch always runs to completion — including
-    // this function's own restore-on-failure below — no matter what happens
-    // to the request that triggered it.
+    // *waiting*, so `run_cycle` itself always runs to completion no matter
+    // what happens to the request that triggered it.
+    //
+    // Issue #1846 review (Codex #3866802276): restoration itself must live
+    // INSIDE the spawned task, not after `redispatch.await` in this
+    // handler's own future. A disconnect during the redispatch drops this
+    // whole future — including the `match redispatch.await` below — so the
+    // pre-fix code's `restore_if_absent` calls in the `Ok(Err(_))`/`Err(_)`
+    // arms never ran on that path: `run_cycle` finished (or panicked) with
+    // nobody left polling the `JoinHandle` to see it, and the reservation
+    // `redeem`/`redeem_matching` took above was lost for good exactly like
+    // the pre-#3865812411 bug this was meant to close. `RestoreGuard` fixes
+    // that by owning the restore itself and living entirely inside the
+    // spawned future: its `Drop` fires whether that future finishes
+    // normally, returns `Err`, or the task panics mid-`run_cycle` — the
+    // three ways `run_cycle` can end without earning the marker back —  and
+    // is a no-op once `disarm`ed on success. None of that depends on this
+    // handler's own future still being polled.
     let runtime = Arc::clone(&company.runtime);
-    let redispatch = tokio::spawn(async move { runtime.run_cycle(vec![event]).await });
+    let redispatch = tokio::spawn({
+        let pauses = Arc::clone(&pauses);
+        let marker = marker.clone();
+        async move {
+            let mut guard = RestoreGuard::new(pauses, marker);
+            let result = runtime.run_cycle(vec![event]).await;
+            if result.is_ok() {
+                guard.disarm();
+            }
+            result
+        }
+    });
     match redispatch.await {
         Ok(Ok(_report)) => Ok(Json(BudgetPauseDto::from(marker))),
-        // The redispatch ran to completion but returned an error — restore
-        // the reservation so the operator's saved payload survives for a
-        // retry, not thrown away over a redispatch that never happened.
-        Ok(Err(err)) => {
-            pauses.restore_if_absent(marker);
-            Err(err.into())
-        }
+        // The redispatch ran to completion but returned an error — the
+        // spawned task's own `RestoreGuard` already restored the reservation
+        // (above) so the operator's saved payload survives for a retry,
+        // rather than being thrown away over a redispatch that never
+        // happened.
+        Ok(Err(err)) => Err(err.into()),
         // The spawned task itself panicked (not `run_cycle` returning
-        // `Err`) — exactly as "never happened" as an `Err`, so the same
-        // restore applies.
-        Err(join_err) => {
-            pauses.restore_if_absent(marker);
-            Err(OpenCompanyError::BackgroundTask(format!(
-                "budget-pause redeem's redispatch did not finish: {join_err}"
-            ))
-            .into())
+        // `Err`) — exactly as "never happened" as an `Err`. `RestoreGuard`
+        // restores on this path too: a panic unwinds through the guard's
+        // scope inside the spawned task, running its `Drop` before the task
+        // finishes, regardless of whether anything is still awaiting this
+        // `JoinHandle`.
+        Err(join_err) => Err(OpenCompanyError::BackgroundTask(format!(
+            "budget-pause redeem's redispatch did not finish: {join_err}"
+        ))
+        .into()),
+    }
+}
+
+/// Restores a reserved [`BudgetPauseMarker`] unless explicitly [`disarm`ed](Self::disarm)
+/// (issue #1846 review, Codex #3866802276).
+///
+/// Lives entirely inside the spawned redispatch task (see
+/// [`redeem_budget_pause`]'s doc comment on why), so its `Drop` fires from
+/// THAT task's own unwind — on an `Err` return, on a panic mid-`run_cycle`,
+/// or simply falling off the end of the async block — independent of
+/// whether the handler that spawned it is still being polled. Disarmed only
+/// on the one outcome that has legitimately spent the reservation: a
+/// `run_cycle` that returned `Ok`.
+struct RestoreGuard {
+    pauses: Arc<BudgetPauseSet>,
+    marker: Option<BudgetPauseMarker>,
+}
+
+impl RestoreGuard {
+    fn new(pauses: Arc<BudgetPauseSet>, marker: BudgetPauseMarker) -> Self {
+        Self {
+            pauses,
+            marker: Some(marker),
+        }
+    }
+
+    /// Marks the reservation as legitimately spent — `Drop` becomes a no-op.
+    fn disarm(&mut self) {
+        self.marker = None;
+    }
+}
+
+impl Drop for RestoreGuard {
+    fn drop(&mut self) {
+        if let Some(marker) = self.marker.take() {
+            self.pauses.restore_if_absent(marker);
         }
     }
 }
@@ -854,5 +916,123 @@ mod tests {
             }
         }
         false
+    }
+
+    /// Same shape as [`StalledRedispatchBrain`], but its cycle FAILS once
+    /// released instead of succeeding — so the spawned redispatch owes a
+    /// restore, not just a settle.
+    struct StalledThenFailingRedispatchBrain {
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for StalledThenFailingRedispatchBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            if req
+                .events
+                .iter()
+                .any(|e| matches!(e, CompanyEvent::OperatorMessage { .. }))
+            {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Err(OpenCompanyError::InvalidRequest(
+                "redispatch refused".to_string(),
+            ))
+        }
+    }
+
+    /// Polls until the marker for `agent` is parked again (restored) or the
+    /// timeout expires — the mirror image of [`recording_settles`], for a
+    /// redispatch that owes a restore rather than a settle.
+    async fn recording_restores(id: &CompanyId, agent: &str) -> bool {
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if budget_pauses_for(id).peek(agent).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Issue #1846 review (Codex #3866802276) — the keystone test for the
+    /// guard-in-the-detached-task fix. Combines the drop-safety scenario
+    /// [`a_dropped_connection_does_not_cancel_the_redispatch`] proves with a
+    /// FAILING redispatch: the connection drops while the redispatch is
+    /// in-flight (so nothing is left awaiting `redeem_budget_pause`'s own
+    /// `redispatch.await`/its `match` arms), and the redispatch then fails.
+    ///
+    /// Before this fix, `restore_if_absent` sat in the `Ok(Err(_))` arm of
+    /// that `match` — code that lived in THIS handler's own future, which
+    /// the drop above already cancelled. The spawned task still ran
+    /// `run_cycle` to completion (that half was already fixed by
+    /// #3865812411's spawn), but its `Err` reached nobody: the reservation
+    /// stayed gone forever, indistinguishable from a successful redeem to
+    /// anything reading the marker set afterward. `RestoreGuard` lives
+    /// inside the spawned task itself, so its restore does not depend on
+    /// this handler's future still being polled.
+    #[tokio::test]
+    async fn a_dropped_connection_still_restores_the_reservation_when_the_redispatch_fails() {
+        let home = home();
+        let company = "acme-redeem-drop-then-fail";
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let state = state_with_brain(
+            home.path(),
+            company,
+            Arc::new(StalledThenFailingRedispatchBrain {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+        )
+        .await;
+        let id = CompanyId::new(company);
+
+        budget_pauses_for(&id).park(
+            "ceo",
+            None,
+            "ship the API",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
+
+        let uri = "/api/v1/company/agents/ceo/budget-pause/redeem";
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("cookie", crate::server::test_support::fixed_cookie(company))
+            .body(Body::empty())
+            .unwrap();
+        let mut redeeming = Box::pin(router(state.clone()).oneshot(request));
+        tokio::select! {
+            _ = &mut redeeming => panic!("the redeem answered before the redispatch began"),
+            _ = entered.notified() => {}
+        }
+        // Drops `redeem_budget_pause`'s own future — including its
+        // `match redispatch.await { ... }` and every restore call that used
+        // to live inside it. Nothing is left polling the `JoinHandle`.
+        drop(redeeming);
+
+        assert!(
+            budget_pauses_for(&id).peek("ceo").is_none(),
+            "the marker was reserved before the connection dropped"
+        );
+
+        // The spawned task's own `run_cycle` still runs to completion, and
+        // now fails.
+        release.notify_one();
+        let restored = recording_restores(&id, "ceo").await;
+        assert!(
+            restored,
+            "a failed redispatch must restore the reservation even when the connection that \
+             triggered it dropped before the redispatch finished — otherwise the operator's \
+             saved payload is lost for good with no redispatch ever having completed"
+        );
     }
 }
