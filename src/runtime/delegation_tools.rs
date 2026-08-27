@@ -697,7 +697,11 @@ hand work to either. Do the work yourself, or say what you cannot do."
 
 /// The first desk `member` is on, so an invented teammate-as-desk target can be
 /// redirected at the desk that teammate actually sits on.
-fn desk_of_member(record: &CompanyRecord, member: &str) -> Option<String> {
+///
+/// `pub(crate)`: also the issue #1862 prerequisite's default-owner lever — a
+/// workflow proposal that names no `owner_desk` is filled from the proposing
+/// card's assignee's desk (`apply_workflow_proposal`, `server/ops/tasks.rs`).
+pub(crate) fn desk_of_member(record: &CompanyRecord, member: &str) -> Option<String> {
     desks_of_member(record, member).into_iter().next()
 }
 

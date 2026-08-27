@@ -666,7 +666,21 @@ async fn apply_workflow_proposal(
             "the stored workflow proposal could not be read as a graph: {err}"
         ))
     })?;
-    let draft = raw_workflow_from_spec(&spec)?;
+    let mut draft = raw_workflow_from_spec(&spec)?;
+
+    // Issue #1862 prerequisite: a proposal that names no owning desk defaults
+    // to the proposing card's assignee's desk — the same "somebody is
+    // responsible for this" fallback the sender-resolution chain leans on
+    // when a run has no triggering agent. Best-effort: an assignee with no
+    // desk (or a company record that fails to load) leaves `owner_desk`
+    // `None` rather than blocking the apply — the same permissive stance
+    // `resolve_assignee` above takes toward an unloadable record.
+    if draft.owner_desk.is_none()
+        && let Ok(Some(company_record)) = company.runtime.store().load(company.id()).await
+    {
+        draft.owner_desk =
+            crate::runtime::delegation_tools::desk_of_member(&company_record, &record.assignee);
+    }
 
     // Issue #1191: the deliverable channel set, read off the SAME runtime the
     // console's destination picker is served from. Apply is a save, and it used
