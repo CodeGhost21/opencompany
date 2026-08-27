@@ -54,7 +54,13 @@ function card(): Task {
   } as Task;
 }
 
-function parked(id: string, kind: string, at = T0): ApprovalSummary {
+/**
+ * One parked approval. Batched into `turn-1` by default, because that is the
+ * ordinary case a card is blocked by — the calls a single agent turn gated —
+ * and since #1895 the card groups by that key rather than treating everything
+ * it holds as one batch.
+ */
+function parked(id: string, kind: string, at = T0, batch: string | null = "turn-1"): ApprovalSummary {
   return {
     id,
     kind,
@@ -63,6 +69,7 @@ function parked(id: string, kind: string, at = T0): ApprovalSummary {
     agent: "qa",
     task: { link: "task", id: "task-1" },
     payload: { url: "https://example.com/a" },
+    ...(batch ? { batch } : {}),
   };
 }
 
@@ -322,6 +329,54 @@ describe("a paused card with approvals outstanding", () => {
     await render([parked("a1", "web_fetch")]);
     const link = blockedRow()?.querySelector<HTMLAnchorElement>('a[href*="approvals"]');
     expect(link?.getAttribute("href")).toContain("approvals/task-1");
+  });
+
+  /**
+   * A card is not a batch (#1895 review). `ApprovalRow` consolidates because
+   * #842's premise is that a batch is *one turn's work*, interrupting once — so
+   * two turns' parks under one Approve would authorise across unrelated
+   * requests. The card holds what it holds; the grouping is the transcript's
+   * own `approvalBatchKey`, shared rather than restated.
+   */
+  it("keeps two turns' approvals in separate rows, each with its own Approve", async () => {
+    await render([
+      parked("a1", "web_fetch", T0, "turn-1"),
+      parked("a2", "shell", T0 + 1_000, "turn-2"),
+    ]);
+    expect(container.querySelectorAll('[data-approval-inline="card"]')).toHaveLength(2);
+    await act(async () => {
+      button("Approve").click();
+    });
+    // The first row's Approve decided the first turn, and nothing else.
+    expect(decisions).toEqual([{ id: "a1", verdict: "approve" }]);
+  });
+
+  /**
+   * And batchless approvals are never grouped, not even with each other: an
+   * absent key means the host did not say which turn a park came from, and
+   * folding two of those together invents a batch out of two facts that are
+   * only alike in being unknown.
+   */
+  it("never groups approvals the host gave no batch key", async () => {
+    await render([
+      parked("a1", "web_fetch", T0, null),
+      parked("a2", "web_fetch", T0 + 1_000, null),
+    ]);
+    expect(container.querySelectorAll('[data-approval-inline="card"]')).toHaveLength(2);
+  });
+
+  /** Deciding one turn must not freeze the other's buttons. */
+  it("leaves one turn's buttons live while another turn is resolving", async () => {
+    await render(
+      [parked("a1", "web_fetch", T0, "turn-1"), parked("a2", "shell", T0 + 1_000, "turn-2")],
+      { deciding: new Map([["a1", "approve"]]) },
+    );
+    const approve = Array.from(container.querySelectorAll("button")).filter((b) =>
+      b.textContent?.includes("Approve"),
+    ) as HTMLButtonElement[];
+    expect(approve).toHaveLength(2);
+    expect(approve[0].disabled).toBe(true);
+    expect(approve[1].disabled).toBe(false);
   });
 
   /**

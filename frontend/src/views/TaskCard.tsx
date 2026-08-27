@@ -33,6 +33,8 @@
 // This is the run drawer's fix (#1002) reaching the surface an operator
 // actually works from.
 
+import { useMemo } from "react";
+
 import {
   AlertTriangle,
   CircleHelp,
@@ -52,7 +54,6 @@ import { withHostParam } from "@/hooks/use-host-route";
 import { PRIORITY_STYLES } from "@/lib/board-columns";
 import { formatUsdCost } from "@/lib/cost";
 import {
-  blockingTaskApprovals,
   decidingForTask,
   taskApprovalVerdicts,
   type TaskApprovalRow,
@@ -60,6 +61,7 @@ import {
 import { extraOutputCount, primaryLink, type TaskLink } from "@/lib/task-output";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "@/views/chat/ApprovalRow";
+import { approvalBatchKey } from "@/views/chat/model";
 import { tallyPrerequisites } from "./TaskPlanBrief";
 
 function priorityStyle(priority: string): string {
@@ -171,8 +173,27 @@ export function TaskItem({
   onOpen: () => void;
   onResume: () => void;
 }) {
-  // What the card is still *asking* about — the rows that keep their buttons.
-  const blocking = blockingTaskApprovals(rows);
+  // One group per turn, never one card-wide batch (#1895 review). `ApprovalRow`
+  // consolidates because #842's premise is that a batch is *one piece of work*
+  // — one turn's parked calls, interrupting once. A paused card can hold more
+  // than one turn's parks (an overlapping re-dispatch) or several the host
+  // never keyed at all, and handing those to a single row put one Approve over
+  // unrelated requests. `approvalBatchKey` is the transcript's own rule, shared
+  // rather than restated so the two surfaces cannot answer it differently.
+  const groups = useMemo(() => {
+    const byKey = new Map<string, TaskApprovalRow[]>();
+    for (const row of rows) {
+      const key = approvalBatchKey(row.approval);
+      const bucket = byKey.get(key);
+      if (bucket) bucket.push(row);
+      else byKey.set(key, [row]);
+    }
+    // Only the groups still asking something. A batch whose every row has been
+    // decided is settled; the card simply stops showing it.
+    return [...byKey.entries()].filter(([, group]) =>
+      group.some((row) => row.verdict === null),
+    );
+  }, [rows]);
   return (
     <div
       className={cn(
@@ -236,45 +257,49 @@ export function TaskItem({
       {showsOutputLink(task) && <OutputLinkRow task={task} />}
       {task.stage === "paused" && (
         <>
-          {blocking.length > 0 && onDecide && (
+          {groups.length > 0 && onDecide && (
             // Deciding, not just reporting (#1891). Rendered only while
             // something is actually blocking: once every row has a verdict this
             // component's own settled receipt would take the card's place
             // permanently, and a board card is not where a decision's paperwork
             // belongs — the card simply stops being blocked.
-            //
-            // Handed `rows` rather than `blocking`, though, because the row
-            // subtracts what is already decided itself and says so: "1 of 3
-            // decided — 2 still waiting on you" is exactly what an operator
-            // part-way through a batch needs, and passing only the remainder
-            // would silently renumber the work under them.
             <div
-              // The row holds buttons and a link. Without this, every click
-              // inside it would also reach the card's own open handler and
+              // The rows hold buttons and links. Without this, every click
+              // inside them would also reach the card's own open handler and
               // drop the operator into task detail as their decision landed.
               onClick={(e) => e.stopPropagation()}
             >
-              <ApprovalRow
-                variant="card"
-                approvals={rows.map((r) => r.approval)}
-                now={now}
-                askerNames={askerNames}
-                // This card's rows on the Approvals page, not the flat queue —
-                // built with `withHostParam` because a raw hash href drops the
-                // host scope, and an operator on a second host would be sent to
-                // another console's queue.
-                detailsHref={withHostParam(`approvals/${encodeURIComponent(task.id)}`)}
-                deciding={decidingForTask(rows, deciding)}
-                decided={taskApprovalVerdicts(rows)}
-                failed={failed}
-                onDecide={onDecide}
-              />
+              {groups.map(([key, group]) => (
+                <ApprovalRow
+                  key={key}
+                  variant="card"
+                  // The group's whole set, not only its undecided rows: the row
+                  // subtracts what is already decided itself and says so — "1
+                  // of 3 decided — 2 still waiting on you" is what an operator
+                  // part-way through a batch needs, and passing the remainder
+                  // would silently renumber the work under them.
+                  approvals={group.map((r) => r.approval)}
+                  now={now}
+                  askerNames={askerNames}
+                  // This card's rows on the Approvals page, not the flat queue —
+                  // built with `withHostParam` because a raw hash href drops the
+                  // host scope, and an operator on a second host would be sent to
+                  // another console's queue.
+                  detailsHref={withHostParam(`approvals/${encodeURIComponent(task.id)}`)}
+                  // Narrowed to this group: a decision in flight on another of
+                  // this card's turns must not freeze it.
+                  deciding={decidingForTask(group, deciding)}
+                  decided={taskApprovalVerdicts(group)}
+                  failed={failed}
+                  onDecide={onDecide}
+                />
+              ))}
             </div>
           )}
           <Button
             variant="outline"
             size="sm"
-            className={cn("h-7 w-full", blocking.length > 0 ? "mt-2" : "mt-3")}
+            className={cn("h-7 w-full", groups.length > 0 ? "mt-2" : "mt-3")}
             // Issue #883: the button is disabled rather than hidden while the
             // card is blocked. Hiding it would leave the card looking like it
             // had no next action at all, which is the ambiguity being fixed —
