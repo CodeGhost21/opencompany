@@ -483,7 +483,7 @@ describe("ChatView offers no desk affordance on the built-in channel", () => {
 
   it("does not badge anyone its lead", () => {
     // `memberIds[0]` is the roster's first row here, not a hierarchy.
-    expect(source).toContain("activeIsDesk ? active.memberIds?.[0] : undefined }");
+    expect(source).toContain("activeIsDesk && !active.leadless ? active.memberIds?.[0] : undefined }");
   });
 
   it("does not offer the org-chart link that would open on a desk that does not exist", () => {

@@ -77,6 +77,12 @@ export interface Desk {
    * which are neither.
    */
   overlayCreated?: boolean;
+  /**
+   * How the desk routes its unmentioned messages (issue #1835). `"auto"` is a
+   * leadless channel — `members[0]` carries no rank and the host picks a
+   * best-fit member per message. Absent means `"lead"`, today's model.
+   */
+  responder?: "lead" | "auto";
 }
 
 /**

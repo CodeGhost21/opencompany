@@ -221,10 +221,13 @@ impl Fixture {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         Self {
             company,
@@ -440,6 +443,7 @@ async fn read_round_trips_into_an_update_that_keeps_the_workflow_enabled() {
         )
         .unwrap(),
         None,
+        None,
     )
     .await
     .expect("creates");
@@ -533,6 +537,7 @@ async fn a_stale_version_token_is_the_company_layers_conflict() {
         &store,
         None,
         draft,
+        None,
         None,
     )
     .await
@@ -745,6 +750,7 @@ async fn delete_removes_the_body_the_enabled_id_and_the_history() {
         None,
         draft,
         None,
+        None,
     )
     .await
     .expect("creates");
@@ -890,6 +896,7 @@ async fn an_agent_edit_cannot_bypass_the_per_kind_config_rules() {
         &store,
         None,
         draft,
+        None,
         None,
     )
     .await
@@ -1099,10 +1106,13 @@ async fn a_disabled_global_stays_hidden_even_if_a_second_read_would_fail() {
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     };
     let store: Arc<dyn CompanyStore> = Arc::new(FailsAfterFirstLoadStore::seeded(record));
     let admin = WorkflowAdmin::new(company, None, store, None, None);

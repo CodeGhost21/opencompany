@@ -209,14 +209,30 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
 /// Its `members` name one manifest agent (`ceo`) and one overlay agent
 /// (`aria_stone`), which is the mixed case a real console desk produces, and
 /// `description` is `Some` so the `skip_serializing_if` field is exercised.
+///
+/// Two desks since issue #1835, one per responder mode: `support` never states
+/// a mode (the defaulted-and-skipped half — a pre-#1835 row must rehydrate as
+/// `Lead`), and `launch` is an `auto` channel, so every backend proves the
+/// mode a rail-created channel stores actually survives persistence rather
+/// than silently collapsing back to a lead desk.
 fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
-    use crate::ports::types::OverlayDesk;
-    vec![OverlayDesk {
-        id: "support".to_string(),
-        name: "Support".to_string(),
-        description: Some("Customer mail triage.".to_string()),
-        members: vec!["ceo".to_string(), "aria_stone".to_string()],
-    }]
+    use crate::ports::types::{OverlayDesk, ResponderMode};
+    vec![
+        OverlayDesk {
+            id: "support".to_string(),
+            name: "Support".to_string(),
+            description: Some("Customer mail triage.".to_string()),
+            members: vec!["ceo".to_string(), "aria_stone".to_string()],
+            responder: ResponderMode::default(),
+        },
+        OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["ceo".to_string(), "aria_stone".to_string()],
+            responder: ResponderMode::Auto,
+        },
+    ]
 }
 
 /// The console-added desk memberships the fixture seeds every record with, so
@@ -288,6 +304,18 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
         overlay_policy: Some(sample_policy_override()),
+        // Non-empty for the same reason: this is the one overlay that WIDENS
+        // `[tools].allow`, so a backend that drops it silently revokes an
+        // integration the operator granted from a connect surface and leaves
+        // the restored company "Connected" and reaching nobody (issue #1796).
+        overlay_tool_grants: Some(crate::ports::types::ToolGrantsOverride {
+            added: vec!["chargebee".to_string()],
+            set_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "admin@example.com".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }),
         // Non-empty so a backend that drops the field is caught: an empty map
         // survives every possible bug, including not persisting it at all.
         overlay_desk_tools: std::collections::BTreeMap::from([(
@@ -297,6 +325,8 @@ fn record(id: &CompanyId) -> CompanyRecord {
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
         setup: Some(sample_setup_answers()),
+        name_confirmed: false,
+        activation_completed_at: None,
     }
 }
 

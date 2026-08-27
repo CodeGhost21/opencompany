@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::ports::now_millis;
 use crate::ports::types::{
     Attachment, ChunkAddr, CompanyEvent, ContextChunk, ContextOp, ContextOpResult, Effect,
-    EffectGroup, LedgerEntry, OutboundMessage, Verdict,
+    EffectGroup, LedgerEntry, OnboardingStep, OutboundMessage, Verdict,
 };
 
 use super::wire::{EffectFrame, Role, WireEvent};
@@ -635,6 +635,28 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
                  it for approval"
             ),
             "workflow.child_call_not_offered",
+        ),
+        // Issue #1843. Structural, like every arm here: which step, not the
+        // company's whole activation state — the sidecar reads company
+        // activity for insight, and "this step completed" is the insight.
+        CompanyEvent::OnboardingStepCompleted { step } => {
+            let step_name = match step {
+                OnboardingStep::NameConfirmed => "name confirmed",
+                OnboardingStep::IntegrationConnected => "integration connected",
+                OnboardingStep::WorkflowRunSucceeded => "workflow run succeeded",
+            };
+            (
+                Role::System,
+                "activation".to_string(),
+                format!("Activation step completed: {step_name}"),
+                "activation.step_completed",
+            )
+        }
+        CompanyEvent::OnboardingCompleted { .. } => (
+            Role::System,
+            "activation".to_string(),
+            "Company activation completed".to_string(),
+            "activation.completed",
         ),
     };
     WireEvent {

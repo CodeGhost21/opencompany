@@ -106,7 +106,16 @@ const GRAPHS: Record<string, WorkflowGraph> = {
   [WF_B]: graph(WF_B, "Workflow B"),
 };
 
-/** A failed run — `error` is what puts the Fix affordance on the row. */
+/** A failed run — `error` is what puts the Fix affordance on the row.
+ *
+ * `nodes` names the node the failure traces to (matching each graph's own
+ * `start` trigger, the only node either defines). Codex review on #1821
+ * (eighth pass) made the Fix affordance conditional on `failedNodeOf(run)`
+ * finding one — a run whose `error` names no node (a host restart, an
+ * uncompilable graph) offers no fix the copilot could make, so the button no
+ * longer renders for it. This fixture is about the button leaking across a
+ * workflow switch, not about that distinction, so it keeps the ordinary,
+ * node-attributed shape that earns the button in the first place. */
 function failedRun(workflowId: string, seq: number): WorkflowRunOutcome {
   return {
     seq,
@@ -117,6 +126,7 @@ function failedRun(workflowId: string, seq: number): WorkflowRunOutcome {
     deliveries: [],
     pendingApprovals: [],
     error: `${workflowId} blew up`,
+    nodes: [{ nodeId: "start", status: "error", elapsedMs: 1 }],
   };
 }
 
