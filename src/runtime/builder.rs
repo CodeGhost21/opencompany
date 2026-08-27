@@ -95,11 +95,25 @@ pub fn company_id_from_name(name: &str) -> CompanyId {
     })
 }
 
+/// Narrows one glob list against the company `allow`-list: keeps only the
+/// requests the allow-list actually covers. The primitive both the agent level
+/// and the desk level are built from, so "narrow-only" is one function rather
+/// than a rule each site re-implements.
+fn narrow(allow: &[String], globs: &[String]) -> Vec<String> {
+    globs
+        .iter()
+        .filter(|tool| allow_covers(allow, tool))
+        .cloned()
+        .collect()
+}
+
 /// Computes a company's effective tool grants: the company-wide
 /// `[tools].allow` narrowed by per-agent `tools` (most-restrictive-wins).
 ///
-/// An agent with no explicit `tools` inherits the full company allow-list; an
-/// agent that lists tools contributes only those covered by the allow-list. The
+/// The per-agent three states (issue #1804): an agent with **no** explicit
+/// `tools` (`None`) inherits the full company allow-list; an agent with an
+/// **explicit empty** grant (`Some(vec![])`) contributes nothing; an agent that
+/// lists globs (`Some(globs)`) contributes only those the allow-list covers. The
 /// result is the de-duplicated union across the roster, preserving order. A
 /// company with no roster yields the allow-list unchanged.
 pub fn effective_grants(manifest: &CompanyManifest) -> Vec<String> {
@@ -109,15 +123,7 @@ pub fn effective_grants(manifest: &CompanyManifest) -> Vec<String> {
     }
     let mut grants: Vec<String> = Vec::new();
     for agent in &manifest.agents {
-        if agent.tools.is_empty() {
-            grants.extend(allow.iter().cloned());
-        } else {
-            for tool in &agent.tools {
-                if allow_covers(allow, tool) {
-                    grants.push(tool.clone());
-                }
-            }
-        }
+        grants.extend(agent_effective_grants(allow, agent.tools.as_deref()));
     }
     dedup(grants)
 }
@@ -134,15 +140,23 @@ pub fn effective_grants(manifest: &CompanyManifest) -> Vec<String> {
 /// the *same* function or the console would show an operator a tool list the
 /// harness does not actually grant — which is precisely the verification gap
 /// #264 was filed about.
-pub(crate) fn agent_effective_grants(allow: &[String], agent_tools: &[String]) -> Vec<String> {
-    let grants: Vec<String> = if agent_tools.is_empty() {
-        allow.to_vec()
-    } else {
-        agent_tools
-            .iter()
-            .filter(|tool| allow_covers(allow, tool))
-            .cloned()
-            .collect()
+pub(crate) fn agent_effective_grants(
+    allow: &[String],
+    agent_tools: Option<&[String]>,
+) -> Vec<String> {
+    // The single behavioural flip of issue #1804 (epic #1817, Rung 2). `None`
+    // and `Some(vec![])` used to be one indistinguishable "empty" that both
+    // resolved to the full company grant — so an agent an operator had emptied
+    // held *everything*. They are now distinct at the type level and resolve on
+    // opposite sides: absent inherits the standard grant, an explicit empty list
+    // is a real, deliberate deny-all.
+    let grants: Vec<String> = match agent_tools {
+        // Absent → inherit the company's standard grant (every allowed tool).
+        None => allow.to_vec(),
+        // Explicit empty → no tools. The state that used to be unrepresentable.
+        Some(globs) if globs.is_empty() => Vec::new(),
+        // Listed globs → narrow, intersected with the allow-list (narrow-only).
+        Some(globs) => narrow(allow, globs),
     };
     dedup(grants)
 }
@@ -178,7 +192,7 @@ pub(crate) fn agent_effective_grants(allow: &[String], agent_tools: &[String]) -
 pub(crate) fn agent_scoped_grants(
     allow: &[String],
     desk_allows: &[&[String]],
-    agent_tools: &[String],
+    agent_tools: Option<&[String]>,
 ) -> Vec<String> {
     // No desk states a ceiling (the common case, and every pre-existing
     // manifest) → the desk level is skipped entirely and this is exactly the
@@ -186,10 +200,23 @@ pub(crate) fn agent_scoped_grants(
     let ceiling: Vec<String> = if desk_allows.iter().all(|desk| desk.is_empty()) {
         allow.to_vec()
     } else {
+        // The desk level keeps "empty = no ceiling = the full company grant" —
+        // the documented union sharp edge (a desk with no `tools` widens the
+        // union back to `allow`). The issue #1804 "empty = deny-all" flip is an
+        // *agent*-level rule, not a desk-level one: desks combine additively, so
+        // an empty desk still means "this desk adds no restriction", never "this
+        // desk grants nothing". Reached through `narrow` directly rather than
+        // `agent_effective_grants`, which would now read an empty desk as deny.
         dedup(
             desk_allows
                 .iter()
-                .flat_map(|desk| agent_effective_grants(allow, desk))
+                .flat_map(|desk| {
+                    if desk.is_empty() {
+                        allow.to_vec()
+                    } else {
+                        narrow(allow, desk)
+                    }
+                })
                 .collect(),
         )
     };
@@ -1381,9 +1408,9 @@ impl RuntimeBuilder {
     /// Preserve the pre-upgrade scope of persisted overlay teammates whose
     /// grant was left unstated.
     ///
-    /// An empty `OverlayAgent.tools` means "inherit the whole company
+    /// A `None` `OverlayAgent.tools` means "inherit the whole company
     /// allow-list", and it keeps tracking that list across rebuilds on purpose
-    /// — an operator who left the line empty asked for whatever the company
+    /// — an operator who left the line unstated asked for whatever the company
     /// allows. When a manifest upgrade widens the allow-list into a BYO
     /// real-money namespace (issue #788) that the previous manifest did not
     /// grant, that tracking hands billing to a teammate that never asked for
@@ -1392,13 +1419,19 @@ impl RuntimeBuilder {
     /// teammates — a company that already granted the namespace keeps its
     /// tracking, and one that still does not is untouched.
     ///
+    /// Only the **inherit** state is frozen. A `Some(vec![])` teammate is an
+    /// explicit deny-all since issue #1804 — it tracks nothing and a widened
+    /// allow-list confers it nothing — so it is deliberately left alone.
+    ///
     /// The console's per-agent edit half ([`AgentOverride`]) is covered the
-    /// same way. `tools: Some([])` is its stored spelling of "give this
-    /// teammate the company's standard grant" — the same empty-means-standard
-    /// rule — and an override row is otherwise carried across a rebuild
-    /// verbatim, so a teammate an operator reset to the standard grant before
-    /// the upgrade would silently follow the widened allow-list into the new
-    /// namespace. Its empty line is frozen to the previous allow-list too.
+    /// same way. `tools: Some(None)` is its stored spelling of "reset this
+    /// teammate to the company's standard grant" (the inherit state), and an
+    /// override row is otherwise carried across a rebuild verbatim, so a
+    /// teammate an operator reset to the standard grant before the upgrade would
+    /// silently follow the widened allow-list into the new namespace. Its
+    /// inherit line is frozen to the previous allow-list too — while a
+    /// `Some(Some(vec![]))` deny-all override is, like the overlay case, left
+    /// untouched.
     fn preserve_pre_upgrade_grant_scope(
         overlay_agents: Vec<OverlayAgent>,
         overlay_agent_edits: Vec<AgentOverride>,
@@ -1420,8 +1453,11 @@ impl RuntimeBuilder {
         let overlay_agents = overlay_agents
             .into_iter()
             .map(|mut agent| {
-                if agent.tools.is_empty() {
-                    agent.tools = previous.tools.allow.clone();
+                // `None` = inherit (tracks the allow-list) → freeze. `Some([])`
+                // deny-all and `Some(globs)` narrow both state their own scope
+                // and are left untouched.
+                if agent.tools.is_none() {
+                    agent.tools = Some(previous.tools.allow.clone());
                 }
                 agent
             })
@@ -1429,8 +1465,11 @@ impl RuntimeBuilder {
         let overlay_agent_edits = overlay_agent_edits
             .into_iter()
             .map(|mut edit| {
-                if edit.tools.as_ref().is_some_and(Vec::is_empty) {
-                    edit.tools = Some(previous.tools.allow.clone());
+                // `Some(None)` = an override that resets to the standard grant
+                // (the inherit state) → freeze. `Some(Some(_))` states its own
+                // scope, and `None` is "not overridden" — neither is touched.
+                if matches!(edit.tools, Some(None)) {
+                    edit.tools = Some(Some(previous.tools.allow.clone()));
                 }
                 edit
             })
@@ -4090,7 +4129,8 @@ mod test {
                 name: "Clerk".to_string(),
                 role: "Data Entry".to_string(),
                 description: None,
-                tools: Vec::new(),
+                // `None` = inherit (tracks the allow-list) — the state that freezes.
+                tools: None,
                 model: None,
                 harness: None,
             },
@@ -4099,7 +4139,7 @@ mod test {
                 name: "Finance Help".to_string(),
                 role: "Assistant".to_string(),
                 description: None,
-                tools: vec!["docs.*".to_string()],
+                tools: Some(vec!["docs.*".to_string()]),
                 model: None,
                 harness: None,
             },
@@ -4113,22 +4153,25 @@ mod test {
         );
 
         assert_eq!(
-            migrated[0].tools, old.tools.allow,
-            "an empty line is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+            migrated[0].tools,
+            Some(old.tools.allow.clone()),
+            "an absent (inherit) line is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
         );
         assert_eq!(
             migrated[1].tools,
-            vec!["docs.*".to_string()],
+            Some(vec!["docs.*".to_string()]),
             "a stated grant is untouched"
         );
     }
 
-    /// The console's per-agent edit half carries the same empty-means-standard
-    /// rule (`AgentOverride.tools = Some([])` is "give this teammate the
-    /// company's standard grant"), so an upgrade into a BYO namespace must
-    /// freeze its empty line to the previous allow-list as well — otherwise the
-    /// override, copied across the rebuild verbatim, replaces the new
-    /// manifest's explicit non-billing `tools` line with the widened list.
+    /// The console's per-agent edit half carries the same inherit-freeze rule.
+    /// Since #1804 `AgentOverride.tools` is a double-option: `Some(None)` is the
+    /// "reset this teammate to the company's standard grant" spelling (the
+    /// inherit state), so an upgrade into a BYO namespace must freeze it to the
+    /// previous allow-list as well — otherwise the override, copied across the
+    /// rebuild verbatim, replaces the new manifest's explicit non-billing
+    /// `tools` line with the widened list. `Some(Some([]))` (deny-all) and
+    /// `Some(Some(globs))` (narrow) state their own scope and are left untouched.
     #[test]
     fn an_upgrade_into_chargebee_freezes_an_empty_agent_override_scope() {
         let old: CompanyManifest = toml::from_str(
@@ -4148,14 +4191,15 @@ mod test {
         let edits = vec![
             AgentOverride {
                 agent_id: "tax_preparer".to_string(),
-                // The stored spelling of "reset to the company's standard
-                // grant" — what the console writes for an empty tools list.
-                tools: Some(Vec::new()),
+                // The stored spelling of "reset to the company's standard grant"
+                // since #1804 — `Some(None)`, the inherit state. (An empty list
+                // is `Some(Some(vec![]))`, a deny-all, and is NOT frozen.)
+                tools: Some(None),
                 ..Default::default()
             },
             AgentOverride {
                 agent_id: "brand_strategist".to_string(),
-                tools: Some(vec!["docs.*".to_string()]),
+                tools: Some(Some(vec!["docs.*".to_string()])),
                 ..Default::default()
             },
         ];
@@ -4164,13 +4208,13 @@ mod test {
             RuntimeBuilder::preserve_pre_upgrade_grant_scope(Vec::new(), edits, Some(&old), &new);
 
         assert_eq!(
-            migrated[0].tools.as_deref().unwrap(),
-            old.tools.allow,
-            "an empty override is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+            migrated[0].tools,
+            Some(Some(old.tools.allow.clone())),
+            "an inherit override (Some(None)) is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
         );
         assert_eq!(
-            migrated[1].tools.as_deref().unwrap(),
-            vec!["docs.*".to_string()],
+            migrated[1].tools,
+            Some(Some(vec!["docs.*".to_string()])),
             "a stated override grant is untouched"
         );
     }
@@ -4196,7 +4240,8 @@ mod test {
             name: "Clerk".to_string(),
             role: "Data Entry".to_string(),
             description: None,
-            tools: Vec::new(),
+            // `None` = inherit / tracks the allow-list.
+            tools: None,
             model: None,
             harness: None,
         }];
@@ -4209,8 +4254,8 @@ mod test {
         );
 
         assert!(
-            migrated[0].tools.is_empty(),
-            "no BYO namespace was newly conferred, so tracking is preserved"
+            migrated[0].tools.is_none(),
+            "no BYO namespace was newly conferred, so the inherit line keeps tracking (stays None)"
         );
     }
 
@@ -4866,7 +4911,12 @@ mod test {
             let company = strings(company);
             let desk_owned: Vec<Vec<String>> = desks.iter().map(|d| strings(d)).collect();
             let desk_refs: Vec<&[String]> = desk_owned.iter().map(Vec::as_slice).collect();
-            agent_scoped_grants(&company, &desk_refs, &strings(agent))
+            // An empty per-agent slice is "no line of its own" → `None` (inherit)
+            // since #1804, NOT `Some(&[])` (which is a deny-all). A test that
+            // wants the deny-all case calls `agent_scoped_grants` directly.
+            let agent = strings(agent);
+            let agent_tools = (!agent.is_empty()).then_some(agent.as_slice());
+            agent_scoped_grants(&company, &desk_refs, agent_tools)
         }
 
         /// No desk and no per-agent list: the company grant passes through
@@ -4877,6 +4927,22 @@ mod test {
             assert_eq!(scope(&["*", "search"], &[], &[]), ["*", "search"]);
             assert_eq!(scope(&["*", "search"], &[&[]], &[]), ["*", "search"]);
             assert_eq!(scope(&["*", "search"], &[&[], &[]], &[]), ["*", "search"]);
+        }
+
+        /// The #1804 contract inversion at the resolver: an **explicit empty**
+        /// agent grant (`Some(&[])`) is a deny-all — it resolves to nothing,
+        /// the opposite of `None` (inherit), even under a wide-open company and
+        /// no desk ceiling.
+        #[test]
+        fn an_explicit_empty_agent_grant_is_a_deny_all() {
+            let company = strings(&["*", "search"]);
+            // `None` inherits the whole company grant…
+            assert_eq!(agent_scoped_grants(&company, &[], None), ["*", "search"]);
+            // …but an explicit empty list holds nothing.
+            assert_eq!(
+                agent_scoped_grants(&company, &[], Some(&[])),
+                Vec::<String>::new()
+            );
         }
 
         /// The middle level does the work the feature exists for: a department
@@ -4956,9 +5022,11 @@ mod test {
                 (&["docs.*", "web"][..], &["web"][..]),
                 (&["docs.*"][..], &["shell"][..]),
             ] {
+                let agent_owned = strings(agent);
+                let agent_tools = (!agent_owned.is_empty()).then_some(agent_owned.as_slice());
                 assert_eq!(
-                    agent_scoped_grants(&strings(company), &[&[], &[]], &strings(agent)),
-                    agent_effective_grants(&strings(company), &strings(agent)),
+                    agent_scoped_grants(&strings(company), &[&[], &[]], agent_tools),
+                    agent_effective_grants(&strings(company), agent_tools),
                     "company={company:?} agent={agent:?}"
                 );
             }
@@ -5444,7 +5512,7 @@ mod test {
             // like any teammate that requests nothing — not something this
             // bundle's author decided, so not something this test pins.
             for agent in manifest.agents.iter().filter(|agent| !agent.global) {
-                let grants = agent_effective_grants(&manifest.tools.allow, &agent.tools);
+                let grants = agent_effective_grants(&manifest.tools.allow, agent.tools.as_deref());
                 assert!(
                     grants_cover(&grants, "workspace"),
                     "{company}/{} must reach the workspace tools; effective grants: {grants:?}",
@@ -5472,7 +5540,7 @@ mod test {
                 // (`mcp:*`, `mcp:notion`) while `grants_cover` only understands the
                 // dot form, so it answers `false` for a grant list that plainly
                 // contains `mcp:*`.
-                if agent.tools.iter().any(|tool| tool == "mcp:*") {
+                if agent.tools.iter().flatten().any(|tool| tool == "mcp:*") {
                     assert!(
                         grants
                             .iter()
