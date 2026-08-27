@@ -91,6 +91,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -435,6 +436,12 @@ export function TaskDetailView({
   if (notFound) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        {/*
+          `#/tasks/<deleted-id>` had no `h1` at all (codex review, #1785): this
+          pane's only heading is the card's own title, and a deleted card has
+          none. `hidden`, because the recovery message *is* the pane.
+        */}
+        <PageHeader title="Task not found" hidden />
         <p className="text-sm font-medium">This task no longer exists.</p>
         <p className="max-w-sm text-xs text-muted-foreground">
           It may have been deleted. Head back to the board to pick another card.
@@ -449,6 +456,19 @@ export function TaskDetailView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/*
+        This pane's heading is the card's own title, inside `DetailHeader`,
+        which needs a loaded `detail`. So a cold `#/tasks/<id>` was unnamed
+        while the read was in flight, and stayed unnamed if it failed with
+        anything other than a 404 — `detail` is left null and nothing retries
+        (codex review, #1785).
+
+        "Task", not the id: an id is a string the operator did not choose and
+        cannot read out, and announcing one would be worse than announcing the
+        kind of page. It disappears the moment the real title exists, so the
+        two are never both on screen.
+      */}
+      {!detail && <PageHeader title="Task" hidden />}
       <div className="flex items-center gap-2 border-b px-4 py-3">
         <Button
           variant="ghost"

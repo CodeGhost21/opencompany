@@ -56,6 +56,7 @@ import {
   type WorkspaceOrigin,
 } from "@/api/workspace";
 import { cachedAvatarNodeIds, forgetAvatarNode } from "@/lib/avatar";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -107,6 +108,7 @@ import {
   breadcrumbOf,
   childrenOf,
   clearLegacyLocal,
+  countNotes,
   declineLegacyImport,
   DERIVED_LABEL,
   DERIVED_REASON,
@@ -134,8 +136,7 @@ import {
   sortedFolders,
   subtreeCounts,
   subtreeIds,
-  titleOf,
-} from "@/lib/workspace";
+  titleOf, headerNoteCount } from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { MoveAudienceConfirm } from "@/views/workspace/MoveAudienceConfirm";
 import { SearchResults } from "@/views/workspace/SearchResults";
@@ -458,6 +459,15 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // uploaded faces, not only deletes initiated by this view.
   const nodesRef = useRef<FsNode[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * Has a tree ever actually loaded?
+   *
+   * Distinct from `!loading`, which a non-silent refresh sets back to `true`
+   * over a tree already on screen, and from `nodes.length`, which cannot tell
+   * "not fetched yet" from "fetched, and empty" — the two states the header
+   * count has to keep apart (codex review on #1785).
+   */
+  const [treeKnown, setTreeKnown] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The roster names the `agents/` folders resolve against (issue #973). Best
@@ -604,6 +614,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
             ),
           );
         }
+        setTreeKnown(true);
         return tree;
       } catch (e) {
         if (mine !== treeGen.current) return null;
@@ -1482,13 +1493,66 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
    * the tree never scrolled to it.
    */
   const secretNote = isSecretNode(nodes, openId);
+  /**
+   * How many notes the workspace holds, for the header's count.
+   *
+   * Memoised rather than filtered inline: this component re-renders on every
+   * keystroke in the editor (the draft is state), and `nodes` is the whole
+   * tree — so an inline scan would walk every node in the workspace once per
+   * character typed, to recompute a number that only changes when the tree
+   * does.
+   */
+  const noteCount = useMemo(() => countNotes(nodes), [nodes]);
 
   return (
-    <div className="flex min-w-0 max-w-full flex-1 overflow-hidden">
-      {/* The file tree and editor are the page, with no title of their own
-          (issue #1221) — this names the page for a screen reader the same
-          way every other view's title does. */}
-      <h1 className="sr-only">Workspace</h1>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/*
+        Issue #1763: Workspace was the one console page with no header at all.
+        It opened straight into the `EXPLORER` toolbar, so the first heading an
+        operator's eye landed on was a column label for the left rail, and the
+        only thing naming the page was the nav row they arrived from.
+
+        It had an `sr-only` title (issue #1221) on the reasoning that "the file
+        tree and editor are the page". That is true of Chat and Inbox, where the
+        content starts at the top edge and fills the frame. It is not true here:
+        the pane beside the tree is empty until a note is opened, so the page
+        opened on an unnamed toolbar over blank space. This was the omission,
+        not the decision.
+
+        The count is the notes, not the folders — a folder is how the tree is
+        arranged rather than a thing the workspace holds.
+      */}
+      <PageHeader
+        title="Workspace"
+        count={headerNoteCount(noteCount, treeKnown)}
+        /*
+          Not "every note this company's teammates can read and write", which
+          the tree contradicts in two places: `secrets/` is the one folder the
+          agents cannot list, read, search or write (`SECRETS_REASON`, #1465),
+          and `derived/` is written by a ledger and re-derived over any edit
+          (`DERIVED_REASON`, #1222). A header that claims universal read/write
+          is worst exactly where it matters most — over a folder holding
+          credentials.
+
+          It describes the surface and points at where the rule is stated
+          rather than restating it. The per-folder rules already appear on the
+          tree row, in the move dialog and on the note itself, in one wording
+          each on purpose (see `SECRETS_LABEL`); a fourth phrasing up here is
+          how an operator comes to believe there are four rules. The
+          conditional also stays true of a workspace that has neither folder,
+          which an "…and two folders are exceptions" sentence would not.
+        */
+        description="Every note this company holds, in one shared tree. Where a folder is read-only or hidden from the agents, the tree says so."
+        data-testid="workspace-header"
+      />
+      {/*
+        `min-w-0 max-w-full` is #1767's, kept: it is what stops the resizable
+        explorer column pushing the editor past the viewport. It was on the
+        one wrapper this view had; #1763 splits that into a column (header
+        above, panes below), and the classes belong on the row holding the
+        `aside`, which is this one rather than the element outside it.
+      */}
+      <div className="flex min-h-0 min-w-0 max-w-full flex-1 overflow-hidden">
       {/* Explorer */}
       <aside
         id="workspace-explorer"
@@ -2042,6 +2106,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
           />
         )}
       </section>
+      </div>
 
       <NamePrompt
         nodes={nodes}

@@ -63,6 +63,7 @@ pub mod planning;
 pub mod profile_draft;
 pub mod roster_build;
 pub mod search;
+pub mod selector;
 pub mod triage;
 mod types;
 mod usage;
@@ -89,6 +90,7 @@ pub use profile_draft::{
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };
+pub use selector::{record_selector_usage, selector_sample};
 pub use triage::{record_triage_usage, triage_sample};
 pub use types::{
     AgentTokens, CategorySpend, Direction, Finances, ProviderCalls, Transaction, Usage, UsagePoint,
@@ -136,7 +138,7 @@ mod tests {
                 description: None,
                 tier: None,
                 harness: None,
-                tools: vec![],
+                tools: None,
                 delegates_to: vec![],
                 context: None,
                 budget_usd_daily: None,
@@ -156,7 +158,7 @@ mod tests {
                 description: None,
                 tier: None,
                 harness: None,
-                tools: vec![],
+                tools: None,
                 delegates_to: vec![],
                 context: None,
                 budget_usd_daily: None,
@@ -174,7 +176,7 @@ mod tests {
             name: "Creative studio (renamed)".into(),
             role: "Creative".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         }];

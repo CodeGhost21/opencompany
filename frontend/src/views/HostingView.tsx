@@ -10,6 +10,7 @@ import {
 } from "@/api/hosting";
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
@@ -167,21 +168,46 @@ export function HostingView({ client, company }: Props) {
     }
   }
 
+  /*
+    Hoisted above the state conditionals for the same reason as `SearchView`'s
+    (codex review, #1785) — this page is the other half of that copy-paste
+    pair, and had the same two unnamed states.
+  */
+  const header = (
+    <PageHeader
+      title="Hosting"
+      width="5xl"
+      description={
+        <>
+          Connect a hosting provider so your teammates can put a site from this
+          company&rsquo;s workspace on the internet — with a managed database
+          behind it, and a custom domain in front.
+        </>
+      }
+    />
+  );
+
   if (loadError) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-4 py-6">
-        <Alert variant="destructive" data-testid="hosting-load-error">
-          <TriangleAlert className="size-4" />
-          <AlertDescription>Could not load hosting settings: {loadError}</AlertDescription>
-        </Alert>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="mx-auto w-full max-w-5xl px-4 py-6">
+          <Alert variant="destructive" data-testid="hosting-load-error">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>Could not load hosting settings: {loadError}</AlertDescription>
+          </Alert>
+        </div>
       </div>
     );
   }
 
   if (!status) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        <Loader2 className="mr-2 size-4 animate-spin" /> Loading hosting…
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" /> Loading hosting…
+        </div>
       </div>
     );
   }
@@ -189,16 +215,9 @@ export function HostingView({ client, company }: Props) {
   const connected = status.inBuild && status.granted && status.apiKeyConfigured;
 
   return (
-    <div className="flex-1 overflow-y-auto" data-testid="hosting-view">
-      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Hosting</h1>
-          <p className="text-sm text-muted-foreground">
-            Connect a hosting provider so your teammates can put a site from this
-            company&rsquo;s workspace on the internet — with a managed database
-            behind it, and a custom domain in front.
-          </p>
-        </div>
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="hosting-view">
+      {header}
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {/* The two problems this form cannot fix, said before the form so an
           operator does not fill it in and wonder why nothing happened. */}
@@ -226,7 +245,7 @@ export function HostingView({ client, company }: Props) {
         ) : null}
 
         <Card>
-          <CardContent className="space-y-4 pt-6">
+          <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
               <div className="space-y-1">
                 <p className="text-sm font-medium capitalize">{status.provider}</p>

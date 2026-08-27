@@ -21,15 +21,30 @@ yields a grant `[tools].allow` does not already cover, which is what makes the
 lower two levels safe to hand to an operator: the worst a desk or an agent
 declaration can do is remove capability.
 
-Each level is **optional**, and an omitted level is a pass-through rather than a
-denial. This matters more than it looks:
+Each level is **optional**, and an **omitted** level is a pass-through rather
+than a denial:
 
-> An empty grant list means **"inherit"**, not **"nothing"**.
+> An **absent** grant means **"inherit"**, not **"nothing"**.
 
 An agent with no `tools` line holds its desk's ceiling; a desk with no `tools`
-line imposes the company's. Any surface that renders an empty list as "no tools"
-has inverted the meaning — see `AgentToolsDto` in
-`src/server/ops/team_agent.rs`, whose field docs carry the same warning.
+line imposes the company's.
+
+Since issue #1804 the **agent** level draws a further distinction that the desk
+level does not, because a grant is a three-state value there:
+
+> At the **agent** level: **absent** (`None`) inherits; an **explicit empty
+> list** (`[]`) is a deliberate **deny-all** (nothing); a **non-empty list**
+> narrows.
+
+This is a deliberate contract inversion: `[]` used to mean "inherit" and now
+means "hold nothing". It lets an operator lock a single teammate down to no
+tools without touching the company or desk ceiling. The **desk** level keeps the
+older rule — an empty desk `tools` states no ceiling (full pass-through), never
+a company-wide deny-all — so the union sharp edge there is unchanged.
+
+Any surface that renders an absent agent grant as "no tools", or an explicit
+empty agent grant as "inherit", has inverted the meaning — see `AgentToolsDto`
+in `src/server/ops/team_agent.rs`, whose field docs carry the same warning.
 
 Resolution lives in one function,
 [`agent_scoped_grants`](../../../src/runtime/builder.rs), and every reader goes

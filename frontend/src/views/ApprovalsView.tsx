@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Loader2, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import { Check, Clock, Loader2, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -22,6 +22,7 @@ import {
   useAskerNames,
   useApprovalThreadLinks,
 } from "@/components/approval-card";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useApprovalDeadline } from "@/hooks/use-approval-deadline";
@@ -146,6 +147,13 @@ export function ApprovalsView({
   // is doing it" vs "recorded"), and the card says which one it is waiting on.
   const [inFlight, setInFlight] = useState<ReadonlyMap<string, Verdict>>(
     () => new Map(),
+  );
+  // Issue #1805: which cards have an in-flight deadline extension. Separate from
+  // `inFlight` (a verdict) — extending is not a decision, so it neither blocks
+  // nor is blocked by one being recorded; it only guards a double-press on its
+  // own button.
+  const [extending, setExtending] = useState<ReadonlySet<string>>(
+    () => new Set(),
   );
   const { approvals, now, queue } = feed;
   /**
@@ -380,6 +388,39 @@ export function ApprovalsView({
     }
   }
 
+  // Issue #1805: push a card's deadline out so a stalled run does not
+  // default-deny before someone can decide it. Not a verdict — the card stays
+  // parked and decidable — so it runs on its own in-flight set and refreshes the
+  // feed to redraw the countdown from the new deadline the host reports.
+  async function extendDeadline(a: ApprovalSummary) {
+    if (extending.has(a.id)) return;
+    setExtending((prev) => new Set(prev).add(a.id));
+    try {
+      await client.extendApproval(a.id, company);
+      const line = `Extended the deadline for ${approvalSummary(a)}.`;
+      onResolved(line);
+      toast.success(line);
+      // The new deadline is on the host now; a refresh redraws the countdown.
+      void feed.refresh();
+    } catch (err) {
+      // A 404 means it is no longer parked (already decided or expired
+      // elsewhere) — reconcile by refreshing rather than reporting a failure.
+      if (err instanceof ApiError && err.status === 404) {
+        void feed.refresh();
+      } else {
+        const msg =
+          err instanceof ApiError ? err.message : "something went wrong";
+        toast.error(`Couldn't extend the deadline — ${msg}`);
+      }
+    } finally {
+      setExtending((prev) => {
+        const next = new Set(prev);
+        next.delete(a.id);
+        return next;
+      });
+    }
+  }
+
   // Bulk decisions for the whole visible queue.
   //
   // Client-side and sequential on purpose, rather than a new batch route: each
@@ -421,7 +462,7 @@ export function ApprovalsView({
         {/* The queue's own count heading below only renders once loaded, so
             it can't be the page's one `h1` — this stays present through
             loading, error and empty states alike (issue #1221). */}
-        <h1 className="sr-only">Approvals</h1>
+        <PageHeader hidden title="Approvals" />
         {/* Issue #883: the filter says so, and offers the way out of itself.
             A narrowed queue that looked identical to the whole one would make a
             decided-elsewhere approval look like it had vanished. */}
@@ -558,6 +599,8 @@ export function ApprovalsView({
                     onDecide={(verdict, scope) =>
                       void decide(a, verdict, scope)
                     }
+                    extending={extending.has(a.id)}
+                    onExtend={() => void extendDeadline(a)}
                   />
                 ))}
               </div>
@@ -741,8 +784,8 @@ export function StandingPermissions({
           const busy = revoking.has(g.id);
           const expired = g.expires_at_millis <= now;
           return (
-            <Card key={g.id}>
-              <CardContent className="flex flex-wrap items-center gap-3 py-3">
+            <Card key={g.id} size="sm">
+              <CardContent className="flex flex-wrap items-center gap-3">
                 <div className="min-w-0 flex-1">
                   {/* Phrased, never the raw identifier — the glossary rule. */}
                   <p className="truncate text-sm font-medium">
@@ -853,6 +896,8 @@ export function ApprovalCard({
   batchIndex,
   batchTotal,
   onDecide,
+  extending = false,
+  onExtend,
 }: {
   approval: ApprovalSummary;
   now: number;
@@ -873,6 +918,11 @@ export function ApprovalCard({
    */
   batchTotal: number;
   onDecide: (verdict: Verdict, scope: GrantScope) => void;
+  /** Whether this card's deadline extension is in flight (#1805). */
+  extending?: boolean;
+  /** Push this approval's deadline out to a fresh window (#1805). Absent in
+   * read-only render contexts (some tests), where the button is inert. */
+  onExtend?: () => void;
 }) {
   // Per-card, like the in-flight verdict and for the same reason: two cards can
   // be open at once and each carries its own decision. Defaults to `once`, so a
@@ -887,7 +937,7 @@ export function ApprovalCard({
   // business, and treating it as such is the visual half of the #373 bug.
   return (
     <Card data-approval-id={a.id}>
-      <CardContent className="flex flex-col gap-3 py-4">
+      <CardContent className="flex flex-col gap-3">
         {/* Issue #1406: the headline no longer carries the decide buttons.
             Approve and Decline used to sit here, level with the title and above
             everything an operator reads to decide — the payload, and the scope
@@ -953,6 +1003,27 @@ export function ApprovalCard({
           data-testid="approval-decide"
           className="flex flex-wrap justify-end gap-2 border-t border-border pt-3"
         >
+          {/* Issue #1805: the deadline is not only shown, it can be moved. Only
+              offered when the host reports a deadline at all — an absent
+              `expires_at_millis` means this host has no deadlines, so there is
+              nothing to extend. Left of the verdicts because it is not one: it
+              buys the operator time to make the actual decision. */}
+          {typeof a.expires_at_millis === "number" && (
+            <Button
+              variant="outline"
+              size="sm"
+              aria-label={`Extend the deadline: ${decisionLabel(a, askerNames, now)}`}
+              disabled={deciding !== null || extending}
+              onClick={onExtend}
+            >
+              {extending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Clock className="size-4" />
+              )}{" "}
+              Extend
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"

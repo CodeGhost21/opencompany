@@ -39,6 +39,9 @@ Supporting docs:
   - [offline.md](offline.md) — running with no network at all: the documented
     manifest, what stays hosted (Medulla, Composio, the hub identity exchange),
     and the CI lane that executes the claim inside a network namespace
+  - [analytics.md](analytics.md) — what the product reports about its own use:
+    hosted tenants only, an opaque id, shape-and-outcome payloads that cannot
+    structurally carry content, and how to turn it off
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
@@ -59,8 +62,9 @@ Supporting docs:
   prompts, checked-in briefing documents versus routed workspace documents, and
   the `classes` routing exclusions
 - [tools.md](tools.md) — the three-level tool grant
-  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an empty grant list means
-  "inherit" rather than "nothing", the four namespaces `*` never confers, the
+  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an absent grant means
+  "inherit" rather than "nothing" (and why an explicit empty agent grant is a
+  deny-all since #1804), the four namespaces `*` never confers, the
   unified tool catalog, and the seed-wins rule for console desk overrides
 - [lifecycle.md](lifecycle.md) — company state machine and durability
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
