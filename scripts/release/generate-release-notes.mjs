@@ -448,6 +448,7 @@ Required structure:
 - For each new contributor, thank them and briefly describe what they contributed based on their PR titles.
 - End the New Contributors section with a short note hoping they join the community for contributor rewards.
 - Add "## Contributor Credits" thanking all contributors.
+- IMPORTANT: \`contributors[].name\` is a git DISPLAY NAME, not a GitHub handle. Never prefix it with "@". Only \`pullRequests[].author\` is a real handle and may take an "@".
 - Do not add a "## Pull Requests" section.
 - Add "## Full Compare" with the compare URL.
 
@@ -800,7 +801,11 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// `process.argv[1]` is undefined under `node -e` and `node --input-type=module`,
+// and `pathToFileURL(undefined)` THROWS — so an unguarded check here turns any
+// programmatic import of this module into a crash before a single export is
+// read. Importing it must never run `main()`, and must never fail either.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
     console.error(`[release-notes] ${error.message}`);
     process.exit(1);
