@@ -418,6 +418,11 @@ pub struct WorkflowNodeDef {
     /// nodes only. `None` (every legacy graph) keeps the pre-#170 behaviour: the
     /// value surfaces in the run-result drawer and goes nowhere else.
     pub destination: Option<WorkflowDestinationDef>,
+    /// Issue #1866 (deterministic tier): a mechanical check the node's output
+    /// must pass before the run advances past it. `agent` nodes only in this
+    /// slice — see [`WorkflowPostconditionDef`]. `None` (every legacy graph)
+    /// keeps the pre-#1866 behaviour: quality is assumed, never checked.
+    pub postcondition: Option<WorkflowPostconditionDef>,
 }
 
 /// Where an `output` node's report goes when the run completes.
@@ -467,6 +472,33 @@ pub struct WorkflowRetryDef {
     /// Backoff curve: `fixed` (default, constant delay) or `exponential`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff: Option<String>,
+}
+
+/// A node's declared deterministic postcondition (issue #1866, deterministic
+/// tier only) — a mechanical predicate checked against the node's output
+/// before it is allowed to flow downstream. Mirrors the way
+/// [`WorkflowRetryDef`] carries the free-form `retry.*` config keys as typed
+/// model data: the console and validation see one shape, and
+/// [`crate::workflows::caps::HarnessAgentRunner::run_turn`] reads the lowered
+/// form straight off node config, the same seam `on_error`/`retry` already
+/// use.
+///
+/// Agent nodes only for this slice — `tool_call`/`http_request` are a
+/// follow-up (see the issue's fix shape).
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkflowPostconditionDef {
+    /// Which predicate to check: `non_empty`, `field_present`, or
+    /// `non_empty_list`. An unrecognized value is rejected at author time by
+    /// [`validate`]; [`crate::workflows::caps::postcondition::evaluate_postcondition`]
+    /// fails OPEN on one anyway, for a graph saved by a different binary
+    /// version.
+    #[serde(default)]
+    pub require: String,
+    /// A dotted path into the node's output (e.g. `json.items`). Required for
+    /// `field_present`; optional for `non_empty_list` (defaults to the whole
+    /// output); unused by `non_empty`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
 }
 
 /// A directed edge between two nodes.
@@ -562,6 +594,11 @@ pub(crate) struct RawNode {
     pub(crate) retry: Option<WorkflowRetryDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) requires_approval: Option<bool>,
+    /// Issue #1866: table-valued like `retry`, so it must precede any scalar
+    /// field for the same `toml::to_string` reason documented on `retry`
+    /// above — kept beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) postcondition: Option<WorkflowPostconditionDef>,
     /// Kept LAST in the struct: `toml::to_string` refuses to emit a scalar after
     /// a table, so a table-valued field must not be followed by a scalar one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -728,6 +765,12 @@ pub(crate) fn project_workflow_spec(raw: &RawWorkflow) -> WorkflowSpecProjection
         if let Some(repeatable) = node.repeatable {
             fields.push(("repeatable", repeatable.to_string()));
         }
+        if let Some(postcondition) = &node.postcondition {
+            fields.push((
+                "postcondition",
+                serde_json::to_string(postcondition).unwrap_or_else(|_| "set".to_string()),
+            ));
+        }
         if !fields.is_empty() {
             unexpressible.push((node.id.clone(), fields));
         }
@@ -840,6 +883,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 requires_approval: node.requires_approval,
                 repeatable: node.repeatable,
                 destination: node.destination,
+                postcondition: node.postcondition,
             })
             .collect(),
         edges: raw
@@ -1424,6 +1468,40 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
             }
         }
 
+        // `postcondition` (issue #1866, deterministic tier): a mechanical
+        // check the node's output must pass before the run advances. Agent
+        // nodes only in this slice — `tool_call`/`http_request` are a
+        // follow-up, so any other kind naming one is rejected the same way
+        // `destination` is rejected off an `output` node above. `require`
+        // must be one of the three known predicates and `field_present`
+        // needs a `field` to check — an author who leaves it out has
+        // declared a gate that can never resolve.
+        if let Some(postcondition) = &node.postcondition {
+            if kind != Some(WorkflowNodeKind::Agent) {
+                problems.push(format!(
+                    "{label} sets `postcondition` but is a `{}` node — only `agent` nodes carry a postcondition today.",
+                    node.kind
+                ));
+            }
+            match postcondition.require.as_str() {
+                "non_empty" | "non_empty_list" => {}
+                "field_present" => {
+                    if postcondition
+                        .field
+                        .as_deref()
+                        .is_none_or(|f| f.trim().is_empty())
+                    {
+                        problems.push(format!(
+                            "{label} has a `postcondition` with `require = \"field_present\"` but no `field` — name the field it must find."
+                        ));
+                    }
+                }
+                other => problems.push(format!(
+                    "{label} has an unknown `postcondition.require` `{other}` — use one of non_empty, field_present, non_empty_list."
+                )),
+            }
+        }
+
         // Reserved config keys: the first-class fields above are written into
         // the engine config LAST, so a `config` entry naming one would be
         // silently ignored — reject it as a footgun instead. `destination` is
@@ -1439,6 +1517,7 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                 "schedule",
                 "destination",
                 "repeatable",
+                "postcondition",
             ] {
                 if table.contains_key(reserved) {
                     problems.push(format!(
@@ -2098,6 +2177,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -2112,6 +2192,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -2128,6 +2209,125 @@ mod tests {
         let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
         assert_eq!(worker.agent.as_deref(), Some("ceo"));
         assert_eq!(file.edges[0].label.as_deref(), Some("ok"));
+    }
+
+    /// Issue #1866: a declared `postcondition` survives the render -> re-parse
+    /// round trip [`WorkflowSpecProjection`]/the console draft path relies on,
+    /// and — because [`WorkflowPostconditionDef`] is table-valued —
+    /// `toml::to_string` does not choke on field order the way it would if a
+    /// scalar field followed it (the reason `postcondition` sits beside
+    /// `retry`, before `destination`, on [`RawNode`]).
+    #[test]
+    fn render_workflow_round_trip_preserves_postcondition() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: None,
+                    destination: None,
+                    postcondition: None,
+                },
+                RawNode {
+                    id: "worker".to_string(),
+                    kind: "agent".to_string(),
+                    name: "Worker".to_string(),
+                    summary: None,
+                    agent: Some("ceo".to_string()),
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: None,
+                    destination: None,
+                    postcondition: Some(WorkflowPostconditionDef {
+                        require: "field_present".to_string(),
+                        field: Some("items".to_string()),
+                    }),
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "worker".to_string(),
+                label: None,
+            }],
+        };
+        let toml_src = render_workflow(&raw).expect("renders, even with a table field present");
+        let file = parse_workflow(&toml_src).expect("re-parses the rendered graph");
+        let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
+        let postcondition = worker
+            .postcondition
+            .as_ref()
+            .expect("the postcondition survived the round trip");
+        assert_eq!(postcondition.require, "field_present");
+        assert_eq!(postcondition.field.as_deref(), Some("items"));
+    }
+
+    /// Issue #1866: `postcondition` is operator-only policy, exactly like
+    /// `retry` and `requires_approval` beside it — the agent authoring schema
+    /// cannot express it, so [`project_workflow_spec`] must list it in
+    /// [`WorkflowSpecProjection::unexpressible`] rather than silently
+    /// dropping it on an agent-driven full-replacement edit.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn project_workflow_spec_lists_postcondition_as_unexpressible() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![RawNode {
+                id: "worker".to_string(),
+                kind: "agent".to_string(),
+                name: "Worker".to_string(),
+                summary: None,
+                agent: Some("ceo".to_string()),
+                schedule: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                repeatable: None,
+                destination: None,
+                postcondition: Some(WorkflowPostconditionDef {
+                    require: "non_empty".to_string(),
+                    field: None,
+                }),
+            }],
+            edges: Vec::new(),
+        };
+        let projection = project_workflow_spec(&raw);
+        assert_eq!(projection.unexpressible.len(), 1);
+        let (node_id, fields) = &projection.unexpressible[0];
+        assert_eq!(node_id, "worker");
+        assert!(
+            fields.iter().any(|(name, _)| *name == "postcondition"),
+            "postcondition must be named in the unexpressible residue: {fields:?}"
+        );
+        assert!(
+            projection.unexpressible_summary().contains("postcondition"),
+            "{}",
+            projection.unexpressible_summary()
+        );
+        // And it does not leak into the agent-facing spec itself.
+        let worker_spec = projection.spec["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "worker")
+            .unwrap();
+        assert!(worker_spec.get("postcondition").is_none());
     }
 
     /// A rendered graph that fails structural validation (no trigger) surfaces
@@ -2153,6 +2353,7 @@ mod tests {
                 requires_approval: None,
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: vec![],
         };
@@ -2439,6 +2640,130 @@ mod tests {
         "#;
         let err = parse_workflow(src).unwrap_err();
         assert!(err.to_string().contains("inside `config`"), "{err}");
+    }
+
+    #[test]
+    fn postcondition_inside_config_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.config]
+            postcondition = "non_empty"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("inside `config`"), "{err}");
+    }
+
+    #[test]
+    fn postcondition_valid_on_an_agent_node_parses() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            field = "items"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let file = parse_workflow(src).expect("a postcondition on an agent node is valid");
+        let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
+        let postcondition = worker.postcondition.as_ref().expect("postcondition set");
+        assert_eq!(postcondition.require, "field_present");
+        assert_eq!(postcondition.field.as_deref(), Some("items"));
+    }
+
+    #[test]
+    fn postcondition_on_a_non_agent_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.postcondition]
+            require = "non_empty"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only `agent` nodes carry a postcondition"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn postcondition_with_an_unknown_require_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "smells_right"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown `postcondition.require` `smells_right`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn postcondition_field_present_without_a_field_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("but no `field`"), "{err}");
     }
 
     #[test]
@@ -3574,6 +3899,7 @@ to = "to_channel"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -3591,6 +3917,7 @@ to = "to_channel"
                         kind: "email".to_string(),
                         target: Some("ada@example.com".to_string()),
                     }),
+                    postcondition: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -3629,6 +3956,7 @@ to = "to_channel"
                 requires_approval: None,
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: Vec::new(),
         };
@@ -3661,6 +3989,7 @@ to = "to_channel"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -3675,6 +4004,7 @@ to = "to_channel"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -3893,6 +4223,7 @@ to = "to_channel"
                 requires_approval: None,
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: Vec::new(),
         };
@@ -3927,6 +4258,7 @@ to = "to_channel"
                     requires_approval: n.requires_approval,
                     repeatable: None,
                     destination: n.destination.clone(),
+                    postcondition: None,
                 })
                 .collect(),
             edges: Vec::new(),
