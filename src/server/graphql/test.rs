@@ -558,7 +558,7 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
         name: "Jamie".to_string(),
         role: "Growth".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
         model: None,
         harness: None,
     });
@@ -644,7 +644,7 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         name: "Zeroed".to_string(),
         role: "Growth".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
         model: None,
         harness: None,
     });
@@ -653,7 +653,7 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         name: "Uncapped".to_string(),
         role: "Ops".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
         model: None,
         harness: None,
     });

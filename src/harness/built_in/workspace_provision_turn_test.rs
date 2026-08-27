@@ -441,7 +441,7 @@ async fn an_overlay_teammate_added_at_runtime_writes_on_its_first_turn() {
         name: "Analyst".to_string(),
         role: "Analyst".to_string(),
         description: Some("Reads the numbers.".to_string()),
-        tools: Vec::new(),
+        tools: None,
         model: None,
         harness: None,
     };
