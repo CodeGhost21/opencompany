@@ -150,24 +150,39 @@ export interface TaskApprovalRow {
  * *told* an operator their run had parked and gave them nowhere to act, and the
  * board is that fix arriving at the surface an operator actually works from.
  *
- * **The live queue is the only source of rows.** `decided` annotates them; it
- * never adds one. That is the difference from `runApprovals` in
+ * **The live queue decides which rows exist; `decided` may only extend one of
+ * its open batches.** That is the difference from `runApprovals` in
  * `@/views/workflows/run-approvals`, which this otherwise mirrors, and copying
- * its second pass here was wrong (#1895 review): a workflow *run* is one-shot,
- * so every verdict the console has ever witnessed for it belongs to it, while a
- * **task is re-dispatched**. The shell holds `decided` for the whole company
- * session — it is cleared on a company switch and never pruned — so folding in
- * every historical verdict for a task id would mean a card that parks one new
- * approval next week reporting "3 of 4 decided", the count growing with every
- * repeat run. A card that looks completely normal while saying the wrong thing,
- * which is the failure this module exists to keep out of the views.
+ * its second pass wholesale was wrong (#1895 review): a workflow *run* is
+ * one-shot, so every verdict the console has ever witnessed for it belongs to
+ * it, while a **task is re-dispatched**. The shell holds `decided` for the whole
+ * company session — cleared on a company switch, never pruned — so folding in
+ * every historical verdict for a task id meant a card parking one new approval
+ * next week reporting "3 of 4 decided", the count growing with every repeat
+ * run. A card that looks completely normal while saying the wrong thing.
  *
- * What the annotation still buys is the whole reason it is here: between the
- * resolve's answer and the feed's next poll the queue still holds an approval
- * that has already been decided, and a row that offered its buttons again in
- * that window would invite a second decision on a settled request. Once the
- * queue drops it, it is gone from here — which is correct, because it is no
- * longer something this card is waiting on.
+ * Dropping the fold entirely was the over-correction, and it cost the thing the
+ * board's one-click batch depends on (#1895 review, second pass). That click
+ * resolves each id separately, and `decideApproval` refreshes the feed on each
+ * one — so when two of three succeed and the third fails, the successes leave
+ * the queue and a live-only projection collapses to a single-item card reading
+ * "Not recorded — try again". The operator authorised two effects and the card
+ * no longer says so; `ApprovalRow`'s whole partial-failure disclosure ("2 of 3
+ * weren't recorded") needs the original `total` to be able to speak.
+ *
+ * So the bound is the **batch** — `ApprovalSummary.batch`, the opaque key every
+ * approval one agent turn parked shares. A witnessed verdict is re-attached
+ * only when some approval of that same batch is *still* in the queue for this
+ * card. That keeps a batch whole while it is settling, releases it entirely
+ * once the host has taken the last of it, and cannot reach across runs: a
+ * re-dispatch parks a new turn, and a new turn is a new batch. An approval with
+ * no batch (a scheduler tick, an older host) is never re-attached, which is the
+ * safe direction — it degrades to the live queue.
+ *
+ * The annotation on a row still in the queue is separate and unconditional: for
+ * the moment between the resolve's answer and the feed's next poll the queue
+ * still holds a settled approval, and a row that offered its buttons again
+ * there would invite a second decision on it.
  *
  * Ordered oldest park first, then by id — stable across a refresh, because the
  * queue hands back a fresh array on every poll and a list that reordered under
@@ -180,16 +195,32 @@ export function taskApprovalRows(
   decided: Readonly<Record<string, DecidedApproval>>,
   taskId: string,
 ): TaskApprovalRow[] {
-  return approvalsForTask(approvals, taskId)
-    .map((approval) => ({
-      approval,
-      verdict: decided[approval.id]?.verdict ?? null,
-    }))
-    .sort(
-      (a, b) =>
-        a.approval.at_millis - b.approval.at_millis ||
-        (a.approval.id < b.approval.id ? -1 : a.approval.id > b.approval.id ? 1 : 0),
-    );
+  const queued = approvalsForTask(approvals, taskId);
+  const byId = new Map<string, TaskApprovalRow>(
+    queued.map((approval) => [
+      approval.id,
+      { approval, verdict: decided[approval.id]?.verdict ?? null },
+    ]),
+  );
+  // The batches this card still has something parked under. Empty when the
+  // host has taken everything, which is what makes the fold below terminate.
+  const open = new Set(
+    queued.map((a) => a.batch).filter((b): b is string => typeof b === "string" && b !== ""),
+  );
+  if (open.size > 0) {
+    for (const [id, d] of Object.entries(decided)) {
+      if (byId.has(id)) continue;
+      const link = d.approval.task;
+      if (link?.link !== "task" || link.id !== taskId) continue;
+      if (!d.approval.batch || !open.has(d.approval.batch)) continue;
+      byId.set(id, { approval: d.approval, verdict: d.verdict });
+    }
+  }
+  return [...byId.values()].sort(
+    (a, b) =>
+      a.approval.at_millis - b.approval.at_millis ||
+      (a.approval.id < b.approval.id ? -1 : a.approval.id > b.approval.id ? 1 : 0),
+  );
 }
 
 /** The subset still waiting on somebody — what the card is actually stopped behind. */

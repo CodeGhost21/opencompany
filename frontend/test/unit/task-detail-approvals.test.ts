@@ -250,6 +250,32 @@ describe("the task detail's blocked section", () => {
     expect(container.textContent).toContain("Still loading it");
   });
 
+  /**
+   * Ownership is the host's answer, not the queue's (#1895 review).
+   *
+   * `approvalsForTask` can only match on the park's task link. `approval_owner`
+   * decides with an attempt-level `run_id` the console cannot see, so an
+   * approval linked to this card but belonging to another attempt is left out
+   * of the host's own `approvals` — and must not be rendered here as this
+   * card's, still less offered a resolve.
+   */
+  it("does not render a queue row the host left out of this card's approvals", async () => {
+    await render([hostPending("a1")], [queued("a1"), queued("other-attempt")]);
+    expect(rows()).toHaveLength(1);
+    expect(container.textContent).toContain("https://example.com/a1");
+    expect(container.textContent).not.toContain("https://example.com/other-attempt");
+  });
+
+  /** And a row the host has stopped calling pending stops being decidable. */
+  it("drops a row once the host no longer reports it pending", async () => {
+    await render([{ ...hostPending("a1"), status: "approved" } as TaskApproval, hostPending("a2")], [
+      queued("a1"),
+      queued("a2", { at_millis: T0 + 1_000 }),
+    ]);
+    expect(rows()).toHaveLength(1);
+    expect(container.textContent).toContain("https://example.com/a2");
+  });
+
   /** No handler, no controls — never live buttons that do nothing. */
   it("renders the wait and no controls when the surface cannot decide", async () => {
     await render([hostPending("a1")], [queued("a1")], { canDecide: false });

@@ -156,6 +156,46 @@ describe("taskApprovalRows", () => {
     expect(rows).toEqual([]);
   });
 
+  /**
+   * The bound that keeps a settling batch whole (#1895 review). The board's one
+   * Approve resolves each id separately and refreshes the feed on each, so a
+   * partial failure leaves the successes out of the queue — and a live-only
+   * projection would collapse to a single-item card reading "Not recorded",
+   * after the operator had authorised two effects.
+   */
+  it("keeps a decided sibling while its batch is still parked", () => {
+    const a1 = { ...MINE("a1", T0), batch: "turn-1" };
+    const a2 = { ...MINE("a2", T0 + 1_000), batch: "turn-1" };
+    const rows = taskApprovalRows([a2], { a1: { verdict: "approve", approval: a1 } }, "task-1");
+    expect(rows.map((r) => [r.approval.id, r.verdict])).toEqual([
+      ["a1", "approve"],
+      ["a2", null],
+    ]);
+  });
+
+  /** …and releases it once the host has taken the last of that batch. */
+  it("drops the batch entirely when nothing of it is left in the queue", () => {
+    const a1 = { ...MINE("a1", T0), batch: "turn-1" };
+    const rows = taskApprovalRows([], { a1: { verdict: "approve", approval: a1 } }, "task-1");
+    expect(rows).toEqual([]);
+  });
+
+  /** A new turn is a new batch, so a re-dispatch cannot reach the old one. */
+  it("does not let a new batch pick up the previous run's verdicts", () => {
+    const old = { ...MINE("old-1", T0), batch: "turn-1" };
+    const fresh = { ...MINE("fresh", T0 + 900_000), batch: "turn-2" };
+    const rows = taskApprovalRows([fresh], { "old-1": { verdict: "approve", approval: old } }, "task-1");
+    expect(rows.map((r) => r.approval.id)).toEqual(["fresh"]);
+  });
+
+  /** No batch key, no re-attachment — the safe direction on an older host. */
+  it("never re-attaches an approval that carries no batch", () => {
+    const a1 = MINE("a1", T0);
+    const a2 = { ...MINE("a2", T0 + 1_000), batch: "turn-1" };
+    const rows = taskApprovalRows([a2], { a1: { verdict: "approve", approval: a1 } }, "task-1");
+    expect(rows.map((r) => r.approval.id)).toEqual(["a2"]);
+  });
+
   it("does not let a re-dispatched card inherit its own earlier verdicts", () => {
     const old1 = MINE("old-1", T0);
     const old2 = MINE("old-2", T0 + 1_000);

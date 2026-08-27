@@ -1694,10 +1694,23 @@ export function AwaitingApprovalRow({
    * grant-scope choice, and a card whose turn parked a fetch *and* a payment
    * should be able to take the first and refuse the second here.
    */
-  const rows = useMemo(
-    () => taskApprovalRows(parked, decided, taskId),
-    [parked, decided, taskId],
-  );
+  const rows = useMemo(() => {
+    // Intersected with the host's own answer, never taken from the queue alone
+    // (#1895 review). `approvalsForTask` can only match on the park's task
+    // link, while `approval_owner` decides ownership with an attempt-level
+    // `run_id` this side cannot see — so an approval linked to this card but
+    // belonging to another attempt is excluded from `approvals` by the host and
+    // would still have been pulled in here, giving this screen a row to resolve
+    // that the host does not consider part of this card. The header already
+    // says `approvals` is the authority on what this card is waiting on; this
+    // is that rule applied to the rows and not only to the count.
+    const owned = new Set(
+      approvals.filter((a) => a.status === "pending").map((a) => a.id),
+    );
+    return taskApprovalRows(parked, decided, taskId).filter((r) =>
+      owned.has(r.approval.id),
+    );
+  }, [approvals, parked, decided, taskId]);
   const blocking = useMemo(() => blockingTaskApprovals(rows), [rows]);
   /**
    * Pending approvals the host counts that this screen can neither show nor
