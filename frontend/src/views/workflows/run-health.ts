@@ -322,6 +322,13 @@ export const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: stri
       dot: "bg-status-blocked",
       label: AWAITING_APPROVAL,
     },
+    // Issue #1865: amber, sharing `blocked`'s shape rather than `failed`'s red.
+    // A node under `on_error: continue|route` errored and the graph kept
+    // going past it — the author's own config asked for that branch to
+    // survive, and it did, so this is "needs your attention, nothing is
+    // broken" the same way `blocked`/`awaiting approval` are, not the red
+    // that says the run itself came apart.
+    degraded: { dot: "bg-status-blocked", label: "degraded" },
     ok: { dot: "bg-status-done", label: "ok" },
   };
 
