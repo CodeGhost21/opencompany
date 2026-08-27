@@ -944,7 +944,7 @@ mod test {
         let run_turn: &dyn RunTurn = &AcpRunTurn::new(agent);
 
         let outcome = run_turn
-            .run(&CompanyId::new("acme"), "ceo", "go", None)
+            .run(&CompanyId::new("acme"), "ceo", "go", ChatTarget::default())
             .await
             .expect("a turn runs");
 
@@ -968,7 +968,14 @@ mod test {
         control.request(crate::company::steer::SteerAction::Cancel);
 
         let outcome = run_turn
-            .run_steered(&CompanyId::new("acme"), "ceo", "go", &control, None, None)
+            .run_steered(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                ChatTarget::default(),
+                None,
+            )
             .await
             .expect("a steered turn still answers");
         assert_eq!(outcome.reply, "partial");
@@ -998,7 +1005,14 @@ mod test {
         control.request(crate::company::steer::SteerAction::Cancel);
 
         let outcome = run_turn
-            .run_steered(&CompanyId::new("acme"), "ceo", "go", &control, None, None)
+            .run_steered(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                ChatTarget::default(),
+                None,
+            )
             .await
             .expect("a failed cancel still ends in a turn");
         assert_eq!(outcome.reply, "done");

@@ -516,7 +516,7 @@ async fn an_agent_discovers_and_calls_an_action_unaided_on_two_large_toolkits() 
             "ceo",
             "List our open GitHub issues and find the roadmap page in Notion.",
             &deps,
-            None,
+            crate::runtime::delegation::ChatTarget::default(),
         )
         .await
         .expect("turn runs");
@@ -620,9 +620,15 @@ async fn a_repeated_oversized_listing_still_tells_the_agent_to_narrow_instead() 
 
     let dir = tempfile::tempdir().unwrap();
     let (pool, deps, record) = harness(model_url, composio_url, dir.path()).await;
-    pool.run(&record.id, "ceo", "What can you do?", &deps, None)
-        .await
-        .expect("turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "What can you do?",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("turn runs");
 
     let results = tool_results(&script);
     assert!(
@@ -659,9 +665,15 @@ async fn a_narrowed_listing_on_an_unknown_toolkit_needs_no_provider_specific_cod
 
     let dir = tempfile::tempdir().unwrap();
     let (pool, deps, record) = harness(model_url, composio_url, dir.path()).await;
-    pool.run(&record.id, "ceo", "Find the Notion action.", &deps, None)
-        .await
-        .expect("turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "Find the Notion action.",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("turn runs");
 
     let joined = tool_results(&script).join("\n");
     assert!(
