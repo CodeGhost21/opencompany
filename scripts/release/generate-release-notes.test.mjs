@@ -255,25 +255,29 @@ test('buildOpenAiRequest tells the model that contributor names are not handles'
 });
 
 test('groupPullRequestsByHighlight anchors keywords to word starts', () => {
-  // `includes` filed anything saying "support" under Ledgers (via `port`) and
-  // anything saying "efficient" under Desktop (via `ci`).
-  const prs = [
+  // `includes` filed anything saying "support" or "metadata" under Ledgers,
+  // via the `port` and `data` keywords. Note the last group doubles as the
+  // catch-all, so "not misfiled" is asserted against the SPECIFIC group the
+  // substring match wrongly chose, not against the fallback.
+  const titleFor = (groups, n) =>
+    groups.find((g) => g.pullRequests.some((pr) => pr.number === n)).title;
+
+  const misfiled = groupPullRequestsByHighlight([
     { number: 1, title: 'feat: add support for wide screens', url: 'u1', labels: [] },
-    { number: 2, title: 'perf: more efficient rendering', url: 'u2', labels: [] },
-  ];
+    { number: 2, title: 'fix: metadata handling', url: 'u2', labels: [] },
+  ]);
+  assert.doesNotMatch(titleFor(misfiled, 1), /Ledgers/);
+  assert.doesNotMatch(titleFor(misfiled, 2), /Ledgers/);
 
-  const groups = groupPullRequestsByHighlight(prs);
-  const titleFor = (n) => groups.find((g) => g.pullRequests.some((pr) => pr.number === n)).title;
-  assert.doesNotMatch(titleFor(1), /Ledgers/);
-  assert.doesNotMatch(titleFor(2), /Desktop/);
-
-  // Prefix and plural keywords must still match.
+  // Prefix and plural keywords must still match their real group.
   const stillMatched = groupPullRequestsByHighlight([
     { number: 3, title: 'chore: notarize the dmg', url: 'u3', labels: [] },
     { number: 4, title: 'feat: new skills surface', url: 'u4', labels: [] },
+    { number: 5, title: 'refactor: persistence ports', url: 'u5', labels: [] },
   ]);
-  assert.match(stillMatched.find((g) => g.pullRequests.some((pr) => pr.number === 3)).title, /Desktop/);
-  assert.match(stillMatched.find((g) => g.pullRequests.some((pr) => pr.number === 4)).title, /Companies/);
+  assert.match(titleFor(stillMatched, 3), /Desktop/);
+  assert.match(titleFor(stillMatched, 4), /Companies/);
+  assert.match(titleFor(stillMatched, 5), /Ledgers/);
 });
 
 test('serializeOpenAiPayload trims non-PR collections to reach the cap', () => {
