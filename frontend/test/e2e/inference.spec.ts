@@ -278,8 +278,18 @@ test("typing an OpenRouter passthrough id one keystroke at a time is not strippe
   // (issue #1838 follow-up): the provider's own raw-id presets get stripped
   // immediately since there is no key to save them under, leaving the tier
   // fields editable and empty.
+  //
+  // Make that keyless precondition explicit rather than inherited from
+  // whatever a prior spec (or an aborted earlier run) left stored on the
+  // shared E2E company: the free-text `<input>` and the catalog `Select`
+  // trigger share the same `id={inference-model-${tier}}` (only one renders
+  // at a time), so `#inference-model-chat-v1` alone would just as happily
+  // match a leftover-key company's Select trigger — and `toHaveValue("")`
+  // against that gives a confusing "not an input" failure instead of naming
+  // the real problem. `input#…` only matches the free-text control, the same
+  // guard the OpenRouter-catalog spec above already uses.
   await pickProvider(page, "OpenRouter");
-  const chatInput = page.locator("#inference-model-chat-v1");
+  const chatInput = page.locator("input#inference-model-chat-v1");
   await expect(chatInput).toBeVisible();
   await expect(chatInput).toHaveValue("");
 
