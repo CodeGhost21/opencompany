@@ -4021,6 +4021,15 @@ impl CompanyRecord {
                 }
                 self.overlay_desks
                     .iter()
+                    // ...and an overlay desk whose **own id** is a General
+                    // spelling is excluded whatever it is asked for. The guard
+                    // above only narrows the queried key, so `{id: "main", name:
+                    // "Front office"}` was still reachable by its display name —
+                    // resolving to an id that `GET .../desks` filters out and
+                    // that every desk mutation refuses. Its lead would answer,
+                    // and the reply would be journaled under a thread the
+                    // console renders no channel for.
+                    .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
@@ -7546,6 +7555,61 @@ mod test {
             record.effective_desk_members("main"),
             vec!["eng".to_string()]
         );
+    }
+
+    /// ...and it must not be reachable by its **display name** either.
+    ///
+    /// The guard narrows the key being asked for, so `{id: "main", name: "Front
+    /// office"}` slipped through it: `Front office` is not a General spelling,
+    /// the name match fired, and the resolver returned `main` — an id that
+    /// `GET .../desks` filters out and that every desk mutation refuses. Its
+    /// lead would answer, and the reply would be journaled under a thread the
+    /// console renders no channel for: a conversation with no way back.
+    ///
+    /// An overlay desk on a General id is unaddressable by design; it must be
+    /// unaddressable by *every* address.
+    #[test]
+    fn an_overlay_desk_on_a_general_id_is_unreachable_by_name_too() {
+        let mut record = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            Vec::new(),
+        );
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".into(),
+            name: "Front office".into(),
+            description: None,
+            members: vec!["eng".into()],
+        });
+        assert_eq!(
+            record.resolve_desk_id("Front office"),
+            None,
+            "an overlay desk whose id shadows General must not answer to its name"
+        );
+        assert_eq!(
+            record.resolve_desk_id("front office"),
+            None,
+            "nor case-folded"
+        );
+        assert_eq!(record.resolve_desk_id("main"), None, "nor to the id itself");
+        // An ordinary overlay desk is untouched — this narrows one desk, not the rule.
+        let mut ordinary = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            Vec::new(),
+        );
+        ordinary.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "Front office".into(),
+            description: None,
+            members: vec!["eng".into()],
+        });
+        assert_eq!(
+            ordinary.resolve_desk_id("Front office").as_deref(),
+            Some("ops")
+        );
+        assert_eq!(ordinary.resolve_desk_id("ops").as_deref(), Some("ops"));
     }
 
     /// A desk the **manifest** declares under a General spelling is the

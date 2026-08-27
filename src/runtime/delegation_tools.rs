@@ -216,13 +216,37 @@ pub fn desk_lead(record: &CompanyRecord, desk: &str) -> Option<String> {
 /// same fold `HarnessBrain::everyone_desk` applies before expanding
 /// `@everyone`, so who answers and who a broadcast names cannot disagree. With
 /// no claimant it misses and the caller's orchestrator answers, as before.
+/// The blueprint desk that claims the company-wide line, by **either** spelling.
+///
+/// A manifest can declare a desk on any of the folded General spellings, and
+/// which half it uses is arbitrary: `id = "ops", name = "General"` claims the
+/// line by name, `id = "main", name = "Front office"` claims it by id. Asking
+/// for a fixed [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK)
+/// recognised only the first, so for the second a turn addressed `main` reached
+/// its lead while the folded sibling `General` fell through to the orchestrator
+/// — one channel with two responders, decided by which alias the caller
+/// happened to use.
+///
+/// Only the manifest is searched. An overlay desk on a General key is refused
+/// by `resolve_desk_id` and unaddressable, so letting one claim the line here
+/// would hand `#general` to a desk nothing else routes to.
+fn general_claimant(record: &CompanyRecord) -> Option<String> {
+    let general = |s: &str| crate::server::chat_history::is_general_chat(Some(s));
+    record
+        .manifest
+        .group_chats
+        .iter()
+        .find(|c| general(&c.id) || general(&c.name))
+        .map(|c| c.id.clone())
+}
+
 pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
     let direct = |key: &str| desk_lead(record, key).or_else(|| record.resolve_roster_agent_id(key));
     if let Some(lead) = desk_lead(record, chat) {
         return Some(lead);
     }
     if crate::server::chat_history::is_general_chat(Some(chat)) {
-        return desk_lead(record, crate::server::ops::language::DEFAULT_DESK);
+        return general_claimant(record).and_then(|desk| desk_lead(record, &desk));
     }
     record
         .resolve_roster_agent_id(chat)
@@ -1001,6 +1025,35 @@ members = ["counsel"]
         .expect("valid manifest");
         record.manifest.group_chats.extend(declared.group_chats);
         assert_eq!(chat_responder(&record, "main").as_deref(), Some("writer"));
+    }
+
+    /// ...and so does one that claims it by **id**, which is the other half.
+    ///
+    /// A manifest may declare the General desk either way, and which half it
+    /// uses is arbitrary. Re-asking under a fixed `DEFAULT_DESK` ("General")
+    /// recognised only the display-name claimant, so for `id = "main", name =
+    /// "Front office"` a turn addressed `main` reached its lead while the
+    /// folded sibling `General` fell through to the orchestrator — one channel,
+    /// two responders, decided by whichever accepted alias the caller used.
+    #[test]
+    fn chat_responder_folds_the_general_aliases_to_an_id_claimant() {
+        let mut record = record();
+        let declared: crate::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\n[[group_chat]]\nid = \"main\"\nname = \"Front office\"\nmembers = [\"writer\"]\n",
+        )
+        .expect("valid manifest");
+        record.manifest.group_chats.extend(declared.group_chats);
+
+        let direct = chat_responder(&record, "main");
+        assert!(direct.is_some(), "the desk answers under its own id");
+        // Every folded spelling reaches the same lead — one channel, one voice.
+        for alias in ["", "General", "general", "MAIN"] {
+            assert_eq!(
+                chat_responder(&record, alias),
+                direct,
+                "the folded alias {alias:?} must reach the same responder as `main`"
+            );
+        }
     }
 
     /// A desk that claims the line by **display name** answers every spelling
