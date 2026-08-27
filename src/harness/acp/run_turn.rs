@@ -99,6 +99,7 @@ impl AcpRunTurn {
 enum StopKind {
     EndTurn,
     MaxTokens,
+    MaxTurnRequests,
     Refusal,
     Cancelled,
     Other,
@@ -106,14 +107,21 @@ enum StopKind {
 
 /// Classifies ACP's raw `stopReason` into [`StopKind`].
 ///
-/// `max_turn_requests` folds into [`StopKind::MaxTokens`]: both mean the turn
-/// was cut off by a budget rather than by the model choosing to stop, and the
-/// operator-facing consequence — a resumable cap, not a clean finish — is the
-/// same for either.
+/// `max_tokens` and `max_turn_requests` stay distinct variants (PR #1880
+/// review) even though the note either produces reads similarly: only
+/// `max_turn_requests` is this protocol's analog of openhuman's
+/// tool-iteration cap — the number of agent/tool round trips in the turn hit
+/// a limit — and only that one may set
+/// [`TurnOutcome::hit_iteration_cap`](crate::harness::TurnOutcome::hit_iteration_cap).
+/// `max_tokens` is a token-generation budget on a single response, unrelated
+/// to how many tool calls ran; folding it into the same flag would make a
+/// workflow node's `LimitStop { limit: "max_tool_iterations" }` misreport
+/// which cap actually stopped the turn.
 fn classify_stop_reason(raw: &str) -> StopKind {
     match raw {
         "end_turn" => StopKind::EndTurn,
-        "max_tokens" | "max_turn_requests" => StopKind::MaxTokens,
+        "max_tokens" => StopKind::MaxTokens,
+        "max_turn_requests" => StopKind::MaxTurnRequests,
         "refusal" => StopKind::Refusal,
         "cancelled" => StopKind::Cancelled,
         _ => StopKind::Other,
@@ -131,8 +139,9 @@ fn classify_stop_reason(raw: &str) -> StopKind {
 fn stop_reason_note(kind: StopKind, raw_stop_reason: &str) -> Option<String> {
     match kind {
         StopKind::EndTurn => None,
-        StopKind::MaxTokens => {
-            Some("[stopped: hit the token/iteration limit before finishing]".to_string())
+        StopKind::MaxTokens => Some("[stopped: hit the token limit before finishing]".to_string()),
+        StopKind::MaxTurnRequests => {
+            Some("[stopped: hit the tool-call limit before finishing]".to_string())
         }
         StopKind::Refusal => Some("[stopped: the agent declined to continue]".to_string()),
         StopKind::Cancelled => Some("[stopped: cancelled before finishing]".to_string()),
@@ -252,12 +261,16 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
     TurnOutcome {
         reply,
         steps,
-        // A max_tokens/max_turn_requests stop is exactly the shape issue #926
-        // describes: the tool loop was cut off by a budget rather than the
-        // model choosing to stop. Every other `StopKind` is not a cap —
+        // A max_turn_requests stop is exactly the shape issue #926 describes:
+        // the tool loop was cut off by a budget rather than the model
+        // choosing to stop. `max_tokens` is a different budget — a single
+        // response's token limit — and is deliberately excluded (PR #1880
+        // review): downstream (`workflows/caps`) reports this flag as
+        // "stopped at the max_tool_iterations cap", which would misdescribe a
+        // token-limited stop. Every other `StopKind` is not a cap —
         // `Refusal`/`Cancelled`/`Other` are surfaced as a step note instead,
         // and `EndTurn` needs no flag at all.
-        hit_iteration_cap: matches!(kind, StopKind::MaxTokens),
+        hit_iteration_cap: matches!(kind, StopKind::MaxTurnRequests),
         // Issue #1032: nor is there a spend halt to report. The stop hooks are
         // installed around THIS crate's `agent.turn`, and an ACP turn does not
         // run through it — the external process bills and stops on its own
@@ -440,16 +453,34 @@ mod test {
     }
 
     #[test]
-    fn an_empty_turn_with_max_tokens_is_a_cap_not_a_clean_success() {
-        // Issue #1853: the old fold ignored `stop_reason` entirely and
-        // hardcoded `hit_iteration_cap: false`, so a turn cut off by the
-        // token/iteration budget folded identically to a clean end_turn with
-        // nothing to say — the operator saw a blank reply with no cap signal
-        // to explain it.
-        let outcome = fold(turn_with_stop_reason(vec![], "max_tokens"));
+    fn a_max_turn_requests_stop_is_the_tool_step_cap() {
+        // Issue #1853 established that a stop must not fold identically to a
+        // clean end_turn — the operator needs a cap signal. PR #1880 review:
+        // `max_turn_requests` is ACP's analog of openhuman's tool-iteration
+        // cap, and is the only stop reason that may set `hit_iteration_cap`,
+        // because `workflows/caps` reports that flag as "stopped at the
+        // max_tool_iterations cap".
+        let outcome = fold(turn_with_stop_reason(vec![], "max_turn_requests"));
         assert!(
             outcome.hit_iteration_cap,
-            "a max_tokens stop is a cap, not a clean finish"
+            "max_turn_requests is the tool-step cap, not a clean finish"
+        );
+        assert!(
+            !outcome.reply.trim().is_empty(),
+            "a capped turn must say so, not fold to a blank reply"
+        );
+    }
+
+    #[test]
+    fn a_max_tokens_stop_is_not_the_tool_step_cap() {
+        // A token-generation budget on a single response is a different cap
+        // than the tool-iteration one (PR #1880 review) — conflating them
+        // would make a workflow node's `LimitStop{"max_tool_iterations"}`
+        // misreport which cap actually stopped the turn.
+        let outcome = fold(turn_with_stop_reason(vec![], "max_tokens"));
+        assert!(
+            !outcome.hit_iteration_cap,
+            "a max_tokens stop is not the tool-iteration cap"
         );
         assert!(
             !outcome.reply.trim().is_empty(),
@@ -550,7 +581,7 @@ mod test {
         assert_eq!(classify_stop_reason("max_tokens"), StopKind::MaxTokens);
         assert_eq!(
             classify_stop_reason("max_turn_requests"),
-            StopKind::MaxTokens
+            StopKind::MaxTurnRequests
         );
         assert_eq!(classify_stop_reason("refusal"), StopKind::Refusal);
         assert_eq!(classify_stop_reason("cancelled"), StopKind::Cancelled);
