@@ -5263,6 +5263,32 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
     assert_eq!(never_ran.status, RunStatus::Cancelled);
     assert_eq!(never_ran.started_at_millis, None);
 
+    // A by-design decline (issue #1809) is terminal and round-trips like any
+    // other settle: neither an error nor a plain success, so the store must
+    // persist and read it back exactly. Kept on its own company so it does not
+    // perturb the r1..r4 list-count assertions below.
+    let gamma = CompanyId::new("gamma");
+    runs.create_run(&gamma, spec("g1", "card")).await.unwrap();
+    let declined = runs
+        .finish_run(
+            &gamma,
+            "g1",
+            RunOutcome::new(RunStatus::Declined)
+                .with_error("better done once than built into a workflow"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(declined.status, RunStatus::Declined);
+    assert!(
+        declined.finished_at_millis.is_some(),
+        "Declined is terminal, so it carries a finish time"
+    );
+    assert_eq!(
+        runs.get_run(&gamma, "g1").await.unwrap(),
+        Some(declined),
+        "a declined run round-trips byte-identically"
+    );
+
     // -- the step trace ------------------------------------------------------
 
     let step = |run_id: &str, seq: u32, label: &str| RunStepRecord {
