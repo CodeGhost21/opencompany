@@ -3761,20 +3761,33 @@ impl HarnessPool {
                 "[budget-pause] parked a re-issue marker; the operator can redeem it once credits are added"
             );
         } else if let Some(stale) = {
-            // Issue #1846 review (Codex #3869792503): match on the SAME
-            // saved-request text `park_message` above parks a marker under,
-            // not an unconditional `redeem` — an unrelated turn for this
-            // agent (an automatic background task, a second chat message
-            // about something else entirely) succeeding first must not
-            // silently drop the marker for a DIFFERENT, still-unretried
-            // original request. A resend, by construction, runs with the
-            // same text the marker parked; an unrelated success does not.
-            let candidate_message = crate::runtime::grants::current_redeem_context()
+            // Issue #1846 review (Codex #3869792503, tightened by
+            // #3869968949): match on the SAME saved-request CONTEXT
+            // `park_message`/`park`/`park_background` above parks a marker
+            // under — text, chat thread, parent, deliverable, mentions AND
+            // attachments — not an unconditional `redeem` and not text
+            // alone. An unrelated turn for this agent (an automatic
+            // background task, a second chat message about something else
+            // entirely, or even a coincidentally-identical-text request in a
+            // DIFFERENT thread) succeeding first must not silently drop the
+            // marker for a DIFFERENT, still-unretried original request. A
+            // resend, by construction, runs with the SAME context the
+            // marker parked; an unrelated success does not.
+            let candidate_chat_id = match live {
+                LiveStream::On { chat_id } => chat_id.map(str::to_string),
+                LiveStream::Workflow { .. } | LiveStream::Off => None,
+            };
+            let candidate_redeem = crate::runtime::grants::current_redeem_context();
+            let candidate_message = candidate_redeem
                 .text
                 .clone()
                 .unwrap_or_else(|| message.to_string());
-            crate::runtime::grants::budget_pauses_for(company)
-                .retire_if_message_matches(agent_id, &candidate_message)
+            crate::runtime::grants::budget_pauses_for(company).retire_if_message_matches(
+                agent_id,
+                &candidate_message,
+                candidate_chat_id.as_deref(),
+                &candidate_redeem,
+            )
         } {
             // Issue #1846 review (Codex #3868962381): this turn just
             // completed WITHOUT pausing, which is proof the account that
@@ -7561,13 +7574,18 @@ description = "Builds the product."
         // The "manually add credits and resend" half of the scenario: an
         // ordinary successful `run`, NOT the redeem route — nothing here
         // ever calls `redeem`/`redeem_matching` on the marker parked above.
+        // Same thread ("general") the marker itself parked with (issue
+        // #1846 review, Codex #3869968949): a genuine resend runs in the
+        // SAME conversation, and the widened context match this test is
+        // pinned against would otherwise (correctly) treat a different
+        // thread as a different request.
         let outcome = pool
             .run(
                 &company,
                 "ceo",
                 "Please summarize today's standup notes.",
                 &deps,
-                None,
+                Some("general"),
             )
             .await
             .expect("this run succeeds against the scripted reply");
@@ -7704,6 +7722,110 @@ description = "Builds the product."
             marker.message, "Please summarize today's standup notes.",
             "the marker still parked must be request A's, untouched by B's success"
         );
+    }
+
+    /// Issue #1846 review (Codex #3869968949) — **the regression.** The
+    /// sibling test above proves a DIFFERENT-text unrelated success does not
+    /// retire the marker; this proves IDENTICAL text in a DIFFERENT thread
+    /// does not either — the finding's own example ("review this", posted in
+    /// two different threads).
+    ///
+    /// Same fixture and scenario, but request B repeats request A's EXACT
+    /// text — in a different chat thread. Before the widened match (message
+    /// text alone), this would have retired A's marker: `marker.message ==
+    /// candidate_message` was already true for identical text regardless of
+    /// which thread either ran in.
+    #[tokio::test]
+    async fn identical_text_in_a_different_thread_does_not_retire_the_original_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-retire-same-text-diff-thread");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(ScriptedProvider::new(vec![
+                Ok("Here it is.".to_string());
+                4
+            ])),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        // Request A: paused in "general", still unretried.
+        crate::runtime::grants::budget_pauses_for(&company).park(
+            "ceo",
+            Some("general".to_string()),
+            "review this",
+            "Paused — ceo's turn ran out of inference budget/credits.",
+            crate::ports::now_millis(),
+            crate::runtime::grants::RedeemContext::default(),
+        );
+
+        // Request B: the EXACT same text, but in "sales" — a different
+        // conversation entirely — which succeeds.
+        let outcome = pool
+            .run(&company, "ceo", "review this", &deps, Some("sales"))
+            .await
+            .expect("request B succeeds against the scripted reply");
+        assert!(outcome.budget_paused.is_none(), "request B must not pause");
+
+        let marker = crate::runtime::grants::budget_pauses_for(&company)
+            .peek("ceo")
+            .expect(
+                "request A's marker must survive B's success — same text, but a DIFFERENT \
+                 thread, is not the same request",
+            );
+        assert_eq!(marker.chat_id.as_deref(), Some("general"));
     }
 
     /// This file's own default `park()` call site — the top-level turn, not

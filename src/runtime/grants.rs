@@ -1337,14 +1337,15 @@ impl BudgetPauseSet {
         }
     }
 
-    /// Retires the parked marker for `agent` only if its saved request text
-    /// still matches `expected_message` — otherwise leaves it untouched and
-    /// returns `None`.
+    /// Retires the parked marker for `agent` only if its saved request
+    /// context — text, chat thread, thread parent, composer intent, mentions
+    /// AND attachments — still matches the candidate turn's own — otherwise
+    /// leaves it untouched and returns `None`.
     ///
-    /// Issue #1846 review (Codex #3869792503): the sibling of
-    /// [`redeem_matching`](Self::redeem_matching), for the OTHER caller that
-    /// retires a marker without redeeming it — `run_inner`'s "this agent's
-    /// turn just succeeded without pausing" cleanup. Plain
+    /// Issue #1846 review (Codex #3869792503, tightened by #3869968949): the
+    /// sibling of [`redeem_matching`](Self::redeem_matching), for the OTHER
+    /// caller that retires a marker without redeeming it — `run_inner`'s
+    /// "this agent's turn just succeeded without pausing" cleanup. Plain
     /// [`redeem`](Self::redeem) there retired WHATEVER was parked for the
     /// agent the moment ANY turn of theirs succeeded, which is correct for
     /// the manual-resend scenario it was written for (the very request the
@@ -1355,20 +1356,41 @@ impl BudgetPauseSet {
     /// original request, which reads to the operator as "nothing to
     /// resend" even though their original ask was never reissued.
     ///
-    /// Matching on [`BudgetPauseMarker::message`] — the ORIGINAL request text
-    /// the marker exists to re-send — rather than `id`: the caller has no
+    /// The first cut of this fix matched on [`BudgetPauseMarker::message`]
+    /// alone. Text-only matching has its own gap: two DIFFERENT requests can
+    /// share identical text ("review this", posted in two different threads,
+    /// or with two different attachments) — the finding's own example. This
+    /// widens the match to the whole saved [`RedeemContext`] a resend would
+    /// have to reproduce exactly to genuinely BE the same request: `chat_id`,
+    /// `parent`, `deliverable`, `mentions` and `attachments`, alongside
+    /// `message`. There is still no marker id to compare against here (see
+    /// `message`-only note below) — this is the closest a text/context
+    /// comparison can get without one.
+    ///
+    /// Matching on request CONTENT rather than `id`: the caller has no
     /// marker id to compare against here (nothing was ever read back the way
-    /// the console's redeem click reads one), only the text of whatever turn
-    /// just ran. A resend, by construction, runs with the SAME text the
+    /// the console's redeem click reads one), only the shape of whatever turn
+    /// just ran. A resend, by construction, runs with the SAME content the
     /// marker parked; an unrelated success does not.
     pub fn retire_if_message_matches(
         &self,
         agent: &str,
         expected_message: &str,
+        expected_chat_id: Option<&str>,
+        expected_redeem: &RedeemContext,
     ) -> Option<BudgetPauseMarker> {
         let mut by_agent = self.by_agent.lock().expect("budget-pause set poisoned");
         match by_agent.get(agent) {
-            Some(marker) if marker.message == expected_message => by_agent.remove(agent),
+            Some(marker)
+                if marker.message == expected_message
+                    && marker.chat_id.as_deref() == expected_chat_id
+                    && marker.parent == expected_redeem.parent
+                    && marker.deliverable == expected_redeem.deliverable
+                    && marker.mentions == expected_redeem.mentions
+                    && marker.attachments == expected_redeem.attachments =>
+            {
+                by_agent.remove(agent)
+            }
             _ => None,
         }
     }
