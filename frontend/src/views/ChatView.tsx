@@ -2111,6 +2111,16 @@ export function ChatView({
               // reply read here is the same false attribution as one read in
               // the channel, so the panel marks its rows from the same state.
               cognition={cognition}
+              // Issue #1846 review (Codex #3870168372): a budget-pause notice
+              // that answered a thread reply is journaled with THIS thread's
+              // parent, which routes it out of the main channel timeline and
+              // in here — the CTA has to be wired into this panel too, or a
+              // thread-parented notice is unreachable.
+              onRedeemBudgetPause={(agentId, noticeMessageId) =>
+                void redeemBudgetPause(agentId, noticeMessageId)
+              }
+              redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+              latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
             />
           )}
 

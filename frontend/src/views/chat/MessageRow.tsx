@@ -8,12 +8,9 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
-import {
-  isBudgetPauseNotice,
-  isBudgetPauseNoticeSuperseded,
-  parseBudgetPauseAgent,
-} from "@/hooks/use-events";
+import { isBudgetPauseNotice } from "@/hooks/use-events";
 import { timeAgo } from "@/lib/language";
+import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { MessageAttachments } from "./MessageAttachments";
 import { cn } from "@/lib/utils";
 import {
@@ -351,42 +348,17 @@ function SystemPill({
   const className =
     "rounded-full bg-muted px-3 py-1 text-center text-xs text-muted-foreground";
 
+  // Issue #1846 review (Codex #3870168372): extracted to `BudgetPauseNoticeCard`
+  // so `ThreadPanel` can render the SAME card for a notice that answered a
+  // thread reply — see that component's own doc.
   if (isBudgetPauseNotice(message.text)) {
-    const agentId = parseBudgetPauseAgent(message.text);
-    const redeeming = agentId != null && redeemingBudgetPauseAgent === agentId;
-    // Issue #1846 review (Codex #3864988184): the backend parks at most one
-    // marker per agent, so a notice that is not the CURRENT one for its agent
-    // must not offer a live CTA — clicking it would redeem whatever pause is
-    // parked now, not the one this card shows. Disabled rather than hidden:
-    // a card whose button silently vanished reads as a bug, not as "this one
-    // is superseded".
-    const superseded = isBudgetPauseNoticeSuperseded(
-      agentId,
-      message.id,
-      latestBudgetPauseMessageIdByAgent,
-    );
     return (
-      <div className="flex justify-center px-4 py-1.5">
-        <div className="flex max-w-lg flex-col gap-1.5 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3.5 py-2.5 text-xs text-status-blocked-text">
-          <p className="leading-5">{message.text}</p>
-          {agentId != null && onRedeemBudgetPause && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="w-fit border-status-blocked/40 bg-transparent text-xs hover:bg-status-blocked-soft"
-              disabled={redeeming || superseded}
-              title={superseded ? "A newer pause replaced this one — see the latest notice." : undefined}
-              onClick={() => onRedeemBudgetPause(agentId, message.id)}
-            >
-              {redeeming
-                ? "Resending…"
-                : superseded
-                  ? "Superseded by a newer pause"
-                  : "Add credits & resend"}
-            </Button>
-          )}
-        </div>
-      </div>
+      <BudgetPauseNoticeCard
+        message={message}
+        onRedeemBudgetPause={onRedeemBudgetPause}
+        redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+        latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+      />
     );
   }
 
