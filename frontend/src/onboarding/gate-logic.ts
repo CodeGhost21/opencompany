@@ -142,3 +142,25 @@ export function resolveActivationReadError(error: unknown): ActivationReadOutcom
   }
   return { settled: false };
 }
+
+/**
+ * Whether `useActivationGate`'s poll should keep running (PR #1875 review
+ * finding, round 4).
+ *
+ * `GET {scope}/activation` is the only production caller of
+ * `compute_and_latch` on the host — nothing else notices when the funnel's
+ * three steps have all gone true and persists `activation_completed_at`. The
+ * poll must therefore keep running for as long as the funnel is incomplete,
+ * regardless of "skip for now": an admin who skips, then connects an
+ * integration and runs a workflow from the ordinary shell, has genuinely
+ * completed the funnel — but if the poll stopped the moment they skipped,
+ * nothing would ever observe that and persist it. Reloading the same tab
+ * preserves the session skip, and the funnel reads incomplete forever even
+ * though every step is actually done.
+ *
+ * Only `isActivated` — the one thing the poll exists to notice — stops it;
+ * `status: null` (nothing read yet) must keep polling, not stop it.
+ */
+export function shouldPollActivation(status: ActivationStatus | null): boolean {
+  return status?.isActivated !== true;
+}

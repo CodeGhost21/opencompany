@@ -6,6 +6,7 @@ import {
   type GateDecisionInput,
   resolveActivationReadError,
   resolveGateAdminCheckError,
+  shouldPollActivation,
   shouldShowOnboardingGate,
 } from "@/onboarding/gate-logic";
 
@@ -185,5 +186,25 @@ describe("resolveActivationReadError", () => {
   it("does not settle on a non-ApiError throw (e.g. a raw fetch TypeError)", () => {
     const outcome = resolveActivationReadError(new TypeError("Failed to fetch"));
     expect(outcome.settled).toBe(false);
+  });
+});
+
+// PR #1875 review finding, round 4: the shell wired the poll's `enabled` to
+// `!gateSkipped`, so "skip for now" stopped `useActivationGate` from ever
+// reading again. `GET {scope}/activation` is the only production caller of
+// `compute_and_latch`, so a funnel that genuinely completes after a skip
+// (an admin connects an integration and runs a workflow from the ordinary
+// shell) never got its `activation_completed_at` persisted at all.
+describe("shouldPollActivation", () => {
+  it("keeps polling before the first read lands", () => {
+    expect(shouldPollActivation(null)).toBe(true);
+  });
+
+  it("keeps polling while the funnel reads incomplete — this is what a skip must not silence", () => {
+    expect(shouldPollActivation(incomplete)).toBe(true);
+  });
+
+  it("stops once the latch is set — nothing left for the poll to notice", () => {
+    expect(shouldPollActivation(complete)).toBe(false);
   });
 });

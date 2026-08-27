@@ -60,7 +60,7 @@ import {
 import { TourController } from "@/tour/TourController";
 import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
-import { gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
+import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
 import { resolveGateAdminCheckError, shouldShowOnboardingGate } from "@/onboarding/gate-logic";
 import { me as fetchMe } from "@/api/auth";
 import { useCompany } from "@/hooks/use-company";
@@ -859,10 +859,16 @@ export function AppShell({
    *
    * `gateSkippedThisSession` is read once, into state rather than a plain
    * `const`, so clicking "skip for now" re-renders past the gate without a
-   * page reload — `sessionStorage` alone would need one. Declared before the
-   * poll below so `!gateSkipped` can gate it: nothing left for the gate to
-   * decide once the operator dismissed it, so there is nothing worth polling
-   * `{scope}/activation` for either.
+   * page reload — `sessionStorage` alone would need one.
+   *
+   * The poll below is passed `true`, NOT `!gateSkipped` (PR #1875 review
+   * finding, round 4): `GET {scope}/activation` is the only production caller
+   * of `compute_and_latch` on the host, so an operator who skips and then
+   * finishes the funnel anyway (connects an integration, runs a workflow from
+   * the ordinary shell) needs the poll to still be running to ever notice and
+   * persist it — see `shouldPollActivation` for the full reasoning. The poll
+   * stops itself once the company is actually activated; nothing here needs
+   * to.
    */
   const [gateSkipped, setGateSkipped] = useState(() => gateSkippedThisSession(scope));
   useEffect(() => {
@@ -872,7 +878,15 @@ export function AppShell({
     markGateSkipped(scope);
     setGateSkipped(true);
   }, [scope]);
-  const activationGate = useActivationGate(client, company, !gateSkipped);
+  const activationGate = useActivationGate(client, company, true);
+
+  // PR #1875 review finding, round 4: a skip marker from before the funnel
+  // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
+  // already stops gating on it either way), but leaving it in `sessionStorage`
+  // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
+  useEffect(() => {
+    if (activationGate.status?.isActivated) clearGateSkipped(scope);
+  }, [activationGate.status?.isActivated, scope]);
 
   /**
    * Whether the signed-in user is this company's admin (PR #1875 review
