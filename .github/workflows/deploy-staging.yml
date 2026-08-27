@@ -81,7 +81,18 @@ env:
   # `tinymemory` is the hosted-memory contract: `OPENCOMPANY_MEMORY=remote` +
   # `OPENCOMPANY_MEMORY_DRIVER=supermemory|mem0|cognee` (plus `null`), inert
   # until an operator sets those.
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory
+  #
+  # `analytics` (issue #1739) is the Mixpanel transport, and this list is the
+  # only place it is ever compiled: product analytics reports from **hosted
+  # tenants only**, so the image built here is the one build that needs it,
+  # while the desktop and self-hosted builds deliberately do not have it.
+  # Without it every tenant compiles the `cfg(not(feature = "analytics"))` arm
+  # of `mixpanel::build`, installs a `NullTracker`, and reports nothing however
+  # the deployment kind and token are injected. It costs the image nothing —
+  # `analytics = ["dep:reqwest"]`, and `reqwest` is already here via `openhuman`
+  # — and stays inert until the manager injects `OPENCOMPANY_ANALYTICS_TOKEN`
+  # (`docs/spec/runtime/analytics.md`).
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory,analytics
 
 jobs:
   deploy:

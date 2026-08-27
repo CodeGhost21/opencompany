@@ -157,7 +157,7 @@ export function ProvidersSection({
     <section className="space-y-3">
       <SectionHeading count={connectedCount} />
       <Card>
-        <CardContent className="space-y-2 py-4">
+        <CardContent className="space-y-2">
           {noCredential && (
             <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
               {canManage

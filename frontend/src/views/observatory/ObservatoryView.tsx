@@ -27,6 +27,7 @@ import {
 } from "@/api/observatory";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/page-header";
 import { classifyLoadFailure } from "@/lib/section-load";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { cn } from "@/lib/utils";
@@ -208,14 +209,19 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   };
 
   if (load.phase === "loading") {
-    return <p className="text-muted-foreground p-6 text-sm">Reading run history…</p>;
+    return (
+      <div className="flex flex-col">
+        <PageHeader title={runId ? "Run" : "Observatory"} />
+        <p className="text-muted-foreground p-4 text-sm">Reading run history…</p>
+      </div>
+    );
   }
 
   if (load.phase === "unavailable") {
     return (
-      <div className="flex flex-col gap-2 p-6">
-        <h2 className="text-lg font-medium">Observatory</h2>
-        <p className="text-muted-foreground max-w-prose text-sm">
+      <div className="flex flex-col">
+        <PageHeader title={runId ? "Run" : "Observatory"} />
+        <p className="text-muted-foreground max-w-prose p-4 text-sm">
           This host does not expose the run-observability read yet. Attempts and
           their step traces are still recorded — the Attempts tab on a card shows
           them one card at a time.
@@ -226,48 +232,60 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
 
   if (load.phase === "error") {
     return (
-      <div className="flex flex-col items-start gap-2 p-6">
-        <h2 className="text-lg font-medium">Observatory</h2>
-        <p className="text-[var(--status-failed-text)] text-sm">{load.message}</p>
-        <Button variant="outline" size="sm" onClick={() => void reload()}>
-          Try again
-        </Button>
+      <div className="flex flex-col">
+        <PageHeader title={runId ? "Run" : "Observatory"} />
+        <div className="flex flex-col items-start gap-2 p-4">
+          <p className="text-[var(--status-failed-text)] text-sm">{load.message}</p>
+          <Button variant="outline" size="sm" onClick={() => void reload()}>
+            Try again
+          </Button>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-4 p-4">
-      <header className="flex flex-wrap items-baseline gap-3">
-        <h2 className="text-lg font-medium">
-          {runId ? "Run" : "Observatory"}
-        </h2>
-        {runId && (
-          <>
-            <code className="text-muted-foreground text-xs">{runId}</code>
-            <a
-              href={observatoryHref()}
-              className="text-muted-foreground text-xs underline underline-offset-2"
-            >
-              all runs
-            </a>
-          </>
-        )}
-        <div className="flex-1" />
-        <nav className="flex gap-1">
-          {(["runs", "analytics"] as const).map((name) => (
-            <Button
-              key={name}
-              variant={tab === name ? "secondary" : "ghost"}
-              size="sm"
-              className="h-7 px-3 text-xs capitalize"
-              onClick={() => selectTab(name)}
-            >
-              {name}
-            </Button>
-          ))}
-        </nav>
-      </header>
+    <div className="flex flex-col">
+      {/*
+        Issue #1763. This was a hand-rolled `h2` in a bare `header`, so
+        Observatory was one of the two console pages a screen reader could not
+        announce at all — it had no `h1` in any of its four states. Its shape
+        was already the one `PageHeader` generalises (name on the left, tabs
+        right-aligned on the same row), so it maps onto the component's own
+        slots rather than needing a variant.
+      */}
+      <PageHeader
+        title={runId ? "Run" : "Observatory"}
+        trailing={
+          runId && (
+            <>
+              <code className="text-muted-foreground text-xs">{runId}</code>
+              <a
+                href={observatoryHref()}
+                className="text-muted-foreground text-xs underline underline-offset-2"
+              >
+                all runs
+              </a>
+            </>
+          )
+        }
+        actions={
+          <nav className="flex gap-1">
+            {(["runs", "analytics"] as const).map((name) => (
+              <Button
+                key={name}
+                variant={tab === name ? "secondary" : "ghost"}
+                size="sm"
+                className="h-7 px-3 text-xs capitalize"
+                onClick={() => selectTab(name)}
+              >
+                {name}
+              </Button>
+            ))}
+          </nav>
+        }
+      />
+      <div className="flex flex-col gap-4 p-4">
 
       {runs.length === 0 ? (
         <p className="text-muted-foreground text-sm">
@@ -360,6 +378,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
           </section>
         </>
       )}
+      </div>
     </div>
   );
 }

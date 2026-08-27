@@ -25,6 +25,7 @@ import {
 import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } from "@/api/types";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -735,6 +736,31 @@ export function AgentDetailView({
             </li>
           </ol>
         </nav>
+
+        {/*
+          The page's accessible name in the four states `Identity` does not
+          mount for (codex review, #1785). `Identity`'s `h1` is this page's
+          only heading and it renders only once the teammate has loaded, so a
+          direct `#/team/<id>` visit that was still loading — or that landed on
+          a removed teammate, an older host, or a failed read — was a page a
+          screen reader could not announce at all.
+
+          `hidden`, because the breadcrumb above already says where you are and
+          a title bar over a skeleton would be chrome about nothing.
+
+          The name is gated on `load === "ready"` and not merely on `agent`
+          being set (coderabbit review). `boot()` moves `load` to `"loading"`
+          on an `agentId` change but keeps the previous `agent` until the new
+          request settles, so keying off `agent` alone announced the teammate
+          you just navigated *away from* as the name of the page you navigated
+          *to* — a wrong name, which is worse than a generic one. The crumb has
+          the same shape and can afford it: it is visible text next to the
+          controls, changing in place, rather than the one string a screen
+          reader announces on arrival.
+        */}
+        {load !== "ready" || !agent ? (
+          <PageHeader title="Teammate" hidden />
+        ) : null}
 
         {load === "loading" && <Skeleton className="h-64 rounded-xl" />}
 
@@ -2007,7 +2033,7 @@ function Section({
 }) {
   return (
     <Card>
-      <CardContent className="space-y-3 py-4">
+      <CardContent className="space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div className="space-y-1">
             <h3 className="font-medium">{title}</h3>
@@ -2023,8 +2049,8 @@ function Section({
 
 function EmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <Card>
-      <CardContent className="space-y-1 py-8 text-center">
+    <Card className="[--card-spacing:--spacing(8)]">
+      <CardContent className="space-y-1 text-center">
         <p className="font-medium">{title}</p>
         <p className="text-sm text-muted-foreground">{body}</p>
       </CardContent>

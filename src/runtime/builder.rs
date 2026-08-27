@@ -614,6 +614,7 @@ pub struct RuntimeBuilder {
     run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
     deep_trace: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
+    tracker: Option<Arc<dyn crate::analytics::Tracker>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
     notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
@@ -753,6 +754,7 @@ impl RuntimeBuilder {
             run_output_store: None,
             deep_trace: None,
             usage: None,
+            tracker: None,
             skills: None,
             read_state: None,
             notifications: None,
@@ -1155,6 +1157,18 @@ impl RuntimeBuilder {
     /// Swaps the usage meter (default: fs-backed).
     pub fn with_usage(mut self, usage: Arc<dyn UsageMeter>) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    /// Points this company's analytics at `tracker` (issue #1739).
+    ///
+    /// The default is [`NullTracker`](crate::analytics::NullTracker), which is
+    /// what a desktop or self-hosted instance keeps: the whole hosted-only
+    /// posture is that a builder nobody called this on reports nothing. The
+    /// `serve` path calls it once, with the process-wide tracker chosen by
+    /// [`analytics::mixpanel::build`](crate::analytics::mixpanel::build).
+    pub fn with_analytics(mut self, tracker: Arc<dyn crate::analytics::Tracker>) -> Self {
+        self.tracker = Some(tracker);
         self
     }
 
@@ -1727,6 +1741,14 @@ impl RuntimeBuilder {
             .map(|h| h.inbox.clone())
             .or(self.inbox)
             .unwrap_or_else(|| Arc::new(FsInboxStore::new(home.clone())));
+        // Issue #1739. Bound before the ops struct because two places need it:
+        // the usage-meter wrapper inside `ops`, and the runtime itself. Defaults
+        // to the no-op tracker, which is what every build that has not opted in
+        // keeps.
+        let tracker = self
+            .tracker
+            .clone()
+            .unwrap_or_else(crate::analytics::null_tracker);
         // The WS3 console ports default to a single shared fs backend.
         let fs_ops = Arc::new(FsOps::new(home.clone()));
         // Chosen before the ops struct because two of its members need it: the
@@ -1807,7 +1829,16 @@ impl RuntimeBuilder {
                     .run_output_store
                     .clone()
                     .unwrap_or_else(|| fs_ops.clone()),
-                usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
+                // Issue #1739: every metered sample — per-turn from the
+                // harness cost hook, per-cycle from the hosted brain, or a
+                // counted OAuth/search call — passes through this port, so
+                // wrapping it here instruments all of them and changes not one
+                // call site. The wrapper is a no-op with the default
+                // `NullTracker`; see `analytics::meter`.
+                usage: Arc::new(crate::analytics::TrackingUsageMeter::new(
+                    self.usage.unwrap_or_else(|| fs_ops.clone()),
+                    tracker.clone(),
+                )),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 read_state: self.read_state.unwrap_or_else(|| fs_ops.clone()),
                 notifications: self.notifications.unwrap_or_else(|| fs_ops.clone()),
@@ -3624,6 +3655,7 @@ impl RuntimeBuilder {
             grants,
         );
         runtime.set_memory_decorators(scratch_context, memory_scopes);
+        runtime.set_tracker(tracker);
 
         // The seed dir is the company's on-disk source directory
         // (`companies/<name>`); record it so read resolvers can find committed

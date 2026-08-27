@@ -4048,10 +4048,11 @@ impl OverlayBlob {
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
 /// free the roster leaves them: the always-present operator channel, the two
-/// workspace system roots, and the author the runtime speaks under.
+/// workspace system roots, the author the runtime speaks under, and the two
+/// spellings of the built-in `#general` channel.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the four moves this list with it instead of quietly
+/// rename of any of them moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
 ///
@@ -4062,11 +4063,23 @@ impl OverlayBlob {
 /// `agent_slug("System")` produces it — which is what separates it from
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
-pub const RESERVED_AGENT_IDS: [&str; 4] = [
+///
+/// [`MAIN_THREAD_ID`](crate::server::chat_history::MAIN_THREAD_ID) and
+/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK) join them for
+/// issue #1743, and both are ordinary slugs — a teammate named "Main" or
+/// "General" mints straight onto one. That id is a chat address: `responder_for`
+/// checks roster ids before it falls back to the orchestrator, so the teammate
+/// would answer every unaddressed message on the company-wide line, and the
+/// console would render the line's transcript as that teammate's DM. Desk ids
+/// and names are already excluded a few lines below; these are the two keys
+/// that route like a desk without being one.
+pub const RESERVED_AGENT_IDS: [&str; 6] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
+    crate::server::chat_history::MAIN_THREAD_ID,
+    crate::server::ops::language::DEFAULT_DESK,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -4432,6 +4445,20 @@ impl CompanyRecord {
     /// id, searching the manifest desks first and then the operator-created
     /// overlay desks. Lets the harness route to overlay desks by the same
     /// id-or-name key it already accepts for manifest desks.
+    ///
+    /// **An overlay desk never answers to a General spelling** (issue #1743).
+    /// `POST .../desks` accepted `general` and `main` — and the display name
+    /// `General` — until that issue, so an upgraded record can hold one, and it
+    /// would otherwise take over routing for the built-in `#general` channel:
+    /// `responder_for` would answer as its lead while the console showed the
+    /// company-wide line, and `@everyone` there would name only its members.
+    /// Keyed on the **key being asked for**, not on the desk, so such a desk
+    /// still routes normally under its own non-General id — this narrows one
+    /// question, it does not retire a desk.
+    ///
+    /// A desk the *manifest* declares is matched first and is unaffected: a
+    /// blueprint that authored the company's General desk keeps it, which is
+    /// the grandfathering this host has always honoured.
     pub fn resolve_desk_id(&self, key: &str) -> Option<String> {
         self.manifest
             .group_chats
@@ -4439,8 +4466,20 @@ impl CompanyRecord {
             .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
             .map(|c| c.id.clone())
             .or_else(|| {
+                if crate::server::chat_history::is_general_chat(Some(key)) {
+                    return None;
+                }
                 self.overlay_desks
                     .iter()
+                    // ...and an overlay desk whose **own id** is a General
+                    // spelling is excluded whatever it is asked for. The guard
+                    // above only narrows the queried key, so `{id: "main", name:
+                    // "Front office"}` was still reachable by its display name —
+                    // resolving to an id that `GET .../desks` filters out and
+                    // that every desk mutation refuses. Its lead would answer,
+                    // and the reply would be journaled under a thread the
+                    // console renders no channel for.
+                    .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
@@ -6940,9 +6979,16 @@ mod test {
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
         assert_eq!(record.mint_agent_id("System"), "system_2");
+        // Issue #1743: both spellings of the built-in `#general` channel. A
+        // teammate minted onto one becomes the answer to every unaddressed
+        // message on the company-wide line — `responder_for` checks roster ids
+        // before falling back to the orchestrator — and the console renders
+        // that line's transcript as the teammate's DM.
+        assert_eq!(record.mint_agent_id("Main"), "main_2");
+        assert_eq!(record.mint_agent_id("General"), "general_2");
         assert_eq!(
             RESERVED_AGENT_IDS,
-            ["operator", "agents", "desks", "system"]
+            ["operator", "agents", "desks", "system", "main", "General"]
         );
     }
 
@@ -7986,6 +8032,144 @@ mod test {
             record.effective_desk_members("growth"),
             vec!["eng".to_string(), "ceo".to_string()]
         );
+    }
+
+    /// An **overlay** desk never answers to a General spelling (issue #1743).
+    ///
+    /// `POST .../desks` accepted `general`, `main` and the display name
+    /// `General` until that issue, so an upgraded record can be carrying one.
+    /// Every routing decision on the built-in `#general` channel funnels
+    /// through this one resolver — `desk_lead` → `responder_for` picks who
+    /// answers, and `mentioned_agents` picks who `@everyone` names — so a desk
+    /// that resolves here takes the company-wide line over: the console shows
+    /// `#general` while that desk's lead answers it, and a broadcast meant for
+    /// the whole roster reaches only that desk's members.
+    ///
+    /// Keyed on the **key being asked for**, not on the desk, which is what
+    /// keeps this a narrowing of one question rather than a retirement: the
+    /// same desk still resolves under its own non-General id.
+    #[test]
+    fn an_overlay_desk_does_not_answer_to_a_general_spelling() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        record.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "General".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["ceo".into()],
+        });
+
+        for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
+            assert_eq!(
+                record.resolve_desk_id(spelling),
+                None,
+                "an overlay desk must not answer to {spelling:?}"
+            );
+        }
+        // Both desks still exist and still route under their own ids — this
+        // narrows one question, it does not take a desk away.
+        assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+        assert!(record.desk_exists("main"));
+        assert_eq!(
+            record.effective_desk_members("main"),
+            vec!["eng".to_string()]
+        );
+    }
+
+    /// ...and it must not be reachable by its **display name** either.
+    ///
+    /// The guard narrows the key being asked for, so `{id: "main", name: "Front
+    /// office"}` slipped through it: `Front office` is not a General spelling,
+    /// the name match fired, and the resolver returned `main` — an id that
+    /// `GET .../desks` filters out and that every desk mutation refuses. Its
+    /// lead would answer, and the reply would be journaled under a thread the
+    /// console renders no channel for: a conversation with no way back.
+    ///
+    /// An overlay desk on a General id is unaddressable by design; it must be
+    /// unaddressable by *every* address.
+    #[test]
+    fn an_overlay_desk_on_a_general_id_is_unreachable_by_name_too() {
+        let mut record = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            Vec::new(),
+        );
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        assert_eq!(
+            record.resolve_desk_id("Front office"),
+            None,
+            "an overlay desk whose id shadows General must not answer to its name"
+        );
+        assert_eq!(
+            record.resolve_desk_id("front office"),
+            None,
+            "nor case-folded"
+        );
+        assert_eq!(record.resolve_desk_id("main"), None, "nor to the id itself");
+        // An ordinary overlay desk is untouched — this narrows one desk, not the rule.
+        let mut ordinary = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            Vec::new(),
+        );
+        ordinary.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        assert_eq!(
+            ordinary.resolve_desk_id("Front office").as_deref(),
+            Some("ops")
+        );
+        assert_eq!(ordinary.resolve_desk_id("ops").as_deref(), Some("ops"));
+    }
+
+    /// A desk the **manifest** declares under a General spelling is the
+    /// blueprint's own General desk, and this host has always honoured it
+    /// (issue #1743). The narrowing above is about overlay desks only; the
+    /// manifest arm of the resolver is searched first and is untouched.
+    #[test]
+    fn a_blueprint_desk_still_owns_a_general_spelling() {
+        let record = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
+             [[group_chat]]\nid = \"main\"\nname = \"Front office\"\nmembers = [\"eng\"]\n",
+            Vec::new(),
+        );
+        assert_eq!(record.resolve_desk_id("main").as_deref(), Some("main"));
+        assert_eq!(
+            record.effective_desk_members("main"),
+            vec!["eng".to_string()]
+        );
+        // And by display name, the other spelling `resolve_desk_id` matches.
+        let named = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"General\"\nmembers = [\"ceo\"]\n",
+            Vec::new(),
+        );
+        assert_eq!(named.resolve_desk_id("General").as_deref(), Some("ops"));
+        assert_eq!(named.resolve_desk_id("general").as_deref(), Some("ops"));
     }
 
     /// The overlay blob round-trips operator-created desks through its persisted
