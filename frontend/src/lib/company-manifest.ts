@@ -369,10 +369,28 @@ export const MAX_EXPLICIT_ID_LENGTH = 128;
  * could have refused for free is instead discovered only when
  * `provisionCompany` is called, after the old company is already archived
  * (codex review on #1828, PR comment 3873186322).
+ *
+ * A bare `.` or `..` is refused outright, independent of the length check:
+ * `slug` (`store/paths.rs`) passes `.` through as one of its three
+ * filesystem-safe passthrough characters (alongside `_` and `-`), so
+ * `Bundle::new` joins it onto `home/companies` unmodified — an id of `..`
+ * resolves the bundle directory to `home` itself, and `.` to `home/companies`
+ * — landing the manifest save outside any per-company directory instead of
+ * failing closed. `OpenCompanyClient.scope()` compounds this on the request
+ * path: `encodeURIComponent` leaves `.` unescaped, so a `/companies/..`
+ * route is collapsed by ordinary URL normalization before it ever reaches
+ * the host, making the new company unreachable through its expected
+ * `/companies/{id}` route (codex review on #1828, PR comment 3874738990).
+ * Only the two literal dot-segments are special path components — anything
+ * else typed here (including runs of three or more dots, or a dot beside
+ * other characters) is an ordinary, safe filesystem component once slugged.
  */
 export function explicitIdProblem(candidateId: string): string | null {
   if (candidateId.length > MAX_EXPLICIT_ID_LENGTH) {
     return `That id is too long (${candidateId.length} characters) — keep it under ${MAX_EXPLICIT_ID_LENGTH} characters. Leave the field blank for an auto-generated id.`;
+  }
+  if (candidateId === "." || candidateId === "..") {
+    return `"${candidateId}" isn't a usable id — it's a reserved path segment. Choose a different id, or leave the field blank for an auto-generated one.`;
   }
   return null;
 }
