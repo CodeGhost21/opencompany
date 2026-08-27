@@ -22,6 +22,7 @@ vi.mock("sonner", () => {
 });
 
 const {
+  budgetProximityExpiresAt,
   handleEvent,
   isBudgetPauseNotice,
   isBudgetPauseNoticeSuperseded,
@@ -249,23 +250,24 @@ describe("budget_proximity routing", () => {
  * boundary directly, since there is no component-test harness in this
  * project to mount the effect itself (see this file's header doc comment).
  */
-describe("isBudgetProximityExpired", () => {
+describe("isBudgetProximityExpired — per-agent daily warning (agentId present)", () => {
   // 2023-11-14T22:13:20.000Z — mid-evening, nowhere near a midnight boundary,
   // so the daily-vs-flat-window distinction below doesn't collapse into the
   // same answer by coincidence.
   const parkedAt = 1_700_000_000_000;
   const midnightAfter = nextUtcMidnightAfter(parkedAt);
+  const agentId = "ceo";
 
   it("is not expired the moment it is parked", () => {
-    expect(isBudgetProximityExpired(parkedAt, parkedAt)).toBe(false);
+    expect(isBudgetProximityExpired(parkedAt, parkedAt, agentId)).toBe(false);
   });
 
   it("is not expired a millisecond before the next UTC midnight", () => {
-    expect(isBudgetProximityExpired(parkedAt, midnightAfter - 1)).toBe(false);
+    expect(isBudgetProximityExpired(parkedAt, midnightAfter - 1, agentId)).toBe(false);
   });
 
   it("is expired exactly at the next UTC midnight — a stale banner must not survive it", () => {
-    expect(isBudgetProximityExpired(parkedAt, midnightAfter)).toBe(true);
+    expect(isBudgetProximityExpired(parkedAt, midnightAfter, agentId)).toBe(true);
   });
 
   it("is expired well past midnight — the pre-fix 'remains indefinitely' case", () => {
@@ -273,7 +275,9 @@ describe("isBudgetProximityExpired", () => {
     // state, so a check like this one would have failed against the
     // original pre-fix code path (which had no expiry predicate to call at
     // all — the banner just never went away).
-    expect(isBudgetProximityExpired(parkedAt, parkedAt + 7 * BUDGET_PROXIMITY_TTL_MS)).toBe(true);
+    expect(
+      isBudgetProximityExpired(parkedAt, parkedAt + 7 * BUDGET_PROXIMITY_TTL_MS, agentId),
+    ).toBe(true);
   });
 
   it("a fresh frame's later atMillis is not expired against the same clock reading", () => {
@@ -283,11 +287,11 @@ describe("isBudgetProximityExpired", () => {
     const staleAt = parkedAt;
     const now = midnightAfter + 1000;
     const freshAt = now - 1000;
-    expect(isBudgetProximityExpired(staleAt, now)).toBe(true);
-    expect(isBudgetProximityExpired(freshAt, now)).toBe(false);
+    expect(isBudgetProximityExpired(staleAt, now, agentId)).toBe(true);
+    expect(isBudgetProximityExpired(freshAt, now, agentId)).toBe(false);
   });
 
-  // Issue #1846 review (Codex #3868962374): a flat 24h-from-`atMillis` window
+  // Issue #1846 review (Codex #3868962376): a flat 24h-from-`atMillis` window
   // left a warning that fired shortly before midnight claiming stale status
   // for almost the entire NEXT day, even though the daily counter it was
   // warning about had already reset hours (or even minutes) earlier. Proof:
@@ -300,13 +304,58 @@ describe("isBudgetProximityExpired", () => {
     // The pre-fix flat-24h rule would NOT have expired here — the actual bug
     // this test pins:
     expect(twoMinutesAfterMidnight - lateEvening).toBeLessThan(BUDGET_PROXIMITY_TTL_MS);
-    expect(isBudgetProximityExpired(lateEvening, twoMinutesAfterMidnight)).toBe(true);
+    expect(isBudgetProximityExpired(lateEvening, twoMinutesAfterMidnight, agentId)).toBe(true);
   });
 
   it("does NOT expire a warning that fired just after midnight until the FOLLOWING midnight", () => {
     const justAfterMidnight = Date.UTC(2026, 5, 15, 0, 2, 0, 0);
     const stillSameDay = Date.UTC(2026, 5, 15, 23, 0, 0, 0);
-    expect(isBudgetProximityExpired(justAfterMidnight, stillSameDay)).toBe(false);
+    expect(isBudgetProximityExpired(justAfterMidnight, stillSameDay, agentId)).toBe(false);
+  });
+});
+
+/**
+ * Issue #1846 review (Codex #3869601278) — **the regression.** A
+ * company-wide `budget_proximity` frame (no `agentId`) warns about the
+ * COMPANY's plan/billing period, which is not necessarily UTC-day-aligned at
+ * all — unlike the per-agent daily cap, which resets at exactly 00:00 UTC.
+ * Anchoring this case to the next UTC midnight too (as the per-agent fix
+ * above does) would clear a still-valid company-wide warning hours or days
+ * before the period it actually describes ends.
+ */
+describe("isBudgetProximityExpired — company-wide warning (agentId absent)", () => {
+  const parkedAt = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
+  const midnightAfter = nextUtcMidnightAfter(parkedAt); // ~1h46m later
+
+  it("is NOT expired at the next UTC midnight — the daily boundary does not apply here", () => {
+    // The pre-regression-fix bug: applying `nextUtcMidnightAfter`
+    // unconditionally would have expired this well before the flat 24h
+    // ceiling, even though nothing about a company-wide plan period ties it
+    // to midnight.
+    expect(isBudgetProximityExpired(parkedAt, midnightAfter, undefined)).toBe(false);
+  });
+
+  it("is not expired a millisecond before the flat 24h ceiling", () => {
+    expect(isBudgetProximityExpired(parkedAt, parkedAt + BUDGET_PROXIMITY_TTL_MS - 1)).toBe(
+      false,
+    );
+  });
+
+  it("is expired at the flat 24h ceiling", () => {
+    expect(isBudgetProximityExpired(parkedAt, parkedAt + BUDGET_PROXIMITY_TTL_MS)).toBe(true);
+  });
+});
+
+describe("budgetProximityExpiresAt", () => {
+  const parkedAt = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
+
+  it("anchors a per-agent warning to the next UTC midnight", () => {
+    expect(budgetProximityExpiresAt(parkedAt, "ceo")).toBe(nextUtcMidnightAfter(parkedAt));
+  });
+
+  it("anchors a company-wide warning to the flat 24h ceiling, not midnight", () => {
+    expect(budgetProximityExpiresAt(parkedAt, undefined)).toBe(parkedAt + BUDGET_PROXIMITY_TTL_MS);
+    expect(budgetProximityExpiresAt(parkedAt)).not.toBe(nextUtcMidnightAfter(parkedAt));
   });
 });
 

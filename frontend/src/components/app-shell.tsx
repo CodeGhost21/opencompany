@@ -69,9 +69,9 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
+  budgetProximityExpiresAt,
   type CompanyStreamEvent,
   isBudgetProximityExpired,
-  nextUtcMidnightAfter,
   useEvents,
 } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
@@ -2097,6 +2097,12 @@ export function AppShell({
   const [budgetProximity, setBudgetProximity] = useState<{
     message: string;
     atMillis: number;
+    // The frame's own `agentId` (issue #1846 review, Codex #3869601278):
+    // present for one teammate's daily cap, absent for the company-wide
+    // ceiling. Carried through to state (not just read at arrival) because
+    // the expiry effect below needs it too, to pick the right boundary —
+    // see `isBudgetProximityExpired`'s doc.
+    agentId?: string;
   } | null>(null);
   // Issue #1846 review (Codex #3864988188): company-scoped, and reset on
   // company change for the same reason `workflowRunEvents`/`openTurns` are
@@ -2106,30 +2112,35 @@ export function AppShell({
   useEffect(() => {
     setBudgetProximity((prev) => (prev === null ? prev : null));
   }, [client, company]);
-  // Issue #1846 review (Codex #3866418899, refined by #3868962374): bounded
-  // self-expiry, since the backend only ever publishes a `budget_proximity`
-  // frame while usage is at least 90% (`is_approaching_budget_ceiling`'s
-  // callers in `harness/built_in/mod.rs`) and never a "cleared" counterpart.
-  // Without this, a daily agent cap resetting at 00:00 UTC, a plan period
-  // rolling over, or an operator raising the cap all leave usage back below
-  // that threshold with nothing on the wire to say so, and the banner
-  // claimed the previous period's status forever.
+  // Issue #1846 review (Codex #3866418899, refined by #3868962376 /
+  // #3869601278): bounded self-expiry, since the backend only ever
+  // publishes a `budget_proximity` frame while usage is at least 90%
+  // (`is_approaching_budget_ceiling`'s callers in `harness/built_in/mod.rs`)
+  // and never a "cleared" counterpart. Without this, a daily agent cap
+  // resetting at 00:00 UTC, a plan period rolling over, or an operator
+  // raising the cap all leave usage back below that threshold with nothing
+  // on the wire to say so, and the banner claimed the previous period's
+  // status forever.
   //
-  // Anchored to the next UTC midnight after the warning (see
-  // `nextUtcMidnightAfter`'s doc), not a flat 24h from `atMillis`: the
-  // DAILY case this exists for resets exactly at that boundary, and a flat
-  // window left a warning that fired late in the evening claiming stale
-  // status for most of the following day. A dispatch that is STILL near the
-  // cap re-publishes its own frame well inside the window, which reaches
-  // this effect as a new `budgetProximity` value and re-arms the timer, so a
-  // genuinely ongoing warning never flickers off mid-window.
+  // The boundary itself depends on `agentId` — see
+  // `isBudgetProximityExpired`/`budgetProximityExpiresAt`'s docs: a per-agent
+  // DAILY warning is anchored to the next UTC midnight (that reset's actual
+  // instant), but the COMPANY-WIDE warning has no such fixed boundary the
+  // console can compute, so it keeps the flat 24h ceiling instead — anchoring
+  // IT to midnight too would clear a still-valid warning hours or days before
+  // its own (not-necessarily-UTC-day-aligned) plan period actually ends. A
+  // dispatch that is STILL near the cap re-publishes its own frame well
+  // inside the window, which reaches this effect as a new `budgetProximity`
+  // value and re-arms the timer, so a genuinely ongoing warning never
+  // flickers off mid-window.
   useEffect(() => {
     if (budgetProximity === null) return;
-    if (isBudgetProximityExpired(budgetProximity.atMillis, Date.now())) {
+    if (isBudgetProximityExpired(budgetProximity.atMillis, Date.now(), budgetProximity.agentId)) {
       setBudgetProximity(null);
       return;
     }
-    const remainingMs = nextUtcMidnightAfter(budgetProximity.atMillis) - Date.now();
+    const remainingMs =
+      budgetProximityExpiresAt(budgetProximity.atMillis, budgetProximity.agentId) - Date.now();
     const timer = setTimeout(() => setBudgetProximity(null), Math.max(remainingMs, 0));
     return () => clearTimeout(timer);
   }, [budgetProximity]);
@@ -2447,7 +2458,11 @@ export function AppShell({
     ),
     onBudgetProximityEvent: useCallback((event: CompanyStreamEvent) => {
       if (event.type !== "budget_proximity") return;
-      setBudgetProximity({ message: event.message, atMillis: event.atMillis });
+      setBudgetProximity({
+        message: event.message,
+        atMillis: event.atMillis,
+        agentId: event.agentId,
+      });
     }, []),
     onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
       // Both halves. The tick refreshes the durable history; the frames drive

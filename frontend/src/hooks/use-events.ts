@@ -474,18 +474,23 @@ export function isBudgetPauseNoticeSuperseded(
  * to keep claiming its warning without a fresh `budget_proximity` frame
  * renewing it (issue #1846 review, Codex #3866418899) — a plan-period
  * rollover or an operator raising the cap has no fixed reset instant the
- * console can compute, so those two fall back to this flat ceiling. Kept
- * exported for that ceiling and for tests; the DAILY case (see
- * {@link nextUtcMidnightAfter}) no longer uses it directly, per Codex
- * #3868962374's review — see that function's doc for why a flat 24h-from-
- * `atMillis` window was wrong for the far more common daily reset.
+ * console can compute, so the COMPANY-WIDE case (see
+ * {@link isBudgetProximityExpired}'s `agentId` param) falls back to this
+ * flat ceiling. The PER-AGENT DAILY case no longer uses it directly, per
+ * Codex #3868962376's review — see {@link nextUtcMidnightAfter}'s doc for
+ * why a flat 24h-from-`atMillis` window was wrong for the far more common
+ * daily reset.
  */
 export const BUDGET_PROXIMITY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The next UTC-midnight instant strictly after `atMillis` (issue #1846
- * review, Codex #3868962374) — the boundary the backend's PER-AGENT DAILY
- * cap actually resets against.
+ * review, Codex #3868962376) — the boundary the backend's PER-AGENT DAILY
+ * cap actually resets against. **Only** the right boundary for a per-agent
+ * warning (`budget_proximity`'s `agentId` present) — see
+ * {@link isBudgetProximityExpired}'s `agentId` param for the company-wide
+ * case, which is not necessarily aligned to a UTC day at all (issue #1846
+ * review, Codex #3869601278) and must not use this.
  *
  * `isBudgetProximityExpired` used to add a flat {@link BUDGET_PROXIMITY_TTL_MS}
  * (24h) to `atMillis` instead, on the theory that 24h "matches the daily
@@ -495,9 +500,7 @@ export const BUDGET_PROXIMITY_TTL_MS = 24 * 60 * 60 * 1000;
  * for nearly a full EXTRA day after the count it was warning about had
  * already reset to zero. Anchoring to the next actual midnight instead means
  * a late-day warning clears within minutes of the reset that actually
- * clears it, while a warning caused by a plan-period rollover or a manual
- * cap raise (no daily-reset instant to anchor to) still ages out within at
- * most 24h, same as before.
+ * clears it.
  */
 export function nextUtcMidnightAfter(atMillis: number): number {
   const d = new Date(atMillis);
@@ -505,17 +508,41 @@ export function nextUtcMidnightAfter(atMillis: number): number {
 }
 
 /**
- * Whether a `budget_proximity` frame parked at `atMillis` has aged out and
- * must no longer be shown, as of `nowMillis` (issue #1846 review, Codex
- * #3866418899 / #3868962374). A frame that is STILL near the cap
- * re-publishes its own, newer `atMillis` well inside the window, so a
- * genuinely ongoing warning never expires mid-window — only a stale one,
- * with nothing renewing it, eventually does. Bounded by the next UTC
- * midnight after `atMillis` — see {@link nextUtcMidnightAfter} — not a flat
- * 24h-from-`atMillis` window.
+ * When a `budget_proximity` frame parked at `atMillis` ages out and must no
+ * longer be shown (issue #1846 review, Codex #3866418899 / #3868962376 /
+ * #3869601278).
+ *
+ * `agentId` is the frame's own field (present for one teammate's daily cap,
+ * absent for the company-wide ceiling — see the `budget_proximity` event's
+ * doc) and decides which boundary applies:
+ * - **Present** (a per-agent DAILY warning): the next UTC midnight after
+ *   `atMillis` — see {@link nextUtcMidnightAfter}'s doc for why a flat
+ *   window was wrong here.
+ * - **Absent** (the COMPANY-WIDE warning): a plan/billing period is not
+ *   necessarily UTC-day-aligned at all, so anchoring THIS case to midnight
+ *   would clear a still-valid warning early — a monthly period rolling over
+ *   mid-afternoon, say, would have its warning vanish at the NEXT midnight
+ *   regardless, hours or days before the period the warning is actually
+ *   about ends. Falls back to the flat {@link BUDGET_PROXIMITY_TTL_MS}
+ *   ceiling instead, same as before the per-agent fix.
  */
-export function isBudgetProximityExpired(atMillis: number, nowMillis: number): boolean {
-  return nowMillis >= nextUtcMidnightAfter(atMillis);
+export function isBudgetProximityExpired(
+  atMillis: number,
+  nowMillis: number,
+  agentId?: string,
+): boolean {
+  if (agentId != null) return nowMillis >= nextUtcMidnightAfter(atMillis);
+  return nowMillis - atMillis >= BUDGET_PROXIMITY_TTL_MS;
+}
+
+/**
+ * When a `budget_proximity` frame parked at `atMillis` is next due to expire
+ * (issue #1846 review, Codex #3869601278) — the timer-arming counterpart of
+ * {@link isBudgetProximityExpired}, so `app-shell.tsx`'s expiry effect does
+ * not have to re-derive the same per-agent-vs-company-wide branch itself.
+ */
+export function budgetProximityExpiresAt(atMillis: number, agentId?: string): number {
+  return agentId != null ? nextUtcMidnightAfter(atMillis) : atMillis + BUDGET_PROXIMITY_TTL_MS;
 }
 
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
