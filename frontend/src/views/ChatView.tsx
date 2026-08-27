@@ -34,6 +34,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   fromHistory,
+  isGeneralChannel,
   makeMessage,
   reconcileIds,
   toHostMessageId,
@@ -1144,7 +1145,24 @@ export function ChatView({
   // (`responder_for` in `src/harness/brain.rs`), which is exactly what a DM's
   // `member.id` is, so a DM addresses that teammate the same way a desk
   // addresses its lead. It is also the id every live turn frame carries.
-  const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
+  //
+  // **Except** a teammate whose id is itself a General spelling. The host folds
+  // the bare key to the company's line before it ever reaches the roster —
+  // deliberately, so `main` cannot be captured by a teammate called `main` —
+  // and a DM composed here was therefore written and answered in `#general`,
+  // under a transcript its own DM could not read back. `mint_agent_id` reserves
+  // these spellings, but a manifest can still declare one, so this is
+  // grandfathered state rather than a hypothesis. That one DM is addressed
+  // prefixed, which `chat_responder` unwraps and resolves
+  // (`chat_responder("dm:main") == Some("main")`), and which
+  // `channelIdForThread` maps back. Every other DM keeps the bare id issue #364
+  // re-keyed it onto.
+  const activeThreadId =
+    active.kind === "channel"
+      ? active.id
+      : active.member && isGeneralChannel(active.member.id)
+        ? dmChannelId(active.member)
+        : active.member?.id;
   /**
    * Whether the active channel is a **host desk** — the thing every desk
    * affordance below is derived from.

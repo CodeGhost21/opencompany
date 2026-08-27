@@ -3,30 +3,13 @@
 // a desk scopes a transcript and fixes the company side's identity, it is not
 // a separate backend.
 
-import { MAIN_THREAD_ID } from "@/lib/chat";
+import { isGeneralChannel } from "@/lib/chat";
 
-/**
- * The name of the company-wide channel, rendered after the `#`.
- *
- * Mirrors the host's `GENERAL_CHANNEL` (`src/server/ops/language.rs`), the same
- * way {@link MAIN_THREAD_ID} mirrors its `MAIN_THREAD_ID`.
- */
-export const GENERAL_CHANNEL = "general";
-
-/**
- * Does this id name the built-in `#general` channel?
- *
- * Mirrors the host's `is_general_chat` (`src/server/chat_history.rs`), which
- * has folded four spellings into one conversation since issue #65: the empty
- * string, `main` (what this console addresses the line as), `General` (the
- * name the host attributes an unaddressed turn to), and `general`. The host
- * reserves every one of them — a desk cannot be created with any of them as
- * its id — so this is a closed set, not a guess.
- */
-export function isGeneralChannel(id: string): boolean {
-  const key = id.trim().toLowerCase();
-  return key === "" || key === MAIN_THREAD_ID || key === GENERAL_CHANNEL;
-}
+// `GENERAL_CHANNEL` and `isGeneralChannel` live in `lib/chat.ts` beside
+// `MAIN_THREAD_ID` — they are facts about chat addressing, and
+// `dispatchMarkerPlacement` there has to apply them. Re-exported so every
+// reader keeps importing them from where desks are described.
+export { GENERAL_CHANNEL, isGeneralChannel } from "@/lib/chat";
 
 /**
  * Does this desk answer to the company-wide line?
@@ -38,10 +21,24 @@ export function isGeneralChannel(id: string): boolean {
  * beside the built-in channel while the host answered from the desk, which is
  * the same duplicate this predicate exists to prevent.
  *
+ * **A blueprint desk only.** `resolve_desk_id` searches the manifest desks and
+ * then the operator-created overlay ones, and it declines the overlay half for
+ * a General key outright — so an overlay desk *named* `General` answers only to
+ * its own id and does not have the line. It is projected under that id like any
+ * other desk (`GET .../desks`), and letting its name claim the line here would
+ * take `#general` off the rail in a company where the host still answers it as
+ * the orchestrator. `overlayCreated` is the host's own word for the
+ * distinction, carried through {@link Desk} for exactly this.
+ *
  * The host reserves both spellings against newly created desks; a manifest can
  * still declare either, and that is the grandfathered case.
  */
-export function deskClaimsGeneralChannel(desk: { id: string; name: string }): boolean {
+export function deskClaimsGeneralChannel(desk: {
+  id: string;
+  name: string;
+  overlayCreated?: boolean;
+}): boolean {
+  if (desk.overlayCreated) return false;
   return isGeneralChannel(desk.id) || isGeneralChannel(desk.name);
 }
 
@@ -70,6 +67,16 @@ export interface Desk {
    * the removable members from the blueprint ones without refetching.
    */
   overlayMembers?: string[];
+  /**
+   * Whether the whole desk was operator-created rather than declared in the
+   * manifest blueprint — the host's own `overlayCreated` (issue #1743).
+   *
+   * Needed because the two are not interchangeable to the host: only a
+   * blueprint desk is grandfathered onto the company-wide line
+   * ({@link deskClaimsGeneralChannel}). Absent on the static fallback desks,
+   * which are neither.
+   */
+  overlayCreated?: boolean;
 }
 
 /**

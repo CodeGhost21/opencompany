@@ -214,7 +214,7 @@ describe("the built-in #general channel", () => {
 
 describe("resolving a host thread to the general channel", () => {
   it("folds every spelling the host journals it under", () => {
-    for (const spelling of ["", "main", "General", "general", "  MAIN  "]) {
+    for (const spelling of ["", "main", "General", "general", "MAIN"]) {
       expect(channelIdForThread(spelling, DESKS, ROSTER)).toBe("main");
     }
   });
@@ -243,7 +243,7 @@ describe("resolving a host thread to the general channel", () => {
     // mirrors that order — desk, then the General fold, then the roster.
     const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
     expect(channelIdForThread("main", DESKS, withMain)).toBe("main");
-    for (const spelling of ["", "General", "general", "  MAIN  "]) {
+    for (const spelling of ["", "General", "general", "MAIN"]) {
       expect(channelIdForThread(spelling, DESKS, withMain)).toBe("main");
     }
     // Every other teammate's DM is untouched — this moved one key, not the rule.
@@ -255,6 +255,50 @@ describe("resolving a host thread to the general channel", () => {
     expect(channelIdForThread("main", deskMain, withMain)).toBe("main");
     // And with nobody claiming it, the fold is unchanged.
     expect(channelIdForThread("main", DESKS, ROSTER)).toBe("main");
+  });
+
+  /**
+   * ...and that teammate's DM is readable, which is the other half.
+   *
+   * The fold above is deliberate — `chat_responder("main")` is `None`, so a
+   * teammate called `main` cannot capture the company's line — but it left the
+   * DM writable and unreadable at once: `ChatView` addressed the host with the
+   * bare `member.id` (issue #364 re-keyed DMs onto it), so a message composed
+   * in that DM was written and answered in `#general`, under a transcript the
+   * DM could not read back.
+   *
+   * Both ends therefore have to agree on the prefixed address: the host answers
+   * it (`chat_responder("dm:main") == Some("main")`), and this resolves the
+   * frames it emits under that key. Asserted here because the comment above has
+   * claimed this routing since #1743 while nothing held the sender to it.
+   */
+  it("reads back the DM of a teammate whose id is a General spelling", () => {
+    const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
+    expect(channelIdForThread("dm:main", DESKS, withMain)).toBe("dm:main");
+    // The bare key still belongs to the company, unchanged by the arm above.
+    expect(channelIdForThread("main", DESKS, withMain)).toBe("main");
+    // The prefix resolves nobody it should not.
+    expect(channelIdForThread("dm:nobody", DESKS, withMain)).toBeNull();
+    expect(channelIdForThread("dm:", DESKS, withMain)).toBeNull();
+    // An ordinary teammate is reachable either way, so no existing DM moved.
+    expect(channelIdForThread("eng", DESKS, withMain)).toBe("dm:eng");
+    expect(channelIdForThread("dm:eng", DESKS, withMain)).toBe("dm:eng");
+  });
+
+  /**
+   * And the sender actually uses it.
+   *
+   * `activeThreadId` is what `ChatView` puts in `chat`. The resolver above is
+   * inert unless that one DM is addressed prefixed, so this holds the sender to
+   * the same rule rather than trusting the comment beside it.
+   */
+  it("addresses that one DM prefixed, and leaves every other bare", () => {
+    const view = readFileSync(
+      new URL("../../src/views/ChatView.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(view).toContain("isGeneralChannel(active.member.id)");
+    expect(view).toContain("dmChannelId(active.member)");
   });
 
   it("lets a blueprint desk that authored a general id keep its own thread", () => {
@@ -272,7 +316,7 @@ describe("resolving a host thread to the general channel", () => {
     const authored: Desk[] = [
       { id: "general", channel: "ops-room", name: "Ops lead", blurb: "", members: ["ceo"] },
     ];
-    for (const spelling of ["", "main", "General", "general", "  MAIN  "]) {
+    for (const spelling of ["", "main", "General", "general", "MAIN"]) {
       expect(channelIdForThread(spelling, authored, ROSTER)).toBe("general");
     }
     // And the same, the other way round, for a desk that authored `main`.
@@ -307,11 +351,30 @@ describe("deskClaimsGeneralChannel", () => {
 
 describe("isGeneralChannel", () => {
   it("matches exactly the four spellings the host folds", () => {
-    for (const yes of ["", "main", "Main", "MAIN", "general", "General", " general "]) {
+    for (const yes of ["", "main", "Main", "MAIN", "general", "General"]) {
       expect(isGeneralChannel(yes)).toBe(true);
     }
     for (const no of ["engineering", "generals", "main-line", "dm:main"]) {
       expect(isGeneralChannel(no)).toBe(false);
+    }
+  });
+
+  /**
+   * **Case-folded, never trimmed** — because the host is not.
+   *
+   * `is_general_chat` compares with `eq_ignore_ascii_case` against the string
+   * exactly as journaled, so a client that posts `chat: "  Main  "` has that
+   * spelling stored verbatim. Trimming here was strictly worse than being
+   * strict: the console rendered the live reply in `#general` while
+   * `chat/history?desk=main` did not return it, so the message vanished on the
+   * next reload. A frame that lands and then disappears reads as data loss.
+   *
+   * Asserted rather than merely dropped from the list above: silence about
+   * padding is what let the two sides disagree in the first place.
+   */
+  it("does not trim, because the host does not", () => {
+    for (const padded of ["  main  ", " general", "General ", "\tmain", "main\n"]) {
+      expect(isGeneralChannel(padded)).toBe(false);
     }
   });
 });
@@ -441,7 +504,7 @@ describe("resolving a live frame's thread id against the shell's map", () => {
   });
 
   it("accepts every casing of a General spelling, as the host does", () => {
-    for (const spelling of ["MAIN", "GENERAL", "Main", "gEnErAl", "  Main  "]) {
+    for (const spelling of ["MAIN", "GENERAL", "Main", "gEnErAl"]) {
       expect(channelForThread(MAP, spelling)).toBe("main");
     }
   });
