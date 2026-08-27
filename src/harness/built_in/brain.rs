@@ -303,6 +303,34 @@ fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
     }
 }
 
+/// The bubble a confined workflow-copilot turn's outcome becomes on the
+/// operator channel — the boundary [`HarnessBrain`]'s copilot arm calls
+/// (issue #1846 review, Codex #3869277640).
+///
+/// A budget pause is a RUNTIME terminal state (issue #1846), the same as the
+/// iteration-cap pause and the spend halt the interactive operator-turn path
+/// already reports via [`system_notice`] rather than folding into a reply —
+/// never something the confined copilot itself said. `run_confined`
+/// deliberately bypasses `run_inner` (the only place that parks a redeemable
+/// re-issue marker): `CONFINED_AGENT_ID` "names no teammate and cannot be
+/// addressed" (see [`confined_bubble`]'s doc), so there is no safe way to
+/// replay ITS confined workflow context through the generic chat-message
+/// redeem path a marker would offer. Before this, `confined_bubble` folded
+/// the placeholder pause text straight into `outcome.reply` and attributed
+/// it to the copilot as an ordinary answer — exactly the #966 misattribution
+/// class `system_notice` exists to prevent, just one call site short of it.
+///
+/// Emits the SAME unauthored notice copy the interactive path shows, with no
+/// CTA (nothing was parked to redeem) — the honest middle ground the review
+/// asked for, between a fabricated copilot reply and a redemption this agent
+/// id can never honour.
+fn confined_turn_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
+    match &outcome.budget_paused {
+        Some(pause) => system_notice(budget_pause_notice(pause)),
+        None => confined_bubble(outcome),
+    }
+}
+
 impl HarnessBrain {
     /// Builds a harness brain for `record`, answering unaddressed operator
     /// messages with the company orchestrator (the `tier = "orchestrator"` agent,
@@ -2929,7 +2957,11 @@ impl HarnessBrain {
                                 &confinement,
                             )
                             .await?;
-                        channel_responses.push(confined_bubble(outcome));
+                        // Issue #1846 review (Codex #3869277640): see
+                        // `confined_turn_bubble`'s doc for why a budget pause
+                        // is handled separately from an ordinary copilot
+                        // reply here.
+                        channel_responses.push(confined_turn_bubble(outcome));
                         continue;
                     }
                     // Route to the teammate the message named, else to the
@@ -9662,6 +9694,64 @@ agent = "claude"
             bubble.agent.as_deref(),
             Some(bubble.channel.as_str()),
             "author and destination must not be the same value — that conflation is issue #885"
+        );
+    }
+
+    /// Issue #1846 review (Codex #3869277640) — **the regression.** A budget
+    /// pause from a confined workflow-copilot turn must NOT read as the
+    /// copilot's own answer.
+    ///
+    /// Before this fix, `confined_bubble` folded `outcome.reply` — the
+    /// budget-paused placeholder text, per `classify_turn`'s
+    /// `AttemptOutcome::BudgetPaused` handling — straight into an ordinary
+    /// bubble authored by `CONFINED_AGENT_ID`, exactly the #885/#966
+    /// author-vs-channel conflation this file exists to prevent, just for a
+    /// pause instead of an authored reply. `confined_turn_bubble` is the
+    /// fixed boundary: this asserts it routes a paused outcome to
+    /// `system_notice` (unauthored, `SYSTEM_AUTHOR`) instead.
+    #[test]
+    fn a_confined_turns_budget_pause_is_a_system_notice_not_a_copilot_reply() {
+        let outcome = crate::harness::TurnOutcome {
+            // What `classify_turn`'s `AttemptOutcome::BudgetPaused` arm
+            // actually leaves in `reply` — irrelevant to the notice text,
+            // which is built fresh from `budget_paused` below, but present
+            // here so this fixture matches what `run_confined` really
+            // returns rather than an idealised one.
+            reply: "Paused — copilot's turn ran out of inference budget/credits.".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: confine::CONFINED_AGENT_ID.to_string(),
+                summary: "Add credits to your account, then resend your message.".to_string(),
+            }),
+        };
+
+        let bubble = confined_turn_bubble(outcome);
+
+        assert_eq!(
+            bubble.agent.as_deref(),
+            Some(crate::ports::SYSTEM_AUTHOR),
+            "a budget pause is never something the copilot said — it must be unauthored, not \
+             attributed to CONFINED_AGENT_ID like an ordinary reply: {:?}",
+            bubble.agent
+        );
+        assert_ne!(
+            bubble.agent.as_deref(),
+            Some(confine::CONFINED_AGENT_ID),
+            "the pre-fix defect: falling through to confined_bubble would attribute the pause \
+             notice to the copilot itself"
+        );
+        assert!(
+            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the console's SystemPill only renders the highlighted pause card for this exact \
+             prefix: {}",
+            bubble.text
+        );
+        assert!(
+            bubble.text.to_ascii_lowercase().contains("add credits"),
+            "the actionable ask survives into the notice: {}",
+            bubble.text
         );
     }
 
