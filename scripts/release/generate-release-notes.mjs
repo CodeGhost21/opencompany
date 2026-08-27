@@ -171,15 +171,35 @@ function resolveEndRef(to) {
 // The most recent RELEASE, not the most recent tag: the tag being published is
 // usually already pushed by the time this runs, so `git describe` would resolve
 // the start of the range to its end and produce an empty document.
+//
+// THE FIRST RELEASE has no previous one, and `gh release view` exits non-zero
+// rather than empty in that case. Falling back to the root commit is what makes
+// `--from latest-release` a safe default for a repository that has never cut a
+// release — which `tinyhumansai/opencompany` was when this landed. The range is
+// then the entire history, so the run is slow (one `gh pr view` per PR) and the
+// payload is shed hard by `serializeOpenAiPayload`; pass an explicit `--from`
+// for a first release you actually want to read.
 function resolveStartRef(repo, from) {
   if (from !== 'latest-release') {
     return from;
   }
-  const tag = runGh(['release', 'view', '--repo', repo, '--json', 'tagName', '--jq', '.tagName']);
-  if (!tag) {
-    throw new Error(`Could not resolve latest GitHub Release tag for ${repo}`);
+  let tag = '';
+  try {
+    tag = runGh(['release', 'view', '--repo', repo, '--json', 'tagName', '--jq', '.tagName'], {
+      allowFailure: true,
+    });
+  } catch {
+    tag = '';
   }
-  return tag;
+  if (tag) {
+    return tag;
+  }
+  const root = runGit(['rev-list', '--max-parents=0', 'HEAD']).split('\n').at(-1)?.trim();
+  if (!root) {
+    throw new Error(`No GitHub Release for ${repo} and no root commit to fall back to`);
+  }
+  console.error(`[release-notes] No previous release for ${repo}; ranging from the root commit ${root.slice(0, 9)}.`);
+  return root;
 }
 
 // A shallow clone is the usual cause of a miss here, and its failure mode is
