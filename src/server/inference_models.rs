@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as TokioMutex;
 
 /// How long a successful OpenRouter catalog stays fresh in this process.
 pub(crate) const MODEL_CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
@@ -136,6 +137,16 @@ struct CacheEntry {
 #[derive(Default)]
 pub(crate) struct ModelCatalogCache {
     entry: Mutex<Option<CacheEntry>>,
+    /// Serializes cache-miss fetches (issue #1838 follow-up). Held across the
+    /// whole `discover_models` await, not just the cache write: without it,
+    /// every console request that lands after startup or a TTL expiry sees
+    /// the same empty/stale entry and fires its own upstream fetch, so a
+    /// multi-tenant host can burst several identical OpenRouter registry
+    /// calls at once — and any of them that gets rate-limited fails even
+    /// though a sibling fetch is about to populate the cache. A `tokio`
+    /// mutex, not `std`: the guard needs to survive the `.await` inside
+    /// [`openrouter_models`].
+    fetch_lock: TokioMutex<()>,
 }
 
 impl ModelCatalogCache {
@@ -158,7 +169,21 @@ pub(crate) fn openrouter_cache() -> &'static ModelCatalogCache {
 }
 
 /// Return the cached OpenRouter catalog, fetching it on a miss.
+///
+/// Single-flight on a miss (issue #1838 follow-up): every caller queues on
+/// [`ModelCatalogCache::fetch_lock`] rather than racing its own request to
+/// OpenRouter, and re-checks the cache after acquiring it, so only the first
+/// caller through actually fetches — everyone behind it reads what that
+/// fetch just stored instead of duplicating the upstream call.
 pub(crate) async fn openrouter_models() -> Result<Vec<InferenceModel>, String> {
+    let now = Instant::now();
+    if let Some(models) = openrouter_cache().lookup(now) {
+        return Ok(models);
+    }
+
+    let _fetch_guard = openrouter_cache().fetch_lock.lock().await;
+    // Another caller may have already refilled the cache while we waited for
+    // the lock — re-check before fetching again.
     let now = Instant::now();
     if let Some(models) = openrouter_cache().lookup(now) {
         return Ok(models);
@@ -311,5 +336,60 @@ mod tests {
             Some(vec![model("vendor/model")])
         );
         assert_eq!(cache.lookup(stored_at + MODEL_CATALOG_TTL), None);
+    }
+
+    /// Regression for a P2 review finding on #1838's follow-up round: without
+    /// `fetch_lock`, every concurrent caller that observed the same
+    /// empty/stale entry would independently "fetch" — a multi-tenant host
+    /// bursting several identical upstream calls at once. This exercises the
+    /// exact lock-then-recheck sequence [`openrouter_models`] runs (acquire
+    /// `fetch_lock`, re-`lookup`, only then do the (here, simulated) fetch),
+    /// against the real `ModelCatalogCache`, so a regression that drops the
+    /// lock or the re-check fails this test rather than only showing up as
+    /// upstream rate-limit noise in production.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_misses_coalesce_into_a_single_fetch() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(ModelCatalogCache::default());
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let fetch_count = Arc::clone(&fetch_count);
+                tokio::spawn(async move {
+                    let now = Instant::now();
+                    if let Some(models) = cache.lookup(now) {
+                        return models;
+                    }
+                    let _fetch_guard = cache.fetch_lock.lock().await;
+                    let now = Instant::now();
+                    if let Some(models) = cache.lookup(now) {
+                        return models;
+                    }
+                    fetch_count.fetch_add(1, Ordering::SeqCst);
+                    // Hold the lock across a slow "upstream" call so every
+                    // other task is still queued on `fetch_lock` — the same
+                    // shape a real registry round-trip has.
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let models = vec![model("vendor/single-flight")];
+                    cache.store(models.clone(), Instant::now());
+                    models
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let models = handle.await.expect("fetch task must not panic");
+            assert_eq!(models, vec![model("vendor/single-flight")]);
+        }
+
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            1,
+            "only the first caller through fetch_lock should fetch; the rest must reuse its result"
+        );
     }
 }
