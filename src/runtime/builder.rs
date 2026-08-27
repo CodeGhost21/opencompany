@@ -2958,17 +2958,29 @@ impl RuntimeBuilder {
                                 // no rebuild. The default harness's own
                                 // `[harness.inference]` beats the company-level
                                 // `[inference]` — the same precedence a named
-                                // harness gets — while the scope stays the
-                                // default one so the flat legacy secret keys keep
-                                // working for the company's default harness.
-                                provider: Arc::new(TenantProvider::new(
-                                    id.clone(),
-                                    secrets.clone(),
-                                    self.manifest
-                                        .default_harness_inference()
-                                        .unwrap_or_else(|| self.manifest.inference.clone()),
-                                    env_default.clone(),
-                                )),
+                                // harness gets. The scope stays `is_default` so
+                                // the flat legacy secret keys keep working, but
+                                // carries the default harness's *real* id (not
+                                // the generic `HarnessScope::default()` sentinel)
+                                // so an unavailable-model error names the actual
+                                // harness whose `[harness.inference]` is in play,
+                                // not a placeholder the operator's manifest never
+                                // wrote (Codex review on #1824's #1811 follow-up).
+                                provider: Arc::new(
+                                    TenantProvider::new(
+                                        id.clone(),
+                                        secrets.clone(),
+                                        self.manifest
+                                            .default_harness_inference()
+                                            .unwrap_or_else(|| self.manifest.inference.clone()),
+                                        env_default.clone(),
+                                    )
+                                    .with_scope(
+                                        inference::HarnessScope::default_harness(
+                                            self.manifest.default_harness_id(),
+                                        ),
+                                    ),
+                                ),
                                 // Static fallback only; `HarnessPool::run` reads
                                 // the live slug from the provider per turn.
                                 provider_slug: "managed".to_string(),
