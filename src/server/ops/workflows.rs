@@ -2574,10 +2574,15 @@ async fn workflow_tool_slugs(
 /// destination editor offers a picker of real targets. Not feature-gated — the
 /// channel set exists on every build.
 ///
-/// **`operator` is not among them** (issue #981). This used to say the opposite
-/// and serve the unfiltered adapter list, which offered authors the one target
-/// workflow delivery refuses by name. An empty list is a truthful answer for a
-/// company with no desks and no provider channels: there is nowhere to deliver.
+/// **`operator` is always among them** (issue #1757; previously excluded per
+/// issue #981, when the in-memory `operator` adapter had no durable reader and
+/// workflow delivery refused it by name). The built-in Operator channel is now
+/// a durable, journal-backed delivery target present on every running company,
+/// so it is a real entry in this picker like any other — never doubled, even
+/// when a grandfathered manifest desk also claims the literal id `operator`
+/// (`CompanyRuntime::deliverable_channel_ids` dedupes). An empty list is still
+/// a truthful answer for everything else: a company with no desks and no
+/// provider channels has nowhere else to deliver.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WiredChannelsResponse {
