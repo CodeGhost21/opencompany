@@ -1719,6 +1719,34 @@ async fn stash_blocked_agent_nodes(
         .collect();
 
     for (turn, node_id) in turns {
+        // Issue #1825 (P2, fourth follow-up — found by chatgpt-codex-connector):
+        // the `is_armed` check above ran once, synchronously, before this loop
+        // awaited anything — it only proves each turn was still live at the
+        // moment the whole batch was collected. For every turn but the first,
+        // a sibling's own awaited durable write (right below, one iteration
+        // ago) gives a landing decision time to run `retire_blocked_stash`
+        // in between: that clears this turn's in-memory stash and appends its
+        // `BlockedNodeReleased` before this iteration ever reaches it. Without
+        // this re-check, the write below would then append a `BlockedNodeStashed`
+        // behind that terminal record — durable on replay — resurrecting an
+        // already-dispatched turn for a future boot's `reconcile_stranded_blocked_nodes`
+        // to redeem a second time. Re-checking immediately before the write
+        // narrows the window to the same shape every other park-time write in
+        // this module already accepts (see the P1 fourth follow-up's own
+        // residual in `caps::park_gated_calls`), not the whole width of this
+        // batch's sibling I/O.
+        if !parking.blocked_nodes.is_armed(&turn) {
+            tracing::info!(
+                %workflow_id,
+                %run_id,
+                node = %node_id,
+                "[approval] skipping this blocked node's durable stash write: a decision \
+                 released it while an earlier sibling in this same settle batch was still \
+                 being durably written — re-appending now would resurrect an already-dispatched \
+                 turn"
+            );
+            continue;
+        }
         // Issue #1816 (Stage 2): mirror the in-memory arm into the durable
         // journal so an approval landing after a process/host replacement can
         // still locate this run. Best-effort — a failed write leaves the
@@ -6591,6 +6619,133 @@ to = "done"
             "the settle pass must not durably re-stash an already-released turn either — a \
              late approval-bank retry landing on the resurrection could make a future boot \
              dispatch this run a second time"
+        );
+    }
+
+    /// Issue #1825 (P2, fourth follow-up — found by chatgpt-codex-connector):
+    /// "Make the settle-time stash check atomic with its append".
+    ///
+    /// # The race this closes
+    ///
+    /// `a_released_turn_is_not_resurrected_by_the_settle_pass` above proves a
+    /// turn released *before* the settle pass starts is not resurrected — its
+    /// `is_armed` check, run once while collecting `turns`, already catches
+    /// that. This test proves the gap that check alone does not close: a turn
+    /// released *during* the settle pass, while an earlier sibling's own
+    /// durable write is still awaited, one loop iteration before this turn's
+    /// own write is reached. `is_armed` was true for it when `turns` was
+    /// built (its card is exactly as clickable as any other), but by the time
+    /// its OWN await comes up, the decision has already run
+    /// `retire_blocked_stash` — the same interleaving
+    /// `every_blocked_node_is_armed_before_the_first_journal_write_is_awaited`
+    /// above freezes to prove the *arm* side lands in time; this freezes the
+    /// same point to drive a *release* through it and prove the *write* side
+    /// does not go ahead once one has.
+    ///
+    /// Pre-fix, the durable write below runs unconditionally once a turn is in
+    /// `turns`, so it appends a `BlockedNodeStashed` behind the release's own
+    /// `BlockedNodeReleased` — durable on replay, resurrecting an
+    /// already-dispatched turn. Post-fix, the write is skipped and the journal
+    /// carries no trace of it.
+    #[tokio::test]
+    async fn a_turn_released_mid_settle_batch_is_not_stashed_behind_its_own_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatedJournalStore::new("BlockedNodeStashed"));
+        let deps = deps_with_parking_over(dir.path(), store.clone());
+        let parking = deps.parking.clone().expect("wired above");
+        let journal = parking.journal.clone();
+
+        let blocked = vec![
+            crate::ports::WorkflowBlockedNode {
+                node_id: "first".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-first".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+            crate::ports::WorkflowBlockedNode {
+                node_id: "second".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-second".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+        ];
+
+        let run_id = "run-1825-p2e".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "first");
+        let second_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+        // What `park_gated_calls` already did for both, at real park time,
+        // before this settle pass ever runs.
+        parking
+            .blocked_nodes
+            .arm(&first_turn, "wf-1825-p2e", &trigger_input);
+        parking
+            .blocked_nodes
+            .arm(&second_turn, "wf-1825-p2e", &trigger_input);
+
+        let handle = tokio::spawn(async move {
+            stash_blocked_agent_nodes(
+                Some(&deps),
+                "wf-1825-p2e",
+                &run_id,
+                &trigger_input,
+                &blocked,
+            )
+            .await;
+        });
+
+        // Blocks until the settle pass is genuinely suspended inside the
+        // FIRST node's durable write — after `turns` was built (both `first`
+        // and `second` already passed their `is_armed` check), but before
+        // `second`'s own write is even attempted.
+        store.reached.notified().await;
+
+        // What deciding `second`'s last card right now, mid-batch, already
+        // does to the in-memory stash: `retire_blocked_stash` releases it,
+        // the same call `a_released_turn_is_not_resurrected_by_the_settle_pass`
+        // above reproduces directly. Its durable `BlockedNodeReleased`
+        // half is deliberately NOT reproduced here while `first`'s write is
+        // still frozen: `RuntimeJournal::append` takes `write_lock` around
+        // the whole store call (see its doc comment), which `first`'s
+        // in-flight append is still holding at this exact point, so a second
+        // append attempted here would deadlock against itself — a test
+        // artifact of freezing one append to observe another, not a real
+        // constraint on the two decisions in production (there they run on
+        // separate turns' own append calls, each taking and releasing the
+        // lock in turn). The in-memory release alone is the only signal the
+        // fix under test reads (`BlockedNodeQueue::is_armed`), so it is
+        // sufficient on its own to pose the race.
+        parking.blocked_nodes.release(&second_turn);
+
+        // Let `first`'s write complete; the loop now reaches `second`.
+        store.release.notify_one();
+        handle
+            .await
+            .expect("stash_blocked_agent_nodes does not panic");
+
+        assert!(
+            !parking.blocked_nodes.is_armed(&second_turn),
+            "a turn released mid-batch must not be resurrected in memory either"
+        );
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .all(|(t, ..)| t != second_turn),
+            "a turn released mid-batch must not be durably re-stashed behind its own release — \
+             a late approval-bank retry landing on the resurrection could make a future boot \
+             dispatch this run a second time"
+        );
+        // The sibling that was never touched is unaffected.
+        assert!(parking.blocked_nodes.is_armed(&first_turn));
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .any(|(t, ..)| t == first_turn)
         );
     }
 
