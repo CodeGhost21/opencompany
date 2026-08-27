@@ -1553,6 +1553,14 @@ impl HarnessBrain {
         let orchestrator = self.orchestrator();
         let text = format!("dispatch refused: {reason}");
         settle(&mut card, TaskRunEnd::Failed, &orchestrator, &text);
+        // Issue #1865 (CodeRabbit review, PR #1883): the same bounce-chip rule
+        // `run_task`'s rich settle and `advance::advance_settled_card` already
+        // apply. Without this, a refusal — an invalid `assignee` — lands the
+        // card in `todo` exactly like any other failed dispatch but skips the
+        // amber chip that failure is supposed to carry, because this is the
+        // one settle path that never computed it.
+        card.bounced =
+            crate::runtime::advance::bounced_reason(&card.column, RunStatus::Failed, &text);
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
         // A refusal is a real, terminal attempt — one that spent nothing. It
@@ -6276,6 +6284,15 @@ members = ["engineer"]
         assert_eq!(
             refused.assignee, "Shane",
             "the invalid name is left as typed for the operator to correct"
+        );
+        // Issue #1865 (CodeRabbit review, PR #1883): a refusal is a failed
+        // dispatch landing on `todo` exactly like any other, so it must carry
+        // the same bounce chip `run_task`'s rich settle and the system mover
+        // apply — the board must not read this card any differently just
+        // because nobody ever ran.
+        assert!(
+            refused.bounced.is_some(),
+            "an off-roster refusal must set the bounce chip like any other failed dispatch: {refused:?}"
         );
         let note = refused.note.expect("the refusal is written to the note");
         assert!(
