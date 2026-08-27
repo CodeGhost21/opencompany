@@ -358,11 +358,24 @@ impl WorkflowSpawn {
                     // `stranded_approvals`'s per-node grouping — the same
                     // reconciliation the sync run response uses — gets right
                     // and a bare `.any()` over `approvals` cannot.
+                    //
+                    // Codex review (PR #1883): `> 0` alone is also wrong when
+                    // only SOME pending nodes are stranded — e.g. one
+                    // `ParkFailed` node beside one node with a live `Parked`
+                    // card. That run is only partly stranded: the live card
+                    // is still decidable, so it must read `blocked`, not
+                    // `stranded`. This mirrors the equality check
+                    // `RunVerdictFacts::fully_stranded` uses for the sync run
+                    // response — `stranded_approvals` can never exceed
+                    // `pending_approvals.len()`, so `==` is "every pending
+                    // node lost its card", the only case "nobody was asked"
+                    // is honest.
                     Ok(run)
-                        if crate::ports::workflow_runner::stranded_approvals(
-                            &run.pending_approvals,
-                            &run.approvals,
-                        ) > 0 =>
+                        if !run.pending_approvals.is_empty()
+                            && crate::ports::workflow_runner::stranded_approvals(
+                                &run.pending_approvals,
+                                &run.approvals,
+                            ) == run.pending_approvals.len() =>
                     {
                         self.notify_run_unhealthy(
                             &workflow.id,
@@ -743,6 +756,118 @@ mod tests {
             "a fully-stranded run must NOT file the misleading 'blocked' \
              notification — nobody is waiting on a person to decide anything: \
              {notes:?}"
+        );
+    }
+
+    /// A runner with two pending nodes: `node1` failed to park (nothing
+    /// waiting on it), `node2` has a live `Parked` card. `stranded_approvals`
+    /// over the whole run is `1`, which is `> 0` but not equal to the `2`
+    /// pending nodes — the run is only **partly** stranded, and `node2`'s
+    /// card is still there for an operator to decide.
+    struct PartlyStrandedRunner;
+
+    #[async_trait]
+    impl WorkflowRunner for PartlyStrandedRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &WorkflowRunContext,
+        ) -> Result<WorkflowRun> {
+            Ok(WorkflowRun {
+                output: Value::Null,
+                pending_approvals: vec!["node1".to_string(), "node2".to_string()],
+                deliveries: Vec::new(),
+                cancelled: false,
+                nodes: Vec::new(),
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: vec![
+                    crate::ports::WorkflowBlockedNode {
+                        node_id: "node1".to_string(),
+                        tools: vec!["some_tool".to_string()],
+                        approval_ids: Vec::new(),
+                        unparkable: 1,
+                        stranded: 0,
+                    },
+                    crate::ports::WorkflowBlockedNode {
+                        node_id: "node2".to_string(),
+                        tools: vec!["other_tool".to_string()],
+                        approval_ids: vec!["appr-2".to_string()],
+                        unparkable: 0,
+                        stranded: 0,
+                    },
+                ],
+                approvals: vec![
+                    crate::ports::WorkflowRunApprovalRow {
+                        node_id: Some("node1".to_string()),
+                        tool: Some("some_tool".to_string()),
+                        outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                        approval_id: None,
+                    },
+                    crate::ports::WorkflowRunApprovalRow {
+                        node_id: Some("node2".to_string()),
+                        tool: Some("other_tool".to_string()),
+                        outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                        approval_id: Some("appr-2".to_string()),
+                    },
+                ],
+            })
+        }
+    }
+
+    /// Codex review on PR #1883 (comment 3874654376): the "stranded" arm must
+    /// require the stranded count to equal the *total* pending count, matching
+    /// the invariant [`crate::ports::workflow_verdict::RunVerdictFacts::fully_stranded`]
+    /// documents for the sync run response ("a run only **partly** stranded
+    /// keeps its old verdict: something there really is still decidable").
+    /// Before the fix, this arm tested `stranded_approvals(...) > 0`, which is
+    /// true here too (`node1` is stranded) even though `node2` still has a
+    /// live, actionable card — misclassifying a decidable run as one with
+    /// "nobody... asked".
+    #[tokio::test]
+    async fn a_partly_stranded_run_notifies_blocked_not_stranded() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-spawn-partly-stranded-")
+            .tempdir()
+            .expect("tempdir");
+        let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let notifications = Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let spawn = WorkflowSpawn {
+            company: company.clone(),
+            events: events.clone(),
+            supervisor: RunSupervisor::new(),
+            runner: Arc::new(PartlyStrandedRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
+            notifications: notifications.clone(),
+        };
+
+        let (run_id, handle) = spawn
+            .spawn(empty_workflow(), Value::Null, false, false)
+            .expect("under the default cap");
+        handle.await.expect("join").expect("run settles Ok");
+
+        use crate::ports::notifications::NotificationStore;
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_blocked"
+                    && n.notification.subject.id == run_id),
+            "a partly-stranded run still has a decidable card and must file \
+             'blocked', not 'stranded': {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_stranded"),
+            "a partly-stranded run must NOT be announced as fully stranded — \
+             node2's card is still live and actionable: {notes:?}"
         );
     }
 }
