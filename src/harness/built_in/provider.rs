@@ -848,6 +848,24 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         || payload
             .pointer("/choices/0/message/function_call")
             .is_some_and(|v| !v.is_null());
+    // A tool call was genuinely requested (the raw payload carries one,
+    // whether or not `parse_tool_calls` accepted it) but none survived
+    // parsing. This must error even when `content` is nonempty: array-shaped
+    // content can carry a text preamble alongside the malformed call, which
+    // would otherwise pass the empty-turn check below and let the harness
+    // silently return the preamble as if it were the whole answer — the same
+    // class of substitution the reasoning-fallback guard above exists to
+    // prevent, just via the *content* channel instead of `reasoning`
+    // (CodeRabbit review on #1779, comment 3872084060).
+    if raw_tool_call_requested && tool_calls.is_empty() {
+        let detail = finish_reason
+            .as_deref()
+            .map(|r| format!(" (finish_reason: {r})"))
+            .unwrap_or_default();
+        return Err(TinyAgentsError::Model(format!(
+            "inference response requested a tool call that failed to parse{detail}"
+        )));
+    }
     if content.is_empty() && tool_calls.is_empty() && !raw_tool_call_requested && genuinely_finished
     {
         // A nonempty `message.refusal` is the provider's own visible safety
@@ -2337,6 +2355,39 @@ mod tests {
         });
         let err = model_response_from_payload(payload).expect_err(
             "a malformed raw tool_calls entry must not be dropped for promoted reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Array-shaped `content` can carry a text preamble ("Let me check
+    /// that…") alongside a `tool_calls` entry the model genuinely requested
+    /// but that fails to parse (missing `function.name`). `content` reads
+    /// nonempty via `extract_content_text` while `parse_tool_calls` drops the
+    /// call, so a check that only looks at content-or-tool_calls emptiness
+    /// passes and the harness would silently return just the preamble,
+    /// dropping the requested action entirely. The raw-payload guard must
+    /// catch this regardless of whether prose content is also present
+    /// (CodeRabbit review on #1779, comment 3872084060).
+    #[test]
+    fn malformed_tool_call_beside_array_content_preamble_errors_instead_of_silently_dropping() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Let me check that for you." }
+                    ],
+                    "tool_calls": [{ "id": "call_1", "type": "function", "function": { "arguments": "{}" } }]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a malformed raw tool_calls entry beside preamble content must not be silently dropped",
         );
         let msg = err.to_string();
         assert!(
