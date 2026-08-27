@@ -17,13 +17,26 @@
 //! workflow lineage of its own (it is minted by `ApprovalPolicy::effect_for`,
 //! which knows nothing of the run).
 //!
-//! # Why armed at block-settle, not at park time
+//! # Armed at node park time, mirrored durably at block-settle (issue #1825, P1)
 //!
-//! The calls are parked mid-turn from `HarnessAgentRunner`, which does **not**
-//! carry the trigger input (only the run request). The runner's block-settle
-//! *does* — it is the one place with the workflow id and the trigger input
-//! beside the list of blocked nodes — so the stash is populated there, exactly
-//! as `park_pending_gates` populates the gate queue from the runner.
+//! The in-memory stash is armed by `HarnessAgentRunner::park_gated_calls`
+//! itself, before that call parks a single tool-call effect for the node's
+//! turn — `HarnessAgentRunner` is built with the run's trigger input for
+//! exactly this (see [`RunContext::trigger_input`](crate::workflows::caps::RunContext::trigger_input)),
+//! so nothing stops arming this queue the moment a node's calls are about to
+//! become clickable. Before this, the arm ran only in the runner's
+//! block-settle pass — after the agent had returned, the engine had settled,
+//! and (on the halt path) the run's output had already been persisted — which
+//! left a window where an operator could approve a card that was durably
+//! journaled and clickable, but had nothing armed here yet: `continue_turn`
+//! consumed the decision against an empty stash, retired the turn without
+//! spawning, and the block-settle pass then armed a stash no decision would
+//! ever come back for. Arming at park time closes that window instead of
+//! narrowing it. [`arm`](BlockedNodeQueue::arm) is first-write-wins, so the
+//! block-settle pass's own call is now a harmless no-op for every node this
+//! queue already holds a stash for — it stays only because it is also where
+//! the durable journal mirror below is written, and that write still needs
+//! the full blocked-node list the engine hands back on settle.
 //!
 //! # Durability, stated plainly (issue #1816, Stage 2)
 //!

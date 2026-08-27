@@ -439,6 +439,7 @@ async fn run_workflow_inner(
             workflow_id: &workflow.id,
             run_id: &run_id,
             run_request,
+            trigger_input: &trigger_input,
             dry_run,
             notices: notices.clone(),
             board: board.clone(),
@@ -1619,13 +1620,19 @@ struct PausedGates<'a> {
 /// id and this run's trigger input — keyed by the per-(run, node) turn key its
 /// gated calls armed `ContinuationQueue` under at park time (issue #899, Stage 1).
 ///
-/// # Why here, and not where the calls are parked
+/// # Why the durable mirror is still written here, not where the calls are parked
 ///
-/// The calls are parked mid-turn from `HarnessAgentRunner`, which carries no
-/// trigger input. This is the one place with the workflow id, the trigger input
-/// and the list of blocked nodes together — exactly as `park_pending_gates` is
-/// the one place a gate's facts come together. A node with no parked approval id
-/// is skipped: nothing can be decided, so nothing will ever release a stash.
+/// The in-memory arm itself now happens where the calls are parked —
+/// `HarnessAgentRunner` is built with the run's trigger input (issue #1825, P1
+/// follow-up) precisely so `park_gated_calls` can call `arm` before a card is
+/// journaled and clickable, closing the race this function's own comment above
+/// describes. What that call site does *not* have is the settled `blocked`
+/// list — a node only shows up there once the engine has decided the run
+/// stopped for it — so the durable journal record still has to be written
+/// from here, once per this run's whole batch of blocked nodes, exactly as
+/// `park_pending_gates` is the one place a gate's facts come together. A node
+/// with no parked approval id is skipped: nothing can be decided, so nothing
+/// will ever release a stash.
 ///
 /// A build with no approvals queue wired stashes nothing and is silent — the
 /// same node already logged its own "could not be parked" line, and there is no
@@ -1656,6 +1663,19 @@ async fn stash_blocked_agent_nodes(
     // in-memory, non-awaiting pass) closes that window for the whole batch at
     // once instead of leaving it open per node; only the durable mirroring
     // below still awaits.
+    //
+    // Issue #1825 (P1 follow-up): `arm` below is now a no-op for every node in
+    // `blocked` whose calls actually parked — `HarnessAgentRunner::park_gated_calls`
+    // arms the same stash itself, at node park time, before the first card is
+    // journaled and clickable (see `crate::runtime::blocked_nodes`'s module
+    // doc). This function ran only after the agent returned and the engine
+    // settled, which — even with the synchronous pass above — was still after
+    // every card for this run's blocked nodes had gone live; an operator fast
+    // enough to approve inside that outer window hit the same empty-stash race
+    // the paragraph above closed for the inner one. The pass stays here
+    // because it is still the only place with the full settled `blocked` list
+    // the durable mirror below needs, and `arm`'s first-write-wins semantics
+    // make the redundant call free.
     let turns: Vec<_> = blocked
         .iter()
         .filter(|node| !node.approval_ids.is_empty())
