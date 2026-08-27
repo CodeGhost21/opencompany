@@ -443,6 +443,24 @@ describe("the legend trigger opens without hover or focus", () => {
   });
 });
 
+describe("the legend is limited to terms RUN_STATUS_DEFINITIONS actually defines", () => {
+  // CodeRabbit review on PR #1821: RUN_STATUS_DEFINITIONS was typed
+  // Record<string, string> and RUN_STATUS_LEGEND readonly string[], so
+  // TypeScript accepted a legend entry with no matching definition — and the
+  // legend's own render site (`RUN_STATUS_DEFINITIONS[term]`, no fallback)
+  // has no guard against one landing there silently. This is a type-only
+  // regression, proven the same way `tsconfig.e2e.json`'s docblock describes
+  // for its suite: `noUnusedLocals` turns an `@ts-expect-error` that suppresses
+  // nothing into a compile error, so `npm run typecheck:unit` goes red the
+  // moment the legend's element type widens back to bare `string`.
+  it("rejects a legend entry that is not a defined term (type-level)", () => {
+    type LegendTerm = (typeof RUN_STATUS_LEGEND)[number];
+    // @ts-expect-error - "not-a-real-status" has no entry in RUN_STATUS_DEFINITIONS
+    const bogus: LegendTerm = "not-a-real-status";
+    expect(bogus).toBe("not-a-real-status");
+  });
+});
+
 describe("the legend popup names itself for assistive technology", () => {
   // Codex review on #1821 (sixth pass): `Popover.Popup` renders `role="dialog"`
   // and only sets its own `aria-labelledby` when a `Popover.Title` supplied the
