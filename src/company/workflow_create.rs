@@ -403,6 +403,11 @@ pub(crate) struct WorkflowGraphSpec {
     pub(crate) name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
+    /// The owning desk (issue #1862 prerequisite) — see
+    /// [`WorkflowFile::owner_desk`]. Camel-cased `ownerDesk` on the wire, like
+    /// every other field on this spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_desk: Option<String>,
     #[serde(default)]
     pub(crate) nodes: Vec<WorkflowNodeSpec>,
     #[serde(default)]
@@ -495,6 +500,7 @@ pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWork
         id: spec.id.clone(),
         name: spec.name.clone(),
         description: spec.description.clone(),
+        owner_desk: spec.owner_desk.clone(),
         nodes,
         edges: spec
             .edges
@@ -527,6 +533,7 @@ pub(crate) fn workflow_spec_from_graph(file: WorkflowFile) -> WorkflowGraphSpec 
         id: file.id,
         name: file.name,
         description: file.description,
+        owner_desk: file.owner_desk,
         nodes: file
             .nodes
             .into_iter()
@@ -923,6 +930,27 @@ fn validate_draft_against_record(
                 ),
             ));
         }
+    }
+
+    // Owning desk (issue #1862 prerequisite): validated STRICTLY here, at
+    // author time only — the same asymmetry #1757 already applies to output
+    // destinations, and the reason is the same. `parse_workflow`'s lenient
+    // load path (`validate(&raw, false)`) must NOT run this check: a saved
+    // graph whose desk was since renamed or removed still has to load, or an
+    // operator opening the editor on an otherwise-untouched workflow would be
+    // greeted with a hard failure over a field they never looked at.
+    if let Some(desk) = draft.owner_desk.as_deref()
+        && !desk.trim().is_empty()
+        && record.resolve_desk_id(desk).is_none()
+    {
+        problems.push(WorkflowProblem {
+            node_id: None,
+            field: Some("owner_desk".to_string()),
+            message: format!(
+                "this workflow's owning desk `{desk}` does not match any desk on this company \
+                 — check the id or name, or clear the field."
+            ),
+        });
     }
 
     if !problems.is_empty() {
@@ -2509,6 +2537,7 @@ to = "done"
             id: id.to_string(),
             name: name.to_string(),
             description: Some("A tiny graph.".to_string()),
+            owner_desk: None,
             nodes: vec![
                 RawNode {
                     id: "start".to_string(),
@@ -4541,6 +4570,7 @@ to = "done"
             id: id.to_string(),
             name: name.to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 RawNode {
                     id: "start".to_string(),
@@ -5381,6 +5411,7 @@ to = "done"
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 node("start", "trigger", None),
                 node("gate", "condition", config),
@@ -5500,6 +5531,7 @@ to = "done"
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 RawNode {
                     id: "start".to_string(),
@@ -6499,6 +6531,7 @@ to = "done"
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![oc_node("start", "trigger", None), node],
             edges: vec![RawEdge {
                 from: "start".to_string(),
@@ -6641,6 +6674,7 @@ to = "done"
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![oc_node("start", "trigger", None)],
             edges: vec![RawEdge {
                 from: "old-id".to_string(),
@@ -6757,5 +6791,71 @@ to = "done"
         )
         .await
         .expect("config-less merge is accepted");
+    }
+
+    /// A manifest with an `assistant` roster agent AND an `ops` desk that
+    /// agent sits on — issue #1862 prerequisite's "accept wired" case needs a
+    /// real desk to resolve against.
+    fn manifest_with_assistant_and_desk() -> CompanyManifest {
+        toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"Ops\"\nmembers = [\"assistant\"]\n",
+        )
+        .expect("valid manifest")
+    }
+
+    /// Issue #1862 prerequisite, RED-FIRST: a draft naming an `owner_desk` that
+    /// resolves against NO desk on the company is rejected at author time,
+    /// naming the `owner_desk` field. Accepted on unpatched code, because the
+    /// field — and this check — did not exist.
+    #[tokio::test]
+    async fn draft_with_unknown_owner_desk_is_rejected() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let mut draft = valid_draft("wf", "WF");
+        draft.owner_desk = Some("ghost-desk".to_string());
+        let err = create_company_workflow(&company, None, &store, None, draft, None, None)
+            .await
+            .expect_err("owner_desk naming no real desk");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].node_id, None, "graph-level, not node-scoped");
+        assert_eq!(problems[0].field.as_deref(), Some("owner_desk"));
+    }
+
+    /// The accept half of the same gate: an `owner_desk` that resolves against
+    /// a real desk is accepted, and the saved graph carries it through.
+    #[tokio::test]
+    async fn draft_with_a_wired_owner_desk_is_accepted() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant_and_desk(),
+        )));
+        let mut draft = valid_draft("wf", "WF");
+        draft.owner_desk = Some("ops".to_string());
+        let file = create_company_workflow(&company, None, &store, None, draft, None, None)
+            .await
+            .expect("owner_desk naming a real desk is accepted");
+        assert_eq!(file.owner_desk.as_deref(), Some("ops"));
+    }
+
+    /// A blank/whitespace `owner_desk` is treated as unset rather than
+    /// resolved against the desk set — the same "empty means absent" leniency
+    /// the rest of this draft's optional fields get.
+    #[tokio::test]
+    async fn draft_with_blank_owner_desk_is_accepted() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let mut draft = valid_draft("wf", "WF");
+        draft.owner_desk = Some("   ".to_string());
+        create_company_workflow(&company, None, &store, None, draft, None, None)
+            .await
+            .expect("a blank owner_desk is not resolved against the desk set");
     }
 }
