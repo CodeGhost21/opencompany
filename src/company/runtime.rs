@@ -44,6 +44,9 @@ use crate::ports::{
 use crate::ports::ScheduleFireStore;
 // Separate line (#596) for the same reason.
 use crate::ports::WorkflowRunOutputStore;
+// Separate line, same reasons as above: `set_lifecycle` needs the
+// per-company write lock (PR #1875 review finding, second round).
+use crate::ports::store::company_write_lock;
 
 /// The board column a task must enter to be dispatched to its assignee. Read
 /// from the task port (#205) so this edge and the write boundary that validates
@@ -3257,6 +3260,19 @@ impl CompanyRuntime {
     /// no durable record yet is a [`OpenCompanyError::CompanyNotFound`].
     pub async fn set_lifecycle(&self, to: impl Into<String>, by: Actor) -> Result<String> {
         let to = to.into();
+        // Held across the whole load-modify-save cycle (PR #1875 review
+        // finding, second round): `server/provision.rs` calls this directly
+        // for pause/resume, with no lock of its own, so without this a
+        // `PATCH {scope}` name-confirm racing this transition could load
+        // before the rename's `save` lands and save after it, silently
+        // writing the confirmed rename's manifest and `name_confirmed` back
+        // to their pre-rename values — undoing a write that already returned
+        // success and potentially reopening the onboarding name step. Every
+        // other `CompanyStore` load-modify-save cycle in the console
+        // (`company_profile.rs`, `company_logo.rs`, `activation.rs`, …)
+        // already serializes on this same per-company lock.
+        let write_lock = company_write_lock(&self.id);
+        let _lock = write_lock.lock().await;
         let mut record = self
             .store
             .load(&self.id)
@@ -3851,6 +3867,56 @@ mod tests {
             .expect("load")
             .expect("record");
         (runtime, record, home)
+    }
+
+    /// `set_lifecycle` must serialize its load-modify-save cycle against
+    /// `company_write_lock`, exactly like every other console load-modify-save
+    /// (PR #1875 review finding, second round). Proven the same way
+    /// `put_logo_serializes_against_the_company_write_lock`
+    /// (`server/ops/company_logo.rs`) proves it for that handler: hold the
+    /// lock externally, drive the real method, and demand it cannot finish
+    /// while the lock is held.
+    #[tokio::test]
+    async fn set_lifecycle_serializes_against_the_company_write_lock() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+        let runtime = std::sync::Arc::new(runtime);
+        let id = runtime.id().clone();
+
+        let lock = crate::ports::store::company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            runtime_for_task
+                .set_lifecycle(
+                    "paused",
+                    crate::ports::types::Actor {
+                        kind: crate::ports::types::ActorKind::Operator,
+                        id: "op".to_string(),
+                    },
+                )
+                .await
+        });
+
+        // The method must be blocked behind the held lock — give it every
+        // chance to (wrongly) race ahead before declaring it stuck.
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "set_lifecycle completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent writers (e.g. a racing name-confirm PATCH)"
+        );
+
+        drop(guard);
+        let from = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("set_lifecycle never resumed after the lock was released")
+            .expect("task panicked")
+            .expect("set_lifecycle failed");
+        assert_eq!(from, "running", "the fixture starts running");
     }
 
     /// The shared workflow-wiring fixture, re-exported under the name these
