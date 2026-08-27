@@ -81,6 +81,50 @@ export function shouldShowOnboardingGate(input: GateDecisionInput): boolean {
   return !input.status.isActivated;
 }
 
+/**
+ * Whether the shell should hold in a neutral pending state rather than
+ * render the ordinary interactive shell (PR #1875 review finding, round 8).
+ *
+ * `shouldShowOnboardingGate`'s `!input.checked || !input.status` guard above
+ * answers one question — "do not show the *gate* yet" — and `AppShell`
+ * plugged that straight into "so render the ordinary shell instead", on the
+ * premise that the unresolved window is always the brief one round trip a
+ * fresh mount's first read takes. `useActivationGate` breaks that premise
+ * whenever `getActivation` hits a transient failure (a dropped connection, a
+ * proxy 5xx): the hook deliberately leaves `checked: false` for as long as it
+ * keeps retrying (see `ActivationGate.retrying`'s own doc) rather than
+ * settling early on a non-answer, so an outage of any length reads exactly
+ * like "first read still in flight" to `shouldShowOnboardingGate` — and
+ * `AppShell` rendered the full, ordinary, clickable shell for the entire
+ * outage on that account. Worse, if the company is genuinely not activated,
+ * the funnel abruptly replaces that already-interactive shell with the
+ * blocking gate the instant a retry finally lands — the same "abrupt
+ * replacement" `resolveActivationReadError`'s own doc calls out for a single
+ * glitched read, just stretched over however long the outage runs.
+ *
+ * This predicate names that gap so `AppShell` can render a neutral loading
+ * state instead of the ordinary shell while `retrying` is true — never the
+ * gate itself (this is still an unknown, not a "not activated" answer) and
+ * never the interactive shell (which is the state that was wrong to show).
+ * Gated the same way `shouldShowOnboardingGate` is on `skippedThisSession`,
+ * `setupOpen`, and `isAdmin`: none of this matters to an operator who
+ * dismissed the gate, is still being staffed, or could never see the gate at
+ * all (a confirmed non-admin, or the admin read still unresolved) — holding
+ * the shell pending for a screen the gate would never have blocked anyway
+ * would be a regression of its own.
+ */
+export function shouldHoldShellPending(
+  input: GateDecisionInput & { retrying: boolean },
+): boolean {
+  if (input.skippedThisSession) return false;
+  if (input.setupOpen) return false;
+  if (input.isAdmin === null || !input.isAdmin) return false;
+  // Once the first read has landed one way or another, `shouldShowOnboardingGate`
+  // has everything it needs — this predicate only covers the unresolved window.
+  if (input.checked) return false;
+  return input.retrying;
+}
+
 /** What a failed `/auth/me` read (behind `isGateAdmin` in `AppShell`) resolves to. */
 export type GateAdminCheckOutcome =
   | { settled: true; isAdmin: boolean }

@@ -37,6 +37,17 @@ export interface ActivationGate {
   checked: boolean;
   /** `null` only before the first read lands, or after a read that failed. */
   status: ActivationStatus | null;
+  /**
+   * True from the first transient `getActivation` failure (a network error, a
+   * proxy 5xx — anything `resolveActivationReadError` does not settle) until
+   * either a read succeeds or a later attempt settles terminally (PR #1875
+   * review finding, round 8). Distinguishes "still stuck retrying, unknown
+   * how long this outage lasts" from the ordinary brief "first read has not
+   * landed yet" window `checked` alone conflates them into — see
+   * `shouldHoldShellPending`'s own doc for why that distinction matters to
+   * the caller.
+   */
+  retrying: boolean;
   /** Re-reads the funnel immediately — called after an in-gate action. */
   refresh: () => Promise<void>;
 }
@@ -56,6 +67,7 @@ export function useActivationGate(
 ): ActivationGate {
   const [checked, setChecked] = useState(false);
   const [status, setStatus] = useState<ActivationStatus | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const generation = useRef(0);
   /**
    * Set once a read reports the latch. `isActivated` is monotonic on the host
@@ -92,6 +104,7 @@ export function useActivationGate(
       if (gen !== generation.current) return;
       setStatus(next);
       setChecked(true);
+      setRetrying(false);
       if (next.isActivated) activated.current = true;
     } catch (err) {
       if (gen !== generation.current) return;
@@ -107,12 +120,18 @@ export function useActivationGate(
         // can land on.
         terminal.current = true;
         setChecked(true);
+        setRetrying(false);
         return;
       }
       // A transient failure (network error, 5xx) — not an answer, so do not
       // settle `checked` on it. Retry sooner than the regular poll cadence
       // instead of waiting out the full `POLL_MS` tick — see
-      // `ACTIVATION_READ_RETRY_MS`.
+      // `ACTIVATION_READ_RETRY_MS`. `retrying` flips on here (PR #1875 review
+      // finding, round 8): the caller must be able to tell "still waiting on
+      // the very first read" apart from "stuck in an outage of unknown
+      // length" — `checked` alone reads identically for both, and the two
+      // need different renders (see `shouldHoldShellPending`).
+      setRetrying(true);
       retryTimer.current = setTimeout(() => {
         if (gen !== generation.current) return;
         void load();
@@ -126,6 +145,7 @@ export function useActivationGate(
     terminal.current = false;
     setChecked(false);
     setStatus(null);
+    setRetrying(false);
     void load();
     const stopPolling = startVisiblePolling(() => void load(), POLL_MS);
     return () => {
@@ -134,5 +154,5 @@ export function useActivationGate(
     };
   }, [enabled, load]);
 
-  return { checked, status, refresh: load };
+  return { checked, status, retrying, refresh: load };
 }

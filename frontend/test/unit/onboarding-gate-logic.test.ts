@@ -6,6 +6,7 @@ import {
   type GateDecisionInput,
   resolveActivationReadError,
   resolveGateAdminCheckError,
+  shouldHoldShellPending,
   shouldPollActivation,
   shouldPollActivationForRole,
   shouldShowOnboardingGate,
@@ -238,5 +239,58 @@ describe("shouldPollActivationForRole", () => {
 
   it("keeps polling for a confirmed non-admin too (round 7) — a member can still be the read that observes the workflow step complete after an admin who already cleared the other two steps closes their tab", () => {
     expect(shouldPollActivationForRole(false)).toBe(true);
+  });
+});
+
+// PR #1875 review finding, round 8: `shouldShowOnboardingGate`'s
+// `!checked || !status` guard reads identically for "first read still in
+// flight" and "stuck retrying a transient outage of unknown length" —
+// `AppShell` plugged that straight into rendering the ordinary, fully
+// interactive shell, for the whole outage in the second case. `retrying`
+// (from `useActivationGate`) is what tells these two apart.
+describe("shouldHoldShellPending", () => {
+  const pendingBase = { ...base, retrying: false };
+
+  it("does not hold once the first read has landed, even if a later poll starts retrying", () => {
+    expect(
+      shouldHoldShellPending({ ...pendingBase, checked: true, status: incomplete, retrying: true }),
+    ).toBe(false);
+  });
+
+  it("does not hold while merely waiting on the first read — not retrying yet", () => {
+    expect(shouldHoldShellPending({ ...pendingBase, checked: false, retrying: false })).toBe(false);
+  });
+
+  it("holds the shell pending once stuck retrying before the first read lands", () => {
+    expect(shouldHoldShellPending({ ...pendingBase, checked: false, retrying: true })).toBe(true);
+  });
+
+  it("does not hold once 'skip for now' was clicked — that must always win, same as the gate itself", () => {
+    expect(
+      shouldHoldShellPending({
+        ...pendingBase,
+        checked: false,
+        retrying: true,
+        skippedThisSession: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not hold while setup/staffing is still open — the gate could not show yet either way", () => {
+    expect(
+      shouldHoldShellPending({ ...pendingBase, checked: false, retrying: true, setupOpen: true }),
+    ).toBe(false);
+  });
+
+  it("does not hold for a confirmed non-admin — the gate could never block them, so there is nothing to protect the shell from", () => {
+    expect(
+      shouldHoldShellPending({ ...pendingBase, checked: false, retrying: true, isAdmin: false }),
+    ).toBe(false);
+  });
+
+  it("does not hold before the admin check itself has landed — mirrors shouldShowOnboardingGate's own null guard", () => {
+    expect(
+      shouldHoldShellPending({ ...pendingBase, checked: false, retrying: true, isAdmin: null }),
+    ).toBe(false);
   });
 });

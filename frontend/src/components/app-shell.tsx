@@ -63,6 +63,7 @@ import { useActivationGate } from "@/onboarding/useActivationGate";
 import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
 import {
   resolveGateAdminCheckError,
+  shouldHoldShellPending,
   shouldPollActivationForRole,
   shouldShowOnboardingGate,
 } from "@/onboarding/gate-logic";
@@ -2759,6 +2760,31 @@ export function AppShell({
       });
     }, []),
   });
+
+  // PR #1875 review finding, round 8: hold the shell in a neutral pending
+  // state — never the ordinary interactive shell, never the gate itself —
+  // for as long as `useActivationGate` is stuck retrying a transient
+  // failure. Without this, the gap below fell straight through to the full
+  // shell (its `shouldShowOnboardingGate` guard reads "not checked yet"
+  // identically for a live outage and a brief first read), leaving an
+  // operator clicking around a shell the funnel had not actually cleared for
+  // them to be in, until a retry finally landed and abruptly yanked the gate
+  // over it. `RouteLoading` is the same neutral loader every code-split route
+  // fallback in this file already uses — see its own doc for why a bare
+  // "Loading…" line is not enough (`title` names the page for a screen reader
+  // that never sees a mounted heading otherwise).
+  if (
+    shouldHoldShellPending({
+      status: activationGate.status,
+      checked: activationGate.checked,
+      setupOpen,
+      skippedThisSession: gateSkipped,
+      isAdmin: isGateAdmin,
+      retrying: activationGate.retrying,
+    })
+  ) {
+    return <RouteLoading title="Console" label="Reconnecting…" />;
+  }
 
   // Issue #1844: the blocking first-run gate. Held behind `!setupOpen` —
   // `setupOpen` is already true for as long as `SetupController`'s dialog is
