@@ -1659,6 +1659,7 @@ async fn the_prompt_carries_runtime_teammates_and_desks_not_just_manifest_ones()
         name: "Growth".to_string(),
         description: None,
         members: vec!["social_manager".to_string()],
+        responder: crate::ports::types::ResponderMode::default(),
     });
     runtime.store().save(&record).await.unwrap();
 

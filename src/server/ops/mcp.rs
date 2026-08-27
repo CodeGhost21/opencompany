@@ -1181,6 +1181,7 @@ role = "Chief Executive"
             name: "Creative".to_string(),
             description: None,
             members: vec!["jamie".to_string()],
+            responder: crate::ports::types::ResponderMode::default(),
         });
         scoped
             .overlay_desk_tools

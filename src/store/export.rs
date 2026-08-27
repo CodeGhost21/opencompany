@@ -1683,6 +1683,7 @@ mod test {
             name: "Growth".into(),
             description: Some("Marketing pod".into()),
             members: vec!["ceo".into()],
+            responder: crate::ports::types::ResponderMode::default(),
         }];
         // A workflow graph authored at runtime (issue #168). On a hosted tenant
         // this body is the ONLY copy — a bundle that dropped it would lose the

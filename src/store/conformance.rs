@@ -209,14 +209,30 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
 /// Its `members` name one manifest agent (`ceo`) and one overlay agent
 /// (`aria_stone`), which is the mixed case a real console desk produces, and
 /// `description` is `Some` so the `skip_serializing_if` field is exercised.
+///
+/// Two desks since issue #1835, one per responder mode: `support` never states
+/// a mode (the defaulted-and-skipped half — a pre-#1835 row must rehydrate as
+/// `Lead`), and `launch` is an `auto` channel, so every backend proves the
+/// mode a rail-created channel stores actually survives persistence rather
+/// than silently collapsing back to a lead desk.
 fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
-    use crate::ports::types::OverlayDesk;
-    vec![OverlayDesk {
-        id: "support".to_string(),
-        name: "Support".to_string(),
-        description: Some("Customer mail triage.".to_string()),
-        members: vec!["ceo".to_string(), "aria_stone".to_string()],
-    }]
+    use crate::ports::types::{OverlayDesk, ResponderMode};
+    vec![
+        OverlayDesk {
+            id: "support".to_string(),
+            name: "Support".to_string(),
+            description: Some("Customer mail triage.".to_string()),
+            members: vec!["ceo".to_string(), "aria_stone".to_string()],
+            responder: ResponderMode::default(),
+        },
+        OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["ceo".to_string(), "aria_stone".to_string()],
+            responder: ResponderMode::Auto,
+        },
+    ]
 }
 
 /// The console-added desk memberships the fixture seeds every record with, so

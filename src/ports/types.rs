@@ -3164,6 +3164,40 @@ pub struct OverlayDeskOrder {
     pub ordered: Vec<String>,
 }
 
+/// How a desk's unmentioned messages find their answerer (issue #1835).
+///
+/// `Lead` is the model every desk has always had: `members[0]` is the desk
+/// lead, made explicit by #1827, and `responder_for` hands the lead every
+/// message that names nobody. `Auto` is the channel model: **no lead exists**
+/// — no crown, no hierarchy, no `delegate_to_desk` target — and the answerer
+/// is chosen **per message**, by a best-fit selection over the channel's own
+/// membership, with the first roster member as the deterministic fallback
+/// wherever selection cannot run (the default build, the small-talk fast
+/// path, a selection failure).
+///
+/// On the wire and in storage this is `"lead"` / `"auto"`, defaulted and
+/// skipped when `Lead`, so every record written before the field existed —
+/// and every desk the org chart creates today — deserializes and re-serializes
+/// byte-for-byte unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponderMode {
+    /// `members[0]` leads the desk and answers its unmentioned messages.
+    #[default]
+    Lead,
+    /// No lead: a per-message best-fit selection over the membership answers,
+    /// falling back to the first roster member where selection cannot run.
+    Auto,
+}
+
+impl ResponderMode {
+    /// Whether this is the default mode — the `skip_serializing_if` predicate
+    /// that keeps every pre-#1835 record round-tripping byte-identically.
+    pub fn is_lead(&self) -> bool {
+        matches!(self, ResponderMode::Lead)
+    }
+}
+
 /// An operator-created desk (group chat) that the version-controlled manifest
 /// does not declare. Persisted as an overlay on the [`CompanyRecord`] and merged
 /// with the manifest's `[[group_chat]]` desks at read/resolve time; the
@@ -3180,11 +3214,20 @@ pub struct OverlayDesk {
     /// What the desk is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// The desk's founding member ids, in order; the first is its lead. Each
-    /// must resolve to a roster teammate (manifest agent or [`OverlayAgent`]).
-    /// Further members can still be added through the desk-member overlay.
+    /// The desk's founding member ids, in order; the first is its lead — unless
+    /// [`responder`](Self::responder) is [`ResponderMode::Auto`], in which case
+    /// order carries no rank at all. Each must resolve to a roster teammate
+    /// (manifest agent or [`OverlayAgent`]). Further members can still be added
+    /// through the desk-member overlay.
     #[serde(default)]
     pub members: Vec<String>,
+    /// How this desk's unmentioned messages find their answerer (issue #1835).
+    /// Defaulted and skipped when [`ResponderMode::Lead`], so every record
+    /// written before the field existed deserializes unchanged. Manifest
+    /// `[[group_chat]]` desks are always `Lead` — the blueprint syntax carries
+    /// no such field.
+    #[serde(default, skip_serializing_if = "ResponderMode::is_lead")]
+    pub responder: ResponderMode,
 }
 
 /// A workflow graph body authored at runtime (the console's create dialog or
@@ -4001,6 +4044,23 @@ impl CompanyRecord {
     pub fn desk_exists(&self, desk_id: &str) -> bool {
         self.manifest.group_chats.iter().any(|c| c.id == desk_id)
             || self.overlay_desks.iter().any(|d| d.id == desk_id)
+    }
+
+    /// How the desk with **exact** id `desk_id` routes its unmentioned messages
+    /// (issue #1835).
+    ///
+    /// Manifest `[[group_chat]]` desks are always [`ResponderMode::Lead`] — the
+    /// blueprint syntax carries no responder field — and so is any id that
+    /// names no desk at all, which keeps every non-desk caller (`#general`, a
+    /// DM key, a bare teammate id) on the behaviour it has today. Takes the
+    /// resolved id, not a display name: callers that accept either resolve
+    /// through [`Self::resolve_desk_id`] first, as `desk_lead` does.
+    pub fn desk_responder_mode(&self, desk_id: &str) -> ResponderMode {
+        self.overlay_desks
+            .iter()
+            .find(|d| d.id == desk_id)
+            .map(|d| d.responder)
+            .unwrap_or_default()
     }
 
     /// Whether `agent_id` names a roster teammate — a manifest agent or an
@@ -6400,6 +6460,7 @@ mod test {
             name: "Design Studio".into(),
             description: None,
             members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
         });
         assert_eq!(record.mint_agent_id("Design Studio"), "design_studio");
         // …while the overlay desk's id is reserved exactly like a manifest one.
@@ -7441,6 +7502,7 @@ mod test {
             name: "Growth".into(),
             description: None,
             members: vec!["eng".into()],
+            responder: crate::ports::types::ResponderMode::default(),
         });
         // Resolves by id and by case-insensitive name.
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
