@@ -20,6 +20,8 @@ import {
   channelMembers,
   directMessageChannels,
   directMessageForId,
+  dmThreadId,
+  memberForThread,
 } from "@/views/chat/model";
 
 /**
@@ -321,8 +323,52 @@ describe("resolving a host thread to the general channel", () => {
       new URL("../../src/views/ChatView.tsx", import.meta.url),
       "utf8",
     );
-    expect(view).toContain("isGeneralChannel(active.member.id)");
-    expect(view).toContain("dmChannelId(active.member)");
+    expect(view).toContain("dmThreadId(active.member)");
+  });
+
+  /**
+   * ...and so does every other seam that turns a member into a thread id.
+   *
+   * The sender was only the first. The shell seeds the live thread -> channel
+   * map from the roster and builds its rehydration targets from it, and the
+   * Approvals page resolves an origin back from a recorded thread; each one
+   * left on the bare id put that DM's replies, its recovered history, or its
+   * approval link back on the company's line. One rule, asked in one place.
+   */
+  it("asks the same question at the map, the hydration and the approval origin", () => {
+    const shell = readFileSync(
+      new URL("../../src/components/app-shell.tsx", import.meta.url),
+      "utf8",
+    );
+    // The live thread -> channel map.
+    expect(shell).toContain("members.map(dmThreadId)");
+    expect(shell).not.toContain("members.map((m) => m.id)");
+    // The rehydration targets.
+    expect(shell).toContain("threadId: dmThreadId(m)");
+    expect(shell).not.toContain("threadId: m.id,");
+
+    const card = readFileSync(
+      new URL("../../src/components/approval-card.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(card).toContain("memberForThread(members, approval.thread)");
+    expect(card).not.toContain("candidate.id === approval.thread");
+  });
+
+  /**
+   * The rule itself, rather than the call sites that apply it.
+   */
+  it("addresses only the General-spelling teammate prefixed", () => {
+    const mainard = member({ id: "main", name: "Mainard" });
+    const eng = member({ id: "eng", name: "Engie" });
+    expect(dmThreadId(mainard)).toBe("dm:main");
+    expect(dmThreadId(eng)).toBe("eng");
+    // And the reverse lookup accepts either address.
+    const roster = [eng, mainard];
+    expect(memberForThread(roster, "dm:main")?.id).toBe("main");
+    expect(memberForThread(roster, "eng")?.id).toBe("eng");
+    expect(memberForThread(roster, "dm:eng")?.id).toBe("eng");
+    expect(memberForThread(roster, "nobody")).toBeNull();
   });
 
   it("lets a blueprint desk that authored a general id keep its own thread", () => {
@@ -495,14 +541,16 @@ describe("the shell maps the main line to #general, not to the first desk", () =
   });
 
   it("hydrates a DM from a thread id that actually belongs to that DM", () => {
-    // A DM's history is fetched under the teammate's own id. For a teammate
-    // whose id is a General spelling that id is *not* the DM's address — the
-    // host folds it, and `GET chat/history?desk=main` answers with the whole
-    // company-wide conversation. Pinned through `channelIdForThread` so one
-    // rule decides where a thread's history lands, rather than a second
+    // A DM's history is fetched under the address it is written on. For a
+    // teammate whose id is a General spelling the bare id is *not* that
+    // address — the host folds it, and `GET chat/history?desk=main` answers
+    // with the whole company-wide conversation, so the DM's own transcript
+    // could never be recovered after a reload. Both halves go through the
+    // shared rules (`dmThreadId`, `channelIdForThread`) rather than repeating a
     // literal here that can disagree with the rail.
+    expect(shell).toContain("threadId: dmThreadId(m)");
     expect(shell).toContain(
-      "...roster.map((m) => ({ channelId: channelIdForThread(m.id, chatDesks, roster) ?? dmChannelId(m), threadId: m.id, })),",
+      "channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m)",
     );
     expect(shell).not.toContain(
       "...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),",

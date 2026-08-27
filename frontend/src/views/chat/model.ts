@@ -355,8 +355,44 @@ function latestMessageAt(messages: ChatMessage[] | undefined): number {
  * journaled under the old one. An id does not change when a person's name does,
  * which is the entire reason to prefer it.
  */
+export const DM_PREFIX = "dm:";
+
 export function dmChannelId(member: TeamMember): string {
-  return `dm:${member.id}`;
+  return `${DM_PREFIX}${member.id}`;
+}
+
+/**
+ * The **host thread** a teammate's DM is addressed on — not always the same
+ * string as {@link dmChannelId}, which is its console-local channel id.
+ *
+ * Issue #364 re-keyed DMs onto the bare teammate id, and for every ordinary
+ * teammate that is still what this answers. The exception is a teammate whose
+ * id is itself a General spelling: the host folds that bare key to the
+ * company-wide line before it ever reaches the roster — deliberately, so `main`
+ * cannot be captured by a teammate called `main` — and answers it as the
+ * orchestrator. Addressed bare, that DM was writable and unreadable at once.
+ *
+ * So exactly that one teammate is addressed prefixed, which `chat_responder`
+ * unwraps and resolves (`chat_responder("dm:main") == Some("main")`).
+ *
+ * **Every seam that turns a roster member into a thread id has to ask this**,
+ * not only the sender: the live thread → channel map, the rehydration targets
+ * that recover history after a reload, and the Approvals page resolving an
+ * origin back to its conversation. Any one of them left on the bare id puts
+ * that DM's replies, its recovered history, or its approval link back on the
+ * company's line (issue #1743).
+ */
+export function dmThreadId(member: TeamMember): string {
+  return isGeneralChannel(member.id) ? dmChannelId(member) : member.id;
+}
+
+/** The teammate a thread addresses, whether it is bare or `dm:`-prefixed. */
+export function memberForThread(members: TeamMember[], threadId: string): TeamMember | null {
+  return (
+    members.find((m) => dmThreadId(m) === threadId) ??
+    members.find((m) => dmChannelId(m) === threadId) ??
+    null
+  );
 }
 
 /**
@@ -482,7 +518,7 @@ export function channelIdForThread(
   // `dm:<id>`, which the host does answer. The frames it emits carry that
   // prefixed key, so without this arm they resolved to no channel at all and
   // the reply never appeared — the DM was writable and unreadable at once.
-  const prefixed = threadId.startsWith("dm:") ? threadId.slice("dm:".length) : null;
+  const prefixed = threadId.startsWith(DM_PREFIX) ? threadId.slice(DM_PREFIX.length) : null;
   const dmMember = prefixed ? members.find((m) => m.id === prefixed) : null;
   return dmMember ? dmChannelId(dmMember) : null;
 }

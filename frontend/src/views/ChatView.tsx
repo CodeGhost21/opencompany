@@ -34,7 +34,6 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   fromHistory,
-  isGeneralChannel,
   makeMessage,
   reconcileIds,
   toHostMessageId,
@@ -82,6 +81,7 @@ import {
   channelTitle,
   deskFromDto,
   dmChannelId,
+  dmThreadId,
   findChannel,
   firstChannel,
   historyReady,
@@ -1158,11 +1158,7 @@ export function ChatView({
   // `channelIdForThread` maps back. Every other DM keeps the bare id issue #364
   // re-keyed it onto.
   const activeThreadId =
-    active.kind === "channel"
-      ? active.id
-      : active.member && isGeneralChannel(active.member.id)
-        ? dmChannelId(active.member)
-        : active.member?.id;
+    active.kind === "channel" ? active.id : active.member && dmThreadId(active.member);
   /**
    * Whether the active channel is a **host desk** — the thing every desk
    * affordance below is derived from.

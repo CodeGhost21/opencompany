@@ -116,6 +116,7 @@ import {
   channelIdForThread,
   deskFromDto,
   dmChannelId,
+  dmThreadId,
   HISTORY_UNSTARTED,
   type DecidedApproval,
   type HistoryHydration,
@@ -419,7 +420,11 @@ function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string
     const channelId = channelIdForThread(spelling, desks, members);
     if (channelId) map[spelling] = channelId;
   }
-  for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
+  // `dmThreadId`, not `m.id`: a teammate whose id is a General spelling is
+  // addressed on `dm:<id>`, and the host emits its live frames under that key.
+  // Seeded bare, `channelForThread` could place neither that DM's reply nor its
+  // working indicator anywhere at all (issue #1743).
+  for (const threadId of [...desks.map((d) => d.id), ...members.map(dmThreadId)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
   }
@@ -1154,8 +1159,12 @@ export function AppShell({
           // where a thread renders decides it here too (issue #1743). For every
           // ordinary teammate that is exactly `dm:<id>`, unchanged.
           ...roster.map((m) => ({
-            channelId: channelIdForThread(m.id, chatDesks, roster) ?? dmChannelId(m),
-            threadId: m.id,
+            channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
+            // The address the DM is actually written under. Bare, this fetched
+            // the folded General history for a teammate whose id is a General
+            // spelling, so its own transcript could never be recovered after a
+            // reload (issue #1743).
+            threadId: dmThreadId(m),
           })),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);

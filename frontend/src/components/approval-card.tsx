@@ -55,7 +55,13 @@ import {
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { workflowHref } from "@/lib/task-output";
-import { channelForThread, channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
+import {
+  channelForThread,
+  channelIdForThread,
+  deskFromDto,
+  dmChannelId,
+  memberForThread,
+} from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -573,7 +579,11 @@ export function approvalThreadLink(
     return { channelId, label: `#${GENERAL_CHANNEL}` };
   }
 
-  const member = members.find((candidate) => candidate.id === approval.thread);
+  // Matched through `dmThreadId`, not against the bare id: a DM for a teammate
+  // whose id is a General spelling records its thread as `dm:<id>`, and a raw
+  // comparison returned `null` — so the Approvals page called the origin
+  // unavailable for a conversation it could perfectly well link to (#1743).
+  const member = memberForThread(members, approval.thread);
   return member ? { channelId: dmChannelId(member), label: member.name } : null;
 }
 
