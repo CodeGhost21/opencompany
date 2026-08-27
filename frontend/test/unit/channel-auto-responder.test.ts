@@ -67,7 +67,11 @@ describe("buildChannels", () => {
       deskFromDto(desk({ id: "eng", name: "Engineering" })),
       deskFromDto(desk({ id: "launch", name: "Launch", responder: "auto" })),
     ]);
-    const [eng, launch] = channels.channels;
+    // Selected by id, not by index: since issue #1743 the rail leads with the
+    // built-in `#general` row, which is not a desk and shifts every position.
+    const byId = (id: string) => channels.channels.find((c) => c.id === id)!;
+    const eng = byId("eng");
+    const launch = byId("launch");
     expect(launch.leadless).toBe(true);
     // Undefined rather than false, so every pre-#1835 consumer that never
     // reads the flag serializes and compares exactly as it did.
@@ -82,7 +86,10 @@ describe("buildChannels", () => {
       ),
       deskFromDto(desk({ id: "eng", name: "Engineering" })),
     ]);
-    const [launch, beta, eng] = channels.channels;
+    const byId = (id: string) => channels.channels.find((c) => c.id === id)!;
+    const launch = byId("launch");
+    const beta = byId("beta");
+    const eng = byId("eng");
     expect(launch.purpose).toBe("Best fit picks up anything you don't @-mention");
     expect(beta.purpose).toBe("Beta rollout.");
     // A lead desk with no blurb keeps its empty purpose — the routing line is

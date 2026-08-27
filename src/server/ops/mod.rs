@@ -30,6 +30,8 @@ pub mod billing;
 pub mod budget_pause;
 pub mod capabilities;
 pub mod company_key;
+/// Operator-set company logo, stored in the company manifest.
+pub mod company_logo;
 pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
@@ -205,6 +207,7 @@ pub fn router() -> Router<AppState> {
         .merge(billing::router())
         .merge(hosting::router())
         .merge(search::router())
+        .merge(company_logo::router())
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())
