@@ -335,9 +335,6 @@ oversight:
 
 - approvals, tools, workflows, ledgers, connections/MCP, and console views —
   the surfaces #1739 lists as candidates;
-- **model name**, which exists at no metering seam today. Adding it is a change
-  to `UsageSample`/`Cognition`, not to this module, and belongs in its own
-  change;
 - **build commit**, which this crate does not stamp at build time;
 - a timed flush shared with `MaintenanceTicker` rather than the transport's own
   30-second loop.

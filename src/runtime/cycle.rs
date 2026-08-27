@@ -518,7 +518,10 @@ impl<'a> CycleRunner<'a> {
             }
             None => self.rt.serial.clone().lock_owned().await,
         };
-        let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
+        let mut effects = EffectCounts::default();
+        let outcome = self
+            .run_locked(events, cycle_id.clone(), run_id, &mut effects)
+            .await;
         // Issue #1739: the product's unit of work, reported as shape and outcome.
         //
         // Emitted here rather than inside `run_locked` for the same reason the
@@ -545,12 +548,13 @@ impl<'a> CycleRunner<'a> {
                     .err()
                     .map(crate::analytics::FailureCode::of),
                 duration_ms: started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-                effects_executed: outcome
-                    .as_ref()
-                    .map_or(0, |report| report.executed_effects.len() as u64),
-                approvals_parked: outcome
-                    .as_ref()
-                    .map_or(0, |report| report.parked.len() as u64),
+                // From the host, not from the report: the report exists only on
+                // the success path, so reading it here reported zero effects
+                // and zero parked approvals for every failed cycle — including
+                // one that executed an irreversible effect and *then* hit an
+                // adapter error, which is the turn most worth counting.
+                effects_executed: effects.executed,
+                approvals_parked: effects.parked,
             });
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
@@ -577,6 +581,7 @@ impl<'a> CycleRunner<'a> {
         inputs: Vec<(Option<EventSeq>, CompanyEvent)>,
         cycle_id: String,
         run_id: Option<String>,
+        effects: &mut EffectCounts,
     ) -> Result<CycleReport> {
         let company = self.rt.id.clone();
 
@@ -791,6 +796,12 @@ impl<'a> CycleRunner<'a> {
         // that escapes it is a panic, which is the boot reaper's job.
         self.backstop_dispatched_runs(&company, &dispatched_runs, result.as_ref().err())
             .await;
+        // Before the `?`, and before the fallible persistence below, for the
+        // same reason the backstop is: an effect that executed and an approval
+        // that parked are facts, and a later adapter error does not un-happen
+        // them. Read here, the turn event reports them whichever way the cycle
+        // ends (issue #1739).
+        *effects = host.counts();
         let result = result?;
 
         // 6. Persist output.
@@ -2539,6 +2550,18 @@ fn cycle_conversation(
 
 /// The host the brain calls back into mid-cycle. Bridges tool, context, and
 /// effect callbacks to the runtime's ports and gates every effect.
+/// Effects executed and approvals parked by a cycle — counted, not owned.
+///
+/// Separate from `CycleReport` because the report only exists on success, while
+/// these two numbers describe work that has already happened and cannot be
+/// undone by a later failure. Reported as zero on a failed cycle, they made
+/// `turn_finished` systematically undercount exactly the turns worth looking at.
+#[derive(Clone, Copy, Default)]
+struct EffectCounts {
+    executed: u64,
+    parked: u64,
+}
+
 struct CycleHostImpl<'a> {
     company: CompanyId,
     cycle_id: String,
@@ -2609,6 +2632,20 @@ impl<'a> CycleHostImpl<'a> {
             external_trigger,
             thread_id: conversation.thread,
             thread_parent: conversation.parent,
+        }
+    }
+
+    /// What this host has irreversibly done so far, readable without consuming it.
+    ///
+    /// `into_outcomes` can only be reached on the success path, but an effect
+    /// that has executed and an approval that has parked are facts already —
+    /// they survive whatever fails afterwards. Reading the counts through the
+    /// same mutexes lets the turn report them even when the cycle goes on to
+    /// fail (issue #1739).
+    fn counts(&self) -> EffectCounts {
+        EffectCounts {
+            executed: self.executed.lock().expect("executed poisoned").len() as u64,
+            parked: self.parked.lock().expect("parked poisoned").len() as u64,
         }
     }
 
@@ -9008,5 +9045,76 @@ members = ["writer"]
             !rendered.contains("Northwind"),
             "the operator's message reached the payload: {rendered}"
         );
+    }
+
+    /// `turn_finished` counts the effects the cycle actually performed.
+    ///
+    /// These two numbers used to be read off `CycleReport`, which exists only
+    /// on the success path — so every failed cycle reported zero effects and
+    /// zero parked approvals, including one that executed an irreversible
+    /// effect and *then* hit an adapter error on the way out. That is a
+    /// systematic undercount of exactly the turns worth looking at.
+    ///
+    /// They now come from the host, read before the fallible tail of
+    /// `run_locked` rather than after it. This covers the reading being
+    /// faithful: a cycle whose brain emits one effect reports one. The failure
+    /// case is covered by where the read happens — `*effects = host.counts()`
+    /// sits above `let result = result?;` and above every `?` that follows, so
+    /// no later error can reach the tracker with the counts unset.
+    #[tokio::test]
+    async fn a_cycle_reports_the_effects_it_actually_performed() {
+        let home_dir = tmp_home();
+        let recorder = Arc::new(crate::analytics::RecordingTracker::new());
+        let effect = Effect {
+            kind: "noop".into(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .with_brain(Arc::new(EffectBrain { effect }))
+            .with_analytics(recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            text: "do the thing".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+
+        let turns: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .filter(|event| matches!(event, crate::analytics::Event::TurnFinished { .. }))
+            .collect();
+        assert_eq!(turns.len(), 1, "one cycle, one event: {turns:?}");
+
+        match turns[0] {
+            crate::analytics::Event::TurnFinished {
+                effects_executed,
+                approvals_parked,
+                ..
+            } => {
+                assert_eq!(
+                    effects_executed + approvals_parked,
+                    1,
+                    "the cycle's one effect must be counted, executed or parked: {:?}",
+                    turns[0]
+                );
+            }
+            ref other => panic!("{other:?}"),
+        }
     }
 }
