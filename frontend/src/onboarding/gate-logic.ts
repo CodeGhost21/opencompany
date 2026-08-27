@@ -106,23 +106,64 @@ export function shouldShowOnboardingGate(input: GateDecisionInput): boolean {
  * state instead of the ordinary shell while `retrying` is true — never the
  * gate itself (this is still an unknown, not a "not activated" answer) and
  * never the interactive shell (which is the state that was wrong to show).
- * Gated the same way `shouldShowOnboardingGate` is on `skippedThisSession`,
- * `setupOpen`, and `isAdmin`: none of this matters to an operator who
- * dismissed the gate, is still being staffed, or could never see the gate at
- * all (a confirmed non-admin, or the admin read still unresolved) — holding
- * the shell pending for a screen the gate would never have blocked anyway
- * would be a regression of its own.
+ * Gated the same way `shouldShowOnboardingGate` is on `skippedThisSession`
+ * and `setupOpen`: neither matters to an operator who dismissed the gate or
+ * is still being staffed.
+ *
+ * `isAdmin` is deliberately NOT gated the same way here (PR #1875 review
+ * finding, round 9 — the original round-8 cut copied
+ * `shouldShowOnboardingGate`'s `isAdmin === null || !isAdmin` guard
+ * verbatim, which was wrong for this predicate specifically). Only a
+ * confirmed non-admin (`isAdmin === false`) can never see the gate — for
+ * `null` (the read has not landed yet), the gate is still an open question,
+ * not a settled "no". Bypassing pending for `null` reintroduced the exact
+ * bug this predicate exists to close: whenever the admin check simply
+ * hadn't resolved yet — which is the common case for at least the first
+ * leg of any outage, since both reads start together on mount — this guard
+ * fired before `retrying` was ever consulted, so round 8's fix only worked
+ * on the accident of `isAdmin` resolving `true` before the outage was
+ * noticed.
+ *
+ * The `checked` branch has the same class of bug: `checked` landing does
+ * NOT mean `shouldShowOnboardingGate` has everything it needs — it also
+ * needs `isAdmin` resolved, and while that is still `null`,
+ * `shouldShowOnboardingGate` returns `false` (its own null guard) exactly
+ * the way it does for "not checked yet". The unconditional
+ * `if (input.checked) return false` therefore let the ordinary shell render
+ * for as long as `/auth/me` was slow or failing even after activation had
+ * already read incomplete — then had the gate abruptly replace it the
+ * instant the role resolved, the same "abrupt replacement" this whole file
+ * exists to prevent.
  */
 export function shouldHoldShellPending(
   input: GateDecisionInput & { retrying: boolean },
 ): boolean {
   if (input.skippedThisSession) return false;
   if (input.setupOpen) return false;
-  if (input.isAdmin === null || !input.isAdmin) return false;
-  // Once the first read has landed one way or another, `shouldShowOnboardingGate`
-  // has everything it needs — this predicate only covers the unresolved window.
-  if (input.checked) return false;
-  return input.retrying;
+  // A confirmed non-admin can never see the gate (`shouldShowOnboardingGate`'s
+  // own guard) — nothing to hold the shell pending for.
+  if (input.isAdmin === false) return false;
+
+  if (!input.checked || !input.status) {
+    // Mirrors `shouldShowOnboardingGate`'s own "nothing to gate on yet"
+    // guard: an unlanded first read (or one that settled terminally with no
+    // status — a legacy host's 404, which never retries) cannot make the
+    // gate appear either way, admin role resolved or not. Only an actual
+    // outage (`retrying`) is worth holding the ordinary shell back for.
+    return input.retrying;
+  }
+
+  // Activation has landed. Once the company reads activated, no role can
+  // make the gate appear — nothing left to hold for, `isAdmin` resolved or
+  // not.
+  if (input.status.isActivated) return false;
+
+  // The company is not (yet) activated and the admin role is still
+  // unresolved: `shouldShowOnboardingGate` cannot rule the gate in or out
+  // yet. Hold the neutral screen rather than let the ordinary shell render
+  // and then get yanked out from under the operator the moment the role
+  // resolves.
+  return input.isAdmin === null;
 }
 
 /** What a failed `/auth/me` read (behind `isGateAdmin` in `AppShell`) resolves to. */

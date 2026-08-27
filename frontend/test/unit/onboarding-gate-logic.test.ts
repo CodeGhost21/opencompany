@@ -288,9 +288,39 @@ describe("shouldHoldShellPending", () => {
     ).toBe(false);
   });
 
-  it("does not hold before the admin check itself has landed — mirrors shouldShowOnboardingGate's own null guard", () => {
+  it("holds the shell pending while the admin role is still unresolved and activation is stuck retrying (round 9) — the old null guard bypassed this exactly like a confirmed non-admin, so round 8's own fix never fired unless the role happened to resolve `true` first (was: does not hold before the admin check itself has landed)", () => {
     expect(
       shouldHoldShellPending({ ...pendingBase, checked: false, retrying: true, isAdmin: null }),
+    ).toBe(true);
+  });
+
+  it("holds the shell pending once activation has already read incomplete but the admin role is still unresolved (PR #1875 review finding, round 9)", () => {
+    // `checked` landing first does NOT mean `shouldShowOnboardingGate` has
+    // everything it needs — it still cannot rule the gate in or out while
+    // `isAdmin` is null. The old `if (input.checked) return false` bypass
+    // let the ordinary shell render for the whole time `/auth/me` was slow
+    // or transiently failing, only to have the gate abruptly replace it the
+    // instant the role resolved.
+    expect(
+      shouldHoldShellPending({ ...pendingBase, checked: true, status: incomplete, isAdmin: null }),
+    ).toBe(true);
+  });
+
+  it("does not hold once activation reads incomplete for a confirmed non-admin, admin role resolved or not", () => {
+    expect(
+      shouldHoldShellPending({ ...pendingBase, checked: true, status: incomplete, isAdmin: false }),
+    ).toBe(false);
+  });
+
+  it("does not hold for an already-activated company even while the admin role is unresolved — no role can make the gate appear", () => {
+    expect(
+      shouldHoldShellPending({ ...pendingBase, checked: true, status: complete, isAdmin: null }),
+    ).toBe(false);
+  });
+
+  it("does not hold for a legacy host that settled with no status (terminal 404), admin role resolved or not", () => {
+    expect(
+      shouldHoldShellPending({ ...pendingBase, checked: true, status: null, retrying: false, isAdmin: null }),
     ).toBe(false);
   });
 });
