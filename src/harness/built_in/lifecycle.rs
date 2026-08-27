@@ -111,6 +111,18 @@ pub enum TaskRunEnd {
     /// (`MAX_REDIRECTS_PER_DISPATCH`); the last run's reply is finalized
     /// rather than looping forever.
     RedirectsExhausted,
+    /// The turn stopped on something **a person can answer** and parked a
+    /// durable blocker instead of settling (issue #1861): a rejected model id,
+    /// an expired credential, a missing prerequisite, or the assignee's own
+    /// `escalate_to_human`.
+    ///
+    /// Separate from [`Failed`](Self::Failed) because the two need opposite
+    /// treatment. A failure is over — the card returns to To-do and the reason
+    /// is history. A blocker is an open question: the card parks, somebody is
+    /// asked, and the answer resumes the step. Reaching this arm means the
+    /// classifier decided the stop was answerable; everything it does not
+    /// recognise keeps settling `Failed`.
+    Blocked,
 }
 
 /// The orchestrator's verdict on a card sitting in `in_review` (issue #186
@@ -295,6 +307,11 @@ pub fn settled_landing_column(end: TaskRunEnd, parked_approvals: usize) -> &'sta
 /// * [`Paused`](TaskRunEnd::Paused) → [`Paused`](RunStatus::Paused). Epic #183
 ///   decision 2: an operator pause is resolved by *resuming*, not by a person
 ///   approving something, so it is `Paused` and never `WaitingApproval`.
+/// * [`Blocked`](TaskRunEnd::Blocked) → [`Blocked`](RunStatus::Blocked). Epic
+///   #183 decision 2 again, and the case it did not have a status for: the
+///   attempt is waiting on *a person*, but on an answer rather than on an
+///   approval. It parks rather than settling, so the card lands in
+///   [`COLUMN_PAUSED`] with the question on it.
 /// * [`Delegated`](TaskRunEnd::Delegated) → [`Paused`](RunStatus::Paused). A
 ///   hand-off is not an ending at all — the card stays in
 ///   [`COLUMN_IN_PROGRESS`] — and it is unreachable as a run settle today,
@@ -310,6 +327,7 @@ pub fn run_status_for(end: TaskRunEnd) -> RunStatus {
         TaskRunEnd::Failed => RunStatus::Failed,
         TaskRunEnd::Cancelled => RunStatus::Cancelled,
         TaskRunEnd::Paused | TaskRunEnd::Delegated => RunStatus::Paused,
+        TaskRunEnd::Blocked => RunStatus::Blocked,
     }
 }
 
