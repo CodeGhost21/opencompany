@@ -1733,7 +1733,7 @@ impl CompanyRuntime {
     /// coordinate who "owns" the bank. A no-op for a denial, an id this
     /// journal never parked, or a turn that is not a blocked agent node's.
     ///
-    /// # Why the durable write retries inline (P1 follow-up)
+    /// # Why the durable write retries inline, then in the background (P1, then P2)
     ///
     /// Both inline callers reach this only after
     /// `approval_gate.resolve_outcome` has already popped `id` from the
@@ -1744,13 +1744,23 @@ impl CompanyRuntime {
     /// function again: unlike `spawn_blocked_node_continuation`'s dispatch
     /// write (which a caller-visible `Err` lets `resume_blocked_agent_node`
     /// retry, because that stash and approval are still sitting there to
-    /// retry from), there is no external actor who can retry *this* write.
-    /// It is only ever retryable from inside this call. A single failed
-    /// attempt on this node's last decision is invisible to
-    /// `reconcile_stranded_blocked_nodes` (see this function's doc above) and
-    /// strands the grant permanently, not until the next transient blip
-    /// clears — so a bounded, synchronous retry runs before this call returns
-    /// to the caller, rather than warning once and moving on.
+    /// retry from), there is no external *caller* who can retry *this* write
+    /// — the operator's click already happened, and clicking again is a
+    /// no-op past this point. A single failed attempt on this node's last
+    /// decision is invisible to `reconcile_stranded_blocked_nodes` (see this
+    /// function's doc above) and strands the grant permanently, not until the
+    /// next transient blip clears — so a bounded, synchronous retry runs
+    /// before this call returns to the caller, rather than warning once and
+    /// moving on.
+    ///
+    /// That bounded loop (P1) still gives up after three quick attempts,
+    /// which is exactly as blind to an outage lasting any longer as no retry
+    /// at all — the caller sees success either way, since the grant and the
+    /// resolved-journal line are already committed by the time this runs. P2
+    /// hands an exhausted write to [`spawn_background_approval_bank_retry`](Self::spawn_background_approval_bank_retry)
+    /// instead of only logging it: not a caller retrying, but this function
+    /// retrying itself on borrowed time, for as long as the process backing
+    /// this boot survives the outage.
     pub(crate) async fn bank_blocked_node_approval(&self, id: &ApprovalId, verdict: Verdict) {
         if verdict != Verdict::Approve {
             return;
@@ -1773,21 +1783,145 @@ impl CompanyRuntime {
                 Err(error) => last_error = Some(error),
             }
         }
-        // Every attempt failed. `error!`, not `warn!`: nothing downstream
-        // re-attempts this write (see the doc above — there is no retryable
-        // caller for this one), so this line is the only record that a
-        // restart landing on this node's last decision will now strand the
-        // grant with no further recovery.
+        // Every bounded, inline attempt failed. `error!`, not `warn!`: this is
+        // the only synchronous record of the fact.
         if let Some(error) = last_error {
             tracing::error!(
                 company = %self.id,
                 %turn,
                 %error,
                 "[approval] a blocked node's approval could not be durably banked after \
-                 retrying; a restart before this node's last decision will now strand this \
-                 grant with no further recovery"
+                 retrying inline; handing the write to a background retry rather than \
+                 accepting the loss"
             );
         }
+        // Issue #1825 (P2 follow-up): the bounded loop above used to be where
+        // this gave up — three quick attempts (max ~150ms of backoff) and then
+        // only a log line, so a journal outage lasting even a moment longer
+        // than that fell through as a *successful* settlement: the caller
+        // above sees no error, the grant is already live, and nothing downstream
+        // ever tries this write again (see the doc above `bank_blocked_node_approval`
+        // — there is no retryable caller for it, unlike `spawn_blocked_node_continuation`'s
+        // dispatch write). A restart landing anywhere before the live follow-up
+        // releases the turn then rehydrates the stash from `blocked_stashes`
+        // with `approved: false` (that record is a separate write, made earlier
+        // at park time, and did land), and boot's `reconcile_stranded_blocked_nodes`
+        // reads it off `stashed_turns()` as unapproved — indistinguishable from a
+        // stash nobody ever decided — and retires it, discarding a real approval.
+        //
+        // # Why detached rather than propagated as an error
+        //
+        // Returning `Err` from here instead was considered and rejected. By
+        // this point `ApprovalGate::resolve_outcome` (`settle_approval`,
+        // `runtime/cycle.rs`) has already popped `id` from the parked set —
+        // synchronously, unconditionally, on every path, not something this
+        // function can gate — and `record_resolved` plus (for an approval)
+        // the grant mint have already durably committed. An `Err` here would
+        // misrepresent an approval that already took effect elsewhere as
+        // failed, AND would abort `resolve_approval_spawned` before
+        // `spawn_follow_up` runs — the continuation would then never dispatch
+        // even in the ordinary same-process case, trading a rare cross-restart
+        // gap for a routine same-process failure on any multi-second journal
+        // hiccup. Moving this write earlier, before `resolve_outcome`, so an
+        // abort *would* be clean, is not safe on its own either:
+        // `resolve_outcome` is what tells an `Approve` apart from an `Expired`
+        // default-deny, and writing "this node's continuation is approved"
+        // before that classification risks banking a decision that turns out
+        // to be a deny. Doing that safely needs a peek-then-commit split on
+        // `ApprovalGate::resolve_outcome`'s pop, out of scope for this finding.
+        //
+        // So the accepted trade-off is a *bounded* background retry, not a
+        // synchronous or an unbounded one — the same best-effort-plus-boot-
+        // reconciliation pattern this feature already uses for its other
+        // post-commit durable writes (`record_blocked_node_stashed`,
+        // `BlockedNodeDispatched`). It does not make the crash-during-retry
+        // window zero — nothing single-process can, once the decision is
+        // already irreversible — it shrinks the window from "gone the
+        // instant the third inline attempt fails" to "gone only if the
+        // process dies during the several-second background retry", and
+        // keeps the operator's HTTP response exactly as fast as before:
+        // `settle_approval` has already returned by the time this task
+        // starts, so nothing here adds to the caller's wait.
+        self.spawn_background_approval_bank_retry(turn);
+    }
+
+    /// Keeps retrying [`RuntimeJournal::record_blocked_node_approved`] in the
+    /// background after [`bank_blocked_node_approval`](Self::bank_blocked_node_approval)'s
+    /// bounded inline loop exhausts (issue #1825, P2 follow-up).
+    ///
+    /// Detached on its own clone of the journal handle and the company id —
+    /// not `Arc<Self>` — because nothing else this turn's continuation needs
+    /// lives here: `mark_approved` already flipped the in-process flag this
+    /// same call started with, so a same-process redemption is unaffected
+    /// either way. This task's only job is to keep trying the one durable
+    /// write a restart depends on, until it lands.
+    ///
+    /// Backs off exponentially (200ms doubling, capped at 2s) for up to 8
+    /// further attempts — worst case ~11s of total backoff, not the ~80s a
+    /// wider bound would allow. Deliberately tight: every second this task is
+    /// still retrying is a second in which a process crash loses the
+    /// approval for good (see the doc above), and a real transient blip —
+    /// brief disk contention, a momentary lock — clears in low single-digit
+    /// seconds, not tens of them. Widening this bound trades a smaller
+    /// crash-loss window for catching a longer outage, which is not a trade
+    /// this function should make silently; a store down for longer than ~11s
+    /// needs an operator's attention regardless; a bounded window, not
+    /// forever, so a journal that is down for good does not leak one task
+    /// per stranded approval for the life of the process.
+    /// `record_blocked_node_approved` is idempotent (a journal-backed set
+    /// insert, per its own doc), so a write that lands after the bounded
+    /// inline loop's own attempts already partially failed cannot
+    /// double-record anything.
+    fn spawn_background_approval_bank_retry(&self, turn: String) {
+        let journal = self.journal.clone();
+        let company = self.id.clone();
+        tokio::spawn(async move {
+            const MAX_ATTEMPTS: u32 = 8;
+            const MAX_BACKOFF_MS: u64 = 2_000;
+            let mut backoff_ms: u64 = 200;
+            for attempt in 0..MAX_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                match journal.record_blocked_node_approved(&turn).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            company = %company,
+                            %turn,
+                            attempt,
+                            "[approval] a blocked node's approval bank landed on a background \
+                             retry, after the inline bounded loop exhausted"
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        tracing::warn!(
+                            company = %company,
+                            %turn,
+                            attempt,
+                            %error,
+                            "[approval] background retry of a blocked node's approval bank \
+                             failed again"
+                        );
+                    }
+                }
+            }
+            // Issue #1825 (P2 follow-up): every extended attempt failed too.
+            // This is now the loudest record there is — the grant is live, the
+            // decision is durable in the audit trail, but this specific
+            // `BlockedNodeApproved` fact never reached the journal, so a
+            // restart from here on will rehydrate this stash unapproved and
+            // `reconcile_stranded_blocked_nodes` will retire it. There is no
+            // further retry left on this boot; recovering from this point on
+            // needs an operator to re-run the workflow.
+            tracing::error!(
+                company = %company,
+                %turn,
+                attempts = MAX_ATTEMPTS,
+                "[approval] a blocked node's approval could not be durably banked after an \
+                 extended background retry; a restart from here will strand this grant with \
+                 no further automatic recovery — the workflow needs a manual re-run"
+            );
+        });
     }
 
     /// Runs the continuation a settled verdict owes — **once per turn, not once

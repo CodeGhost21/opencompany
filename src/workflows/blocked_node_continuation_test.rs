@@ -1999,3 +1999,95 @@ async fn a_persistent_approval_bank_failure_is_not_hidden_by_the_retry() {
          the durable fact is honestly absent, not silently assumed present"
     );
 }
+
+/// Issue #1825 (P1, found by chatgpt-codex-connector): the fact absent at the
+/// end of the test above must not be *permanently* absent for an outage that
+/// clears — `bank_blocked_node_approval`'s bounded inline loop still gives up
+/// after three quick attempts (max ~150ms of backoff), and on `main` that was
+/// the end of it: the caller sees `Ok` regardless (the grant and the resolved
+/// journal line are already committed before this call runs), nothing
+/// downstream re-attempts the write, and a restart landing anywhere after
+/// this point rehydrates the stash from `blocked_stashes` with
+/// `approved: false` — indistinguishable from a stash nobody ever decided —
+/// so `reconcile_stranded_blocked_nodes` retires it and the operator's real
+/// approval is gone for good, even though the outage that caused it had
+/// already cleared by the time the process crashed.
+///
+/// `bank_blocked_node_approval` is actually called **twice** per resolve —
+/// once inline from `settle_approval` before the follow-up cycle is even
+/// spawned, and again as deliberate defense-in-depth from `continue_turn`
+/// inside that follow-up cycle (see the comment at that call site). Each call
+/// runs its own independent 3-attempt bounded loop, so a fixture that only
+/// fails 5 appends never actually exercises the background retry this test
+/// means to prove: the first call's loop burns 3 failures, the second call's
+/// loop burns 2 more and then succeeds on its own third (inline) attempt —
+/// recovered by the pre-existing redundant call, not by anything this P2
+/// follow-up added. Fails **six** appends — exactly both call sites' combined
+/// 3+3 inline attempts — so neither loop's own retries can recover it and
+/// only a background retry (spawned independently by whichever call site
+/// exhausts first) can land the seventh append. This test polls until the
+/// fact appears rather than asserting an intermediate absence: with two
+/// independent bank calls in play, the moment each one's background task gets
+/// its first real poll is not something this test should hardcode a timing
+/// assumption about. Pre-fix this test times out — nothing on `main` ever
+/// retries past either call's third attempt, so the fact never appears no
+/// matter how long the poll waits.
+#[tokio::test]
+async fn a_recovered_approval_bank_failure_lands_via_the_background_retry() {
+    let home = seed_home();
+    let (rt, store, runner) = runtime_with_failing_journal_store(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+        "BlockedNodeApproved",
+        6,
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    let result = rt
+        .resolve_approval(&cards[0], Verdict::Approve, operator())
+        .await;
+    assert!(
+        result.is_ok(),
+        "the resolve itself is unaffected by the bank's durable write failing — the same \
+         guarantee the test above already establishes: {result:?}"
+    );
+    assert_eq!(
+        runner.started(),
+        2,
+        "the live process still dispatches the continuation from its in-memory state, \
+         regardless of the durable bank"
+    );
+    // Poll rather than asserting an immediate absence or a single fixed
+    // sleep: two independent bank calls each spawn their own background
+    // retry on exhaustion (see the doc above), so which one's first backoff
+    // (200ms, 400ms, 800ms, ...) elapses first is not something this test
+    // should hardcode a timing assumption about — only that the fact
+    // eventually lands.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if store_durably_has(&store, rt.id(), "BlockedNodeApproved", &turn).await {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the background retry never landed the durable fact within 10s — on `main` this \
+             is exactly the permanent loss the P2 follow-up closes: an outage that already \
+             cleared still strands the approval forever because nothing ever retries past the \
+             inline loop's third attempt"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
