@@ -872,6 +872,9 @@ name = "{name}"
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            overlay_tool_grants: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
