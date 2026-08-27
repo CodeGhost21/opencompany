@@ -6320,8 +6320,14 @@ to = "done"
             line: &str,
             durability: crate::ports::Durability,
         ) -> Result<()> {
-            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
-                && line.contains(self.match_substr)
+            // CodeRabbit nitpick (review 5038258829): check the substring
+            // before disarming. `swap` first meant any append that reached
+            // this store ahead of the `match_substr` line consumed the armed
+            // flag on a non-match, so the real target line would never gate —
+            // today's tests only pass because nothing writes here before it,
+            // a property this double shares with nothing that enforces it.
+            if line.contains(self.match_substr)
+                && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
             {
                 self.reached.notify_one();
                 self.release.notified().await;
