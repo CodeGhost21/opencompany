@@ -835,8 +835,16 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
     // (Codex review on #1779, comment 3862781739).
     let raw_tool_call_requested = payload
         .pointer("/choices/0/message/tool_calls")
-        .and_then(|v| v.as_array())
-        .is_some_and(|arr| !arr.is_empty())
+        .is_some_and(|v| match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::Array(arr) => !arr.is_empty(),
+            // A present-but-non-array value (e.g. an object) is not a shape
+            // `parse_tool_calls` or the legacy `function_call` check can
+            // recognize, but it is not an absence either — fail closed
+            // rather than let it read as "nothing requested" and fall
+            // through to the reasoning fallback below.
+            _ => true,
+        })
         || payload
             .pointer("/choices/0/message/function_call")
             .is_some_and(|v| !v.is_null());
@@ -2266,6 +2274,36 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A non-array `message.tool_calls` (e.g. an object instead of a list) is
+    /// neither a legacy `function_call` nor something `.as_array()` accepts,
+    /// so pre-fix the raw-payload guard silently read it as "no call
+    /// present" and fell through to the reasoning fallback below — the exact
+    /// class of substitution the array/legacy checks above exist to prevent,
+    /// just for a shape neither one covers. Must error instead of promoting
+    /// (CodeRabbit review on #1779, comment 3872083353).
+    #[test]
+    fn non_array_tool_calls_with_reasoning_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function",
+                    "tool_calls": {}
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a non-array raw tool_calls value must not be dropped for promoted reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stop"),
             "error must name finish_reason for diagnosis, got: {msg}"
         );
     }
