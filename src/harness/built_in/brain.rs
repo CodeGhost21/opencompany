@@ -3468,6 +3468,8 @@ description = "Runs Acme."
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -3662,6 +3664,8 @@ description = "Builds it."
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -5841,6 +5845,8 @@ members = ["engineer"]
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -6326,6 +6332,8 @@ name = "Design"
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(
@@ -6398,6 +6406,8 @@ members = ["eng1", "eng2"]
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(
@@ -6463,6 +6473,8 @@ members = ["eng1", "eng2"]
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -9576,6 +9588,8 @@ agent = "claude"
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
 
         let brain = brain_over_mock_with(dir.path(), record);

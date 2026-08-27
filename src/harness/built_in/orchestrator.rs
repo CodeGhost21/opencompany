@@ -76,7 +76,7 @@ use crate::harness::workflow_refs::WorkflowRefQueue;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
-use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OverlayAgent};
+use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent};
 use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
@@ -1841,6 +1841,18 @@ fn summarize_event(event: &CompanyEvent) -> String {
             tool,
             ..
         } => format!("workflow child {child_workflow_id} ran {tool} at node {node} unapproved"),
+        // Issue #1843. Structural only, like every arm here: which step, from
+        // a fixed vocabulary — no company or operator free text involved.
+        CompanyEvent::OnboardingStepCompleted { step } => match step {
+            OnboardingStep::NameConfirmed => "activation step: name confirmed".to_string(),
+            OnboardingStep::IntegrationConnected => {
+                "activation step: integration connected".to_string()
+            }
+            OnboardingStep::WorkflowRunSucceeded => {
+                "activation step: workflow run succeeded".to_string()
+            }
+        },
+        CompanyEvent::OnboardingCompleted { .. } => "activation completed".to_string(),
     }
 }
 
@@ -4668,6 +4680,10 @@ impl Tool for CreateWorkflowTool {
             self.events.as_ref(),
             draft,
             None,
+            // Issue #1843: an agent authoring a graph on its own initiative is
+            // not the human activation signal `by` exists to capture — keep
+            // this path unattributed, same as before this field existed.
+            None,
         )
         .await
         {
@@ -7205,6 +7221,8 @@ name = "Morning"
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -8288,6 +8306,8 @@ name = "Morning"
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 

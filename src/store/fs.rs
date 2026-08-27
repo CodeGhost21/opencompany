@@ -778,6 +778,14 @@ struct Meta {
     /// operator never answered; `#[serde(default)]` keeps those loading.
     #[serde(default)]
     setup: Option<crate::company::setup::SetupAnswers>,
+    /// Whether the operator has confirmed the company's display name
+    /// (issue #1843). See [`crate::ports::types::CompanyRecord::name_confirmed`].
+    #[serde(default)]
+    name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed (issue #1843). See
+    /// [`crate::ports::types::CompanyRecord::activation_completed_at`].
+    #[serde(default)]
+    activation_completed_at: Option<u64>,
 }
 
 impl Default for Meta {
@@ -802,6 +810,8 @@ impl Default for Meta {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 }
@@ -904,6 +914,8 @@ impl CompanyStore for FsCompanyStore {
             disabled_workflows: meta.disabled_workflows,
             template_provenance: meta.template_provenance,
             setup: meta.setup,
+            name_confirmed: meta.name_confirmed,
+            activation_completed_at: meta.activation_completed_at,
         }))
     }
 
@@ -931,6 +943,8 @@ impl CompanyStore for FsCompanyStore {
             disabled_workflows: record.disabled_workflows.clone(),
             template_provenance: record.template_provenance.clone(),
             setup: record.setup.clone(),
+            name_confirmed: record.name_confirmed,
+            activation_completed_at: record.activation_completed_at,
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
         Ok(())
@@ -2659,6 +2673,8 @@ mod test {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         store.save(&record).await.unwrap();
 
@@ -2720,6 +2736,8 @@ mod test {
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -2782,6 +2800,8 @@ mod test {
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
