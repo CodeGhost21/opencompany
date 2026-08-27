@@ -678,8 +678,19 @@ async fn apply_workflow_proposal(
     if draft.owner_desk.is_none()
         && let Ok(Some(company_record)) = company.runtime.store().load(company.id()).await
     {
-        draft.owner_desk =
-            crate::runtime::delegation_tools::desk_of_member(&company_record, &record.assignee);
+        // Issue #1882 review: a card assigned directly to a desk stores the
+        // canonical desk id as its `assignee` (`runtime::assignee`,
+        // `AssigneeResolution::canonical` — including an `EmptyDesk` with no
+        // roster member yet), not a teammate id. `desk_of_member` searches
+        // desk MEMBERSHIP, so a desk-id assignee — nobody's member — resolved
+        // to nothing even though the card already names its owning desk.
+        // Resolve as a desk first; only fall back to the teammate's desk when
+        // the assignee is not itself a desk.
+        draft.owner_desk = company_record
+            .resolve_desk_id(&record.assignee)
+            .or_else(|| {
+                crate::runtime::delegation_tools::desk_of_member(&company_record, &record.assignee)
+            });
     }
 
     // Issue #1191: the deliverable channel set, read off the SAME runtime the
