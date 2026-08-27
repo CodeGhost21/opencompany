@@ -7399,6 +7399,47 @@ async fn applying_a_proposal_creates_the_workflow_and_finishes_the_card() {
     assert_eq!(created["enabled"], true, "a manual trigger is not disarmed");
 }
 
+/// Issue #1862 prerequisite: a proposal that names no `ownerDesk` defaults to
+/// the proposing card's assignee's desk. `seed_proposal_card` assigns the
+/// card to `ceo`, and `desk_manifest` seats `ceo` on the `engineering` desk —
+/// so the created workflow must come out owned by `engineering` even though
+/// `digest_ops` never mentions it.
+///
+/// `owner_desk` is deliberately not projected on the read routes (see
+/// `WorkflowFile::owner_desk`), so this reads it back off the persisted
+/// overlay TOML rather than the `GET …/workflows/{id}` response.
+#[tokio::test]
+async fn applying_a_proposal_defaults_the_owner_desk_from_the_assignees_desk() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "the assignee's desk fills the omitted owner_desk"
+    );
+}
+
 /// #276: applying a proposal whose trigger carries a schedule creates the
 /// workflow **switched off** — armed only by a person, never by approving the
 /// proposal.
@@ -9068,6 +9109,7 @@ async fn the_run_history_carries_a_runs_board_rows() {
             workflow_id: "digest".into(),
             run_id: "run-1".into(),
             scheduled: true,
+            started_by: None,
         },
         CompanyEvent::WorkflowRunFinished {
             workflow_id: "digest".into(),
