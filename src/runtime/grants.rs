@@ -1038,6 +1038,30 @@ pub struct BudgetPauseMarker {
     /// from (a workflow node's own background turn) or whose original
     /// message carried none.
     pub attachments: Vec<Attachment>,
+    /// Whether this marker's ORIGINAL turn had no chat thread an operator
+    /// was addressing — a dispatched task card or a workflow agent node,
+    /// rather than an interactive `/chat` message (issue #1846 review, Codex
+    /// #3869193112).
+    ///
+    /// **Not the same question as `chat_id.is_none()`.** An ordinary
+    /// interactive message sent to no specific desk ALSO parks with
+    /// `chat_id: None` (see that field's doc — "unaddressed → orchestrator"
+    /// is a normal, redeemable destination) and must redeem exactly as it
+    /// does today. This field is the thing `chat_id` alone cannot say:
+    /// whether an operator was ever in the loop for the ORIGINAL turn at
+    /// all. `redeem_budget_pause` refuses when this is `true` — replaying a
+    /// dispatched card's or workflow node's own turn as a generic
+    /// `OperatorMessage` routes it to the orchestrator instead of the
+    /// original task/node, leaving the original stuck forever while opening
+    /// unrelated, possibly duplicate work.
+    ///
+    /// Set at the ONE call site (`run_inner` in `mod.rs`) that has the
+    /// `LiveStream` value to answer this from directly; the delegation
+    /// re-park call sites in `runtime/delegation.rs` do not have that
+    /// context available and default to `false` — a delegated sub-turn's own
+    /// background-ness is not yet distinguished by this field, which is a
+    /// known gap, not a claim this covers every background origin.
+    pub background: bool,
 }
 
 /// The parent / deliverable / mentions the operator's ORIGINAL message set,
@@ -1182,6 +1206,50 @@ impl BudgetPauseSet {
         at_millis: u64,
         redeem: RedeemContext,
     ) -> BudgetPauseMarker {
+        self.park_marked(agent, chat_id, message, summary, at_millis, redeem, false)
+    }
+
+    /// [`park`](Self::park), for the ONE call site (`run_inner` in
+    /// `mod.rs`) that knows — from its own `LiveStream` value — that this
+    /// turn had no chat thread an operator was addressing at all: a
+    /// dispatched task card or a workflow agent node (issue #1846 review,
+    /// Codex #3869193112). See [`BudgetPauseMarker::background`]'s doc for
+    /// why this is a different question from `chat_id.is_none()`.
+    ///
+    /// A SEPARATE method rather than a new parameter on [`park`](Self::park)
+    /// itself: that method has ~30 call sites across this crate's own tests
+    /// and the delegation re-park sites in `runtime/delegation.rs`, none of
+    /// which have (or need) an opinion on this — a positional bool added
+    /// there would be silent, easy-to-mis-order surface area on every one of
+    /// them for a distinction only one caller actually has the information
+    /// to make. Every other caller keeps calling `park`, which defaults to
+    /// `background: false` — the correct answer for an interactive message
+    /// (addressed or not) and the status-quo answer (no worse than before
+    /// this field existed) for a delegation re-park, which does not yet
+    /// have this context threaded to it either.
+    pub fn park_background(
+        &self,
+        agent: impl Into<String>,
+        chat_id: Option<String>,
+        message: impl Into<String>,
+        summary: impl Into<String>,
+        at_millis: u64,
+        redeem: RedeemContext,
+    ) -> BudgetPauseMarker {
+        self.park_marked(agent, chat_id, message, summary, at_millis, redeem, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn park_marked(
+        &self,
+        agent: impl Into<String>,
+        chat_id: Option<String>,
+        message: impl Into<String>,
+        summary: impl Into<String>,
+        at_millis: u64,
+        redeem: RedeemContext,
+        background: bool,
+    ) -> BudgetPauseMarker {
         let agent = agent.into();
         let marker = BudgetPauseMarker {
             id: generate_id(),
@@ -1194,6 +1262,7 @@ impl BudgetPauseSet {
             deliverable: redeem.deliverable,
             mentions: redeem.mentions,
             attachments: redeem.attachments,
+            background,
         };
         self.by_agent
             .lock()

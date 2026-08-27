@@ -191,6 +191,36 @@ async fn redeem_budget_pause(
         })?,
     };
 
+    // Issue #1846 review (Codex #3869193112): a marker whose ORIGINAL turn
+    // had no chat thread an operator was addressing at all — a dispatched
+    // task card or a workflow agent node — must not be redeemed through this
+    // generic chat-message path. Replaying it as an `OperatorMessage` would
+    // route to the orchestrator instead of the original task/node, leaving
+    // the original stuck forever while opening unrelated, possibly duplicate
+    // work. See `BudgetPauseMarker::background`'s doc for why this check is
+    // NOT the same as the `chat_id.is_none()` case already handled below (an
+    // unaddressed interactive message legitimately redeems fine).
+    //
+    // Restored, not dropped: the reservation above already took it, and a
+    // refusal must not silently lose the marker any more than a failed
+    // redispatch does — see `restore_if_absent`'s own doc.
+    if marker.background {
+        tracing::info!(
+            company = %company.id(),
+            agent = %agent_id,
+            marker_id = %marker.id,
+            "[budget-pause] redeem refused — this pause happened in a dispatched task or \
+             workflow node, which the generic chat-message redeem path cannot resume; leaving \
+             it parked"
+        );
+        pauses.restore_if_absent(marker);
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "the budget pause for agent '{agent_id}' happened in a background task or workflow \
+             and cannot be resumed from here — investigate the task/workflow run directly"
+        ))
+        .into());
+    }
+
     tracing::info!(
         company = %company.id(),
         agent = %agent_id,
@@ -766,6 +796,65 @@ mod tests {
             }
             other => panic!("expected an OperatorMessage, got {other:?}"),
         }
+    }
+
+    /// Issue #1846 review (Codex #3869193112) — **the regression.** A marker
+    /// parked via `park_background` (a dispatched task card or a workflow
+    /// agent node — the ONLY call site that uses it, in `mod.rs`'s
+    /// `run_inner`) has no chat thread an operator was ever addressing. Its
+    /// `chat_id` is `None`, same as an ordinary unaddressed interactive
+    /// message's — the ONE case redeeming through the generic
+    /// `OperatorMessage` path is actually correct for. Before this fix
+    /// nothing told the two apart: redeeming the background one would have
+    /// routed an unaddressed message to the orchestrator instead of the
+    /// original task/node, leaving the original stuck forever.
+    ///
+    /// The marker must survive the refusal (restored, not dropped) and the
+    /// brain must never be reached — same "left completely untouched" shape
+    /// as the stale-id sibling test below.
+    #[tokio::test]
+    async fn redeem_refuses_a_background_marker() {
+        let home = home();
+        let company = "acme-redeem-background";
+        let recording = Arc::new(RecordingBrain::default());
+        let state = state_with_brain(home.path(), company, recording.clone()).await;
+        let id = CompanyId::new(company);
+
+        let marker = budget_pauses_for(&id).park_background(
+            "ceo",
+            None,
+            "run the nightly workflow node",
+            "paused for the background turn",
+            1_000,
+            RedeemContext::default(),
+        );
+        assert!(
+            marker.background,
+            "park_background must set the field it names"
+        );
+
+        let (status, _resp, raw) = send(
+            &state,
+            company,
+            "POST",
+            "/api/v1/company/agents/ceo/budget-pause/redeem",
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a background marker must be refused, not silently redispatched to the \
+             orchestrator: {raw}"
+        );
+        assert!(
+            recording.last.lock().unwrap().is_none(),
+            "a refused background redeem must never reach the brain"
+        );
+
+        let still_parked = budget_pauses_for(&id)
+            .peek("ceo")
+            .expect("the marker must survive the refusal, not be dropped");
+        assert_eq!(still_parked.id, marker.id);
     }
 
     /// Issue #1846 review (Codex #3866418876) — the keystone test for the

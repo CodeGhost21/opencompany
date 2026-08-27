@@ -3706,6 +3706,13 @@ impl HarnessPool {
                 LiveStream::On { chat_id } => chat_id.map(str::to_string),
                 LiveStream::Workflow { .. } | LiveStream::Off => None,
             };
+            // Issue #1846 review (Codex #3869193112): whether an operator
+            // was ever addressing this turn AT ALL, not just whether they
+            // named a specific desk — see `BudgetPauseMarker::background`'s
+            // doc for why this is a different question from `chat_id`
+            // above, which is `None` for BOTH an unaddressed interactive
+            // message and a background turn alike.
+            let is_background = matches!(live, LiveStream::Workflow { .. } | LiveStream::Off);
             // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
             // the ambient parent/deliverable/mentions the cycle was started
             // with, so a redeem replays the operator's ORIGINAL
@@ -3727,14 +3734,26 @@ impl HarnessPool {
                 .text
                 .clone()
                 .unwrap_or_else(|| message.to_string());
-            let marker = crate::runtime::grants::budget_pauses_for(company).park(
-                pause.agent.clone(),
-                chat_id,
-                park_message,
-                pause.summary.clone(),
-                crate::ports::now_millis(),
-                redeem_context,
-            );
+            let pauses = crate::runtime::grants::budget_pauses_for(company);
+            let marker = if is_background {
+                pauses.park_background(
+                    pause.agent.clone(),
+                    chat_id,
+                    park_message,
+                    pause.summary.clone(),
+                    crate::ports::now_millis(),
+                    redeem_context,
+                )
+            } else {
+                pauses.park(
+                    pause.agent.clone(),
+                    chat_id,
+                    park_message,
+                    pause.summary.clone(),
+                    crate::ports::now_millis(),
+                    redeem_context,
+                )
+            };
             tracing::info!(
                 company = %company,
                 agent = %pause.agent,
