@@ -931,16 +931,13 @@ export function AppShell({
   // `compute_and_latch` on the host, so an admin who skips and then finishes
   // the funnel anyway (connects an integration, runs a workflow from the
   // ordinary shell) needs the poll to still be running to ever notice and
-  // persist it — see `shouldPollActivation` for that half. But none of the
-  // three funnel steps can be cleared by anyone but the admin (see
-  // `isGateAdmin`'s own doc comment above), so a confirmed non-admin's poll
-  // can never be the read that observes the funnel complete — it only repeats
-  // `compute_and_latch`'s whole-journal scan for every invited member's open
-  // tab. `shouldPollActivationForRole` keeps polling through `isGateAdmin ===
-  // null` (the check has not landed yet) for the same reason `null` holds
-  // rather than guesses everywhere else in this gate; only a confirmed
-  // `false` stops it. The poll also stops itself once the company is actually
-  // activated; nothing here needs to.
+  // persist it — see `shouldPollActivation` for that half. Round 5 also tried
+  // to stop this poll for a confirmed non-admin, on the premise that no
+  // funnel step is reachable by anyone but the admin; round 7 found that
+  // premise false (`POST {scope}/workflows/{wid}/run` is `ScopedCompany`, not
+  // admin-gated) and reverted it — see `shouldPollActivationForRole`'s own
+  // doc for why every role now polls alike. The poll still stops itself once
+  // the company is actually activated; nothing here needs to.
   const activationGate = useActivationGate(client, company, shouldPollActivationForRole(isGateAdmin));
 
   // PR #1875 review finding, round 4: a skip marker from before the funnel
