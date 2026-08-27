@@ -78,7 +78,7 @@ const DELIVERY_TONE: Record<DeliveryStatus, string> = {
  * {@link liveParkedApprovalCount}. Keyed by the labels {@link runTone} returns
  * (see `VERDICT_TONE` in `run-health.ts`) so a dot can be looked up directly.
  */
-const RUN_STATUS_DEFINITIONS: Record<string, string> = {
+const RUN_STATUS_DEFINITIONS = {
   running: "Still working through its steps — nothing here is final yet.",
   ok: "Finished, with nothing left undelivered and nobody waiting on you — every report either reached its destination or didn't need to (a dry run, or one an earlier run already delivered).",
   failed:
@@ -111,7 +111,16 @@ const RUN_STATUS_DEFINITIONS: Record<string, string> = {
   "awaiting approval":
     "The run is parked on an approval and needs your decision in Approvals.",
   parked: "The run filed this into the Approvals queue for you to decide.",
-};
+} satisfies Record<string, string>;
+
+/** CodeRabbit review on PR #1821: `RUN_STATUS_DEFINITIONS` was `Record<string,
+ * string>` and `RUN_STATUS_LEGEND` was `readonly string[]`, so TypeScript
+ * accepted a legend entry with no matching definition, and the legend's own
+ * render site (`RUN_STATUS_DEFINITIONS[term]`, no fallback) had no guard
+ * against one. Deriving the legend's element type from the map's own keys
+ * makes that pairing a compile error instead of a convention — see the
+ * `typecheck:unit` regression test in `workflow-run-status-legend.test.ts`. */
+type RunStatusTerm = keyof typeof RUN_STATUS_DEFINITIONS;
 
 /** The statuses worth a standing key, in the order the legend lists them: the
  * ones an operator hits without a definition anywhere else on the row.
@@ -120,7 +129,7 @@ const RUN_STATUS_DEFINITIONS: Record<string, string> = {
  * of truth the header legend renders from, rather than opening the tooltip
  * portal (which mounts to `document.body`, not the render container) to read
  * it back out of the DOM. */
-export const RUN_STATUS_LEGEND: readonly string[] = [
+export const RUN_STATUS_LEGEND: readonly RunStatusTerm[] = [
   "blocked",
   "stranded",
   "not delivered",
@@ -133,7 +142,12 @@ export const RUN_STATUS_LEGEND: readonly string[] = [
  * definition when there is one. Falls back to the bare word for a verdict this
  * map does not name (a host could grow an eighth — see `verdictOf`). */
 function statusDotTitle(label: string): string {
-  const def = RUN_STATUS_DEFINITIONS[label];
+  // `label` is any tone `verdictOf` returns, not narrowed to `RunStatusTerm` —
+  // that's the whole point of the fallback below — so the lookup is cast back
+  // to the pre-`satisfies` shape rather than widening the map's own type.
+  const def = (RUN_STATUS_DEFINITIONS as Record<string, string | undefined>)[
+    label
+  ];
   return def ? `${label} — ${def}` : label;
 }
 
