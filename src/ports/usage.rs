@@ -122,6 +122,31 @@ pub enum SampleKind {
     /// Counted toward the capability-tier token budget exactly like planning —
     /// see [`tokens_in`](crate::metering::tokens_in).
     SetupCall,
+    /// One completed authoring assist — the single tool-less model call that
+    /// drafts text an operator will read and then keep or throw away
+    /// (issue #1776: a teammate's mandate or persona).
+    ///
+    /// A sibling of [`Self::PlanningCall`] and [`Self::SetupCall`] rather than
+    /// of [`Self::Inference`], for the reason those two are: the call belongs to
+    /// no teammate's turn. It is *about* a teammate, which is not the same
+    /// thing — the teammate did not run, and attributing the draft to it would
+    /// both corrupt "how much did Maya spend?" and let an operator's drafting
+    /// eat the daily cap of the very teammate they are describing. So it is
+    /// charged to the whole-company bucket
+    /// ([`UNATTRIBUTED_AGENT`](crate::metering::UNATTRIBUTED_AGENT)) with no
+    /// `run_id`.
+    ///
+    /// Its own kind rather than a reused [`Self::SetupCall`] because that one is
+    /// explicitly the once-per-company onboarding cost, and folding a recurring
+    /// authoring assist into it would make "what does onboarding a company
+    /// cost?" unanswerable — the exact question `SetupCall` was split out to
+    /// keep answerable.
+    ///
+    /// Counted toward the capability-tier token budget exactly like planning and
+    /// setup — see [`tokens_in`](crate::metering::tokens_in). Drafting is
+    /// company-driven model spend, and excluding it would let an operator keep
+    /// drafting after the tier budget was exhausted.
+    AuthoringCall,
 }
 
 /// One metered usage event.

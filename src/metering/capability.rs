@@ -272,6 +272,12 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
 /// the three: a company runs first-run setup once. It is included so the ceiling
 /// covers every completion billed to the tenant rather than only the ones that
 /// happen to belong to a teammate.
+///
+/// [`SampleKind::AuthoringCall`] is counted on the same principle (issue #1776).
+/// Drafting a teammate's mandate or persona is a real completion the tenant
+/// pays for, and it is operator-driven and repeatable — an excluded kind would
+/// let someone keep pressing Draft after the ceiling that is supposed to have
+/// stopped them.
 pub fn tokens_in(samples: &[UsageSample]) -> u64 {
     samples
         .iter()
@@ -283,6 +289,7 @@ pub fn tokens_in(samples: &[UsageSample]) -> u64 {
                     | SampleKind::TriageCall
                     | SampleKind::SelectorCall
                     | SampleKind::SetupCall
+                    | SampleKind::AuthoringCall
             )
         })
         .map(|s| s.input_tokens.saturating_add(s.output_tokens))

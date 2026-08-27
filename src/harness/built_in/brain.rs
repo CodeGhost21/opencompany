@@ -3450,10 +3450,13 @@ description = "Runs Acme."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -3643,10 +3646,13 @@ description = "Builds it."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -5684,10 +5690,13 @@ members = ["engineer"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -6168,10 +6177,13 @@ name = "Design"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(
@@ -6239,10 +6251,13 @@ members = ["eng1", "eng2"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(
@@ -6303,10 +6318,13 @@ members = ["eng1", "eng2"]
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -9634,10 +9652,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
 
         let brain = brain_over_mock_with(dir.path(), record);
