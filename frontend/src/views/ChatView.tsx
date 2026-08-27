@@ -1120,8 +1120,10 @@ export function ChatView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `client`/`company`
     // intentionally excluded: this effect's job is "a new notice appeared",
-    // not "the client changed"; a client/company change already clears
-    // `transcripts` (and therefore this map) via the boot/company-switch path.
+    // not "the client changed". A client/company change is handled by the
+    // reset effect above, which empties this map; `transcripts` resetting in
+    // `AppShell` then re-derives `budgetPauseMessageIdByAgent`, so this effect
+    // re-runs with the new scope's notices.
   }, [budgetPauseMessageIdByAgent]);
 
   // An open thread only makes sense while its parent is on screen; switching
