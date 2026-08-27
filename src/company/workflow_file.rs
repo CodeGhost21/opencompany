@@ -507,6 +507,26 @@ pub(crate) struct RawWorkflow {
     pub(crate) edges: Vec<RawEdge>,
 }
 
+impl RawWorkflow {
+    /// One accessor for the "blank means absent" rule on `owner_desk`,
+    /// called from every external boundary that turns a caller-supplied
+    /// `ownerDesk` into a `RawWorkflow` (the HTTP create/update bodies in
+    /// `server::ops::workflows`, and `workflow_create::raw_workflow_from_spec`,
+    /// which also feeds the workflow-proposal apply path).
+    ///
+    /// Without this, a blank/whitespace string is a real `Some("")`, not
+    /// `None` — it passes an `is_none()` check meant to detect "nothing set"
+    /// (issue #1882 review: `apply_workflow_proposal`'s assignee-desk
+    /// fallback skipped itself for exactly this reason) while author-time
+    /// validation already treats it as unset (`validate_draft_against_record`
+    /// trims before checking). Normalizing once here keeps every reader of
+    /// `owner_desk` agreeing on what "unset" looks like, instead of each call
+    /// site needing its own trim.
+    pub(crate) fn normalize_owner_desk(desk: Option<String>) -> Option<String> {
+        desk.filter(|raw| !raw.trim().is_empty())
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct RawNode {
     #[serde(default)]

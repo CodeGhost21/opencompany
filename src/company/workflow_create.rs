@@ -500,7 +500,12 @@ pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWork
         id: spec.id.clone(),
         name: spec.name.clone(),
         description: spec.description.clone(),
-        owner_desk: spec.owner_desk.clone(),
+        // Normalized here, not carried verbatim: a blank/whitespace string
+        // is not "unset" to serde, but every reader of `RawWorkflow::owner_desk`
+        // treats it that way — most concretely `apply_workflow_proposal`'s
+        // `is_none()` fallback (issue #1882 review), which this same
+        // conversion feeds.
+        owner_desk: RawWorkflow::normalize_owner_desk(spec.owner_desk.clone()),
         nodes,
         edges: spec
             .edges
