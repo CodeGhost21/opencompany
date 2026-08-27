@@ -119,6 +119,21 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
   // *create* does not archive a second time (the id is already gone) and the
   // error copy can say the old company is already retired.
   const [archived, setArchived] = useState(false);
+  // Whether the archive leg landed is UNKNOWN, as distinct from `archived`
+  // being definitely false. Set when both the archive attempt's own response
+  // AND the reconciliation status lookup that follows it fail — the "the
+  // reconciliation lookup is itself ambiguous" branch below. `archived`
+  // stays false there on purpose (a retry must remain possible: asserting
+  // `true` would skip the archive call on retry for a company that might
+  // still be live), but `onClose` cannot tell "definitely not archived" from
+  // "don't know" from `archived` alone, and used to read the latter as the
+  // former: an operator who closed the dialog here got `onClose(false)`, so
+  // the parent skipped its roster refresh and persisted-default cleanup for
+  // a company that may in fact already be gone (issue #1828 comment
+  // 3873186315). OR'd into every `onClose` call below so any doubt forces a
+  // refresh — a spurious refresh is cheap; a missed one leaves the console
+  // scoped to an archived company.
+  const [archiveMaybe, setArchiveMaybe] = useState(false);
   // Whether the operator has directly edited the id field since the dialog
   // opened, as opposed to it merely holding the value `resetReplacementId`
   // pre-filled it with. Distinct from "is `explicitId` non-blank": a reset's
@@ -154,6 +169,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     setBusy(false);
     setError(null);
     setArchived(false);
+    setArchiveMaybe(false);
     setIdTouched(false);
   }, [request]);
 
@@ -271,7 +287,11 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
             } else {
               // The reconciliation lookup is itself ambiguous — don't
               // assert either outcome. Leave `archived` false so a retry
-              // stays possible, rather than closing over an unknown state.
+              // stays possible, rather than closing over an unknown state,
+              // but record the ambiguity separately so closing the dialog
+              // from here still triggers the parent's refresh (see
+              // `archiveMaybe`'s comment above).
+              setArchiveMaybe(true);
               setError(
                 `Couldn't confirm whether ${request.name} was archived: ${describeProvisionError(err)} Check the company roster before retrying.`,
               );
@@ -440,7 +460,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
     // writes its warning into a hidden dialog, and a late success still calls
     // `onCreated`, navigating the operator into a company they thought they
     // had cancelled out of.
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose(archived)}>
+    <Dialog open onOpenChange={(open) => !open && !busy && onClose(archived || archiveMaybe)}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
@@ -539,7 +559,7 @@ export function CreateCompanyDialog({ client, request, onClose, onCreated }: Pro
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onClose(archived)} disabled={busy}>
+          <Button variant="outline" onClick={() => onClose(archived || archiveMaybe)} disabled={busy}>
             Cancel
           </Button>
           <Button

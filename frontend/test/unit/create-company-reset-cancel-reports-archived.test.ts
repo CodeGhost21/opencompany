@@ -32,11 +32,13 @@ type ProvisionBody = { manifest_toml: string; id?: string };
 
 function stubClient(opts: {
   lifecycle?: ReturnType<typeof vi.fn>;
+  status?: ReturnType<typeof vi.fn<(company?: string | null) => Promise<CompanyStatus>>>;
   provisionCompany?: ReturnType<typeof vi.fn<(body: ProvisionBody) => Promise<CompanyStatus>>>;
 }) {
   return {
     carriesPlatformBearer: true,
     lifecycle: opts.lifecycle ?? vi.fn(() => Promise.resolve()),
+    status: opts.status ?? vi.fn(() => Promise.resolve({ id: "acme" } as unknown as CompanyStatus)),
     provisionCompany:
       opts.provisionCompany ??
       vi.fn(() => Promise.resolve({ id: "whatever" } as unknown as CompanyStatus)),
@@ -194,6 +196,45 @@ describe("cancelling a reset after the archive already landed", () => {
       popup!.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
       );
+    });
+
+    expect(onClose).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  // Codex review on #1828, PR comment 3873186315, fresh evidence beyond the
+  // reconciliation fix `create-company-reset-archive-network-error-
+  // ambiguous.test.ts` already covers: when BOTH the archive attempt and its
+  // reconciliation status lookup fail at the transport layer, the archive
+  // may in fact have landed, but `archived` deliberately stays false (a
+  // retry must remain possible). `onClose(archived)` used to report that
+  // `false` at face value — an operator who closed here got no roster
+  // refresh for a company that might already be archived.
+  it("reports true, not false, when both the archive attempt and the reconciliation lookup are ambiguous", async () => {
+    const lifecycle = vi.fn(() =>
+      Promise.reject(new ApiError(0, "network_error", "network error", true)),
+    );
+    const status = vi.fn(() =>
+      Promise.reject(new ApiError(0, "network_error", "network error", true)),
+    );
+    await open(stubClient({ lifecycle, status }), {
+      kind: "reset",
+      company: "acme",
+      name: "Acme Robotics",
+    });
+
+    await fillAdminEmail();
+    await act(async () => {
+      submitButton().click();
+    });
+    await settle();
+
+    // Confirms this test actually reached the double-failure branch, not
+    // some other error path.
+    const error = document.querySelector('[data-testid="create-company-error"]');
+    expect(error?.textContent).toContain("Couldn't confirm");
+
+    await act(async () => {
+      cancelButton().click();
     });
 
     expect(onClose).toHaveBeenCalledExactlyOnceWith(true);
