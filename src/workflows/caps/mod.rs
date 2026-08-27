@@ -2790,6 +2790,7 @@ mod tests {
             "wf-1".to_string(),
             "run-1880".to_string(),
             None,
+            Value::Null,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
