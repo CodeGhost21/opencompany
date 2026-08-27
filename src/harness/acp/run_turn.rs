@@ -142,22 +142,21 @@ fn stop_reason_note(kind: StopKind, raw_stop_reason: &str) -> String {
 /// Never returns an empty string: a blank reply from a tool-only turn, or one
 /// cut short before the agent said anything, would read on the operator's
 /// timeline as "the agent had nothing to say" rather than what actually
-/// happened. Built from tool-call step **labels** only — never a step's
-/// `result` — because labels are host-derived (a tool's name), while a
-/// result can carry a tool's raw output or arguments; synthesizing a reply
-/// from those would leak into the reply text exactly what the redaction the
-/// rest of this fold performs is trying to avoid.
+/// happened. Says only **that** tools ran, never **what** they were (PR #1880
+/// review) — a tool call's `title` comes verbatim off the wire from the
+/// external ACP agent, with no host-side bounding or redaction (unlike the
+/// built-in harness's server-computed step label), so it can carry arbitrary
+/// upstream content. The titles themselves are already on the operator's
+/// timeline as this turn's [`TurnStep`]s; restating them in a field meant to
+/// read as the agent's own words would only duplicate that exposure for no
+/// new information.
 fn synthesize_empty_reply(steps: &[TurnStep], kind: StopKind, raw_stop_reason: &str) -> String {
-    let tool_labels: Vec<&str> = steps
-        .iter()
-        .filter(|step| step.kind == TurnStepKind::ToolCall)
-        .map(|step| step.label.as_str())
-        .collect();
+    let ran_tools = steps.iter().any(|step| step.kind == TurnStepKind::ToolCall);
 
-    let mut reply = if tool_labels.is_empty() {
-        String::new()
+    let mut reply = if ran_tools {
+        "[no reply text — see steps]".to_string()
     } else {
-        format!("Ran: {}", tool_labels.join(", "))
+        String::new()
     };
 
     if kind != StopKind::EndTurn {
@@ -457,10 +456,13 @@ mod test {
     }
 
     #[test]
-    fn a_tool_only_turn_synthesizes_its_reply_from_step_labels() {
+    fn a_tool_only_turn_gets_a_generic_reply_not_raw_tool_titles() {
         // No MessageChunk at all — the agent's entire turn was tool calls.
-        // The old fold left `reply == ""`; the operator's timeline showed
-        // nothing where two tool calls plainly ran.
+        // PR #1880 review: the reply must not copy the tools' raw ACP titles
+        // — unlike the built-in harness's step label, a title comes straight
+        // off the wire with no host-side bounding, and the timeline (already
+        // carrying each ToolCall step's own title) is where that content
+        // belongs, not a field meant to read as the agent's own words.
         let outcome = fold(turn(vec![
             AcpUpdate::ToolCall {
                 id: "t1".into(),
@@ -476,7 +478,9 @@ mod test {
                 title: "Write".into(),
             },
         ]));
-        assert_eq!(outcome.reply, "Ran: Read, Write");
+        assert_eq!(outcome.reply, "[no reply text — see steps]");
+        assert_eq!(outcome.steps[0].label, "Read");
+        assert_eq!(outcome.steps[1].label, "Write");
         // A clean end_turn needs no stop-reason note on top of the synthesis.
         assert!(!outcome.reply.contains("[stopped"));
     }
