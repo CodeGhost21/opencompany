@@ -1565,6 +1565,77 @@ async fn a_host_wide_auth_override_reaches_a_company_provisioned_after_it_is_set
     );
 }
 
+/// A request must validate against, and build with, ONE snapshot of the
+/// host-wide auth override — not two independent reads of the shared
+/// `RwLock` straddling this request's own `.await`s.
+///
+/// `provision` used to call `state.auth_mode_override()` twice: once to
+/// resolve `effective_auth_mode` for the wallet-no-wallets preflight check,
+/// and again, later, to build `RuntimeBuilder::with_auth_mode_override`. A
+/// concurrent `setup.rs` request can flip the override at any point via
+/// `AppState::set_auth_mode_override` — including during the first read's
+/// duplicate-id `company_store.load` await, which is exactly where this test
+/// flips it. Before the fix, the preflight check validated an admins-only
+/// manifest against the override's ORIGINAL value (`email`, which the
+/// manifest satisfies), but the builder then read the override's NEW value
+/// (`wallet`) and built a runtime in wallet mode with an empty
+/// `[users].wallets` — a company nobody could sign into, and on a reset, the
+/// only copy left once the old one was archived (issue #1828 comment
+/// 3873451846). The fix reads the override once and reuses that snapshot for
+/// both, so the built runtime can never disagree with what was validated.
+#[tokio::test]
+async fn a_concurrent_override_flip_mid_request_cannot_desync_the_check_from_the_build() {
+    let home_dir = home();
+    let state = platform_state(home_dir.path(), None);
+    state.set_auth_mode_override(Some(AuthMode::Email));
+    let app = router(state.clone());
+
+    // Shaped exactly like `buildManifestToml` (frontend/src/lib/company-manifest.ts):
+    // no `[users].mode` (defaults to `email`), admins only, no wallets.
+    let manifest = "[company]\nname = \"Acme\"\n\n[users]\nadmins = [\"admin@example.com\"]\n";
+
+    // Flips the override to `wallet` in a tight loop for the lifetime of the
+    // request. The request's only `.await` before the builder reads the
+    // override is the duplicate-id `company_store.load` — a real
+    // `tokio::fs::read_to_string` that suspends the request task on the
+    // blocking pool, giving this loop many scheduler turns to land the flip
+    // inside that window before the request resumes.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flip_state = state.clone();
+    let flip_stop = stop.clone();
+    let flipper = tokio::spawn(async move {
+        while !flip_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            flip_state.set_auth_mode_override(Some(AuthMode::Wallet));
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let response = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), manifest))
+        .await
+        .unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    flipper.await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "the manifest was valid against the mode actually checked (`email`) and must provision \
+         — a build that silently switched modes underneath a passed check must not surface as \
+         a rejection either, it must surface as the desync this test is about"
+    );
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company is registered");
+    assert_eq!(
+        runtime.auth_mode(),
+        AuthMode::Email,
+        "the auth mode the runtime was actually built with must match the one the \
+         wallet-no-wallets preflight check validated against, regardless of how the shared \
+         override changed mid-request — two reads of the same `RwLock` must not be able to \
+         disagree with each other"
+    );
+}
+
 // ── issue #1050: the durable ownership write ────────────────────────────────
 
 /// An [`OwnershipStore`](crate::store::select::OwnershipStore) that fails its

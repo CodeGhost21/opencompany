@@ -199,8 +199,23 @@ async fn provision(
     // `self.auth_mode_override.unwrap_or_else(...)` — lets this reproduce
     // that decision without paying for the build, so a rejected request never
     // reserves the id in the first place.
-    let effective_auth_mode = state
-        .auth_mode_override()
+    //
+    // Read ONCE, here, and reused for both this check and the builder below
+    // (`.with_auth_mode_override(auth_mode_override)`) rather than calling
+    // `state.auth_mode_override()` a second time at the builder. The override
+    // lives behind `AppState`'s `RwLock` and `setup.rs` can flip it from a
+    // concurrent request at any point — including during this request's own
+    // `.await`s between here and the builder (the duplicate-id store lookup,
+    // notably). Two independent reads could then observe two different
+    // values: this check validates against the first, but a build using the
+    // second could silently produce a runtime in a mode the validated
+    // manifest never agreed to — e.g. an admins-only manifest, checked and
+    // passed against `email`, built as `wallet` with no eligible wallet
+    // users. On a reset the old company is already archived by the time that
+    // divergence could happen, so the replacement would be the only copy left
+    // (issue #1828 comment 3873451846).
+    let auth_mode_override = state.auth_mode_override();
+    let effective_auth_mode = auth_mode_override
         .unwrap_or_else(|| AuthMode::from_str(&manifest.users.mode).unwrap_or_default());
     if !effective_auth_mode.has_login() && !state.config().is_local_only() {
         return envelope(
@@ -366,8 +381,10 @@ async fn provision(
         .with_skills_registry(skills_registry)
         // A host-wide sign-in mode set by setup (or flipped later) must reach
         // every company built from here on, including one provisioned after
-        // that change — see `AppState::auth_mode_override`.
-        .with_auth_mode_override(state.auth_mode_override());
+        // that change — see `AppState::auth_mode_override`. Reuses the single
+        // snapshot read above (`auth_mode_override`), not a fresh call: see
+        // that binding's comment for why a second read here would be a race.
+        .with_auth_mode_override(auth_mode_override);
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }
