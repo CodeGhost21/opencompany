@@ -437,6 +437,47 @@ pub(crate) mod append_probe {
     }
 }
 
+/// Test-only fault injection for [`write_atomic_bytes`].
+///
+/// Simulates the disk-full / transient-IO failure a real deployment can hit
+/// mid-`save` (issue #1828 review on `provision.rs`'s durable collision
+/// check): a targeted path's *next* atomic write fails before it touches the
+/// filesystem, exactly like a real early I/O error — no temp file, no partial
+/// bytes, nothing under the target name. That lets a test prove which of the
+/// two files in `FsCompanyStore::save` a real crash leaves behind, without
+/// needing actual disk-full conditions.
+#[cfg(test)]
+pub(crate) mod fault_probe {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    static FAIL_NEXT: LazyLock<Mutex<HashSet<PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    fn key(path: &Path) -> PathBuf {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Arms a one-shot failure for the next [`write_atomic_bytes`] call
+    /// targeting `path`.
+    pub(crate) fn fail_next_write(path: &Path) {
+        FAIL_NEXT
+            .lock()
+            .expect("fault-probe poisoned")
+            .insert(key(path));
+    }
+
+    /// Consumes the armed failure for `path`, if any. One-shot so a retry
+    /// after the injected failure exercises the real write.
+    pub(crate) fn should_fail(path: &Path) -> bool {
+        FAIL_NEXT
+            .lock()
+            .expect("fault-probe poisoned")
+            .remove(&key(path))
+    }
+}
+
 /// Reads a file to a string, returning an empty string if it does not exist.
 pub(crate) async fn read_optional(path: &Path) -> Result<String> {
     match tokio::fs::read_to_string(path).await {
@@ -669,6 +710,15 @@ pub(crate) async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 /// already uses is the precedent to copy — with evidence, rather than guessed at
 /// now.
 pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    // Test-only: see `fault_probe`. Fails before any filesystem call, like a
+    // real early I/O error — no temp file, no partial write under `path`.
+    #[cfg(test)]
+    if fault_probe::should_fail(path) {
+        return Err(io_err(
+            path,
+            std::io::Error::other("injected test failure (fault_probe)"),
+        ));
+    }
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -925,7 +975,6 @@ impl CompanyStore for FsCompanyStore {
 
         let toml_src = toml::to_string(&record.manifest)
             .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        write_atomic(&bundle.company_toml(), &toml_src).await?;
 
         let meta = Meta {
             lifecycle: record.lifecycle.clone(),
@@ -946,7 +995,27 @@ impl CompanyStore for FsCompanyStore {
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
         };
+        // `meta.json` before `company.toml` — the reverse of `load`'s read
+        // order, and deliberately so (issue #1828 review on the durable
+        // collision check this PR added to `provision.rs`).
+        //
+        // `load` treats a missing `company.toml` as "no such company"
+        // (`Ok(None)`) but a missing `meta.json` as an *existing* company with
+        // no overlays yet (`Meta::default()` — see its doc comment, load-
+        // bearing for real bundles written before `meta.json` existed at all).
+        // That asymmetry means the two writes below can never be made to look
+        // atomic from the read side by ordering alone — but they can be made
+        // to fail safe: whichever file this function writes *last* is the one
+        // a crash or a transient write failure between the two calls leaves
+        // absent. Writing `company.toml` last means that failure window always
+        // reads back as `Ok(None)`, so an interrupted `save` (mid-create or
+        // mid-reset) looks like it never started rather than like a
+        // successfully provisioned company — the provision-path pre-check
+        // that calls `load` before every create/reset can then retry instead
+        // of returning `company_exists` forever over an orphaned bundle it can
+        // never load a usable record from.
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
+        write_atomic(&bundle.company_toml(), &toml_src).await?;
         Ok(())
     }
 
@@ -2708,6 +2777,84 @@ mod test {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// **Issue #1828 review**: `provision.rs`'s durable collision check calls
+    /// `load` before every create/reset, and `load` reads a bundle that has
+    /// `company.toml` but no `meta.json` as an *existing* company
+    /// (`Meta::default()` — deliberate, load-bearing for real bundles that
+    /// predate `meta.json`, see that impl's doc comment). If `save` ever left
+    /// exactly that combination behind after a failed write, the pre-check
+    /// would return `company_exists` forever over a company that was never
+    /// actually provisioned, permanently blocking retry.
+    ///
+    /// `save` writes `meta.json` before `company.toml` for exactly this
+    /// reason: a failure between the two writes then always leaves
+    /// `company.toml` absent, which `load` already reads as "no such
+    /// company." This proves it by injecting a failure on the first write a
+    /// fresh `save` performs and asserting the id still reads back as
+    /// absent — never as an existing company — and that a retry succeeds.
+    #[tokio::test]
+    async fn a_save_interrupted_after_the_first_write_still_reads_back_as_absent() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        fault_probe::fail_next_write(&bundle.meta_json());
+
+        let record = || CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: sample_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        let err = store.save(&record()).await;
+        assert!(
+            err.is_err(),
+            "the injected failure must propagate out of save"
+        );
+
+        // The one combination that would make `load` lie about the company
+        // existing: `company.toml` must not have landed.
+        assert!(
+            !tokio::fs::try_exists(&bundle.company_toml()).await.unwrap(),
+            "company.toml must not exist after the first write of save failed"
+        );
+
+        let loaded = store.load(&id).await.unwrap();
+        assert!(
+            loaded.is_none(),
+            "a save interrupted before company.toml landed must read back as \
+             absent, not as an existing company — retrying create/reset for \
+             this id must be possible"
+        );
+
+        // `fail_next_write` is one-shot, so the retry hits the real write path
+        // and must succeed.
+        store
+            .save(&record())
+            .await
+            .expect("retry succeeds once the fault is no longer armed");
+        assert!(store.load(&id).await.unwrap().is_some());
     }
 
     #[tokio::test]
