@@ -3229,17 +3229,19 @@ impl CompanyRuntime {
     /// A status snapshot, loading the company record for name and lifecycle.
     pub async fn status(&self) -> Result<CompanyStatus> {
         let record = self.store.load(&self.id).await?;
-        let (name, lifecycle, template_provenance) = match record {
+        let (name, logo_url, lifecycle, template_provenance) = match record {
             Some(record) => (
                 record.manifest.company.name,
+                record.manifest.company.logo_url,
                 record.lifecycle,
                 record.template_provenance,
             ),
-            None => (self.id.to_string(), "running".to_string(), None),
+            None => (self.id.to_string(), None, "running".to_string(), None),
         };
         Ok(CompanyStatus {
             id: self.id.clone(),
             name,
+            logo_url,
             lifecycle,
             pending_approvals: self.journal.pending().len(),
             template_provenance,

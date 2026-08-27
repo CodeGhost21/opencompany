@@ -3545,6 +3545,223 @@ impl HarnessBrain {
                         channel_responses.push(message);
                     }
                 }
+                CompanyEvent::ScheduleFired { prompt, .. } => {
+                    let responder = self.responder_for(None);
+                    // A scheduled tick drives a real turn, so it needs the same
+                    // scaffolding an operator message gets: stale MCP failures
+                    // cleared before it (nothing leaks from a prior turn), a
+                    // live publish claim while it runs, and its own MCP
+                    // failures re-skinned onto the reply afterwards.
+                    self.deps.mcp_failures.clear();
+                    // Issue #989: capture the workspace before the scheduled
+                    // turn, so a capped turn can recover files it wrote but
+                    // never offered to publish.
+                    let cap_scan_workspace =
+                        agent_workspace(&self.deps.workspace_root, &self.record().id, &responder);
+                    let cap_scan_baseline = WorkspaceSnapshot::take(&cap_scan_workspace);
+                    // Issue #445: claim the publish queue for this conversation,
+                    // so a file the scheduled turn publishes is drained below
+                    // instead of being staged into a queue nothing reaches.
+                    // Claimed only when both stores the drain needs are wired —
+                    // the claim is a promise to record, and one that cannot be
+                    // kept must not be made, or the tool goes back to issuing
+                    // receipts nothing honours.
+                    let publish_claim =
+                        (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
+                            self.deps
+                                .pending_publishes
+                                .claim(publish::PublishDestination::Conversation)
+                        });
+                    // Drive the same routed turn an operator message gets, so a
+                    // responder bound to a named harness runs there and an
+                    // unavailable default fails loudly instead of silently
+                    // falling back to the embedded engine — the router's job.
+                    let run_turn = self.run_turn();
+                    let record = self.record();
+                    let turn = self
+                        .delegation_runner(run_turn.as_ref(), &record)
+                        .handle_operator_message(&responder, prompt, None)
+                        .await?;
+                    let mut responses = vec![OutboundMessage {
+                        message_id: None,
+                        task_id: turn.spawned_task,
+                        // The reply lands on the General desk — the destination
+                        // — and the responder is its author. Fusing the two into
+                        // `channel` made reload history route the same reply to
+                        // General while journaling the wrong author; they are
+                        // separate facts (issue #885).
+                        channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                        agent: Some(responder.clone()),
+                        text: turn.reply,
+                        reply_to: None,
+                        steps: turn.steps,
+                        mentions: Vec::new(),
+                    }];
+                    responses.extend(turn.bubbles);
+                    // Issue #926/#1032, scheduled edition: a turn that paused at
+                    // its step cap or halted for spend says so in its own
+                    // sibling bubble, exactly as the operator path does. Here
+                    // the journal is the turn's only durable record — the
+                    // operator channel is in-memory for a cron tick — so
+                    // omitting them would present interrupted scheduled work as
+                    // a completed answer. Unauthored on the operator path; here
+                    // they must carry an author to be journaled at all, so they
+                    // take the same system author `system_notice` uses.
+                    if turn.hit_iteration_cap {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    if let Some(halt) = &turn.halted_for_spend {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: spend_halt_notice(halt),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    // Drain what the scheduled turn published (#445) and file it
+                    // onto the card the turn opened — or a freshly minted one —
+                    // exactly as an operator turn's publish is filed.
+                    let spawned_task = responses[0].task_id.clone();
+                    let published = self.deps.pending_publishes.drain();
+                    let published_sources: Vec<String> = published
+                        .iter()
+                        .map(|publish| publish.source.clone())
+                        .collect();
+                    let mut published_card = self
+                        .file_conversation_batch(
+                            &responder,
+                            spawned_task.as_deref(),
+                            Some(crate::server::ops::language::DEFAULT_DESK),
+                            publish_claim.is_some(),
+                            published,
+                            &mut responses[0].text,
+                        )
+                        .await;
+                    // Issue #989: a capped scheduled turn gets the same
+                    // unpublished-file recovery as an operator turn. The nudge
+                    // is deliberately limited to iteration caps, not spend
+                    // halts: spending another model turn after a budget brake
+                    // would defeat that brake. The scheduled path has no
+                    // operator present to notice a stranded workspace file, so
+                    // silently leaving it behind would lose a deliverable.
+                    if turn.hit_iteration_cap {
+                        let changed = cap_scan_baseline.changed_since(&cap_scan_workspace);
+                        let unpublished = publish::unpublished(&changed.files, &published_sources);
+                        if !unpublished.is_empty() {
+                            let nudge_control = SteerControl::new();
+                            let _declined = self
+                                .nudge_for_unpublished(
+                                    run_turn.as_ref(),
+                                    &responder,
+                                    prompt,
+                                    &responses[0].text,
+                                    &unpublished,
+                                    changed.partial,
+                                    &nudge_control,
+                                    None,
+                                )
+                                .await;
+                            let nudge_published = self.deps.pending_publishes.drain();
+                            if let Some(card_id) = self
+                                .file_conversation_batch(
+                                    &responder,
+                                    spawned_task.as_deref(),
+                                    Some(crate::server::ops::language::DEFAULT_DESK),
+                                    publish_claim.is_some(),
+                                    nudge_published,
+                                    &mut responses[0].text,
+                                )
+                                .await
+                            {
+                                published_card = published_card.or(Some(card_id));
+                            }
+                        }
+                    }
+                    drop(publish_claim);
+                    // `published_card` wins over the turn's own card, the same
+                    // rule the operator path applies (#463): it names the card
+                    // the deliverable actually landed on, which is usually the
+                    // turn's card but the freshly minted replacement when that
+                    // card was deleted mid-turn.
+                    if let Some(card_id) = published_card {
+                        responses[0].task_id = Some(card_id);
+                    }
+                    // Re-skin any MCP tool-call failures from the scheduled turn
+                    // as error steps on the reply's timeline — one surface, one
+                    // renderer. Runs before the reply is journaled, so the
+                    // journal order reads failure-then-reply.
+                    self.surface_mcp_failures(&mut responses[0].steps, None)
+                        .await?;
+                    // Issue #561, scheduled edition: if this scheduled turn
+                    // gated more calls than one turn may raise, park the batch
+                    // and journal the overflow notice here. The after-loop
+                    // `park_approval_requests` below routes its notice to the
+                    // in-memory operator adapter, which a cron tick has no live
+                    // operator reading, so the warning that some approvals were
+                    // permanently discarded would otherwise vanish from the only
+                    // surface that records a scheduled turn. Draining here
+                    // leaves the after-loop call with an empty queue, so the
+                    // notice is never raised twice.
+                    if let Some(notice) = self.park_approval_requests(host).await? {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: notice,
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    if let Some(events) = self.deps.events.as_ref() {
+                        for response in &mut responses {
+                            // Per-bubble authorship: a delegation bubble names
+                            // its own speaker; the primary bubble is the
+                            // responder's, and the responder is the fallback a
+                            // bubble without an author needs.
+                            let agent_id =
+                                response.agent.clone().unwrap_or_else(|| responder.clone());
+                            match events
+                                .append(
+                                    &record.id,
+                                    CompanyEvent::AgentReply {
+                                        parent: None,
+                                        task_id: response.task_id.clone(),
+                                        chat_id: crate::server::ops::language::DEFAULT_DESK
+                                            .to_string(),
+                                        agent_id,
+                                        text: response.text.clone(),
+                                        steps: response.steps.clone(),
+                                        mentions: Vec::new(),
+                                        mention_depth: 0,
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(seq) => response.message_id = Some(seq.value().to_string()),
+                                Err(err) => tracing::warn!(
+                                    error = %err,
+                                    "failed to journal a scheduled reply; the bubble has no durable id"
+                                ),
+                            }
+                        }
+                    }
+                    channel_responses.extend(responses);
+                }
                 _ => {}
             }
         }
@@ -3820,6 +4037,208 @@ description = "Runs Acme."
         assert_eq!(result.new_traces.len(), 1);
         // Single cost-accounting site: the cycle result carries no ledger delta.
         assert!(result.ledger_deltas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_gets_an_agent_reply() {
+        // A cron tick (`ScheduleFired`) must drive a real turn and surface its
+        // reply, not fall through the match and vanish — the same guarantee an
+        // operator message gets. Without this arm a scheduled prompt ran to
+        // nowhere: the turn produced an answer that was never journaled, so the
+        // desk history had no record it fired.
+        let dir = tempfile::tempdir().unwrap();
+        let brain = brain_over_mock(dir.path());
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 1);
+        // The mock provider prefixes the routed prompt, proving the turn ran
+        // through the agent rather than falling through the match.
+        assert!(
+            result.channel_responses[0].text.contains("daily standup"),
+            "{:?}",
+            result.channel_responses[0].text
+        );
+        assert_eq!(result.new_traces.len(), 1);
+    }
+
+    /// A cron tick's reply is journaled onto the General desk under the
+    /// responder's name, and the returned bubble is stamped with the journaled
+    /// event's sequence — the same contract an operator reply's bubble carries
+    /// (issue #885: destination and author are separate facts).
+    #[tokio::test]
+    async fn schedule_fired_journals_an_agent_reply_on_the_general_desk() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone());
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        // The reply lands on the General desk, authored by the responder —
+        // destination and author stay separate.
+        assert_eq!(result.channel_responses.len(), 1);
+        let bubble = &result.channel_responses[0];
+        assert_eq!(bubble.channel, crate::server::ops::language::DEFAULT_DESK);
+        assert_eq!(bubble.agent.as_deref(), Some("ceo"));
+
+        // The journal holds one AgentReply, on the General desk, attributed to
+        // the responder — not to the channel the reply was routed over.
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let reply = events
+            .iter()
+            .find(|e| matches!(&e.event, CompanyEvent::AgentReply { .. }))
+            .expect("a scheduled reply was journaled");
+        match &reply.event {
+            CompanyEvent::AgentReply {
+                chat_id,
+                agent_id,
+                text,
+                ..
+            } => {
+                assert_eq!(chat_id, crate::server::ops::language::DEFAULT_DESK);
+                assert_eq!(agent_id, "ceo");
+                assert!(text.contains("daily standup"), "{text}");
+            }
+            _ => unreachable!(),
+        }
+
+        // The returned bubble carries the appended event's sequence as its
+        // durable id.
+        assert_eq!(bubble.message_id, Some(reply.seq.value().to_string()));
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_journals_halt_notices() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let outcome = crate::harness::built_in::TurnOutcome {
+            reply: "checkpoint".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: true,
+            abnormal_stop: None,
+            halted_for_spend: Some(crate::harness::SpendHalt {
+                agent: "ceo".to_string(),
+                spent_usd: 1.25,
+                cap_usd: 1.0,
+            }),
+            budget_paused: None,
+        };
+        let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
+            .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
+                outcome,
+                approval_requests: None,
+            })));
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 3);
+        assert!(
+            result.channel_responses[1]
+                .text
+                .contains("maximum number of steps")
+        );
+        assert!(result.channel_responses[2].text.contains("spend cap"));
+        assert!(
+            result
+                .channel_responses
+                .iter()
+                .skip(1)
+                .all(|response| response.agent.as_deref() == Some(crate::ports::SYSTEM_AUTHOR))
+        );
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let replies: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.event, CompanyEvent::AgentReply { .. }))
+            .collect();
+        assert_eq!(replies.len(), 3, "all scheduled notices are durable");
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_journals_approval_overflow_notice() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let brain = brain_with_queue_and_events(dir.path(), requests.clone(), log.clone())
+            .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
+                outcome: crate::harness::built_in::TurnOutcome {
+                    reply: "checkpoint".to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: false,
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                },
+                approval_requests: Some(requests.clone()),
+            })));
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 2);
+        let notice = &result.channel_responses[1];
+        assert!(
+            notice.text.contains("further gated tool call"),
+            "{}",
+            notice.text
+        );
+        assert_eq!(notice.agent.as_deref(), Some(crate::ports::SYSTEM_AUTHOR));
+        assert_eq!(requests.queued(), 0);
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        assert!(events.iter().any(|event| {
+            matches!(&event.event, CompanyEvent::AgentReply { text, .. } if text.contains("further gated tool call"))
+        }));
     }
 
     #[tokio::test]
@@ -8816,6 +9235,66 @@ members = ["eng1", "eng2"]
     impl HarnessModel for SteeringProvider {
         fn telemetry_provider_id(&self) -> String {
             "steering".to_string()
+        }
+    }
+
+    /// A deterministic turn result for scheduled-cycle edge-case tests.
+    struct FixedOutcomeTurn {
+        outcome: crate::harness::built_in::TurnOutcome,
+        approval_requests: Option<crate::harness::policy::ApprovalRequestQueue>,
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for FixedOutcomeTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            if let Some(requests) = &self.approval_requests {
+                for index in 0..(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
+                    requests.push(crate::harness::policy::ApprovalRequest {
+                        tool: format!("test_tool_{index}"),
+                        reason: "test approval".to_string(),
+                        effect: Effect {
+                            kind: format!("test_tool_{index}"),
+                            group: crate::ports::types::EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({ "index": index }),
+                            agent: None,
+                            run_id: None,
+                        },
+                    });
+                }
+            }
+            Ok(self.outcome.clone())
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.run(company, agent_id, message, chat_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.run(company, agent_id, message, None).await
         }
     }
 
