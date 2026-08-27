@@ -421,7 +421,7 @@ async fn a_real_turn_lists_reads_and_revises_a_workspace_note() {
             "ceo",
             "Add a Friday shipping rule to our standards.",
             &deps,
-            None,
+            crate::runtime::delegation::ChatTarget::default(),
         )
         .await
         .expect("turn runs");
@@ -499,9 +499,15 @@ async fn a_real_turn_is_refused_when_it_writes_with_a_stale_revision() {
 
     let (before, _) = store.read(&record.id, "n-eng").await.unwrap().unwrap();
 
-    pool.run(&record.id, "ceo", "Rewrite the standards.", &deps, None)
-        .await
-        .expect("turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "Rewrite the standards.",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("turn runs");
 
     let joined = tool_results(&script).join("\n---\n");
     // Before anything else: the write must have been built from a revision the
@@ -562,7 +568,7 @@ async fn a_wildcard_grant_turn_can_read_but_is_never_offered_the_write_tool() {
             "ceo",
             "What is our review standard?",
             &deps,
-            None,
+            crate::runtime::delegation::ChatTarget::default(),
         )
         .await
         .expect("turn runs");
@@ -612,9 +618,15 @@ async fn an_edit_between_turns_changes_what_the_next_turn_reads() {
     let dir = tempfile::tempdir().unwrap();
     let (pool, deps, record, store) = harness(base_url, "\"*\"", dir.path()).await;
 
-    pool.run(&record.id, "ceo", "What is our standard?", &deps, None)
-        .await
-        .expect("first turn");
+    pool.run(
+        &record.id,
+        "ceo",
+        "What is our standard?",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("first turn");
 
     // The operator edits the note in the console — the same store handle.
     store
@@ -627,9 +639,15 @@ async fn an_edit_between_turns_changes_what_the_next_turn_reads() {
         .await
         .unwrap();
 
-    pool.run(&record.id, "ceo", "And now?", &deps, None)
-        .await
-        .expect("second turn");
+    pool.run(
+        &record.id,
+        "ceo",
+        "And now?",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("second turn");
 
     let results = tool_results(&script);
     let before = results
@@ -706,7 +724,7 @@ async fn an_oversized_note_reaches_the_model_whole_and_read_only() {
         "ceo",
         "What does the big standard say?",
         &deps,
-        None,
+        crate::runtime::delegation::ChatTarget::default(),
     )
     .await
     .expect("turn runs");
@@ -821,9 +839,15 @@ async fn a_supervised_turn_reads_the_workspace_freely_and_parks_a_write_with_no_
     let (_pool, deps, _record, _store) = harness(base, "\"workspace\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"workspace\"").await;
 
-    pool.run(&record.id, "ceo", "tidy the standards", &deps, None)
-        .await
-        .expect("the turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "tidy the standards",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("the turn runs");
     // Issue #439: no boundary index — this turn ran outside any claim, so its
     // requests are in the `Unscoped` bucket and `drain` reads exactly them.
     let parked = deps
@@ -875,9 +899,15 @@ async fn a_parked_write_to_the_agents_own_workspace_does_offer_a_standing_scope(
         harness(base, "\"files\", \"workspace\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"files\", \"workspace\"").await;
 
-    pool.run(&record.id, "ceo", "jot a note", &deps, None)
-        .await
-        .expect("the turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "jot a note",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("the turn runs");
     // Issue #439: no boundary index — this turn ran outside any claim, so its
     // requests are in the `Unscoped` bucket and `drain` reads exactly them.
     let parked = deps
@@ -919,9 +949,15 @@ async fn a_supervised_turn_reads_its_own_workspace_without_asking() {
     let (_pool, deps, _record, _store) = harness(base, "\"files\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"files\"").await;
 
-    pool.run(&record.id, "ceo", "what do we have?", &deps, None)
-        .await
-        .expect("the turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "what do we have?",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("the turn runs");
     // Issue #439: no boundary index — this turn ran outside any claim, so its
     // requests are in the `Unscoped` bucket and `drain` reads exactly them.
     let parked = deps

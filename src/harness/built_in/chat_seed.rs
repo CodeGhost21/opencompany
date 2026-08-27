@@ -26,10 +26,20 @@
 //! renders for that desk and nothing from any other. That reuse is deliberate:
 //! it gives DM (`dm:<id>`) vs named-desk parity for free and keeps a switch from
 //! ever leaking the previous chat's lines into the next one.
+//!
+//! **A desk is not the finest conversation there is** (#1890). Threads are
+//! persisted — a message carries the `parent` of the line it answers — but
+//! `owns` matches on chat id alone, so every live thread in a channel was
+//! projected into one flat window and the model answering inside one thread
+//! read the others as though they were its own recent turns. The seed's shape
+//! is what made that undetectable: bare `(role, content)` pairs, with no
+//! author, sequence or parent, so a sibling thread's turn is indistinguishable
+//! from this thread's own. [`in_thread`] narrows `owns` by the parent pointer;
+//! the console's one-level fold is the whole definition of membership.
 
 use std::sync::Arc;
 
-use crate::ports::types::{CompanyEvent, CompanyId};
+use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, StoredEvent};
 use crate::ports::{CompanyStore, EventLog};
 use crate::server::chat_history;
 use crate::server::ops::language::DEFAULT_DESK;
@@ -64,6 +74,17 @@ pub struct ChatSeedRequest {
     /// Resolves the incoming chat id to its desk id/name pair (see
     /// [`resolve_seed_desk`]).
     pub store: Arc<dyn CompanyStore>,
+    /// The thread this turn belongs to, as its root message's sequence
+    /// position — `None` for a turn posted straight into the channel.
+    ///
+    /// Carried from the call site rather than recovered here by re-reading the
+    /// turn's own journaled message for its `parent`. The route already knows
+    /// it (it parsed the operator's `parent` and journaled the message with
+    /// it), and rediscovering a fact the caller holds is the ambient-context
+    /// coupling this crate keeps getting bitten by — it would also cost a
+    /// journal read on the *non*-switch turns the switch branch exists to keep
+    /// free.
+    pub thread_root: Option<EventSeq>,
 }
 
 impl ChatSeedRequest {
@@ -79,6 +100,7 @@ impl ChatSeedRequest {
             company,
             &desk_id,
             &desk_name,
+            self.thread_root,
             CHAT_SEED_WINDOW,
             &self.raw_message,
         )
@@ -149,17 +171,60 @@ pub async fn resolve_seed_desk(
     }
 }
 
+/// Does this owned event belong to `thread_root`'s conversation?
+///
+/// A thread is "the messages pointing at this one" (`OperatorMessage::parent`'s
+/// own docs) — there is no thread object to consult, so membership is decided
+/// from the parent pointer and nothing else.
+///
+/// * `None` — the channel-level conversation: only unparented lines. This is
+///   every message in a company that has never opened a thread, so an
+///   unthreaded channel seeds exactly what it seeded before this filter
+///   existed.
+/// * `Some(root)` — the root message itself, plus everything parented to it.
+///   One level deep, because that is all the console renders and all
+///   `AgentReply::parent` can express: a reply is parented to *its question's*
+///   parent, never to the question, precisely so a thread cannot nest.
+///
+/// Anything that is not a chat message answers `false`. The only such event
+/// `owns` admits is a `DeskTaskCompleted` terminal, which the mapper drops
+/// anyway for want of a conversational body — but it is dropped here first,
+/// and deliberately: a card records `origin_chat_id` and no thread root, so
+/// there is currently no honest answer to which thread it belongs to. See the
+/// `origin_parent` sub-issue on #1890.
+fn in_thread(stored: &StoredEvent, thread_root: Option<EventSeq>) -> bool {
+    let parent = match &stored.event {
+        CompanyEvent::OperatorMessage { parent, .. } => *parent,
+        CompanyEvent::AgentReply { parent, .. } => *parent,
+        _ => return false,
+    };
+    match thread_root {
+        None => parent.is_none(),
+        Some(root) => stored.seq == root || parent == Some(root),
+    }
+}
+
 /// Projects the last `window` messages owned by `(desk_id, desk_name)` out of the
 /// company [`EventLog`] into chronological `(role, content)` pairs for
 /// [`Agent::seed_resume_from_messages`](openhuman_core::openhuman::agent::Agent::seed_resume_from_messages).
 ///
 /// Walks the log newest-first (`read_before`), keeps only the events
-/// [`chat_history::owns`] admits for this desk, maps each to a role
+/// [`chat_history::owns`] admits for this desk **and [`in_thread`] admits for
+/// `thread_root`**, maps each to a role
 /// (`OperatorMessage` → `user`, `AgentReply` → `agent`), stops once `window`
 /// messages are gathered, and reverses to chronological order. Non-conversational
 /// owned events (a settled-dispatch terminal, reactions, anything without body
 /// text) are skipped even when `owns` admits them — a seed needs role + text, not
 /// structural markers.
+///
+/// `thread_root` scopes the projection to one conversation within the desk:
+/// `None` is the channel itself (unparented lines only — every message in a
+/// company that has never threaded, so an unthreaded desk projects exactly what
+/// it did before), and `Some(root)` is that root plus its replies. It is
+/// applied **before** the `current_message` boundary below, which matters more
+/// than it looks: the boundary is a text prefix compare, so without the thread
+/// filter a sibling thread carrying the same words would match first and cut
+/// the window at a message this turn never sent.
 ///
 /// An `OperatorMessage` with attachments is composed through the same
 /// [`with_attachment_refs`](crate::brain::medulla::effects::with_attachment_refs)
@@ -206,6 +271,7 @@ pub async fn build_chat_seed(
     company: &CompanyId,
     desk_id: &str,
     desk_name: &str,
+    thread_root: Option<EventSeq>,
     window: usize,
     current_message: &str,
 ) -> Vec<(String, String)> {
@@ -257,6 +323,14 @@ pub async fn build_chat_seed(
         cursor = page.last().map(|event| event.seq);
         for stored in page {
             if !chat_history::owns(desk_id, desk_name, &stored.event) {
+                continue;
+            }
+            // Thread scoping, applied BEFORE the boundary match below so the
+            // self-search only ever sees this thread's own messages. The
+            // boundary is a text prefix compare, so a sibling thread carrying
+            // the same words ("make it shorter") would otherwise match first
+            // and cut the window at the wrong message.
+            if !in_thread(&stored, thread_root) {
                 continue;
             }
             let mapped = match &stored.event {
@@ -500,6 +574,10 @@ mod tests {
             &CompanyId::new("acme"),
             desk_id,
             desk_name,
+            // The channel-level conversation. Every fixture below journals
+            // `parent: None`, which is what an unthreaded company writes — so
+            // these cases assert the pre-#1890 behaviour is byte-identical.
+            None,
             window,
             current_message,
         )
@@ -737,6 +815,161 @@ mod tests {
         );
     }
 
+    // ── Thread scoping (#1890) ───────────────────────────────────────────
+
+    /// An operator message posted inside the thread rooted at `parent`.
+    fn operator_in(seq: u64, chat: Option<&str>, text: &str, parent: u64) -> StoredEvent {
+        let mut stored = operator(seq, chat, text);
+        if let CompanyEvent::OperatorMessage { parent: p, .. } = &mut stored.event {
+            *p = Some(EventSeq::new(parent));
+        }
+        stored
+    }
+
+    /// An agent reply journaled under the thread rooted at `parent` — the
+    /// message's OWN parent, never the message itself, which is what stops a
+    /// thread nesting inside a thread.
+    fn reply_in(seq: u64, chat_id: &str, text: &str, parent: u64) -> StoredEvent {
+        let mut stored = reply(seq, chat_id, text);
+        if let CompanyEvent::AgentReply { parent: p, .. } = &mut stored.event {
+            *p = Some(EventSeq::new(parent));
+        }
+        stored
+    }
+
+    async fn seed_of_thread(
+        log: FixedLog,
+        desk: &str,
+        thread_root: Option<u64>,
+        current_message: &str,
+    ) -> Vec<(String, String)> {
+        let events: Arc<dyn EventLog> = Arc::new(log);
+        build_chat_seed(
+            &events,
+            &CompanyId::new("acme"),
+            desk,
+            desk,
+            thread_root.map(EventSeq::new),
+            CHAT_SEED_WINDOW,
+            current_message,
+        )
+        .await
+    }
+
+    /// Two live threads in ONE channel. The turn answering inside thread A must
+    /// see thread A's exchange and nothing of thread B's — the leak #1890 opens
+    /// with, where "make it shorter" arrived directly after an unrelated CAC
+    /// answer because the projection was scoped to the channel.
+    #[tokio::test]
+    async fn a_thread_sees_only_its_own_exchange() {
+        let log = FixedLog(vec![
+            operator(41, Some("growth"), "draft the launch email"), // root A
+            reply_in(42, "growth", "here is a draft", 41),
+            operator(43, Some("growth"), "what's our Q3 CAC?"), // root B
+            reply_in(44, "growth", "$412, up 18%", 43),
+            operator_in(45, Some("growth"), "make it shorter", 41),
+        ]);
+        let seed = seed_of_thread(log, "growth", Some(41), "make it shorter").await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "draft the launch email".to_string()),
+                ("agent".to_string(), "here is a draft".to_string()),
+                ("user".to_string(), "make it shorter".to_string()),
+            ],
+            "thread A's seed must not carry thread B's turns: {seed:?}"
+        );
+    }
+
+    /// The channel-level conversation is the `None` thread: unparented lines
+    /// only. A thread's body belongs to the thread, not to the channel that
+    /// hosts it.
+    #[tokio::test]
+    async fn the_channel_sees_only_unparented_lines() {
+        let log = FixedLog(vec![
+            operator(41, Some("growth"), "draft the launch email"),
+            reply_in(42, "growth", "THREAD-BODY", 41),
+            operator_in(43, Some("growth"), "THREAD-FOLLOWUP", 41),
+            operator(44, Some("growth"), "unrelated channel line"),
+        ]);
+        let seed = seed_of_thread(log, "growth", None, "").await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "draft the launch email".to_string()),
+                ("user".to_string(), "unrelated channel line".to_string()),
+            ],
+            "the channel must not inherit a thread's body: {seed:?}"
+        );
+    }
+
+    /// The root message is part of its own thread — a thread opened on a
+    /// question must seed the question, or the first reply inside it answers
+    /// against nothing.
+    #[tokio::test]
+    async fn a_thread_includes_its_root() {
+        let log = FixedLog(vec![
+            operator(7, Some("growth"), "the question"),
+            operator_in(8, Some("growth"), "the follow-up", 7),
+        ]);
+        let seed = seed_of_thread(log, "growth", Some(7), "the follow-up").await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "the question".to_string()),
+                ("user".to_string(), "the follow-up".to_string()),
+            ]
+        );
+    }
+
+    /// The self-boundary is a TEXT prefix compare, so a sibling thread carrying
+    /// the same words would match first and cut the window at a message this
+    /// turn never sent — dropping this thread's own history. Scoping to the
+    /// thread before the boundary search is what makes the match unambiguous.
+    #[tokio::test]
+    async fn a_siblings_identical_wording_does_not_cut_the_window() {
+        let log = FixedLog(vec![
+            operator(1, Some("growth"), "root A"),
+            reply_in(2, "growth", "A's answer", 1),
+            operator(3, Some("growth"), "root B"),
+            // Thread B says the very same words, and is NEWER, so a
+            // channel-flat backward scan meets it first.
+            operator_in(4, Some("growth"), "make it shorter", 3),
+            reply_in(5, "growth", "B's shortened text", 3),
+            operator_in(6, Some("growth"), "make it shorter", 1),
+        ]);
+        let seed = seed_of_thread(log, "growth", Some(1), "make it shorter").await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "root A".to_string()),
+                ("agent".to_string(), "A's answer".to_string()),
+                ("user".to_string(), "make it shorter".to_string()),
+            ],
+            "the boundary must be this thread's own message, not the sibling's: {seed:?}"
+        );
+    }
+
+    /// A dispatch terminal is skipped whatever thread is asked for. It carries
+    /// no conversational body, and a card records `origin_chat_id` with no
+    /// thread root — so there is no honest thread to attribute it to yet.
+    #[tokio::test]
+    async fn a_dispatch_terminal_is_in_no_thread() {
+        let log = FixedLog(vec![
+            operator(1, Some("growth"), "root"),
+            desk_completed(2, Some("growth")),
+            operator_in(3, Some("growth"), "follow-up", 1),
+        ]);
+        let seed = seed_of_thread(log, "growth", Some(1), "follow-up").await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "root".to_string()),
+                ("user".to_string(), "follow-up".to_string()),
+            ]
+        );
+    }
+
     /// A read failure yields an empty seed, never a propagated error — the caller
     /// then falls back to the OpenHuman transcript lookup.
     #[tokio::test]
@@ -747,6 +980,7 @@ mod tests {
             &CompanyId::new("acme"),
             "general",
             "general",
+            None,
             CHAT_SEED_WINDOW,
             "",
         )

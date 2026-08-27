@@ -743,7 +743,12 @@ impl HarnessBrain {
         let drained = match self
             .delegation_runner(run_turn.as_ref(), &record)
             .drain_and_execute(
-                grant.origin_thread.as_deref(),
+                // The channel, with no thread (#1890). A parked approval
+                // records `origin_thread` and no root, so there is nothing
+                // honest to narrow to — the resumed turn is scoped exactly as
+                // it was before the root joined the key. Threading a grant's
+                // origin is the `origin_parent` sub-issue on #1890.
+                crate::runtime::delegation::ChatTarget::channel(grant.origin_thread.as_deref()),
                 delegation::MessageContext::default(),
                 delegation::HandOffs::Run,
             )
@@ -2805,7 +2810,11 @@ impl HarnessBrain {
         let run_turn = self.run_turn();
         let record = self.record();
         self.delegation_runner(run_turn.as_ref(), &record)
-            .run_delegation(delegation, chat_id, delegation::MessageContext::default())
+            .run_delegation(
+                delegation,
+                crate::runtime::delegation::ChatTarget::channel(chat_id),
+                delegation::MessageContext::default(),
+            )
             .await
     }
 
@@ -3150,6 +3159,7 @@ impl HarnessBrain {
                 CompanyEvent::OperatorMessage {
                     text,
                     chat,
+                    parent,
                     deliverable,
                     mentions,
                     attachments,
@@ -3263,6 +3273,15 @@ impl HarnessBrain {
                     // in this cycle rides the same operator thread, so it gets the
                     // same id.
                     let chat_id = chat.as_deref();
+                    // Which conversation this turn answers (#1890): the channel,
+                    // and the thread within it. The message's own `parent` IS
+                    // the thread root — a reply is parented to its question's
+                    // parent, never to the question — so an unparented message
+                    // carries `None` and lands on the channel-level
+                    // conversation, exactly where every message went before the
+                    // root was part of the key.
+                    let chat_target =
+                        crate::runtime::delegation::ChatTarget::in_thread(chat_id, *parent);
                     // Issue #989: the dispatch-start baseline for "did this
                     // responder write anything it did not publish?" — taken
                     // before the turn runs, for the same reason run_task's own
@@ -3322,7 +3341,7 @@ impl HarnessBrain {
                         // with what the operator actually asked for rather than
                         // the hand-off instruction the model wrote.
                         .reissue_message(composed.clone())
-                        .handle_operator_message(&responder, &composed, chat_id)
+                        .handle_operator_message(&responder, &composed, chat_target)
                         .await?;
                     let mut operator_steps = turn.steps;
                     let mut operator_reply = turn.reply;
@@ -3632,7 +3651,11 @@ impl HarnessBrain {
                     let record = self.record();
                     let turn = self
                         .delegation_runner(run_turn.as_ref(), &record)
-                        .handle_operator_message(&responder, prompt, None)
+                        .handle_operator_message(
+                            &responder,
+                            prompt,
+                            crate::runtime::delegation::ChatTarget::default(),
+                        )
                         .await?;
                     let mut responses = vec![OutboundMessage {
                         message_id: None,
@@ -4199,6 +4222,10 @@ description = "Runs Acme."
                 spent_usd: 1.25,
                 cap_usd: 1.0,
             }),
+            // Added by #1846 after these fixtures were written; neither is what
+            // this test is about — it exercises the spend halt.
+            abnormal_stop: None,
+            budget_paused: None,
         };
         let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
             .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
@@ -4257,6 +4284,9 @@ description = "Runs Acme."
                     steps: Vec::new(),
                     hit_iteration_cap: false,
                     halted_for_spend: None,
+                    // Added by #1846 after these fixtures were written.
+                    abnormal_stop: None,
+                    budget_paused: None,
                 },
                 approval_requests: Some(requests.clone()),
             })));
@@ -9313,7 +9343,7 @@ members = ["eng1", "eng2"]
             _company: &CompanyId,
             _agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
             if let Some(requests) = &self.approval_requests {
                 for index in 0..(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
@@ -9342,10 +9372,10 @@ members = ["eng1", "eng2"]
             agent_id: &str,
             message: &str,
             _control: &crate::company::steer::SteerControl,
-            chat_id: Option<&str>,
+            chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
-            self.run(company, agent_id, message, chat_id).await
+            self.run(company, agent_id, message, chat).await
         }
 
         async fn run_steered_background(
@@ -9356,7 +9386,13 @@ members = ["eng1", "eng2"]
             _control: &crate::company::steer::SteerControl,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
-            self.run(company, agent_id, message, None).await
+            self.run(
+                company,
+                agent_id,
+                message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
         }
     }
 
@@ -10810,7 +10846,7 @@ members = ["eng1", "eng2"]
             _company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
             self.seen.lock().unwrap().push(agent_id.to_string());
             Ok(crate::harness::built_in::TurnOutcome {
@@ -10829,7 +10865,7 @@ members = ["eng1", "eng2"]
             a: &str,
             m: &str,
             _: &crate::company::steer::SteerControl,
-            chat: Option<&str>,
+            chat: crate::runtime::delegation::ChatTarget<'_>,
             _: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
             self.run(c, a, m, chat).await
@@ -10842,7 +10878,8 @@ members = ["eng1", "eng2"]
             _: &crate::company::steer::SteerControl,
             _: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
-            self.run(c, a, m, None).await
+            self.run(c, a, m, crate::runtime::delegation::ChatTarget::default())
+                .await
         }
     }
 
@@ -10899,14 +10936,27 @@ kind = "built_in"
         let company = CompanyId::new("acme");
         let out = brain
             .run_turn()
-            .run(&company, "researcher", "hi", None)
+            .run(
+                &company,
+                "researcher",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("routes to the deep lane");
         assert_eq!(out.reply, "deep");
         assert_eq!(&*deep.seen.lock().unwrap(), &["researcher".to_string()]);
 
         // The unbound agent must not reach it — it belongs to the default pool.
-        let _ = brain.run_turn().run(&company, "ceo", "hi", None).await;
+        let _ = brain
+            .run_turn()
+            .run(
+                &company,
+                "ceo",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await;
         assert_eq!(
             &*deep.seen.lock().unwrap(),
             &["researcher".to_string()],
@@ -10945,7 +10995,12 @@ kind = "built_in"
         // with "company not found".
         let out = brain
             .run_turn()
-            .run(&CompanyId::new("acme"), "researcher", "hi", None)
+            .run(
+                &CompanyId::new("acme"),
+                "researcher",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("the deep lane's roster is built at boot");
         assert!(out.reply.contains("hi"), "{}", out.reply);
@@ -10966,7 +11021,12 @@ kind = "built_in"
 
         let err = brain
             .run_turn()
-            .run(&CompanyId::new("acme"), "researcher", "hi", None)
+            .run(
+                &CompanyId::new("acme"),
+                "researcher",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect_err("must not fall back to the default lane");
         let msg = err.to_string();
@@ -11074,7 +11134,12 @@ agent = "claude"
 
         let err = brain
             .run_turn()
-            .run(&CompanyId::new("acme"), "ceo", "hi", None)
+            .run(
+                &CompanyId::new("acme"),
+                "ceo",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect_err("must not fall back to the embedded engine");
         let msg = err.to_string();

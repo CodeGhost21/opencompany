@@ -56,7 +56,7 @@ use crate::error::OpenCompanyError;
 use crate::harness::TurnOutcome;
 pub use crate::ports::acp::{AcpAgent, AcpAgentFactory, AcpTurn, AcpUpdate};
 use crate::ports::types::{CompanyId, TurnStep, TurnStepKind, TurnStepStatus};
-use crate::runtime::delegation::RunTurn;
+use crate::runtime::delegation::{ChatTarget, RunTurn};
 
 /// [`RunTurn`] over an [`AcpAgent`].
 pub struct AcpRunTurn {
@@ -343,7 +343,7 @@ impl RunTurn for AcpRunTurn {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
-        _chat_id: Option<&str>,
+        _chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome> {
         self.run_once(company, agent_id, message).await
     }
@@ -354,7 +354,7 @@ impl RunTurn for AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
-        _chat_id: Option<&str>,
+        _chat: ChatTarget<'_>,
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.steered(company, agent_id, message, control).await
