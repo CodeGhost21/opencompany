@@ -68,7 +68,13 @@ use crate::runtime::{RunGuard, RunSupervisor};
 /// the ones that completed before it did. A caught unwind journals this so the
 /// run stops reading `running: true` forever, then re-raises so the run's task
 /// still resolves to a `JoinError`.
-const PANICKED_BEFORE_FINISH: &str = concat!(
+///
+/// Shared with the orchestrator's own `run_workflow` tool path (issue #1865):
+/// that call sits inside an agent turn rather than its own supervised task, so
+/// it cannot re-raise the way this module's catch does — but the run it
+/// panicked out of owes the exact same honest finish, worded identically
+/// rather than a second, possibly-drifting sentence for the same fact.
+pub(crate) const PANICKED_BEFORE_FINISH: &str = concat!(
     "this run's task panicked before it finished; ",
     "the nodes recorded against it are the ones that completed before it stopped"
 );
@@ -81,6 +87,12 @@ pub struct WorkflowSpawn {
     supervisor: RunSupervisor,
     runner: Arc<dyn WorkflowRunner>,
     runs: Arc<dyn RunStore>,
+    /// Issue #1865: where a settled-but-unhealthy run (failed, blocked,
+    /// stranded) is announced, since this is one of the two chokepoints every
+    /// supervised run's outcome passes through on its way to the journal — the
+    /// other is the orchestrator's own `run_workflow` tool path, which is not
+    /// spawned through here at all (see that call site's own comment).
+    notifications: Arc<dyn crate::ports::notifications::NotificationStore>,
 }
 
 impl WorkflowSpawn {
@@ -101,6 +113,7 @@ impl WorkflowSpawn {
             supervisor: runtime.run_supervisor().clone(),
             runner,
             runs: runtime.runs().clone(),
+            notifications: runtime.notifications().clone(),
         }
     }
 
@@ -249,6 +262,16 @@ impl WorkflowSpawn {
                                  it will read as in-flight until the next boot sweep settles it"
                             );
                         }
+                        // Issue #1865: a panic is unambiguously the worst
+                        // reading a run can settle with — notify without
+                        // needing a verdict computation.
+                        self.notify_run_unhealthy(
+                            &workflow.id,
+                            &ctx.run_id,
+                            "failed",
+                            PANICKED_BEFORE_FINISH,
+                        )
+                        .await;
                     }
                     // Re-raise: the JoinHandle still resolves to a JoinError, so
                     // the synchronous caller still 500s. The finish is durable.
@@ -311,6 +334,47 @@ impl WorkflowSpawn {
                 // fail the run), but a finish that did not land is worth an error
                 // line naming the run — not only the helper's warn — so the hole
                 // is visible in telemetry rather than only at the next restart.
+                // Issue #1865: failed/blocked/stranded, the unhealthy readings
+                // this run can settle with — an operator who was not watching
+                // (this is the scheduled/detached path) learns from here
+                // rather than by opening Run History. `undelivered`,
+                // `degraded` and `awaiting-approval` are real but softer
+                // readings the run's own surfaces (the delivery badge, the
+                // node chip, the Approvals page) already carry; this
+                // notification is reserved for the three that leave a run
+                // with nothing more it can do on its own.
+                match &result {
+                    Ok(run) if !run.blocked_nodes.is_empty() => {
+                        self.notify_run_unhealthy(
+                            &workflow.id,
+                            &ctx.run_id,
+                            "blocked",
+                            "This run stopped because a step is waiting on a person to decide \
+                             something.",
+                        )
+                        .await;
+                    }
+                    Ok(run) if run.approvals.iter().any(|a| a.outcome.unparkable()) => {
+                        self.notify_run_unhealthy(
+                            &workflow.id,
+                            &ctx.run_id,
+                            "stranded",
+                            "This run tried to park an approval and could not — nothing is \
+                             waiting on it any more, and nobody was asked.",
+                        )
+                        .await;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        self.notify_run_unhealthy(
+                            &workflow.id,
+                            &ctx.run_id,
+                            "failed",
+                            &err.to_string(),
+                        )
+                        .await;
+                    }
+                }
                 if !journaled {
                     tracing::error!(
                         company = %self.company,
@@ -324,6 +388,49 @@ impl WorkflowSpawn {
             result
         });
         (run_id, handle)
+    }
+
+    /// Files a durable notification that a supervised run settled unhealthy —
+    /// failed, blocked, or stranded (issue #1865). Best-effort and after the
+    /// journal write, matching every other notification producer in the tree:
+    /// a notification that could not be filed must not touch the run's own
+    /// outcome, which has already landed.
+    ///
+    /// `kind` is one of `"failed"` / `"blocked"` / `"stranded"`, not
+    /// [`WorkflowRunVerdict`] itself — this fires off the settle's own shape
+    /// (an `Err`, a non-empty `blocked_nodes`, an unparkable approval), not a
+    /// full verdict read, which needs the live-approvals queue join this
+    /// hot path deliberately does not make (see the sync run response's own
+    /// `stranded_approvals` comment in `server::ops::workflows`).
+    async fn notify_run_unhealthy(
+        &self,
+        workflow_id: &str,
+        run_id: &str,
+        kind: &str,
+        detail: &str,
+    ) {
+        let note = crate::ports::notifications::Notification {
+            id: crate::ports::generate_id(),
+            kind: format!("workflow_run_{kind}"),
+            subject: crate::ports::notifications::Subject {
+                kind: crate::ports::notifications::SubjectKind::Run,
+                id: run_id.to_string(),
+            },
+            created_at: crate::ports::now_millis(),
+            title: format!("Workflow `{workflow_id}` {kind}: {detail}"),
+            audience: None,
+            context: None,
+        };
+        if let Err(err) = self.notifications.append(&self.company, &note).await {
+            tracing::warn!(
+                company = %self.company,
+                workflow = %workflow_id,
+                run = %run_id,
+                error = %err,
+                "a workflow-run-unhealthy notification could not be recorded; the run's own \
+                 outcome is unaffected, but nobody is badged for it"
+            );
+        }
     }
 }
 
@@ -425,12 +532,14 @@ mod tests {
             .expect("tempdir");
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let company = CompanyId::new("acme");
+        let notifications = Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
         let spawn = WorkflowSpawn {
             company: company.clone(),
             events: events.clone(),
             supervisor: RunSupervisor::new(),
             runner: Arc::new(PanickingRunner),
             runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
+            notifications: notifications.clone(),
         };
 
         let (run_id, handle) = spawn
@@ -461,6 +570,22 @@ mod tests {
             finished,
             "the watchdog journaled a WorkflowRunFinished for the panicked run"
         );
+
+        // Issue #1865: the panic is exactly the shape `notify_run_unhealthy`
+        // exists for — a run that came apart entirely, with nobody watching
+        // (a detached/scheduled fire is the case this matters most for).
+        use crate::ports::notifications::NotificationStore;
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_failed"
+                    && n.notification.subject.id == run_id),
+            "a panicked run must file a durable notification: {notes:?}"
+        );
     }
 
     /// A dry (test) run that panics journals **nothing** — the watchdog honours
@@ -480,6 +605,7 @@ mod tests {
             supervisor: RunSupervisor::new(),
             runner: Arc::new(PanickingRunner),
             runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
+            notifications: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
         };
 
         let (_run_id, handle) = spawn

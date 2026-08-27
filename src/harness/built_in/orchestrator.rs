@@ -59,6 +59,10 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use crate::ports::store::company_write_lock;
 
 use async_trait::async_trait;
+// Issue #1865: `.catch_unwind()` on the `run_workflow` tool's runner call —
+// see the call site in `RunWorkflowTool::execute` for why this path needs its
+// own catch rather than routing through `WorkflowSpawn`.
+use futures::future::FutureExt;
 use serde_json::{Value, json};
 
 use openhuman_core::openhuman as oh;
@@ -3712,8 +3716,67 @@ impl Tool for RunWorkflowTool {
                 )));
             }
         };
-        match runner.run(&self.company, &file, input, &ctx).await {
-            Ok(run) => {
+        // Issue #1865: this call sits inside an agent turn (see the #383
+        // comment above — the run is deliberately NOT spawned onto its own
+        // task, because spawning would reset the task-local `WORKFLOW_DEPTH`
+        // re-entry guard mid-chain), so it cannot route through
+        // `WorkflowSpawn`'s own `catch_unwind` the way the console run route
+        // and the cron scheduler do. Left uncaught, a panic in the runner
+        // future unwound straight past both journal-write arms below, so the
+        // run's `WorkflowRunStarted` never got a matching finish and
+        // `GET …/workflows/runs` read it `running: true` until the next boot
+        // sweep — which does not run on rebuild, so a panicked agent-run could
+        // zombie for the life of the process. This is its own catch rather
+        // than a second call into `WorkflowSpawn`: that type owns a
+        // `RunGuard`/supervisor registration this call already holds via
+        // `_run_guard` above, and re-raising (as the spawned-task catch does,
+        // so its `JoinHandle` still resolves to a `JoinError`) is wrong here —
+        // there is no task boundary to preserve, only a tool call to answer,
+        // so the payload is swallowed after the finish is journaled and this
+        // returns an ordinary `ToolResult::error` instead.
+        match std::panic::AssertUnwindSafe(runner.run(&self.company, &file, input, &ctx))
+            .catch_unwind()
+            .await
+        {
+            Err(_payload) => {
+                tracing::error!(
+                    company = %self.company,
+                    workflow = %wid,
+                    run_id = %ctx.run_id,
+                    "run_workflow: the runner panicked; journaling a finish so the run does not \
+                     read as in-flight forever"
+                );
+                if let Some(events) = self.events.as_ref() {
+                    let journaled = crate::runtime::record_run_finished(
+                        events,
+                        &self.company,
+                        &wid,
+                        false,
+                        &ctx.run_id,
+                        Err(crate::runtime::PANICKED_BEFORE_FINISH.into()),
+                    )
+                    .await;
+                    if !journaled {
+                        tracing::error!(
+                            company = %self.company,
+                            workflow = %wid,
+                            run_id = %ctx.run_id,
+                            "run_workflow: a panicked run's finish could not be journaled; it \
+                             will read as in-flight until the next boot sweep settles it"
+                        );
+                    }
+                }
+                // No re-raise: unlike `WorkflowSpawn`'s catch, there is no
+                // `JoinHandle` here to preserve a `JoinError` on — this call is
+                // itself the tool's execution, so the honest answer is an
+                // ordinary tool failure the agent can read and act on.
+                return Ok(ToolResult::error(format!(
+                    "Workflow `{wid}` hit an internal error while running. Its completed steps, \
+                     if any, are recorded in the run history. Don't retry it in a loop — check \
+                     the run history or ask an operator."
+                )));
+            }
+            Ok(Ok(run)) => {
                 tracing::debug!(
                     company = %self.company,
                     workflow = %wid,
@@ -3811,7 +3874,7 @@ impl Tool for RunWorkflowTool {
                     md,
                 ))
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: run failed");
                 if let Some(events) = self.events.as_ref() {
                     let message = err.to_string();
