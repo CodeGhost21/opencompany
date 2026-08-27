@@ -9,6 +9,7 @@
 // what makes that a unit test instead of a manual click-through.
 
 import type { ActivationStatus } from "@/api/activation";
+import { ApiError } from "@/api/types";
 
 export interface GateDecisionInput {
   /** The funnel's last successful read, or `null` before the first one lands. */
@@ -74,4 +75,36 @@ export function shouldShowOnboardingGate(input: GateDecisionInput): boolean {
   if (input.isAdmin === null || !input.isAdmin) return false;
 
   return !input.status.isActivated;
+}
+
+/** What a failed `/auth/me` read (behind `isGateAdmin` in `AppShell`) resolves to. */
+export type GateAdminCheckOutcome =
+  | { settled: true; isAdmin: boolean }
+  | { settled: false };
+
+/**
+ * Classifies a `fetchMe` failure for the gate's admin check (PR #1875 review
+ * finding).
+ *
+ * Every other `fetchMe`-gated view in this app (`OAuthView`, `TeamView`, …)
+ * catches every failure the same way — `admin = false` — and that is safe
+ * there: the worst case is a connect button staying disabled one round trip
+ * longer. It is the wrong direction here, because `isAdmin: false` is what
+ * makes `shouldShowOnboardingGate` suppress the blocking gate — a transient
+ * failure (a dropped connection, a proxy 5xx) would resolve to "not admin"
+ * exactly like a real 401 does, and fail the gate open for an actual admin
+ * for the rest of that mount.
+ *
+ * A definitive `401` — no session on this host at all, whether because there
+ * is no user plane or the operator is signed out — is the one answer that
+ * genuinely means non-admin, and settles immediately, same as before.
+ * Anything else (`ApiError` with any other status, or a raw `fetch` throw
+ * that never reached the host) is not an answer about *who this user is* —
+ * `settled: false` tells the caller to retry rather than guess.
+ */
+export function resolveGateAdminCheckError(error: unknown): GateAdminCheckOutcome {
+  if (error instanceof ApiError && error.status === 401) {
+    return { settled: true, isAdmin: false };
+  }
+  return { settled: false };
 }

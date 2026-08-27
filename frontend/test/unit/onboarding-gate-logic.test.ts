@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { ActivationStatus } from "@/api/activation";
-import { type GateDecisionInput, shouldShowOnboardingGate } from "@/onboarding/gate-logic";
+import { ApiError } from "@/api/types";
+import {
+  type GateDecisionInput,
+  resolveGateAdminCheckError,
+  shouldShowOnboardingGate,
+} from "@/onboarding/gate-logic";
 
 const complete: ActivationStatus = {
   nameConfirmed: true,
@@ -120,5 +125,36 @@ describe("shouldShowOnboardingGate", () => {
         shouldShowOnboardingGate({ ...base, checked: true, status: incomplete, isAdmin: true }),
       ).toBe(true);
     });
+  });
+});
+
+// PR #1875 review finding: `AppShell`'s `isGateAdmin` effect caught every
+// `fetchMe` failure the same way — treat as non-admin — mirroring every
+// other admin-gated view's `catch { admin = false }` pattern. That pattern is
+// safe on a read-only view (a button stays disabled one round trip longer).
+// It is wrong here: `isAdmin: false` fails the *blocking* gate open, so a
+// transient failure (a dropped connection, a 5xx) would let an actual admin
+// past onboarding for the rest of that mount. A definitive `401` — no
+// session at all — is the one answer that genuinely means non-admin and must
+// still settle immediately; everything else must be retried instead.
+describe("resolveGateAdminCheckError", () => {
+  it("settles to non-admin on a definitive 401 — no session on this host", () => {
+    const outcome = resolveGateAdminCheckError(new ApiError(401, "no_session", "no session"));
+    expect(outcome).toEqual({ settled: true, isAdmin: false });
+  });
+
+  it("does not settle on a network failure — retry instead of failing the gate open", () => {
+    const outcome = resolveGateAdminCheckError(new ApiError(0, "network_error", "offline"));
+    expect(outcome.settled).toBe(false);
+  });
+
+  it("does not settle on a 5xx — the host, not the session, is the problem", () => {
+    const outcome = resolveGateAdminCheckError(new ApiError(503, "unavailable", "quiescing"));
+    expect(outcome.settled).toBe(false);
+  });
+
+  it("does not settle on a non-ApiError throw (e.g. a raw fetch TypeError)", () => {
+    const outcome = resolveGateAdminCheckError(new TypeError("Failed to fetch"));
+    expect(outcome.settled).toBe(false);
   });
 });
