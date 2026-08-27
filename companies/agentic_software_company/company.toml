@@ -29,7 +29,22 @@ human_role = "Product direction"
 #
 # Search spend is bounded by `[tools].search_daily_calls` (200/day by default);
 # setting it to `0` pauses search without editing this list.
-allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+#
+# `chargebee` (#788) is a CEILING, not a grant: every agent in `agents/` states
+# a `tools` line that omits it, so nobody this template ships holds billing
+# tools. A software business that invoices its customers names the teammate who
+# does from the console — `PATCH {scope}/team/{agent_id}` with `chargebee`
+# added — and that edit is an overlay this manifest never sees.
+#
+# It is here at all because the alternative is that the capability is
+# unreachable: `[tools].allow` has no runtime write path, so a company booted
+# from this bundle could store a Chargebee key and still have it reach no
+# teammate, with nothing in the console able to fix it (#1854).
+#
+# `*` does not cover it. These tools mail invoices to a real business's real
+# customers, so the grant is opted into by name rather than ridden in on a
+# wildcard set for files and shell.
+allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*", "chargebee"]
 
 # There is deliberately no `[tools.composio].toolkits` here. Absent means "open
 # mode": defer to the backend's own server-enforced allowlist, which is every

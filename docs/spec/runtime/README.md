@@ -59,8 +59,9 @@ Supporting docs:
   prompts, checked-in briefing documents versus routed workspace documents, and
   the `classes` routing exclusions
 - [tools.md](tools.md) — the three-level tool grant
-  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an empty grant list means
-  "inherit" rather than "nothing", the four namespaces `*` never confers, the
+  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an absent grant means
+  "inherit" rather than "nothing" (and why an explicit empty agent grant is a
+  deny-all since #1804), the four namespaces `*` never confers, the
   unified tool catalog, and the seed-wins rule for console desk overrides
 - [lifecycle.md](lifecycle.md) — company state machine and durability
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
@@ -106,6 +107,11 @@ Supporting docs:
   each is documented
   - [Console write plane](api-write-plane.md) — every write the console makes,
     route by route
+    - [api-team-drafting.md](api-team-drafting.md) — the two draft routes behind
+      the teammate copilot, and why a model may write into a persona at all
+    - [api-tool-grants.md](api-tool-grants.md) — the three tool-grant routes
+      that widen `[tools].allow` from a connect page, and when a grant takes
+      effect
   - [api-graphql.md](api-graphql.md) — the `/graphql` read plane
 - [credentials.md](credentials.md) — the company's own TinyHumans key: the one
   seam a brokered surface resolves through (Composio today), why rotating it

@@ -67,7 +67,13 @@ import {
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
-import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
+import {
+  type AgentReplyEvent,
+  budgetProximityExpiresAt,
+  type CompanyStreamEvent,
+  isBudgetProximityExpired,
+  useEvents,
+} from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import {
   mentionCountsByChannel,
@@ -2078,6 +2084,67 @@ export function AppShell({
   const presence = usePresence(client, company);
   const typing = useTyping(client, company);
   /**
+   * The coarse "near your credit limit" warning (issue #1846), off the live
+   * `budget_proximity` frame. Shell-owned for the same reason presence/typing
+   * are: the SSE subscription lives here, and the banner must outlive a
+   * channel switch (the warning is about the company, not one conversation).
+   * `null` once dismissed or once a fresh dispatch has not re-raised it.
+   *
+   * "Outlive a channel switch" stops at the company boundary, though — see
+   * the reset effect right below, the same shape `workflowRunEvents` and
+   * `openTurns` already use for their own company-scoped state.
+   */
+  const [budgetProximity, setBudgetProximity] = useState<{
+    message: string;
+    atMillis: number;
+    // The frame's own `agentId` (issue #1846 review, Codex #3869601278):
+    // present for one teammate's daily cap, absent for the company-wide
+    // ceiling. Carried through to state (not just read at arrival) because
+    // the expiry effect below needs it too, to pick the right boundary —
+    // see `isBudgetProximityExpired`'s doc.
+    agentId?: string;
+  } | null>(null);
+  // Issue #1846 review (Codex #3864988188): company-scoped, and reset on
+  // company change for the same reason `workflowRunEvents`/`openTurns` are
+  // (see their own reset effects above) — this state has no company id on
+  // it, so switching without clearing left company A's warning rendered
+  // under company B until B dismissed it or emitted its own.
+  useEffect(() => {
+    setBudgetProximity((prev) => (prev === null ? prev : null));
+  }, [client, company]);
+  // Issue #1846 review (Codex #3866418899, refined by #3868962376 /
+  // #3869601278): bounded self-expiry, since the backend only ever
+  // publishes a `budget_proximity` frame while usage is at least 90%
+  // (`is_approaching_budget_ceiling`'s callers in `harness/built_in/mod.rs`)
+  // and never a "cleared" counterpart. Without this, a daily agent cap
+  // resetting at 00:00 UTC, a plan period rolling over, or an operator
+  // raising the cap all leave usage back below that threshold with nothing
+  // on the wire to say so, and the banner claimed the previous period's
+  // status forever.
+  //
+  // The boundary itself depends on `agentId` — see
+  // `isBudgetProximityExpired`/`budgetProximityExpiresAt`'s docs: a per-agent
+  // DAILY warning is anchored to the next UTC midnight (that reset's actual
+  // instant), but the COMPANY-WIDE warning has no such fixed boundary the
+  // console can compute, so it keeps the flat 24h ceiling instead — anchoring
+  // IT to midnight too would clear a still-valid warning hours or days before
+  // its own (not-necessarily-UTC-day-aligned) plan period actually ends. A
+  // dispatch that is STILL near the cap re-publishes its own frame well
+  // inside the window, which reaches this effect as a new `budgetProximity`
+  // value and re-arms the timer, so a genuinely ongoing warning never
+  // flickers off mid-window.
+  useEffect(() => {
+    if (budgetProximity === null) return;
+    if (isBudgetProximityExpired(budgetProximity.atMillis, Date.now(), budgetProximity.agentId)) {
+      setBudgetProximity(null);
+      return;
+    }
+    const remainingMs =
+      budgetProximityExpiresAt(budgetProximity.atMillis, budgetProximity.agentId) - Date.now();
+    const timer = setTimeout(() => setBudgetProximity(null), Math.max(remainingMs, 0));
+    return () => clearTimeout(timer);
+  }, [budgetProximity]);
+  /**
    * The company's people, id → label.
    *
    * Presence and typing frames carry a user id and no label — deliberately, so
@@ -2389,6 +2456,14 @@ export function AppShell({
       },
       [typing],
     ),
+    onBudgetProximityEvent: useCallback((event: CompanyStreamEvent) => {
+      if (event.type !== "budget_proximity") return;
+      setBudgetProximity({
+        message: event.message,
+        atMillis: event.atMillis,
+        agentId: event.agentId,
+      });
+    }, []),
     onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
       // Both halves. The tick refreshes the durable history; the frames drive
       // the live canvas. Progress frames are far more frequent than outcomes,
@@ -2643,6 +2718,8 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
+              budgetProximity={budgetProximity}
+              onDismissBudgetProximity={() => setBudgetProximity(null)}
             />
           )}
           {view === "conversation" && (

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::ports::now_millis;
 use crate::ports::types::{
     Attachment, ChunkAddr, CompanyEvent, ContextChunk, ContextOp, ContextOpResult, Effect,
-    EffectGroup, LedgerEntry, OutboundMessage, Verdict,
+    EffectGroup, LedgerEntry, OnboardingStep, OutboundMessage, Verdict,
 };
 
 use super::wire::{EffectFrame, Role, WireEvent};
@@ -244,6 +244,16 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             by.id.clone(),
             format!("{} approval {approval_id}", verdict_word(*verdict)),
             "approval.resolved",
+        ),
+        // Issue #1805: the brain is told a stalled request got more time, so it
+        // can reason that it is still blocked but no longer racing a deadline.
+        // Structural only, like the parked/resolved arms beside it — the id and
+        // who extended it, no payload.
+        CompanyEvent::ApprovalExtended { approval_id, by } => (
+            Role::System,
+            by.id.clone(),
+            format!("extended approval {approval_id}"),
+            "approval.extended",
         ),
         CompanyEvent::FeedbackFiled { note } => (
             Role::User,
@@ -635,6 +645,28 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
                  it for approval"
             ),
             "workflow.child_call_not_offered",
+        ),
+        // Issue #1843. Structural, like every arm here: which step, not the
+        // company's whole activation state — the sidecar reads company
+        // activity for insight, and "this step completed" is the insight.
+        CompanyEvent::OnboardingStepCompleted { step } => {
+            let step_name = match step {
+                OnboardingStep::NameConfirmed => "name confirmed",
+                OnboardingStep::IntegrationConnected => "integration connected",
+                OnboardingStep::WorkflowRunSucceeded => "workflow run succeeded",
+            };
+            (
+                Role::System,
+                "activation".to_string(),
+                format!("Activation step completed: {step_name}"),
+                "activation.step_completed",
+            )
+        }
+        CompanyEvent::OnboardingCompleted { .. } => (
+            Role::System,
+            "activation".to_string(),
+            "Company activation completed".to_string(),
+            "activation.completed",
         ),
     };
     WireEvent {

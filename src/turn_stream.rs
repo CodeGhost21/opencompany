@@ -75,6 +75,8 @@ pub enum LiveFrame {
     Presence(PresenceFrame),
     /// Somebody is typing in a channel.
     Typing(TypingFrame),
+    /// A coarse "near your credit limit" warning (issue #1846).
+    BudgetProximity(BudgetProximityFrame),
 }
 
 impl LiveFrame {
@@ -110,6 +112,44 @@ impl From<TypingFrame> for LiveFrame {
     fn from(frame: TypingFrame) -> Self {
         Self::Typing(frame)
     }
+}
+
+impl From<BudgetProximityFrame> for LiveFrame {
+    fn from(frame: BudgetProximityFrame) -> Self {
+        Self::BudgetProximity(frame)
+    }
+}
+
+/// A coarse, non-blocking "near your credit limit" warning (issue #1846).
+///
+/// Rides the same ephemeral, journal-less bus as [`TurnStreamEvent`] and for
+/// the same reason: this is a soft heads-up, not an authoritative fact worth
+/// persisting — a console that missed one because it was offline sees the
+/// next one on the next dispatch, and there is nothing to "catch up" on. It
+/// is published **beside the existing pre-flight cap reads** in
+/// [`crate::harness::HarnessPool`]'s dispatch gate, reusing the meter read
+/// that already happens there — never a second query, and never a per-task
+/// cost estimate (that needs a net-new `TaskPlan` cost primitive and is
+/// explicitly out of scope here).
+///
+/// Fail-open by construction: this is emitted only on the branch where the
+/// meter read already SUCCEEDED and a coarse threshold was crossed. An
+/// unreadable meter publishes nothing, exactly like the pre-flight refusals
+/// beside it fall through to running the turn rather than bricking dispatch.
+#[derive(Clone, Debug, Serialize)]
+pub struct BudgetProximityFrame {
+    /// Always `"budget_proximity"`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// The teammate whose dispatch triggered the read, when the warning is
+    /// scoped to one agent's own cap. `None` for the company-wide ceiling.
+    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// An operator-facing sentence — no raw figures the config threshold
+    /// might not want surfaced verbatim, just "you're near your limit".
+    pub message: String,
+    #[serde(rename = "atMillis")]
+    pub at_millis: u64,
 }
 
 /// One person's presence changed.

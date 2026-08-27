@@ -432,8 +432,8 @@ fn the_outcome_resolves_graph_versus_not_automatable() {
 
     // Issue #873: no workflow, no reason and no refusal decided NOTHING, so it
     // is a non-answer rather than a verdict. The distinction is load-bearing —
-    // a verdict now settles Succeeded and converts the card to a one-off, and an
-    // empty object must do neither.
+    // a verdict now settles Declined (#1809) and converts the card to a one-off,
+    // and an empty object must do neither.
     let empty = parse_draft(r#"{"automatable":true}"#)
         .unwrap()
         .into_outcome();
@@ -1016,9 +1016,11 @@ async fn a_card_with_no_plan_builds_from_title_and_note() {
 /// A not-automatable answer returns the card to To-do with the reason and no
 /// proposal (decision D2c).
 ///
-/// Issue #873: the attempt settles **Succeeded**, and the card is converted to a
-/// `once` deliverable. It used to settle Failed and keep `workflow`, which is
-/// what trapped the card — see the loop test below.
+/// Issue #873 + #1809: the attempt settles **Declined** — its own terminal
+/// state, neither the failure it used to be (#873) nor the success that #873
+/// first repurposed — and the card is converted to a `once` deliverable. It used
+/// to settle Failed and keep `workflow`, which is what trapped the card — see the
+/// loop test below.
 #[tokio::test]
 async fn a_not_automatable_answer_returns_the_card_to_todo() {
     let reply = r#"{"automatable":false,"reason":"this only ever runs once"}"#;
@@ -1044,7 +1046,10 @@ async fn a_not_automatable_answer_returns_the_card_to_todo() {
         "no proposal on a not-automatable card"
     );
     assert!(after.note.unwrap().contains("done once"));
-    assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Succeeded);
+    // Issue #1809: a by-design decline is its own terminal state, not a failure
+    // and not a plain success — so the external "work that stopped" surface stops
+    // bucketing the compiler's correct refusal as the product breaking.
+    assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Declined);
 }
 
 /// The loop #873 reports, asserted at the seam that closes it.
@@ -1118,7 +1123,7 @@ async fn a_not_automatable_verdict_files_no_error_and_says_what_happened_to_the_
         .await
         .expect("read")
         .expect("the attempt row exists");
-    assert_eq!(row.status, RunStatus::Succeeded);
+    assert_eq!(row.status, RunStatus::Declined);
     assert!(
         row.error.is_none(),
         "a verdict is not an error: {:?}",
@@ -1495,6 +1500,7 @@ async fn seed_workflow(runtime: &Arc<CompanyRuntime>, id: &str, name: &str) {
         runtime.store(),
         Some(runtime.events()),
         raw,
+        None,
         None,
     )
     .await

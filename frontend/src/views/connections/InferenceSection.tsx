@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BrainCircuit, Check, Loader2, RotateCcw, Save, Trash2, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getInferenceStatus,
+  listInferenceModels,
   restartInference,
   revertInference,
   setInference,
   testInference,
   type InferenceMutation,
+  type InferenceModel,
   type InferenceProvider,
   type InferenceStatus,
   type UsageMetering,
@@ -97,10 +99,18 @@ const PROVIDERS: Record<
     acceptsKey: true,
     requiresBaseUrl: false,
     keyKind: "an OpenRouter key (`sk-or-…`)",
-    // OpenRouter's recommended DeepSeek pairing, prefilled.
+    // Fallback only, used before the first status read resolves —
+    // `presetFor` prefers the host's own `defaultTierModels` once it has
+    // loaded, so this copy cannot drift from `DEFAULT_TIER_MODELS` and stay
+    // wrong (issue #1838 follow-up).
     preset: {
       baseUrl: "",
-      models: { "chat-v1": "deepseek/deepseek-chat", "reasoning-v1": "deepseek/deepseek-r1" },
+      models: {
+        "chat-v1": "anthropic/claude-sonnet-5",
+        "reasoning-v1": "openai/gpt-5.6-sol-pro",
+        "agentic-v1": "anthropic/claude-opus-5",
+        "vision-v1": "qwen/qwen3.8-max",
+      },
     },
   },
   ollama: {
@@ -138,11 +148,22 @@ const METERING_NOTES: Record<UsageMetering, string> = {
 };
 
 /** Per-provider form defaults applied when the operator picks a provider. */
-function presetFor(provider: InferenceProvider): {
+function presetFor(
+  provider: InferenceProvider,
+  defaultTierModels?: Partial<Record<Tier, string>>,
+): {
   baseUrl: string;
   models: Partial<Record<Tier, string>>;
 } {
-  return PROVIDERS[provider].preset;
+  const preset = PROVIDERS[provider].preset;
+  // The host's own `defaultTierModels` (from `GET …/inference`) is the source
+  // of truth once it has loaded; `PROVIDERS.openrouter.preset.models` is only
+  // the fallback used before that first status read resolves, so switching to
+  // OpenRouter still has something to prefill with immediately.
+  if (provider === "openrouter" && defaultTierModels && Object.keys(defaultTierModels).length > 0) {
+    return { ...preset, models: defaultTierModels };
+  }
+  return preset;
 }
 
 type Load = "loading" | "ready" | "unavailable" | "error";
@@ -151,6 +172,146 @@ type TestState =
   | { kind: "loading" }
   | { kind: "ok"; note: string }
   | { kind: "error"; message: string };
+
+type ModelCatalogState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; models: InferenceModel[] }
+  | { kind: "empty" }
+  | { kind: "error" };
+
+/** Keep a stored custom id selectable even after the registry no longer lists it. */
+function optionsForTier(catalog: InferenceModel[], current: string): InferenceModel[] {
+  if (!current || catalog.some((model) => model.id === current)) return catalog;
+  return [{ id: current, name: "Current custom model" }, ...catalog];
+}
+
+/**
+ * The tier model select's value for "no override — fall back to
+ * `model_for_tier`'s own default for this tier".
+ *
+ * Not `""`: an empty string is Base UI Select's own placeholder/unset
+ * sentinel, so a real option needs a value of its own — the same reason
+ * `AgentDetailView`'s `HARNESS_DEFAULT` exists. `""` is what `models[tier]`
+ * already uses to mean "no override" on the wire (`stripProxyIncompatible`,
+ * `save()`'s `cleanModels` filter), so the boundary is translated at the one
+ * point that crosses it, the select's `onValueChange` below.
+ *
+ * Without this item, a keyed company with a saved override had no way to
+ * clear it back to the tier default once the catalog loaded: the select only
+ * ever offered concrete models, selecting one only replaced the override, and
+ * Reset discards the whole provider configuration and key rather than one
+ * tier (issue #1838 follow-up).
+ */
+const TIER_DEFAULT_MODEL = "__tier_default__";
+
+/**
+ * The tier model select's value for "the operator wants to type an id
+ * themselves rather than pick one off the registry."
+ *
+ * The catalog select otherwise only ever offers ids OpenRouter's registry
+ * already lists. `optionsForTier` keeps an *already-stored* custom id
+ * selectable once it is there, but nothing let an operator enter a *new* one
+ * once the catalog loaded — and the registry can lag a model OpenRouter only
+ * just published, or list it under a slightly different slug. `model_for_tier`
+ * forwards any concrete override verbatim, so the runtime has always accepted
+ * an unlisted id; only the picker stopped offering a way to type one (issue
+ * #1838 follow-up).
+ */
+const CUSTOM_MODEL = "__custom_model__";
+
+function modelLabel(model: InferenceModel): string {
+  return model.name ? `${model.name} — ${model.id}` : model.id;
+}
+
+function modelItems(models: InferenceModel[]): Record<string, string> {
+  return Object.fromEntries(models.map((model) => [model.id, modelLabel(model)]));
+}
+
+/**
+ * Whether `value`, once trimmed, is one of the exact two shapes the
+ * platform's subscription proxy accepts for a tier override: a bare tier
+ * name (`model_for_tier` reads that as "not really an override — let the
+ * platform resolve this tier itself"), or the proxy's own explicit
+ * three-segment `openrouter/<author>/<model>` passthrough form. Everything
+ * else — including a raw OpenRouter registry id (`<author>/<model>`), which
+ * `model_for_tier` forwards to the proxy verbatim and the proxy rejects — is
+ * incompatible.
+ *
+ * Whitelisting the two accepted shapes, not blacklisting the one known-bad
+ * one (issue #1838 follow-up, ninth instance): an earlier version asked "is
+ * this shaped like a raw catalog id?" and treated everything else, including
+ * *any* slashless string, as a safe bare-tier passthrough. `model_for_tier`
+ * honours an override verbatim on the proxied path regardless of its shape
+ * (see `src/company/inference.rs`), so an operator typing a real but
+ * unnamespaced model id out of direct-path habit — `gpt-4o`, `llama3`, no
+ * `/` in sight — read as "a bare tier id, not an override at all" and rode
+ * straight through Save. The platform endpoint's curated tier registry does
+ * not know `gpt-4o`; the request fails instead of the incompatible value
+ * being dropped the way the console's own warning promises. Naming the tier
+ * names outright closes that gap without reopening the ones the shape-based
+ * check below still exists to catch.
+ *
+ * Shape-based rather than catalog-membership-based on purpose (issue #1838
+ * follow-up, third and fourth instance): checking membership in the loaded
+ * catalog only answers the question once the catalog has actually loaded,
+ * and a raw `<author>/<model>` id breaks the proxy whether or not it happens
+ * to appear in whatever catalog snapshot we managed to fetch — an id the
+ * operator typed by hand that just isn't in the catalog (yet, or ever) fails
+ * the exact same way a catalog-picked one does. Keying off the shape instead
+ * means every caller gets the same, correct answer with no dependency on a
+ * network fetch having already resolved.
+ *
+ * The `openrouter/` prefix alone is not enough to confirm the passthrough
+ * shape (issue #1838 follow-up, fifth instance): OpenRouter's own registry
+ * owns two-segment ids under that same author name, such as
+ * `openrouter/auto`, and a plain `startsWith` mistook one for the proxy's
+ * three-segment `openrouter/<author>/<slug>` form. That let `model_for_tier`
+ * forward a raw registry id straight through under the same "already the
+ * proxy's own form" exemption meant for ids the proxy actually accepts.
+ * Counting the segments is what actually distinguishes the two shapes.
+ *
+ * Trimmed before any shape check (issue #1838 follow-up, seventh instance):
+ * this runs inside `stripProxyIncompatible`, which `save()` calls *before*
+ * its own trim pass over `models` (surrounding whitespace only gets cleaned
+ * up after this check would already have run). Untrimmed, a pasted
+ * ` openrouter/anthropic/model ` fails `startsWith("openrouter/")` on the
+ * leading space and gets classified as incompatible — silently dropped here
+ * even though it is exactly the three-segment passthrough form the proxy
+ * accepts and the later trim would have normalized it to.
+ */
+function isProxyCompatible(value: string): boolean {
+  const trimmed = value.trim();
+  if ((TIERS as readonly string[]).includes(trimmed)) return true;
+  if (!trimmed.includes("/")) return false;
+  if (!trimmed.startsWith("openrouter/")) return false;
+  return trimmed.split("/").length >= 3;
+}
+
+/**
+ * Drop tier overrides that the platform's subscription proxy would reject —
+ * the one place every "about to save under the proxy" call site funnels
+ * through, so the rule can't drift out of sync with itself between the
+ * live-edit effect, `save()`, and `removeKey()` the way three separate partial
+ * implementations of it already had (issue #1838 follow-up).
+ *
+ * Also the one place a kept value is trimmed (issue #1838 follow-up, seventh
+ * instance): `save()` trims `models` again after this runs, but `removeKey()`
+ * sends `carriedModels` straight to the wire with no trim pass of its own —
+ * so a kept id has to come out of here already normalized, or a pasted
+ * ` openrouter/anthropic/model ` would survive Remove Key with its whitespace
+ * intact even though it correctly survives the shape check.
+ */
+function stripProxyIncompatible<T extends string>(
+  models: Partial<Record<T, string>>,
+): Partial<Record<T, string>> {
+  const next = {} as Partial<Record<T, string>>;
+  for (const key of Object.keys(models) as T[]) {
+    const value = models[key];
+    if (value && isProxyCompatible(value)) next[key] = value.trim();
+  }
+  return next;
+}
 
 /**
  * Bring-Your-Own-Key inference (issue #56). Shows the company's effective
@@ -186,11 +347,19 @@ export function InferenceSection({
     "save" | "reset" | "test" | "removeKey" | "restart" | null
   >(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogState>({ kind: "idle" });
 
   // Switch form.
   const [provider, setProvider] = useState<InferenceProvider>("managed");
   const [baseUrl, setBaseUrl] = useState("");
   const [models, setModels] = useState<Partial<Record<Tier, string>>>({});
+  /**
+   * Tiers the operator switched from the catalog select into free-text entry
+   * via the "Enter a model id" option, so a registry that has not caught up
+   * to a newly published model does not leave them stuck picking from a list
+   * that will never contain it (issue #1838 follow-up).
+   */
+  const [manualEntryTiers, setManualEntryTiers] = useState<ReadonlySet<Tier>>(new Set());
   const [key, setKey] = useState("");
   const [pendingProvider, setPendingProvider] = useState<InferenceProvider | null>(null);
   /**
@@ -269,13 +438,149 @@ export function InferenceSection({
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    let current = true;
+    if (provider !== "openrouter") {
+      setModelCatalog({ kind: "idle" });
+      return () => {
+        current = false;
+      };
+    }
+
+    setModelCatalog({ kind: "loading" });
+    void listInferenceModels(client, company)
+      .then((catalog) => {
+        if (!current) return;
+        setModelCatalog(catalog.length ? { kind: "ready", models: catalog } : { kind: "empty" });
+      })
+      .catch(() => {
+        if (current) setModelCatalog({ kind: "error" });
+      });
+
+    return () => {
+      current = false;
+    };
+  }, [client, company, provider]);
+
+  /**
+   * Whether saving right now would ride the platform's subscription proxy
+   * rather than go straight to OpenRouter with a tenant key.
+   *
+   * The proxy only resolves an abstract tier (or its own `openrouter/…`
+   * passthrough form, off by default) — see `model_for_tier` in
+   * `src/company/inference.rs`. The catalog picker below stores the
+   * registry's raw `<author>/<model>` id verbatim, which is exactly the form
+   * the proxy rejects. `key` is write-only and never comes back from the
+   * host, so "no key typed" only means proxied when the stored config is not
+   * already a direct, keyed OpenRouter connection.
+   *
+   * Hoisted above the early return below so the clear-on-transition effect
+   * that follows can depend on it — hooks cannot come after a conditional
+   * return.
+   */
+  const wouldSaveProxied =
+    key.trim().length === 0 && !(status?.provider === "openrouter" && status.keyConfigured);
+
+  /**
+   * Drop a catalog-shaped tier override the moment the form would save
+   * proxied (issue #1838 follow-up).
+   *
+   * A keyless company can type a key, pick a model from the catalog select —
+   * which stores the registry's raw `<author>/<model>` id verbatim — and then
+   * clear the key again before Save. `wouldSaveProxied` flips back to `true`
+   * and the free-text input reappears, but nothing cleared the value it
+   * inherited from the select, so Save still persists that raw id as an
+   * override. `model_for_tier` honours overrides verbatim on *both* paths, so
+   * the proxy receives a model namespace it rejects. The same thing happens
+   * without ever touching a key at all: switching a keyless company onto
+   * OpenRouter installs that provider's raw-id presets (`PROVIDERS.openrouter
+   * .preset.models`) up front, and Save is not disabled while the catalog is
+   * still loading or has failed.
+   *
+   * Runs off `stripProxyIncompatible`'s shape check, not catalog membership —
+   * an earlier version of this effect only stripped a value present in the
+   * *loaded* catalog, so it did nothing while `modelCatalog.kind` was
+   * `"loading"` or `"error"`, letting a raw preset or catalog-picked id ride
+   * straight through Save during that window (issue #1838 follow-up, third
+   * instance). A tier id the operator typed by hand that is not a raw
+   * `<author>/<model>` id — a bare tier passthrough, or the proxy's own
+   * `openrouter/<author>/<model>` form — is left alone either way.
+   *
+   * Folds the strip into `baseline` in the same pass, not just `models` —
+   * but only for the tiers the strip actually touched. `pickProvider` seeds
+   * both together from the same preset, so skipping `baseline` here left it
+   * holding the raw ids this effect had just stripped out of `models` — and
+   * `hasTypedDraft()` reads any such gap as an operator draft, however it
+   * got there. That flipped a same-tick `pickProvider("openrouter")` →
+   * `pickProvider(<something else>)` (typing a key in between, never
+   * touching Base URL or a model field) into an unwanted "Replace the
+   * provider draft?" confirmation, because this effect's own cleanup — not
+   * anything the operator typed — was the entire difference `hasTypedDraft()`
+   * saw. An automatic proxy-safety strip is no more a typed draft than the
+   * preset it is correcting; `baseline` has to move with it for the same
+   * reason it moves with the preset itself.
+   *
+   * Merging only the *changed* tiers into `baseline.models` (not replacing
+   * the whole map with `next`) matters because `next` is a full snapshot of
+   * every tier, stripped or not. A keyless operator can edit several tiers
+   * in the same proxied window — say a hand-typed passthrough id on one
+   * tier that `stripProxyIncompatible` leaves alone, alongside a raw
+   * catalog id on another that it strips. Setting `baseline.models = next`
+   * wholesale would silently promote that untouched tier's draft into the
+   * baseline too, since `next` carries it through unchanged — and
+   * `hasTypedDraft()` would then see baseline and draft agree and let a
+   * provider switch discard it without the confirmation dialog, even though
+   * the operator never asked for that edit to become the new baseline
+   * (issue #1838 follow-up, eighth instance).
+   *
+   * Latched to the *edge* of entering a proxied window, not every render
+   * inside one (issue #1838 follow-up, sixth instance). `models` has to stay
+   * a dependency — it is what changed when a catalog pick or Remove Key's
+   * carry-over needs catching — but that means this effect also re-runs on
+   * every keystroke into the free-text input `wouldSaveProxied` itself put on
+   * screen (`useFreeText` below), because typing calls `setModel` the same as
+   * any other write to `models`. `openrouter/<author>/<model>` only reaches
+   * three segments once the id is complete, so a strip that fires on every
+   * render caught the field mid-word — after `openrouter/`, after
+   * `openrouter/a` — and cleared it before an operator typing one by hand
+   * could ever finish it. `stripProxyIncompatible` normalizes a *settled*
+   * value; applying it while the value is still being composed is the bug,
+   * not a stricter version of the fix. `strippedForWindow` records that the
+   * strip already ran for the current proxied window and skips re-running it
+   * until the window closes (provider leaves `openrouter`, or a key makes
+   * `wouldSaveProxied` false again) and a new one opens — which is exactly
+   * the set of transitions (`pickProvider`, typing then clearing a key) this
+   * effect exists to catch.
+   */
+  const strippedForWindow = useRef(false);
+  useEffect(() => {
+    if (provider !== "openrouter" || !wouldSaveProxied) {
+      strippedForWindow.current = false;
+      return;
+    }
+    if (strippedForWindow.current) return;
+    strippedForWindow.current = true;
+    const next = stripProxyIncompatible(models);
+    const changedTiers = TIERS.filter((tier) => (next[tier] ?? "") !== (models[tier] ?? ""));
+    if (changedTiers.length === 0) return;
+    setModels(next);
+    setBaseline((b) => ({
+      ...b,
+      models: {
+        ...b.models,
+        ...Object.fromEntries(changedTiers.map((tier) => [tier, next[tier]])),
+      },
+    }));
+  }, [provider, wouldSaveProxied, models]);
+
   function pickProvider(next: InferenceProvider) {
     setProvider(next);
-    const preset = presetFor(next);
+    const preset = presetFor(next, status?.defaultTierModels);
     setBaseUrl(preset.baseUrl);
     setModels(preset.models);
     setBaseline({ baseUrl: preset.baseUrl, models: preset.models });
     setTest({ kind: "idle" });
+    setManualEntryTiers(new Set());
   }
 
   /**
@@ -331,8 +636,19 @@ export function InferenceSection({
       if (provider === "managed" && !key.trim() && !status?.keyConfigured) {
         result = await revertInference(client, company);
       } else {
+        // Belt-and-suspenders alongside the live-edit effect above: that
+        // effect strips a proxy-incompatible draft value out of `models`
+        // asynchronously, after the state update that made
+        // `wouldSaveProxied` true has committed. Re-applying the same
+        // shape-based strip here means Save can never persist a raw
+        // catalog id under the proxy even in the window before that effect
+        // has run (issue #1838 follow-up).
+        const draftModels =
+          provider === "openrouter" && wouldSaveProxied
+            ? stripProxyIncompatible(models)
+            : models;
         const cleanModels = Object.fromEntries(
-          Object.entries(models)
+          Object.entries(draftModels)
             .map(([t, v]) => [t, (v ?? "").trim()])
             .filter(([, v]) => v.length > 0),
         );
@@ -372,6 +688,32 @@ export function InferenceSection({
     setBusy("removeKey");
     const effective = (status?.provider as InferenceProvider) ?? provider;
     try {
+      let carriedModels =
+        status && Object.keys(status.models).length ? status.models : undefined;
+      // Clearing the key on OpenRouter flips this company onto the platform
+      // proxy immediately (`wouldSaveProxied` above). A catalog-picked raw
+      // `<author>/<model>` id is exactly what that proxy rejects —
+      // `model_for_tier` honours an override verbatim on both paths. The
+      // live-edit effect above already drops that id out of the *draft form*
+      // the moment the transition happens there, but Remove Key echoes back
+      // `status.models` — the *stored* config — straight past that effect, so
+      // an id saved while keyed survives this transition and breaks every
+      // proxied call afterwards (issue #1838 follow-up).
+      //
+      // Shape-based (`stripProxyIncompatible`), not a fresh catalog fetch: an
+      // earlier version of this block fetched the registry here and, on
+      // failure, fell back to sending the stored overrides completely
+      // unfiltered — which is exactly the condition an unreachable registry
+      // produces, so the one case this fallback existed for was also the one
+      // case guaranteed to break every proxied tier (issue #1838 follow-up,
+      // fourth instance). `stripProxyIncompatible` needs nothing from the
+      // network, so there is no failure mode left to fall back from, and a
+      // tier id the operator typed by hand (not shaped like a raw catalog id)
+      // is still left alone, same as the live-edit effect.
+      if (effective === "openrouter" && carriedModels) {
+        const kept = stripProxyIncompatible(carriedModels);
+        carriedModels = Object.keys(kept).length ? (kept as Record<string, string>) : undefined;
+      }
       await setInference(client, company, {
         provider: effective,
         // Only echo the resolved base URL back for the providers that require
@@ -379,7 +721,7 @@ export function InferenceSection({
         // a well-known default, and persisting the *displayed* value would pin
         // the company to it — silently overriding `OPENCOMPANY_INFERENCE_URL`.
         baseUrl: PROVIDERS[effective]?.requiresBaseUrl ? status?.baseUrl || undefined : undefined,
-        models: status && Object.keys(status.models).length ? status.models : undefined,
+        models: carriedModels,
         key: "",
       });
       toast.success("Removed the company key. Teammates fall back on their next turn.");
@@ -697,20 +1039,178 @@ export function InferenceSection({
                 </div>
 
                 {provider !== "managed" && (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {TIERS.map((tier) => (
-                      <div key={tier} className="space-y-1">
-                        <Label htmlFor={`inference-model-${tier}`} className="text-xs">
-                          {tier}
-                        </Label>
-                        <Input
-                          id={`inference-model-${tier}`}
-                          value={models[tier] ?? ""}
-                          placeholder="provider model id"
-                          onChange={(e) => setModel(tier, e.target.value)}
-                        />
-                      </div>
-                    ))}
+                  <div className="space-y-2">
+                    {provider === "openrouter" && modelCatalog.kind === "error" && (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-testid="inference-model-catalog-fallback"
+                      >
+                        OpenRouter&apos;s model list could not be loaded. Enter model ids directly.
+                      </p>
+                    )}
+                    {provider === "openrouter" && modelCatalog.kind === "empty" && (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-testid="inference-model-catalog-empty"
+                      >
+                        OpenRouter returned no models. Enter model ids directly.
+                      </p>
+                    )}
+                    {/*
+                      `kind !== "idle"` is a no-op here — the effect above
+                      only ever sets "idle" when `provider !== "openrouter"`,
+                      which the surrounding check already excludes. Left in
+                      as a defensive guard against that invariant changing,
+                      not a live branch.
+
+                      "loading" used to be excluded like "idle", but a
+                      keyless company's free-text input (`useFreeText` below
+                      is true here because `wouldSaveProxied` is one of its
+                      conditions) is already editable and Save-able during a
+                      cold catalog fetch, which can run for up to ten
+                      seconds. Withholding the warning until "ready" left
+                      that whole window silent: an id typed and saved while
+                      still loading was dropped by `stripProxyIncompatible`
+                      with no explanation (issue #1838 follow-up).
+                    */}
+                    {provider === "openrouter" &&
+                      modelCatalog.kind !== "idle" &&
+                      wouldSaveProxied && (
+                        <p
+                          className="text-xs text-muted-foreground"
+                          data-testid="inference-model-catalog-proxied"
+                        >
+                          Without an OpenRouter key this runs on the shared subscription, which only
+                          resolves a tier name. A specific model id typed above will be dropped on
+                          Save. Add a key to pick a specific model, or enter a tier id directly.
+                        </p>
+                      )}
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {TIERS.map((tier) => {
+                        const value = models[tier] ?? "";
+                        // Whether this tier is in manual entry *by the
+                        // operator's own choice* — as opposed to the other
+                        // `useFreeText` reasons below, which are the catalog
+                        // giving out on its own and offer no way back to a
+                        // select this render.
+                        const manualEntry = manualEntryTiers.has(tier);
+                        const useFreeText =
+                          provider !== "openrouter" ||
+                          modelCatalog.kind === "error" ||
+                          modelCatalog.kind === "empty" ||
+                          wouldSaveProxied ||
+                          manualEntry;
+                        const options =
+                          modelCatalog.kind === "ready"
+                            ? optionsForTier(modelCatalog.models, value)
+                            : value
+                              ? [{ id: value }]
+                              : [];
+
+                        return (
+                          <div key={tier} className="space-y-1">
+                            <Label htmlFor={`inference-model-${tier}`} className="text-xs">
+                              {tier}
+                            </Label>
+                            {useFreeText ? (
+                              <div className="space-y-1">
+                                <Input
+                                  id={`inference-model-${tier}`}
+                                  value={value}
+                                  placeholder="provider model id"
+                                  onChange={(e) => setModel(tier, e.target.value)}
+                                />
+                                {/* Only the operator's own "enter a model id"
+                                    choice gets a way back — the other
+                                    `useFreeText` reasons (no key, no catalog)
+                                    have no select to return to this render. */}
+                                {manualEntry && modelCatalog.kind === "ready" && (
+                                  <button
+                                    type="button"
+                                    className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                                    data-testid={`inference-model-back-to-catalog-${tier}`}
+                                    onClick={() =>
+                                      setManualEntryTiers((prev) => {
+                                        const next = new Set(prev);
+                                        next.delete(tier);
+                                        return next;
+                                      })
+                                    }
+                                  >
+                                    Choose from the OpenRouter catalog instead
+                                  </button>
+                                )}
+                              </div>
+                            ) : (
+                              <Select
+                                value={value || null}
+                                disabled={modelCatalog.kind !== "ready"}
+                                onValueChange={(next) => {
+                                  if (!next) return;
+                                  if (next === CUSTOM_MODEL) {
+                                    setManualEntryTiers((prev) => new Set(prev).add(tier));
+                                    return;
+                                  }
+                                  setModel(tier, next === TIER_DEFAULT_MODEL ? "" : String(next));
+                                }}
+                                items={{
+                                  [TIER_DEFAULT_MODEL]: "Use the tier default",
+                                  [CUSTOM_MODEL]: "Enter a model id…",
+                                  ...modelItems(options),
+                                }}
+                              >
+                                <SelectTrigger
+                                  id={`inference-model-${tier}`}
+                                  className="w-full"
+                                  data-testid={`inference-model-select-${tier}`}
+                                >
+                                  <SelectValue
+                                    placeholder={
+                                      modelCatalog.kind === "loading"
+                                        ? "Loading OpenRouter models…"
+                                        : "Choose a model"
+                                    }
+                                  />
+                                  {modelCatalog.kind === "loading" && (
+                                    <Loader2 className="size-3.5 animate-spin" />
+                                  )}
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {value && (
+                                    <SelectItem
+                                      value={TIER_DEFAULT_MODEL}
+                                      data-testid={`inference-model-clear-${tier}`}
+                                    >
+                                      <span>Use the tier default</span>
+                                    </SelectItem>
+                                  )}
+                                  {options.map((model) => (
+                                    <SelectItem key={model.id} value={model.id}>
+                                      <span>{model.name ?? model.id}</span>
+                                      {model.name && (
+                                        <span className="font-mono text-xs text-muted-foreground">
+                                          {model.id}
+                                        </span>
+                                      )}
+                                    </SelectItem>
+                                  ))}
+                                  {/* The registry can lag a model OpenRouter
+                                      only just published — this is the way out
+                                      of "pick from what the catalog happens to
+                                      list today" (issue #1838 follow-up). */}
+                                  <SelectItem
+                                    value={CUSTOM_MODEL}
+                                    data-testid={`inference-model-custom-${tier}`}
+                                  >
+                                    <span>Enter a model id…</span>
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
 

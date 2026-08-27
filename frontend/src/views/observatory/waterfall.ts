@@ -14,8 +14,16 @@
  * is really parallel until you can see the overlap.
  */
 
-/** How a span should be tinted — the run-health vocabulary, not a new one. */
-export type SpanState = "done" | "failed" | "running" | "blocked";
+/**
+ * How a span should be tinted — the run-health vocabulary, not a new one.
+ *
+ * `idle` is the closed set's neutral word (docs/design-system/color.md): the
+ * tone `run-health.ts` already gives `stopped` and `stranded` for "nothing is
+ * happening and nothing went wrong". A by-design decline (issue #1809) reaches
+ * for it too — it is a clean terminal outcome, but not a success, so it must
+ * not share `done`'s green.
+ */
+export type SpanState = "done" | "failed" | "running" | "blocked" | "idle";
 
 /** One bar: an agent doing one thing over an interval. */
 export interface Span {

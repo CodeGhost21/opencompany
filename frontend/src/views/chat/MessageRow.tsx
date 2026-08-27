@@ -8,7 +8,9 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
+import { isBudgetPauseNotice } from "@/hooks/use-events";
 import { timeAgo } from "@/lib/language";
+import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { MessageAttachments } from "./MessageAttachments";
 import { cn } from "@/lib/utils";
 import {
@@ -78,6 +80,31 @@ interface Props {
    * `undefined` is unknown — an older host — and marks nothing.
    */
   cognition?: CognitionState | null;
+  /**
+   * The Add-Credits CTA (issue #1846): redeems the parked re-issue marker for
+   * a budget-paused teammate. `undefined` when the shell has not wired
+   * redemption — the notice still renders, just without a working button.
+   *
+   * Carries the clicked notice's own `message.id` alongside the agent id
+   * (issue #1846 review, Codex #3868962374) — the caller binds the redeem to
+   * the marker THIS card was rendered from, rather than whatever is live at
+   * click time.
+   */
+  onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
+  /** The agent id whose redeem is currently in flight, so only that row's
+   * button shows a busy state and the others stay clickable. */
+  redeemingBudgetPauseAgent?: string | null;
+  /**
+   * Agent id -> the message id of that agent's most recently parked
+   * budget-pause notice (issue #1846 review, Codex #3864988184).
+   *
+   * The backend keeps at most one marker per agent — a fresh pause overwrites
+   * the last — so a notice that is not this row disables the CTA rather than
+   * offering to redeem a marker that belongs to a different, newer pause than
+   * the one on screen. Computed once in `MessageTimeline` (the only place
+   * with the whole channel's history) and passed straight through.
+   */
+  latestBudgetPauseMessageIdByAgent?: Map<string, string>;
 }
 
 /**
@@ -148,6 +175,9 @@ export function MessageRow({
   taskStatusByTaskId,
   now = Date.now(),
   cognition,
+  onRedeemBudgetPause,
+  redeemingBudgetPauseAgent,
+  latestBudgetPauseMessageIdByAgent,
 }: Props) {
   const { message, sender, continuation, replies } = entry;
   const chips = reactionChips(message.reactions);
@@ -156,7 +186,16 @@ export function MessageRow({
   const taskWorking = isTaskWorking(taskStatus);
   const elapsed = taskWorking ? taskElapsedLabel(taskStatus?.startedAt, now) : null;
 
-  if (sender.kind === "system") return <SystemPill message={message} />;
+  if (sender.kind === "system") {
+    return (
+      <SystemPill
+        message={message}
+        onRedeemBudgetPause={onRedeemBudgetPause}
+        redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+        latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+      />
+    );
+  }
 
   return (
     <article
@@ -285,10 +324,44 @@ export function MessageRow({
  * always has, as plain text. There is no icon and no chip here on purpose: this
  * is one short sentence, and dressing it up would give a status line more visual
  * weight than the messages around it.
+ *
+ * **Except one** (issue #1846): a budget-pause notice is a terminal state the
+ * operator has exactly one lever for, and a plain sentence buries that lever.
+ * It renders as a highlighted card with an "Add credits" button instead of the
+ * plain pill every other system line still gets.
  */
-function SystemPill({ message }: { message: ChatMessage }) {
+function SystemPill({
+  message,
+  onRedeemBudgetPause,
+  redeemingBudgetPauseAgent,
+  latestBudgetPauseMessageIdByAgent,
+}: {
+  message: ChatMessage;
+  // Issue #1846 review (Codex #3868962374): carries `message.id` alongside
+  // the agent id, so the caller can bind the redeem to the SPECIFIC marker
+  // this card was rendered from — see `ChatView.redeemBudgetPause`'s doc for
+  // why a live re-read at click time cannot do that on its own.
+  onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
+  redeemingBudgetPauseAgent?: string | null;
+  latestBudgetPauseMessageIdByAgent?: Map<string, string>;
+}) {
   const className =
     "rounded-full bg-muted px-3 py-1 text-center text-xs text-muted-foreground";
+
+  // Issue #1846 review (Codex #3870168372): extracted to `BudgetPauseNoticeCard`
+  // so `ThreadPanel` can render the SAME card for a notice that answered a
+  // thread reply — see that component's own doc.
+  if (isBudgetPauseNotice(message.text)) {
+    return (
+      <BudgetPauseNoticeCard
+        message={message}
+        onRedeemBudgetPause={onRedeemBudgetPause}
+        redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+        latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+      />
+    );
+  }
+
   return (
     <div className="flex justify-center px-4 py-1">
       {message.taskId ? (
