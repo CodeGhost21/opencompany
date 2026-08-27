@@ -41,6 +41,7 @@
 
 use crate::Result;
 use crate::ports::TaskStore;
+use crate::ports::notifications::{Notification, NotificationStore, Subject, SubjectKind};
 use crate::ports::now_millis;
 use crate::ports::runs::RunStatus;
 use crate::ports::tasks::{
@@ -151,6 +152,53 @@ pub async fn advance_settled_card(
 pub fn bounced_reason(column: &str, status: RunStatus, reason: &str) -> Option<String> {
     (column == COLUMN_TODO && matches!(status, RunStatus::Failed | RunStatus::Cancelled))
         .then(|| reason.to_string())
+}
+
+/// Files the durable "a board card's dispatch failed and bounced back to
+/// To-do" notification (issue #1865).
+///
+/// Shared by every system path that settles a run its own turn did not —
+/// [`CompanyRuntime::abandon_run`](crate::company::runtime::CompanyRuntime::abandon_run),
+/// the cycle's terminality backstop, and the boot reaper's card sweep in
+/// [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build) — so a
+/// crash-recovered dispatch failure is announced exactly like a live one
+/// instead of only picking up the bounce chip silently. Call this only after
+/// [`advance_settled_card`] actually reports the card landed on
+/// [`COLUMN_TODO`]; a run that settled without moving the card raises nothing.
+///
+/// Whole-company audience: a bounced card has no single decider the way a
+/// mention does, and its assignee is exactly who the card's own `assignee`
+/// field already names for anyone who opens it.
+///
+/// Best-effort and logged, never propagated: the dispatch has already failed,
+/// and a bookkeeping write cannot make that better or worse.
+pub async fn notify_dispatch_failed(
+    notifications: &dyn NotificationStore,
+    company: &CompanyId,
+    task_id: &str,
+    reason: &str,
+) {
+    let note = Notification {
+        id: crate::ports::generate_id(),
+        kind: "dispatch_failed".to_string(),
+        subject: Subject {
+            kind: SubjectKind::Task,
+            id: task_id.to_string(),
+        },
+        created_at: now_millis(),
+        title: format!("A card's dispatch failed and returned to To-do: {reason}"),
+        audience: None,
+        context: None,
+    };
+    if let Err(err) = notifications.append(company, &note).await {
+        tracing::warn!(
+            company = %company,
+            task = %task_id,
+            error = %err,
+            "[runs] a dispatch-failure notification could not be recorded; the card still \
+             bounced, but nobody is badged for it"
+        );
+    }
 }
 
 /// The note a card gets when a planning pass was interrupted by the host going

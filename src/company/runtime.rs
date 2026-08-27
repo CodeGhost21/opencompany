@@ -1241,36 +1241,21 @@ impl CompanyRuntime {
         }
     }
 
-    /// Files a durable notification that a board card's dispatch failed and it
-    /// bounced back to To-do (issue #1865) — shared by every system path that
-    /// settles a run its own turn did not: [`abandon_run`](Self::abandon_run),
-    /// the cycle's terminality backstop, and the boot reaper's card sweep.
-    ///
-    /// Whole-company audience: a bounced card has no single decider the way a
-    /// mention does, and its assignee is exactly who the card's own `assignee`
-    /// field already names for anyone who opens it.
+    /// Thin `&self` wrapper around
+    /// [`advance::notify_dispatch_failed`](crate::runtime::advance::notify_dispatch_failed)
+    /// for the two callers that already hold a live [`CompanyRuntime`]:
+    /// [`abandon_run`](Self::abandon_run) and the cycle's terminality
+    /// backstop. The boot reaper's card sweep runs before a `CompanyRuntime`
+    /// exists, so it calls the shared function directly — see that doc for
+    /// the full three-caller picture.
     pub(crate) async fn notify_dispatch_failed(&self, task_id: &str, reason: &str) {
-        let note = crate::ports::notifications::Notification {
-            id: crate::ports::generate_id(),
-            kind: "dispatch_failed".to_string(),
-            subject: crate::ports::notifications::Subject {
-                kind: crate::ports::notifications::SubjectKind::Task,
-                id: task_id.to_string(),
-            },
-            created_at: now_millis(),
-            title: format!("A card's dispatch failed and returned to To-do: {reason}"),
-            audience: None,
-            context: None,
-        };
-        if let Err(err) = self.notifications().append(&self.id, &note).await {
-            tracing::warn!(
-                company = %self.id,
-                task = %task_id,
-                error = %err,
-                "[runs] a dispatch-failure notification could not be recorded; the card still \
-                 bounced, but nobody is badged for it"
-            );
-        }
+        crate::runtime::advance::notify_dispatch_failed(
+            self.notifications().as_ref(),
+            &self.id,
+            task_id,
+            reason,
+        )
+        .await;
     }
 
     /// Mints this dispatch's [`RunStatus::Pending`] attempt row and returns its
