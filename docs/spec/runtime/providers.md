@@ -174,8 +174,8 @@ resource shared by every tenant on the host, not something scoped per company.
 | property | value |
 |---|---|
 | cache lifetime | 1 hour (`MODEL_CATALOG_TTL`) |
-| fetch timeout | 10 seconds (`MODEL_CATALOG_TIMEOUT`) — a console page-load waits at most this long on a cold cache |
-| concurrent misses | coalesced onto a single upstream fetch (`ModelCatalogCache::fetch_lock`) — after startup or a TTL expiry, several console requests arriving together do not each fire their own OpenRouter call |
+| fetch timeout | 10 seconds (`MODEL_CATALOG_TIMEOUT`) — a console page-load waits at most this long on a cold cache, whatever its position in a `fetch_lock` queue |
+| concurrent misses | coalesced onto a single upstream fetch (`ModelCatalogCache::fetch_lock`) — after startup or a TTL expiry, several console requests arriving together do not each fire their own OpenRouter call. The lock wait and the fetch share one timeout budget per caller, so a caller queued behind others during an outage is not left waiting `N × MODEL_CATALOG_TIMEOUT` for its turn to fail too |
 | malformed entries | skipped individually rather than failing the whole response, so one bad record does not hide every valid model the registry returned |
 | response ordering | sorted by model id, distinct from the provider order `discover_models` preserves for the local/custom setup probe |
 

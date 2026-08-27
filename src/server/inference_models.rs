@@ -175,38 +175,66 @@ pub(crate) fn openrouter_cache() -> &'static ModelCatalogCache {
 /// OpenRouter, and re-checks the cache after acquiring it, so only the first
 /// caller through actually fetches — everyone behind it reads what that
 /// fetch just stored instead of duplicating the upstream call.
+///
+/// Bounded across the *whole* queue-wait-plus-fetch, not just the fetch
+/// itself (issue #1838 follow-up): a failed fetch stores nothing, so during
+/// a registry outage each queued caller would otherwise acquire the lock in
+/// turn and run its own fresh `MODEL_CATALOG_TIMEOUT`-bounded attempt — the
+/// Nth caller through the queue waiting roughly `N * MODEL_CATALOG_TIMEOUT`
+/// before ever finding out, breaking the "a console page-load waits at most
+/// [`MODEL_CATALOG_TIMEOUT`]" contract this module documents
+/// (`docs/spec/runtime/providers.md`). Wrapping the lock acquisition and the
+/// fetch in one `tokio::time::timeout` keeps every individual caller's own
+/// wall-clock budget fixed at `MODEL_CATALOG_TIMEOUT`, however many callers
+/// are already ahead of it in the queue.
 pub(crate) async fn openrouter_models() -> Result<Vec<InferenceModel>, String> {
     let now = Instant::now();
     if let Some(models) = openrouter_cache().lookup(now) {
         return Ok(models);
     }
 
-    let _fetch_guard = openrouter_cache().fetch_lock.lock().await;
-    // Another caller may have already refilled the cache while we waited for
-    // the lock — re-check before fetching again.
-    let now = Instant::now();
-    if let Some(models) = openrouter_cache().lookup(now) {
-        return Ok(models);
-    }
+    let outcome = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, async {
+        let _fetch_guard = openrouter_cache().fetch_lock.lock().await;
+        // Another caller may have already refilled the cache while we waited
+        // for the lock — re-check before fetching again.
+        let now = Instant::now();
+        if let Some(models) = openrouter_cache().lookup(now) {
+            return Ok(models);
+        }
 
-    let fetch = discover_models(crate::company::inference::OPENROUTER_BASE_URL, None);
-    let mut models = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, fetch)
-        .await
-        .map_err(|_| {
-            format!(
-                "OpenRouter's model registry did not answer within {} seconds",
-                MODEL_CATALOG_TIMEOUT.as_secs()
-            )
-        })??;
-    if models.is_empty() {
-        return Err("OpenRouter's model registry returned no models".to_string());
+        let mut models = discover_models(crate::company::inference::OPENROUTER_BASE_URL, None)
+            .await
+            .map_err(FetchError::Failed)?;
+        if models.is_empty() {
+            return Err(FetchError::Failed(
+                "OpenRouter's model registry returned no models".to_string(),
+            ));
+        }
+        // Sorted here, not in `parse_models`: this is the operator-facing
+        // catalog picker's own copy, while `parse_models` also serves
+        // `setup.rs`'s local/custom probe, which relies on provider order.
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        openrouter_cache().store(models.clone(), now);
+        Ok(models)
+    })
+    .await;
+
+    match outcome {
+        Ok(Ok(models)) => Ok(models),
+        Ok(Err(FetchError::Failed(message))) => Err(message),
+        Err(_elapsed) => Err(format!(
+            "OpenRouter's model registry did not answer within {} seconds",
+            MODEL_CATALOG_TIMEOUT.as_secs()
+        )),
     }
-    // Sorted here, not in `parse_models`: this is the operator-facing
-    // catalog picker's own copy, while `parse_models` also serves
-    // `setup.rs`'s local/custom probe, which relies on provider order.
-    models.sort_by(|a, b| a.id.cmp(&b.id));
-    openrouter_cache().store(models.clone(), now);
-    Ok(models)
+}
+
+/// Distinguishes "the fetch itself failed" from the outer
+/// [`tokio::time::timeout`] elapsing in [`openrouter_models`], since both
+/// have to report through the same `Result` and the outer timeout's own
+/// message must win regardless of which inner step it interrupted.
+enum FetchError {
+    Failed(String),
 }
 
 #[cfg(test)]
@@ -391,5 +419,68 @@ mod tests {
             1,
             "only the first caller through fetch_lock should fetch; the rest must reuse its result"
         );
+    }
+
+    /// Regression for a P2 review finding on #1838's follow-up round, filed
+    /// against the single-flight fix directly above: `fetch_lock` serializes
+    /// misses, but a *failed* fetch stores nothing, so during a registry
+    /// outage every queued caller would previously run its own fresh
+    /// `bound`-length attempt after acquiring the lock — the Nth caller
+    /// through the queue waiting roughly `N * bound` before ever finding out,
+    /// which is exactly the docs/spec/runtime/providers.md "at most
+    /// `MODEL_CATALOG_TIMEOUT` seconds" promise this test defends. Mirrors
+    /// `openrouter_models`'s real composition (`tokio::time::timeout` wrapped
+    /// around lock-acquire + recheck + fetch) against the real
+    /// `ModelCatalogCache`, with a simulated fetch standing in for
+    /// `discover_models` so the assertion is deterministic instead of racing
+    /// a real HTTP timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_queued_caller_never_waits_longer_than_the_catalog_timeout() {
+        use std::sync::Arc;
+
+        let cache = Arc::new(ModelCatalogCache::default());
+        // Short enough to keep the suite fast, long enough that three tasks
+        // queuing on one real `tokio::sync::Mutex` stay well-ordered.
+        let bound = Duration::from_millis(120);
+        let fetch_delay = Duration::from_millis(80);
+
+        async fn bounded_miss(
+            cache: Arc<ModelCatalogCache>,
+            bound: Duration,
+            fetch_delay: Duration,
+        ) {
+            let _ = tokio::time::timeout(bound, async {
+                let _fetch_guard = cache.fetch_lock.lock().await;
+                let now = Instant::now();
+                if cache.lookup(now).is_some() {
+                    return;
+                }
+                // Simulates a registry that is down: takes real time, then
+                // fails without storing anything — so the next caller through
+                // the lock faces the same empty cache this one did.
+                tokio::time::sleep(fetch_delay).await;
+            })
+            .await;
+        }
+
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    bounded_miss(cache, bound, fetch_delay).await;
+                    started.elapsed()
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let elapsed = handle.await.expect("task must not panic");
+            assert!(
+                elapsed <= bound + Duration::from_millis(40),
+                "a caller waited {elapsed:?}, which exceeds its own {bound:?} budget by more \
+                 than scheduling slack — queue position must not multiply the wait"
+            );
+        }
     }
 }
