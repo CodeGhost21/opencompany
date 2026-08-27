@@ -1268,6 +1268,42 @@ impl BudgetPauseSet {
         }
     }
 
+    /// Retires the parked marker for `agent` only if its saved request text
+    /// still matches `expected_message` — otherwise leaves it untouched and
+    /// returns `None`.
+    ///
+    /// Issue #1846 review (Codex #3869792503): the sibling of
+    /// [`redeem_matching`](Self::redeem_matching), for the OTHER caller that
+    /// retires a marker without redeeming it — `run_inner`'s "this agent's
+    /// turn just succeeded without pausing" cleanup. Plain
+    /// [`redeem`](Self::redeem) there retired WHATEVER was parked for the
+    /// agent the moment ANY turn of theirs succeeded, which is correct for
+    /// the manual-resend scenario it was written for (the very request the
+    /// marker names came back and worked) but wrong when a DIFFERENT,
+    /// unrelated turn for the same agent — an automatic background task, a
+    /// second chat message about something else — happens to succeed first:
+    /// that silently drops the marker (and its CTA) for the STILL-unretried
+    /// original request, which reads to the operator as "nothing to
+    /// resend" even though their original ask was never reissued.
+    ///
+    /// Matching on [`BudgetPauseMarker::message`] — the ORIGINAL request text
+    /// the marker exists to re-send — rather than `id`: the caller has no
+    /// marker id to compare against here (nothing was ever read back the way
+    /// the console's redeem click reads one), only the text of whatever turn
+    /// just ran. A resend, by construction, runs with the SAME text the
+    /// marker parked; an unrelated success does not.
+    pub fn retire_if_message_matches(
+        &self,
+        agent: &str,
+        expected_message: &str,
+    ) -> Option<BudgetPauseMarker> {
+        let mut by_agent = self.by_agent.lock().expect("budget-pause set poisoned");
+        match by_agent.get(agent) {
+            Some(marker) if marker.message == expected_message => by_agent.remove(agent),
+            _ => None,
+        }
+    }
+
     /// Restores a marker the caller reserved via [`redeem`](Self::redeem) but
     /// whose redispatch failed to complete — guarded on absence (issue #1846
     /// review, Codex #3865395849, replacing the peek/redeem_matching shape

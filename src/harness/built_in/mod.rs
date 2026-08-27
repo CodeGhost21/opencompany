@@ -3741,27 +3741,41 @@ impl HarnessPool {
                 marker_id = %marker.id,
                 "[budget-pause] parked a re-issue marker; the operator can redeem it once credits are added"
             );
-        } else if let Some(stale) =
-            crate::runtime::grants::budget_pauses_for(company).redeem(agent_id)
-        {
+        } else if let Some(stale) = {
+            // Issue #1846 review (Codex #3869792503): match on the SAME
+            // saved-request text `park_message` above parks a marker under,
+            // not an unconditional `redeem` — an unrelated turn for this
+            // agent (an automatic background task, a second chat message
+            // about something else entirely) succeeding first must not
+            // silently drop the marker for a DIFFERENT, still-unretried
+            // original request. A resend, by construction, runs with the
+            // same text the marker parked; an unrelated success does not.
+            let candidate_message = crate::runtime::grants::current_redeem_context()
+                .text
+                .clone()
+                .unwrap_or_else(|| message.to_string());
+            crate::runtime::grants::budget_pauses_for(company)
+                .retire_if_message_matches(agent_id, &candidate_message)
+        } {
             // Issue #1846 review (Codex #3868962381): this turn just
             // completed WITHOUT pausing, which is proof the account that
             // blocked the LAST turn now has budget again — whether the
             // operator got there by clicking "Add credits & resend" (which
-            // already took the marker itself, so `redeem` here finds nothing)
-            // or, as the notice's own copy also invites, by manually adding
-            // credits and resending the message from the composer, bypassing
-            // the CTA/redeem route entirely. Only the second path used to
-            // leave the marker parked: nothing but a click on THIS specific
-            // CTA ever consumed it, so a manual resend left a stale marker
-            // and its stale CTA sitting on the old notice indefinitely.
-            // Clicking it later would silently re-dispatch the OLD message a
-            // second time — a duplicate, and for a non-idempotent request, a
+            // already took the marker itself, so this finds nothing) or, as
+            // the notice's own copy also invites, by manually adding credits
+            // and resending the message from the composer, bypassing the
+            // CTA/redeem route entirely. Only the second path used to leave
+            // the marker parked: nothing but a click on THIS specific CTA
+            // ever consumed it, so a manual resend left a stale marker and
+            // its stale CTA sitting on the old notice indefinitely. Clicking
+            // it later would silently re-dispatch the OLD message a second
+            // time — a duplicate, and for a non-idempotent request, a
             // duplicate side effect the operator never asked for.
             //
-            // `redeem`, not a peek-then-drop: single atomic take, same as
-            // every other consumer of this set, so a concurrent CTA click
-            // racing this retire cannot double-consume the same marker.
+            // `retire_if_message_matches`, not a peek-then-drop: single
+            // atomic check-and-take, same as every other consumer of this
+            // set, so a concurrent CTA click racing this retire cannot
+            // double-consume the same marker.
             tracing::info!(
                 company = %company,
                 agent = %agent_id,
@@ -7549,6 +7563,127 @@ description = "Builds the product."
                 .is_none(),
             "the stale marker parked above must be retired once this agent has a successful \
              turn again, even though nothing ever redeemed it"
+        );
+    }
+
+    /// Issue #1846 review (Codex #3869792503) — **the regression.** The
+    /// sibling test above proves a genuine RESEND retires its own marker;
+    /// this proves an UNRELATED success for the same agent does not retire
+    /// somebody else's still-unretried marker.
+    ///
+    /// An agent has at most one parked marker (`BudgetPauseSet` overwrites by
+    /// agent id), so two DIFFERENT requests cannot both be "the" pause at
+    /// once — but a marker parked for request A can still be live when an
+    /// entirely separate request B for the same agent (an automatic
+    /// background task, a second chat message) happens to succeed. Before
+    /// this fix, that success unconditionally retired A's marker too — the
+    /// operator's original ask (A) was never reissued, yet its CTA would
+    /// report "nothing to resend" as though it had been.
+    ///
+    /// Proof this pins the fix and not a coincidence: reverting
+    /// `retire_if_message_matches`'s match guard back to an unconditional
+    /// take (this file's `run_inner`, or `BudgetPauseSet::retire_if_message_matches`
+    /// itself) makes the final `peek` below find `None` instead of the still-
+    /// parked marker for request A.
+    #[tokio::test]
+    async fn an_unrelated_success_does_not_retire_a_different_requests_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-retire-mismatch-regress");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            // Succeeds against a request B's text — deliberately DIFFERENT
+            // from request A's, parked below.
+            provider: Arc::new(ScriptedProvider::new(vec![
+                Ok(
+                    "Filed under Q3 planning.".to_string()
+                );
+                4
+            ])),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        // Request A: paused, still unretried — parked directly, standing in
+        // for a genuine earlier pause.
+        crate::runtime::grants::budget_pauses_for(&company).park(
+            "ceo",
+            Some("general".to_string()),
+            "Please summarize today's standup notes.",
+            "Paused — ceo's turn ran out of inference budget/credits.",
+            crate::ports::now_millis(),
+            crate::runtime::grants::RedeemContext::default(),
+        );
+
+        // Request B: a completely different ask for the SAME agent, which
+        // succeeds — an automatic background task landing before the
+        // operator ever gets to A's CTA, per the finding's own example.
+        let outcome = pool
+            .run(&company, "ceo", "File this under Q3 planning.", &deps, None)
+            .await
+            .expect("request B succeeds against the scripted reply");
+        assert!(outcome.budget_paused.is_none(), "request B must not pause");
+
+        let marker = crate::runtime::grants::budget_pauses_for(&company)
+            .peek("ceo")
+            .expect(
+                "request A's marker must survive an unrelated request B succeeding — A was \
+                 never reissued",
+            );
+        assert_eq!(
+            marker.message, "Please summarize today's standup notes.",
+            "the marker still parked must be request A's, untouched by B's success"
         );
     }
 
