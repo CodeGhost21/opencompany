@@ -63,6 +63,35 @@ repository credential would sit on that filesystem in plaintext. A
 MongoDB-backed company that wants it adds `repo.*` here and on the teammates
 that need it.
 
+#### Granting a credential-gated namespace from the console (issue #1796)
+
+`[tools].allow` is seed-authoritative: a rebuild re-persists it from
+`company.toml`, and for `[tools]` that is a security property rather than an
+implementation detail. That left the credential-gated integrations above with no
+way in on a hosted tenant, where the manifest is a read-only boot snapshot baked
+into the image — so a company could connect Chargebee from the console, see
+**Connected**, and reach no teammate, with the page correctly reporting that it
+"cannot be fixed from this page".
+
+A connect surface can now add the grant itself, through `PUT …/tools/grants`
+([the write plane](api-write-plane.md)). It is an attributed operator override
+folded into the effective list, **not** a manifest write, and it is bounded two
+ways:
+
+- **A closed list.** `CONSOLE_GRANTABLE_NAMESPACES` is exactly the five the
+  console holds a credential form for — `chargebee`, `composio`, `hosting`,
+  `paypal`, `search`. Granting is the second half of an action the operator
+  already took against an account they already hold. `shell`, `code` and `web`
+  have no such form and are not grantable from any page.
+- **Version control still wins.** A `[tools]` edit in `company.toml` clears
+  every console grant on the next rebuild. This layer only ever *widens*, so a
+  grant outliving a seed edit would be a runtime capability surviving the
+  operator revoking it — the named harm the seed-wins rule exists to prevent.
+
+Narrowing is unchanged and lives one level down: the console withdraws a
+namespace it granted, and takes capability *away* through desk ceilings, never
+by subtracting from the company's own list.
+
 **Desk — `[[group_chat]].tools`.** A department's ceiling. A company organises
 its teammates into desks — a finance desk, a creative desk — and this is where
 "nobody on this desk reaches the web" is stated once instead of repeated on
