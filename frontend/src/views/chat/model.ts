@@ -2,6 +2,7 @@
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
 import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
+import { isBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
 import { clearTaskCard, type ChatMessage, type Reaction } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
@@ -37,6 +38,89 @@ export function deskFromDto(d: DeskDto): Desk {
  * steps into Tasks, Settings, or any other view and comes back.
  */
 export type Transcripts = Record<string, ChatMessage[]>;
+
+/**
+ * The message id of the MOST RECENT budget-pause notice per agent,
+ * COMPANY-WIDE — not scoped to one channel (issue #1846 review, Codex
+ * #3865395879).
+ *
+ * The backend keeps at most one parked marker per agent, full stop: a pause
+ * in channel A followed by a pause for the SAME agent in channel B overwrites
+ * A's marker with B's, regardless of which channel either happened in. This
+ * used to be computed from a single channel's `items` inside `MessageTimeline`
+ * — correct for the channel that is actually open, but wrong for any OTHER
+ * channel holding an older notice for an agent who has since paused again
+ * elsewhere: reopening that channel, its own last notice still reads as the
+ * newest ONE IT has seen, so the "Add credits & resend" button stayed
+ * enabled — and clicking it silently redeemed the newer, different-channel
+ * marker and resent that unrelated message under the stale card.
+ *
+ * Folding over every channel in `transcripts` (which `AppShell` keeps live
+ * for the whole company over SSE, not merely the currently open one) is what
+ * actually matches the backend's one-marker-per-agent truth. Sorted by each
+ * message's own `at` timestamp rather than by scan order, because iterating
+ * one channel's array to completion before moving to the next would NOT
+ * yield cross-channel chronological order on its own.
+ */
+export function latestBudgetPauseMessageIdByAgent(transcripts: Transcripts): Map<string, string> {
+  const latest = new Map<string, { messageId: string; at: number }>();
+  for (const messages of Object.values(transcripts)) {
+    for (const message of messages) {
+      if (!isBudgetPauseNotice(message.text)) continue;
+      const agentId = parseBudgetPauseAgent(message.text);
+      if (agentId == null) continue;
+      const seen = latest.get(agentId);
+      if (seen == null || message.at >= seen.at) {
+        latest.set(agentId, { messageId: message.id, at: message.at });
+      }
+    }
+  }
+  const out = new Map<string, string>();
+  for (const [agentId, { messageId }] of latest) out.set(agentId, messageId);
+  return out;
+}
+
+/**
+ * Folds one `GET …/budget-pause` read into `ChatView`'s
+ * `budgetPauseMarkerByNotice` cache (issue #1846 review, Codex #3868962374)
+ * — the notice-render-time read that replaces redeeming off a live re-read
+ * at click time. Pure so it can be pinned directly; there is no
+ * component-test harness in this project to mount the effect it backs (see
+ * `budget-pause-notice.test.ts`'s header doc for the same constraint).
+ *
+ * Never overwrites an id already cached for `messageId` — the FIRST
+ * successful read for a given notice is the one that landed closest to when
+ * the card actually appeared, which is exactly the property this cache
+ * exists to buy: a later read racing a background re-park would otherwise
+ * silently replace the correct id with a newer, unrelated one.
+ */
+export function mergeBudgetPauseMarkerRead(
+  prev: Map<string, string>,
+  messageId: string,
+  markerId: string,
+): Map<string, string> {
+  if (prev.has(messageId)) return prev;
+  const next = new Map(prev);
+  next.set(messageId, markerId);
+  return next;
+}
+
+/**
+ * The marker id `redeemBudgetPause` should send for a click on `noticeMessageId`
+ * (issue #1846 review, Codex #3868962374): the notice-render-time cached read
+ * when one landed in time, else `liveFallback` — a live read performed AT
+ * click time, for the narrow case the cache has nothing yet (a click landing
+ * faster than the render-time `GET` resolved). Falling back rather than
+ * refusing the click keeps this no worse than the pre-fix behaviour, which
+ * always read live at click time.
+ */
+export function budgetPauseRedeemId(
+  noticeMessageId: string,
+  markerByNotice: Map<string, string>,
+  liveFallback: string | undefined,
+): string | undefined {
+  return markerByNotice.get(noticeMessageId) ?? liveFallback;
+}
 
 /**
  * How far a channel's persisted history has got, per channel.

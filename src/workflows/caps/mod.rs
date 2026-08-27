@@ -1840,10 +1840,32 @@ impl HarnessAgentRunner {
         // A capped turn is a real, partial checkpoint rather than a completed
         // answer. Keep the engine's typed `LimitStop` outcome below, but do not
         // let the durable attempt claim that this node finished successfully.
+        //
+        // Issue #1846 review (Codex #3864988168): a budget pause gets the same
+        // treatment, for the same reason. The model call itself errored, so
+        // `outcome.reply` is the pause notice, not an answer — before this it
+        // fell into the `else` arm below, the attempt settled `Succeeded`, and
+        // the pause text flowed downstream through `=items` as if it were the
+        // node's real output. There is no engine-level resume for this today
+        // (see `StopReason::Paused`'s own doc — an agent node is not
+        // re-enterable), so this reuses the already-supported `LimitStop`
+        // shape rather than inventing a resume path this PR does not wire: the
+        // node blocks the branch exactly as a capped turn does, and the durable
+        // per-agent marker `run_background_workflow` already parked is what the
+        // console's "Add credits & resend" redeems — outside the engine, via
+        // the same `OperatorMessage` cycle path every redeem takes.
         let (status, error) = if outcome.hit_iteration_cap {
             (
                 crate::ports::RunStatus::Failed,
                 Some("agent stopped at the max_tool_iterations cap before finishing".to_string()),
+            )
+        } else if let Some(pause) = &outcome.budget_paused {
+            (
+                crate::ports::RunStatus::Failed,
+                Some(format!(
+                    "agent paused for lack of inference budget/credits: {}",
+                    pause.summary
+                )),
             )
         } else {
             (crate::ports::RunStatus::Succeeded, None)
@@ -1885,9 +1907,18 @@ impl AgentRunner for HarnessAgentRunner {
         // `StopReason::Paused`: `run_turn` returns `Err` for it so the runner can
         // reclassify the node as Blocked, and an agent node is not re-enterable
         // (see the #881 block above). Nothing here changes that.
+        // Issue #1846 review (Codex #3864988168): a budget pause is the same
+        // "reads like a finished answer but is not one" shape `hit_iteration_cap`
+        // closes above, so it gets the same `LimitStop` override rather than
+        // falling into `Finished` and binding the pause notice downstream as a
+        // real result.
         let stop = if outcome.hit_iteration_cap {
             StopReason::LimitStop {
                 limit: "max_tool_iterations".to_string(),
+            }
+        } else if outcome.budget_paused.is_some() {
+            StopReason::LimitStop {
+                limit: "budget_exhausted".to_string(),
             }
         } else {
             StopReason::Finished
@@ -2359,6 +2390,7 @@ mod tests {
             hit_iteration_cap: false,
             abnormal_stop: None,
             halted_for_spend: None,
+            budget_paused: None,
         }
     }
 
@@ -2567,6 +2599,7 @@ mod tests {
             hit_iteration_cap: false,
             abnormal_stop: Some("[stopped: the agent declined to continue]".to_string()),
             halted_for_spend: None,
+            budget_paused: None,
         }));
         let board_claim = Arc::new(deps.delegations.claim_board("run-1880"));
         let publish_refusal_claim =

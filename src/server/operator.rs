@@ -2540,7 +2540,13 @@ async fn join_chat_turn(
 ///
 /// Runs inside the spawned turn (issue #882) so the record survives a client or
 /// proxy that gave up waiting.
-async fn journal_chat_replies(
+///
+/// `pub(crate)` since issue #1846 review (Codex #3870168362): the budget-pause
+/// redeem route (`server::ops::budget_pause`) re-enters `run_cycle`/
+/// `run_journaled_cycle` directly rather than through `spawn_chat_turn`, so it
+/// has no other path to this — and used to skip it entirely, discarding the
+/// redeemed turn's `CycleReport` and leaving its answer never journaled.
+pub(crate) async fn journal_chat_replies(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
     desk: &str,

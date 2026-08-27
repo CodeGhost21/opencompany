@@ -45,6 +45,7 @@ import {
   type FinancesDto,
   type GrantScope,
   type HarnessDto,
+  type BudgetPauseMarker,
   type InboxDto,
   type InboxMessageDto,
   type PageManifestDto,
@@ -878,6 +879,47 @@ export class OpenCompanyClient {
       body,
     );
     return isResolveReceipt(answer) ? answer : (answer as ChatResponse);
+  }
+
+  /**
+   * The parked budget-pause marker for an agent (issue #1846), or `null` when
+   * nothing is paused. Read-only — does not consume the marker.
+   */
+  getBudgetPause(
+    agentId: string,
+    company?: string | null,
+  ): Promise<BudgetPauseMarker | null> {
+    return this.request<BudgetPauseMarker | null>(
+      "GET",
+      `${this.scope(company)}/agents/${encodeURIComponent(agentId)}/budget-pause`,
+    );
+  }
+
+  /**
+   * The Add-Credits CTA (issue #1846): redeems the parked marker and
+   * re-dispatches the original message. Not true resume (#561) — a fresh
+   * turn runs from the top on the same chat thread the pause happened on.
+   *
+   * `expectedId` is the marker id the caller last read via
+   * {@link getBudgetPause} (issue #1846 review, Codex #3866418876 /
+   * #3866802268) — sent as `?id=` so the server can refuse with a `409` when
+   * a background turn (a workflow node, an unstreamed task) has since
+   * overwritten the SAME agent's marker with one that has no chat
+   * destination, rather than silently re-dispatching whatever is parked NOW
+   * under the assumption it is still what the operator clicked. Omitted only
+   * for a caller with no prior read to compare against, in which case the
+   * server falls back to its pre-fix unconditional redeem.
+   */
+  redeemBudgetPause(
+    agentId: string,
+    company?: string | null,
+    expectedId?: string | null,
+  ): Promise<BudgetPauseMarker> {
+    const qs = expectedId ? `?id=${encodeURIComponent(expectedId)}` : "";
+    return this.request<BudgetPauseMarker>(
+      "POST",
+      `${this.scope(company)}/agents/${encodeURIComponent(agentId)}/budget-pause/redeem${qs}`,
+    );
   }
 
   /**

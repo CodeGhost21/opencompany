@@ -509,7 +509,21 @@ impl<'a> CycleRunner<'a> {
             }
             None => self.rt.serial.clone().lock_owned().await,
         };
-        let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
+        // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
+        // the ambient `RedeemContext` for this cycle, read by every
+        // `BudgetPauseSet::park` call underneath it (the top-level turn, a
+        // CEO-relay call, a delegate's own turn) so a redeem replays the
+        // operator's ORIGINAL thread parent, deliverable choice, and
+        // resolved mentions instead of empty defaults. Derived from `events`
+        // before the batch moves into `run_locked` — see
+        // `RedeemContext::from_events` for why "first `OperatorMessage`" is
+        // the right read.
+        let redeem_context = crate::runtime::grants::RedeemContext::from_events(&events);
+        let outcome = crate::runtime::grants::with_redeem_context(
+            redeem_context,
+            self.run_locked(events, cycle_id.clone(), run_id),
+        )
+        .await;
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
         let error = outcome.as_ref().err().map(|err| err.to_string());

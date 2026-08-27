@@ -700,6 +700,22 @@ export const GRANT_DURATIONS: { label: string; millis: number }[] = [
  * structurally unable to be widened into an argument-matching rule, and why this
  * list needs no redaction of its own.
  */
+/**
+ * A durable re-issue marker (issue #1846), as
+ * `GET {scope}/agents/{agentId}/budget-pause` and its `/redeem` twin return
+ * it. Parked when a turn pauses for lack of inference budget/credits;
+ * redeeming re-dispatches `message` from the top on `chatId` (not true
+ * resume — see the endpoint's doc comment in `src/server/ops/budget_pause.rs`).
+ */
+export interface BudgetPauseMarker {
+  id: string;
+  agent: string;
+  chatId?: string;
+  message: string;
+  summary: string;
+  atMillis: number;
+}
+
 export interface StandingGrant {
   id: string;
   /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
