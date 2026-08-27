@@ -30,18 +30,27 @@ import { LIVE_BRAIN } from "./capabilities";
  * is the *response*, which is the actual production failure — a gateway cutting
  * a connection does not un-send the request.
  *
- * The pause between the two is what puts the frame in the window under test.
- * The offline echo brain answers in milliseconds, so during those seconds the
- * turn finishes and its `agent_reply` is pushed while the console still
+ * The pause between the two is what puts the frame in the window under test:
+ * the turn finishes and its `agent_reply` is pushed while the console still
  * believes its POST is in flight and is therefore still suppressing. Abort with
  * no pause and the suppression is lifted before the frame lands, which renders
  * it by the ordinary path and proves nothing about the outcome split.
+ *
+ * That pause used to be a fixed eight seconds, chosen because "the offline echo
+ * brain answers in milliseconds" — an assumption nothing enforced. When it did
+ * not hold, the spec could not tell "the frame was held and released" apart
+ * from "the frame did not exist yet", and reported the second as a 60-second
+ * wait for the first (issue #1885). It is now an observation:
+ * `awaitJournaledReply` blocks until the host has actually journaled this
+ * turn's reply, and only then is the connection cut. A slow host now delays
+ * this spec instead of failing it, and a host that never replies fails it with
+ * that stated plainly rather than as a timeout somewhere downstream.
  *
  * Nothing else can draw this reply, and the spec makes that true rather than
  * assuming it. The `202` body never reached the page, so no turn id was learned
  * from the POST — but the shell also arms its turn poll from `listRuns` at
  * mount, and the harness company this suite shares carries open desk work. A
- * run settling inside the eight-second pause takes the poll's terminal
+ * run settling inside that pause takes the poll's terminal
  * `chat/history` re-read with it, and that read folds in whatever the durable
  * transcript holds by then: this turn's own reply, drawn seconds before the
  * connection is cut.
@@ -62,8 +71,16 @@ import { LIVE_BRAIN } from "./capabilities";
 
 const ENGINEERING = { id: "engineering", channel: "engineering-desk" };
 
-/** How long the response is withheld before the connection is cut. */
-const CUT_AFTER_MS = 8_000;
+/**
+ * How long the released `agent_reply` frame is given to traverse the stream and
+ * be captured, once the host is KNOWN to have journaled the reply.
+ *
+ * Issue #1885: this replaces a fixed 8s `CUT_AFTER_MS` that stood in for "the
+ * turn has surely finished by now". The distinction is not the number — it is
+ * that this waits on one already-sent push rather than on a turn of unknown
+ * duration, so a slow host delays the spec instead of failing it.
+ */
+const FRAME_SETTLE_MS = 1_000;
 
 test.beforeEach(async ({ page }) => {
   // Same tour-skip shim the rest of the suite uses — the first-run modal
@@ -94,8 +111,26 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   // first: what is excluded is a re-read landing *during* the cut, not the
   // hydration the premise depends on.
   let holdHistory = false;
+  // The hydration request's own URL and credential, captured before the bar
+  // goes up, so the cut below can ask the HOST whether the reply exists yet —
+  // see `awaitJournaledReply`. Captured rather than reconstructed: this is the
+  // exact thread scope and auth the console itself uses, with no second source
+  // of truth for either to drift from.
+  let historyProbe: { url: string; auth: string | undefined } | null = null;
   await page.route("**/chat/history*", async (route) => {
     if (!holdHistory) {
+      const request = route.request();
+      // THIS thread's read, not merely the most recent one. Hydration fans out
+      // over every desk the console knows, so capturing unconditionally leaves
+      // the probe pointing at whichever finished last — which then never sees
+      // this turn at all. The thread rides the `desk` query param
+      // (`client.getChatHistory`).
+      if (new URL(request.url()).searchParams.get("desk") === ENGINEERING.id) {
+        historyProbe = {
+          url: request.url(),
+          auth: (await request.allHeaders()).authorization,
+        };
+      }
       await route.continue();
       return;
     }
@@ -105,6 +140,54 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
       body: "[]",
     });
   });
+
+  /**
+   * Block until the host has journaled this turn's reply, or throw.
+   *
+   * This is the premise the cut depends on, made an OBSERVATION rather than an
+   * assumption. The test claims a *held* frame is released, which is only true
+   * if the reply was emitted while the POST was still unresolved and therefore
+   * captured by `PendingSyncPosts`. The previous fixed `CUT_AFTER_MS` wait
+   * asserted that by hoping — "the offline echo brain answers in
+   * milliseconds" — and nothing enforced it, so the spec could not tell "the
+   * frame was held and released" apart from "the frame did not exist yet"
+   * (issue #1885).
+   *
+   * `page.request` is deliberate: an `APIRequestContext` is NOT subject to
+   * `page.route`, so this reads the real durable transcript while the page
+   * itself stays barred from it. The bar on the page is what keeps the
+   * assertions honest; it must not blind the test's own premise check too.
+   */
+  const awaitJournaledReply = async (): Promise<void> => {
+    const deadline = Date.now() + 60_000;
+    let lastStatus = "no history request was captured during hydration";
+    while (Date.now() < deadline) {
+      if (historyProbe) {
+        const probe: { url: string; auth: string | undefined } = historyProbe;
+        const response = await page.request
+          .get(probe.url, probe.auth ? { headers: { authorization: probe.auth } } : {})
+          .catch(() => null);
+        if (response == null) lastStatus = "the history probe request failed";
+        else if (!response.ok()) lastStatus = `history probe returned ${response.status()}`;
+        else {
+          const body = await response.text().catch(() => "");
+          // The REPLY, not the marker alone — the operator's own message
+          // carries the marker too and is journaled the moment the host
+          // accepts the turn, so matching that would cut before any reply
+          // existed and defeat the premise this wait exists to establish.
+          // Same text `reply()` locates in the DOM.
+          if (body.includes(`You said: ${marker}`)) return;
+          lastStatus = "the host has not journaled this turn's reply yet";
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(
+      `the host never journaled a reply for ${marker} within 60s — ${lastStatus}. ` +
+        "That is a real delivery failure, not a timing artefact of this spec: the turn was " +
+        "accepted and the connection was still open, so the reply should exist.",
+    );
+  };
 
   // What was on screen at the moment of the cut, read inside the handler and
   // asserted after it. An `expect` that throws inside a route handler aborts
@@ -125,7 +208,15 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
     // then is the answer thrown away. Holding the browser-facing response
     // keeps the POST in flight until the latch confirms the premise below.
     const response = await route.fetch();
-    await new Promise((resolve) => setTimeout(resolve, CUT_AFTER_MS));
+    // Wait for the reply to EXIST, not for a duration guessed to outlast it
+    // (issue #1885). Then a short settle so the `agent_reply` frame the host
+    // just pushed can traverse the stream and be captured while this POST is
+    // still unresolved — which is the state the assertions below are about.
+    // Bounded and small: it covers one push already known to have been sent,
+    // not an unbounded turn of unknown length, which is exactly the difference
+    // between this and the fixed wait it replaces.
+    await awaitJournaledReply();
+    await new Promise((resolve) => setTimeout(resolve, FRAME_SETTLE_MS));
     cuts += 1;
     // The premise, recorded rather than assumed: at the moment the connection
     // is cut, nothing has drawn this reply yet — it can only appear later from
