@@ -59,6 +59,16 @@ struct PatchCompanyInput {
     name: Option<String>,
 }
 
+/// Max length of the company's display name, matching the convention set by
+/// `MAX_WORKFLOW_NAME_LEN` (`src/company/workflow_create.rs`).
+///
+/// PR #1875 review finding: this name is embedded verbatim into every
+/// agent's system prompt (`persona_prompt`, `src/company/prompt.rs`), with no
+/// bound before this — an accidental pasted document is enough to inflate
+/// every model request until context limits are exceeded and workflows stop
+/// running.
+const COMPANY_NAME_MAX_CHARS: usize = 200;
+
 /// What the console gets back after a successful rename.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +113,12 @@ async fn patch_company(
         // `[company].name` — a console rejection and a `company.toml`
         // rejection must not describe the same requirement differently.
         return Err(refusal("`name` cannot be empty — give your company a name.").into());
+    }
+    if name.len() > COMPANY_NAME_MAX_CHARS {
+        return Err(refusal(&format!(
+            "a company name can be at most {COMPANY_NAME_MAX_CHARS} characters."
+        ))
+        .into());
     }
 
     let write_lock = company_write_lock(company.id());
@@ -243,6 +259,43 @@ mod tests {
             !reloaded.name_confirmed,
             "a refused write must not stamp the flag"
         );
+    }
+
+    /// PR #1875 review finding: an unbounded name is embedded verbatim into
+    /// every agent's system prompt (`persona_prompt`,
+    /// `src/company/prompt.rs`), so one oversized paste (an accidental
+    /// pasted document is enough) inflates every model request until
+    /// context limits are exceeded and workflows stop running.
+    #[tokio::test]
+    async fn an_oversized_name_is_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let too_long = "x".repeat(COMPANY_NAME_MAX_CHARS + 1);
+        let (status, _) = call(&state, &too_long).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let id = CompanyId::new("acme");
+        let store = state.registry().get(&id).unwrap().store().clone();
+        let reloaded = store.load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.manifest.company.name, "Provisional Co",
+            "a refused oversized name must not be persisted"
+        );
+        assert!(
+            !reloaded.name_confirmed,
+            "a refused write must not stamp the flag"
+        );
+    }
+
+    /// A name sitting exactly at the limit is still an ordinary rename.
+    #[tokio::test]
+    async fn a_name_at_the_limit_is_accepted() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let at_limit = "x".repeat(COMPANY_NAME_MAX_CHARS);
+        let (status, body) = call(&state, &at_limit).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], at_limit);
     }
 
     #[tokio::test]
