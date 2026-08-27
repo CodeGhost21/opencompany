@@ -2329,6 +2329,7 @@ mod tests {
             reply: "ok".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: false,
+            abnormal_stop: None,
             halted_for_spend: None,
         }
     }
