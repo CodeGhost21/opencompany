@@ -158,8 +158,8 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
    * itself stays barred from it. The bar on the page is what keeps the
    * assertions honest; it must not blind the test's own premise check too.
    */
-  const awaitJournaledReply = async (): Promise<void> => {
-    const deadline = Date.now() + 60_000;
+  const awaitJournaledReply = async (): Promise<string | null> => {
+    const deadline = Date.now() + 45_000;
     let lastStatus = "no history request was captured during hydration";
     while (Date.now() < deadline) {
       if (historyProbe) {
@@ -176,17 +176,13 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
           // accepts the turn, so matching that would cut before any reply
           // existed and defeat the premise this wait exists to establish.
           // Same text `reply()` locates in the DOM.
-          if (body.includes(`You said: ${marker}`)) return;
+          if (body.includes(`You said: ${marker}`)) return null;
           lastStatus = "the host has not journaled this turn's reply yet";
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error(
-      `the host never journaled a reply for ${marker} within 60s — ${lastStatus}. ` +
-        "That is a real delivery failure, not a timing artefact of this spec: the turn was " +
-        "accepted and the connection was still open, so the reply should exist.",
-    );
+    return lastStatus;
   };
 
   // What was on screen at the moment of the cut, read inside the handler and
@@ -195,6 +191,9 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   // run dies waiting for an error line that was never going to appear —
   // reporting a premise violation as a timeout somewhere else entirely.
   let repliesAtCut: number | null = null;
+  // Why the premise wait gave up, or `null` if it did not — asserted after the
+  // cut, never thrown inside the handler. See `awaitJournaledReply`.
+  let premiseFailure: string | null = null;
   let cutReady!: () => void;
   const cutReadyPromise = new Promise<void>((resolve) => {
     cutReady = resolve;
@@ -215,7 +214,14 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
     // Bounded and small: it covers one push already known to have been sent,
     // not an unbounded turn of unknown length, which is exactly the difference
     // between this and the fixed wait it replaces.
-    await awaitJournaledReply();
+    // Recorded, never thrown — the same discipline `repliesAtCut` below is
+    // written with, and for the same reason stated there: an exception inside
+    // a route handler aborts the HANDLER, so `route.abort` never runs, the
+    // POST never fails, and the run dies waiting for a `Couldn't send` line
+    // that was never going to appear. That reports a premise violation as a
+    // timeout somewhere else entirely, which is precisely the misdirection
+    // this spec is being fixed to stop making.
+    premiseFailure = await awaitJournaledReply();
     await new Promise((resolve) => setTimeout(resolve, FRAME_SETTLE_MS));
     cuts += 1;
     // The premise, recorded rather than assumed: at the moment the connection
@@ -244,6 +250,14 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   await cutReadyPromise;
   expect(cuts, "the chat POST must actually have been cut").toBe(1);
   expect(repliesAtCut, "nothing had drawn this reply when the connection was cut").toBe(0);
+  // Stated before the reply assertion below, so a host that never produced the
+  // reply is reported as exactly that rather than as a 60-second wait for a
+  // bubble that was never coming (issue #1885).
+  expect(
+    premiseFailure,
+    `the host never journaled a reply for ${marker} before the cut — a real delivery failure, ` +
+      "not a timing artefact: the turn was accepted and the connection was still open",
+  ).toBeNull();
 
   // …and the answer is on screen anyway, drawn from the frame that was held
   // while the POST's fate was unknown and released when it turned out to have
