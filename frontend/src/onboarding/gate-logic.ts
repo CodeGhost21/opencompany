@@ -108,3 +108,37 @@ export function resolveGateAdminCheckError(error: unknown): GateAdminCheckOutcom
   }
   return { settled: false };
 }
+
+/** What a failed `GET {scope}/activation` read (behind `useActivationGate`) resolves to. */
+export type ActivationReadOutcome =
+  | { settled: true }
+  | { settled: false };
+
+/**
+ * Classifies a `getActivation` failure for `useActivationGate`'s first read
+ * (PR #1875 review finding, round 3).
+ *
+ * The hook's old `catch { setChecked(true) }` treated every failure the same
+ * — a legacy host predating this route, a dropped connection, a proxy 5xx —
+ * which settles `checked` with `status` left `null`. `shouldShowOnboardingGate`
+ * renders the ordinary shell for that combination exactly as it would for
+ * "not checked yet", so a real (non-activated) company whose *first* read
+ * merely glitched got a multi-second window of the ordinary, unblocked shell
+ * before a later poll succeeded and the gate abruptly replaced it — worse
+ * than the same "abrupt" appearance on a normal first read, because that one
+ * lands before the operator has had any chance to start clicking around.
+ *
+ * A `404` is the one answer that is genuinely final: this host does not have
+ * the route at all, and retrying will not change that, so it settles —
+ * `status` stays `null` and the gate stays off, same as before this fix.
+ * Anything else (`ApiError` with any other status, or a raw `fetch` throw
+ * that never reached the host) is not an answer about *whether this company
+ * is activated* — `settled: false` tells the caller to retry rather than
+ * guess, sooner than the regular poll cadence.
+ */
+export function resolveActivationReadError(error: unknown): ActivationReadOutcome {
+  if (error instanceof ApiError && error.status === 404) {
+    return { settled: true };
+  }
+  return { settled: false };
+}

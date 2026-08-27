@@ -4,6 +4,7 @@ import type { ActivationStatus } from "@/api/activation";
 import { ApiError } from "@/api/types";
 import {
   type GateDecisionInput,
+  resolveActivationReadError,
   resolveGateAdminCheckError,
   shouldShowOnboardingGate,
 } from "@/onboarding/gate-logic";
@@ -155,6 +156,34 @@ describe("resolveGateAdminCheckError", () => {
 
   it("does not settle on a non-ApiError throw (e.g. a raw fetch TypeError)", () => {
     const outcome = resolveGateAdminCheckError(new TypeError("Failed to fetch"));
+    expect(outcome.settled).toBe(false);
+  });
+});
+
+// PR #1875 review finding, round 3: `useActivationGate`'s first-read catch
+// treated every failure the same — settle `checked` with `status` left
+// `null`. That is correct for a legacy host that will never have this route
+// (a `404`), but wrong for a transient failure (a dropped connection, a
+// 5xx): it fails the gate open for up to a full poll interval, on the very
+// read that decides whether a real, non-activated company gets blocked.
+describe("resolveActivationReadError", () => {
+  it("settles on a definitive 404 — this host has no such route", () => {
+    const outcome = resolveActivationReadError(new ApiError(404, "not_found", "no route"));
+    expect(outcome).toEqual({ settled: true });
+  });
+
+  it("does not settle on a network failure — retry instead of failing the gate open", () => {
+    const outcome = resolveActivationReadError(new ApiError(0, "network_error", "offline"));
+    expect(outcome.settled).toBe(false);
+  });
+
+  it("does not settle on a 5xx — the host, not the route, is the problem", () => {
+    const outcome = resolveActivationReadError(new ApiError(503, "unavailable", "quiescing"));
+    expect(outcome.settled).toBe(false);
+  });
+
+  it("does not settle on a non-ApiError throw (e.g. a raw fetch TypeError)", () => {
+    const outcome = resolveActivationReadError(new TypeError("Failed to fetch"));
     expect(outcome.settled).toBe(false);
   });
 });
