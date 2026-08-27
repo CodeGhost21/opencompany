@@ -30,6 +30,8 @@ pub mod billing;
 pub mod budget_pause;
 pub mod capabilities;
 pub mod company_key;
+/// Operator-set company logo, stored in the company manifest.
+pub mod company_logo;
 /// `PATCH {scope}` — the account-activation funnel's conscious naming step
 /// (issue #1844): sets the company's display name and stamps
 /// [`crate::ports::types::CompanyRecord::name_confirmed`]. See
@@ -210,6 +212,7 @@ pub fn router() -> Router<AppState> {
         .merge(billing::router())
         .merge(hosting::router())
         .merge(search::router())
+        .merge(company_logo::router())
         .merge(company_key::router())
         .merge(company_profile::router())
         .merge(composio::router())
