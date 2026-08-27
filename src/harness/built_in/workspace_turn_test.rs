@@ -189,6 +189,7 @@ fn folder(id: &str, name: &str) -> WorkspaceNode {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     }
 }
 
@@ -204,6 +205,7 @@ fn note(id: &str, name: &str, parent: &str) -> WorkspaceNode {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     }
 }
 

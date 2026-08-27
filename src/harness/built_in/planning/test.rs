@@ -391,6 +391,7 @@ fn workspace_paths_render_and_terminate() {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     let paths = workspace_paths(vec![
         node("1", "standards", None, NodeKind::Folder),
