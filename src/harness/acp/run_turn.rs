@@ -121,19 +121,24 @@ fn classify_stop_reason(raw: &str) -> StopKind {
 }
 
 /// The short, fixed note surfaced when a turn stopped for a reason other than
-/// `end_turn`. Appended regardless of whether there is prose alongside it, so
-/// a capped, refused, cancelled or unrecognized turn never reads like a clean
-/// finish. `EndTurn` returns an empty string; callers only invoke this for a
-/// non-`EndTurn` [`StopKind`].
-fn stop_reason_note(kind: StopKind, raw_stop_reason: &str) -> String {
+/// `end_turn`. Landed as its own [`TurnStep`] of kind
+/// [`TurnStepKind::Note`], never concatenated into
+/// [`TurnOutcome::reply`](crate::harness::TurnOutcome::reply) (PR #1880
+/// review) — the reply is the agent's own words, and folding a
+/// platform-generated notice into it would leave the operator unable to tell
+/// how much of the text the agent actually said. `EndTurn` returns `None`;
+/// callers only invoke this for a non-`EndTurn` [`StopKind`].
+fn stop_reason_note(kind: StopKind, raw_stop_reason: &str) -> Option<String> {
     match kind {
-        StopKind::EndTurn => String::new(),
+        StopKind::EndTurn => None,
         StopKind::MaxTokens => {
-            "[stopped: hit the token/iteration limit before finishing]".to_string()
+            Some("[stopped: hit the token/iteration limit before finishing]".to_string())
         }
-        StopKind::Refusal => "[stopped: the agent declined to continue]".to_string(),
-        StopKind::Cancelled => "[stopped: cancelled before finishing]".to_string(),
-        StopKind::Other => format!("[stopped: unrecognized stop reason \"{raw_stop_reason}\"]"),
+        StopKind::Refusal => Some("[stopped: the agent declined to continue]".to_string()),
+        StopKind::Cancelled => Some("[stopped: cancelled before finishing]".to_string()),
+        StopKind::Other => Some(format!(
+            "[stopped: unrecognized stop reason \"{raw_stop_reason}\"]"
+        )),
     }
 }
 
@@ -150,26 +155,14 @@ fn stop_reason_note(kind: StopKind, raw_stop_reason: &str) -> String {
 /// timeline as this turn's [`TurnStep`]s; restating them in a field meant to
 /// read as the agent's own words would only duplicate that exposure for no
 /// new information.
-fn synthesize_empty_reply(steps: &[TurnStep], kind: StopKind, raw_stop_reason: &str) -> String {
+fn synthesize_empty_reply(steps: &[TurnStep]) -> &'static str {
     let ran_tools = steps.iter().any(|step| step.kind == TurnStepKind::ToolCall);
-
-    let mut reply = if ran_tools {
-        "[no reply text — see steps]".to_string()
+    if ran_tools {
+        "[no reply text — see steps]"
     } else {
-        String::new()
-    };
-
-    if kind != StopKind::EndTurn {
-        if !reply.is_empty() {
-            reply.push(' ');
-        }
-        reply.push_str(&stop_reason_note(kind, raw_stop_reason));
-    } else if reply.is_empty() {
         // A clean end with no text and no tool calls. Still never blank.
-        reply.push_str("[no reply]");
+        "[no reply]"
     }
-
-    reply
 }
 
 /// Folds a turn's updates into the outcome the company cycle expects.
@@ -241,10 +234,19 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
     let kind = classify_stop_reason(&turn.stop_reason);
 
     if reply.trim().is_empty() {
-        reply = synthesize_empty_reply(&steps, kind, &turn.stop_reason);
-    } else if kind != StopKind::EndTurn {
-        reply.push(' ');
-        reply.push_str(&stop_reason_note(kind, &turn.stop_reason));
+        reply = synthesize_empty_reply(&steps).to_string();
+    }
+
+    // PR #1880 review: the stop-reason notice is platform-generated, not
+    // agent-authored, so it lands as its own step rather than blurring into
+    // `reply` above.
+    if let Some(note) = stop_reason_note(kind, &turn.stop_reason) {
+        steps.push(TurnStep {
+            kind: TurnStepKind::Note,
+            status: TurnStepStatus::Ok,
+            label: note,
+            ..TurnStep::default()
+        });
     }
 
     TurnOutcome {
@@ -253,8 +255,8 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
         // A max_tokens/max_turn_requests stop is exactly the shape issue #926
         // describes: the tool loop was cut off by a budget rather than the
         // model choosing to stop. Every other `StopKind` is not a cap —
-        // `Refusal`/`Cancelled`/`Other` are surfaced in the reply above
-        // instead, and `EndTurn` needs no flag at all.
+        // `Refusal`/`Cancelled`/`Other` are surfaced as a step note instead,
+        // and `EndTurn` needs no flag at all.
         hit_iteration_cap: matches!(kind, StopKind::MaxTokens),
         // Issue #1032: nor is there a spend halt to report. The stop hooks are
         // installed around THIS crate's `agent.turn`, and an ACP turn does not
@@ -486,25 +488,24 @@ mod test {
     }
 
     #[test]
-    fn a_refusal_is_surfaced_and_the_cap_stays_false() {
+    fn a_refusal_is_surfaced_as_a_note_step_and_the_cap_stays_false() {
         // The agent had prose to say, then declined to continue. The note
         // must land regardless — a refusal is not a clean finish even when
-        // there is a reply to read.
+        // there is a reply to read. PR #1880 review: it lands as a `Note`
+        // step, not appended onto the agent's own reply text.
         let outcome = fold(turn_with_stop_reason(
             vec![AcpUpdate::MessageChunk("I can't help with that.".into())],
             "refusal",
         ));
-        assert!(
-            outcome.reply.starts_with("I can't help with that."),
-            "the agent's own prose is kept: {}",
-            outcome.reply
+        assert_eq!(
+            outcome.reply, "I can't help with that.",
+            "the agent's own prose is kept verbatim, with nothing appended"
         );
         assert!(
-            outcome
-                .reply
-                .contains("[stopped: the agent declined to continue]"),
-            "the refusal must be surfaced, not silently swallowed: {}",
-            outcome.reply
+            outcome.steps.iter().any(|s| s.kind == TurnStepKind::Note
+                && s.label == "[stopped: the agent declined to continue]"),
+            "the refusal must be surfaced as a step, not silently swallowed: {:?}",
+            outcome.steps
         );
         assert!(
             !outcome.hit_iteration_cap,
@@ -525,19 +526,20 @@ mod test {
     #[test]
     fn an_unrecognized_stop_reason_is_surfaced_not_swallowed() {
         // A stop_reason this fold has never heard of must not silently pass
-        // for a clean end_turn — the raw string is carried into the note so
-        // the operator (and whoever reads the ticket) can see exactly what
-        // ACP reported.
+        // for a clean end_turn — the raw string is carried into a note step
+        // so the operator (and whoever reads the ticket) can see exactly what
+        // ACP reported, without it being mistaken for the agent's own words.
         let outcome = fold(turn_with_stop_reason(
             vec![AcpUpdate::MessageChunk("partial thought".into())],
             "some_new_reason_acp_added_later",
         ));
+        assert_eq!(outcome.reply, "partial thought");
         assert!(
-            outcome.reply.contains(
-                "[stopped: unrecognized stop reason \"some_new_reason_acp_added_later\"]"
-            ),
-            "the raw stop_reason must be visible, not swallowed: {}",
-            outcome.reply
+            outcome.steps.iter().any(|s| s.kind == TurnStepKind::Note
+                && s.label
+                    == "[stopped: unrecognized stop reason \"some_new_reason_acp_added_later\"]"),
+            "the raw stop_reason must be visible, not swallowed: {:?}",
+            outcome.steps
         );
         assert!(!outcome.hit_iteration_cap);
     }
