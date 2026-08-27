@@ -3264,7 +3264,17 @@ impl CompanyRuntime {
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.id.to_string()))?;
         let from = record.lifecycle.clone();
         record.lifecycle = to.clone();
-        self.store.save(&record).await?;
+        // `save_importing`, not `save` (PR #1875 review finding): a bare
+        // lifecycle flip is not `RuntimeBuilder::build`'s activation-aware
+        // migration deciding this record has been seen — it is the console's
+        // pause/resume/suspend/archive control, which can fire on a legacy
+        // pre-#1843 record `build`'s "existing but not running" arm has
+        // deliberately left un-migrated. `save`'s unconditional `true` would
+        // poison that record's gate-seen marker while it is still
+        // unmigrated, permanently blocking the grandfather arm on every
+        // later `running` boot. Forward whatever the marker already is.
+        let gate_seen = self.store.activation_gate_seen(&self.id).await?;
+        self.store.save_importing(&record, gate_seen).await?;
         self.events
             .append(
                 &self.id,

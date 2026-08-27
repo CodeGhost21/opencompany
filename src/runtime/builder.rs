@@ -2784,35 +2784,56 @@ impl RuntimeBuilder {
         // that already understands the activation funnel, which every save
         // below now is.
         let gate_already_seen = store.activation_gate_seen(&id).await?;
-        let (name_confirmed, activation_completed_at) = match existing.as_ref() {
-            // Already latched — carry it forward untouched. Matches every
-            // other overlay above: a rebuild never re-derives a fact this
-            // field already answers.
-            Some(r) if r.activation_completed_at.is_some() => {
-                (r.name_confirmed, r.activation_completed_at)
-            }
-            // Running, unlatched, AND never seen by activation-aware code:
-            // the grandfather case this migration exists for — a record that
-            // predates the activation funnel entirely. Gated on
-            // `!gate_already_seen` so this does NOT also match a genuinely
-            // new company's second boot: a fresh company's first save
-            // already stamps the gate-seen marker, so a restart before it
-            // finishes onboarding falls through to the next arm and stays
-            // ungated instead of being silently activated.
-            Some(r) if r.lifecycle == "running" && !gate_already_seen => {
-                (true, Some(crate::ports::now_millis()))
-            }
-            // Existing but not running (paused/archived): left exactly as
-            // recorded rather than migrated, so pausing a company before this
-            // field existed cannot retroactively "activate" it via this path —
-            // its own next `running` boot does that instead.
-            Some(r) => (r.name_confirmed, r.activation_completed_at),
-            // A genuinely new company: the real funnel applies from boot one —
-            // unless the caller explicitly said not to gate it (issue #1844's
-            // `skip_activation_gate`, see its own doc comment).
-            None if self.skip_activation_gate => (true, Some(crate::ports::now_millis())),
-            None => (false, None),
-        };
+        // The third element is the gate-seen marker THIS save must persist
+        // (PR #1875 review finding). It used to be implicit — every save
+        // went through `CompanyStore::save`, which always stamps `true` — so
+        // the "existing but not running" arm's promise that "its own next
+        // `running` boot" performs the migration was false: that later save
+        // (from this same `build`, or from a bare `CompanyRuntime::set_lifecycle`
+        // resume — see its own comment) had already poisoned the marker to
+        // `true` while the record was still paused/archived and unmigrated,
+        // so the grandfather arm's `!gate_already_seen` guard could never
+        // fire again. Every arm that actually decides the migration (or
+        // creates a fresh company) still persists `true`; only the "left
+        // exactly as recorded" arm now forwards whatever the marker already
+        // was, so an unmigrated legacy record stays eligible until a
+        // `running` boot finally grandfathers it in.
+        let (name_confirmed, activation_completed_at, gate_seen_to_persist) =
+            match existing.as_ref() {
+                // Already latched — carry it forward untouched. Matches every
+                // other overlay above: a rebuild never re-derives a fact this
+                // field already answers.
+                Some(r) if r.activation_completed_at.is_some() => {
+                    (r.name_confirmed, r.activation_completed_at, true)
+                }
+                // Running, unlatched, AND never seen by activation-aware code:
+                // the grandfather case this migration exists for — a record that
+                // predates the activation funnel entirely. Gated on
+                // `!gate_already_seen` so this does NOT also match a genuinely
+                // new company's second boot: a fresh company's first save
+                // already stamps the gate-seen marker, so a restart before it
+                // finishes onboarding falls through to the next arm and stays
+                // ungated instead of being silently activated.
+                Some(r) if r.lifecycle == "running" && !gate_already_seen => {
+                    (true, Some(crate::ports::now_millis()), true)
+                }
+                // Existing but not running (paused/archived): left exactly as
+                // recorded rather than migrated, so pausing a company before this
+                // field existed cannot retroactively "activate" it via this path —
+                // its own next `running` boot does that instead. The gate marker
+                // is left exactly as recorded too, or that promise breaks (see
+                // this `match`'s own doc comment above).
+                Some(r) => (
+                    r.name_confirmed,
+                    r.activation_completed_at,
+                    gate_already_seen,
+                ),
+                // A genuinely new company: the real funnel applies from boot one —
+                // unless the caller explicitly said not to gate it (issue #1844's
+                // `skip_activation_gate`, see its own doc comment).
+                None if self.skip_activation_gate => (true, Some(crate::ports::now_millis()), true),
+                None => (false, None, true),
+            };
         // Issue #1844: an operator-confirmed display name is the one other
         // manifest field a rebuild carries forward, alongside
         // `[workflows].enabled` above. `record.manifest` is otherwise
@@ -3652,29 +3673,40 @@ impl RuntimeBuilder {
         // the whole overlay the moment version control edits `[tools]`, and
         // `seed_allow` is how the *next* rebuild still sees the seed's own list
         // through this fold.
+        // `save_importing`, not `save`: the ordinary `save` unconditionally
+        // stamps the gate-seen marker `true`, which is exactly the bug this
+        // `match` above exists to avoid for the "left exactly as recorded"
+        // arm (PR #1875 review finding). `save_importing`'s caller-supplied
+        // `gate_seen` is the general hook that already exists for "persist a
+        // record without forcing the marker" — bundle import is its other,
+        // original caller — so this reuses it rather than adding a second
+        // near-identical trait method.
         store
-            .save(&CompanyRecord {
-                overlay_retired_agents,
-                overlay_agent_edits,
-                id: id.clone(),
-                manifest: self.manifest.clone(),
-                ledger,
-                lifecycle,
-                overlay_agents,
-                overlay_desk_members,
-                overlay_desk_order,
-                overlay_desks,
-                overlay_workflows,
-                overlay_budgets,
-                overlay_policy,
-                overlay_tool_grants,
-                overlay_desk_tools,
-                disabled_workflows,
-                template_provenance,
-                setup,
-                name_confirmed,
-                activation_completed_at,
-            })
+            .save_importing(
+                &CompanyRecord {
+                    overlay_retired_agents,
+                    overlay_agent_edits,
+                    id: id.clone(),
+                    manifest: self.manifest.clone(),
+                    ledger,
+                    lifecycle,
+                    overlay_agents,
+                    overlay_desk_members,
+                    overlay_desk_order,
+                    overlay_desks,
+                    overlay_workflows,
+                    overlay_budgets,
+                    overlay_policy,
+                    overlay_tool_grants,
+                    overlay_desk_tools,
+                    disabled_workflows,
+                    template_provenance,
+                    setup,
+                    name_confirmed,
+                    activation_completed_at,
+                },
+                gate_seen_to_persist,
+            )
             .await?;
 
         // The gate above was built from the seed's `[policy]` alone, before the
@@ -7737,6 +7769,93 @@ needs_reason = true
             rebuilt.activation_completed_at.is_some(),
             "and as activated — it has been operating all along"
         );
+    }
+
+    /// PR #1875 review finding: a legacy pre-#1843 record that is `paused`
+    /// (or `archived`) at its first post-upgrade boot is deliberately left
+    /// un-migrated by the "existing but not running" arm above — but an
+    /// unconditional `save` used to stamp `activation_gate_seen: true`
+    /// regardless, both at the end of `build` and from a bare lifecycle
+    /// transition (`CompanyRuntime::set_lifecycle`, the console's
+    /// pause/resume control). That poisoned the tiebreaker: once `true`, the
+    /// record could never again match the grandfather arm's
+    /// `!gate_already_seen` guard, so a company that later resumed to
+    /// `running` stayed permanently ungated — contrary to the "its own next
+    /// running boot does that instead" promise in the migration's own
+    /// comment above. Neither a `paused` rebuild nor a resume may stamp the
+    /// marker; only an actual migration (or a genuinely new company) may.
+    #[tokio::test]
+    async fn a_paused_legacy_company_stays_gate_unseen_through_a_resume() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-paused-backfill-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        // Same legacy-fixture shape as
+        // `rebuild_backfills_activation_for_a_pre_existing_running_company`
+        // (raw files, not `FsCompanyStore::save`, for the same reason given
+        // there), except `paused` rather than `running`.
+        let bundle = crate::store::Bundle::new(home.clone(), &id);
+        tokio::fs::create_dir_all(bundle.dir()).await.unwrap();
+        let toml_src = toml::to_string(&manifest).unwrap();
+        tokio::fs::write(bundle.company_toml(), toml_src)
+            .await
+            .unwrap();
+        tokio::fs::write(bundle.meta_json(), r#"{"lifecycle":"paused"}"#)
+            .await
+            .unwrap();
+
+        // Boot 1: `paused`, so the "existing but not running" arm leaves the
+        // record un-migrated — and must leave the gate marker unseen too.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        assert!(
+            !store.activation_gate_seen(&id).await.unwrap(),
+            "an unmigrated paused legacy record must not be marked gate-seen \
+             by an ordinary rebuild"
+        );
+
+        // Resume: the console's pause/resume control. A bare lifecycle
+        // transition alone must not decide the record has been seen by
+        // activation-aware code either.
+        use crate::ports::types::{Actor, ActorKind};
+        runtime
+            .set_lifecycle(
+                "running",
+                Actor {
+                    kind: ActorKind::Operator,
+                    id: "test-op".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store.activation_gate_seen(&id).await.unwrap(),
+            "a bare lifecycle transition must not poison the gate marker either"
+        );
+        drop(runtime);
+
+        // Boot 2, now `running`: the grandfather arm must finally be free to
+        // fire.
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            rebuilt.activation_completed_at.is_some(),
+            "a resumed legacy company must finally be grandfathered in on its \
+             first running boot, not left permanently ungated"
+        );
+        assert!(runtime.store().activation_gate_seen(&id).await.unwrap());
     }
 
     /// The other half of the migration: a genuinely new company (no `existing`
