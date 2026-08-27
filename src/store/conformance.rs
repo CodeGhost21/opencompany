@@ -309,6 +309,8 @@ fn record(id: &CompanyId) -> CompanyRecord {
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
         setup: Some(sample_setup_answers()),
+        name_confirmed: false,
+        activation_completed_at: None,
     }
 }
 

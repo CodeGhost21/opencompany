@@ -2521,6 +2521,11 @@ impl RuntimeBuilder {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            // Scratch record used only for desk resolution below — never
+            // saved, so the real (possibly back-filled) activation fields
+            // computed further down have nothing to feed here.
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let mut desk_ids = Vec::new();
         let candidates = desk_record
@@ -2656,6 +2661,37 @@ impl RuntimeBuilder {
         // above: a rebuild must not lose what the operator told us about their
         // business, or the workflow phase would have to ask again.
         let setup = existing.as_ref().and_then(|r| r.setup.clone());
+        // Issue #1843: back-fill the activation latch for a company that
+        // predates activation tracking. A company already `existing` at this
+        // boot has already been through — and presumably out of — whatever
+        // first-run flow this build offered; recomputing the three-step funnel
+        // retroactively would gate an operator who has been running the
+        // company for months behind an onboarding screen they have no memory
+        // of starting. A brand-new company (`existing` is `None`) gets no such
+        // grace: the real funnel applies from its first boot.
+        //
+        // `name_confirmed` is folded into the same back-fill for the same
+        // reason: a company already running plainly named itself at
+        // provisioning time, whether or not the console ever asked it to
+        // *confirm* that name through the later dedicated route.
+        let (name_confirmed, activation_completed_at) = match existing.as_ref() {
+            // Already latched — carry it forward untouched. Matches every
+            // other overlay above: a rebuild never re-derives a fact this
+            // field already answers.
+            Some(r) if r.activation_completed_at.is_some() => {
+                (r.name_confirmed, r.activation_completed_at)
+            }
+            // Running and unlatched: the grandfather case this migration
+            // exists for.
+            Some(r) if r.lifecycle == "running" => (true, Some(crate::ports::now_millis())),
+            // Existing but not running (paused/archived): left exactly as
+            // recorded rather than migrated, so pausing a company before this
+            // field existed cannot retroactively "activate" it via this path —
+            // its own next `running` boot does that instead.
+            Some(r) => (r.name_confirmed, r.activation_completed_at),
+            // A genuinely new company: the real funnel applies from boot one.
+            None => (false, None),
+        };
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
         let brain: Arc<dyn Brain> = match self.brain {
@@ -3200,6 +3236,8 @@ impl RuntimeBuilder {
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                                 setup: setup.clone(),
+                                name_confirmed,
+                                activation_completed_at,
                             };
                             // The company's other declared harnesses, each on
                             // its own pool and its own provider. Empty unless
@@ -3461,6 +3499,8 @@ impl RuntimeBuilder {
                 disabled_workflows,
                 template_provenance,
                 setup,
+                name_confirmed,
+                activation_completed_at,
             })
             .await?;
 
@@ -7139,6 +7179,7 @@ needs_reason = true
             None,
             wf_draft("daily_digest", "Daily Digest"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -7635,6 +7676,8 @@ needs_reason = true
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -7810,6 +7853,8 @@ needs_reason = true
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -8206,6 +8251,8 @@ needs_reason = true
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -8329,6 +8376,8 @@ needs_reason = true
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -8473,6 +8522,8 @@ needs_reason = true
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -8578,6 +8629,8 @@ needs_reason = true
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

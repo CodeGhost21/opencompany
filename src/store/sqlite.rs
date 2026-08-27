@@ -782,6 +782,8 @@ impl CompanyStore for SqliteStore {
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
             setup: overlay.setup,
+            name_confirmed: overlay.name_confirmed,
+            activation_completed_at: overlay.activation_completed_at,
         }))
     }
 
@@ -4871,6 +4873,8 @@ mod test {
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

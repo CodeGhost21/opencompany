@@ -344,6 +344,8 @@ async fn harness(
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     };
 
     let pool = HarnessPool::new();
@@ -780,6 +782,8 @@ async fn supervised(deps: &HarnessDeps, grants: &str) -> (HarnessPool, CompanyRe
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     };
     record.manifest.tools.allow = manifest(grants).tools.allow;
     let pool = HarnessPool::new();
