@@ -3288,9 +3288,39 @@ impl CompanyRuntime {
         // deliberately left un-migrated. `save`'s unconditional `true` would
         // poison that record's gate-seen marker while it is still
         // unmigrated, permanently blocking the grandfather arm on every
-        // later `running` boot. Forward whatever the marker already is.
+        // later `running` boot. Forward whatever the marker already is,
+        // unless the grandfather back-fill below fires — that is the one
+        // case this method itself decides the migration, so it persists
+        // `true` for the same reason every deciding arm in `builder.rs` does.
         let gate_seen = self.store.activation_gate_seen(&self.id).await?;
-        self.store.save_importing(&record, gate_seen).await?;
+        // Grandfather an unmigrated legacy record the moment an in-place
+        // resume (PR #1875 review finding, third round) puts it back to
+        // `running` without going through another `RuntimeBuilder::build` —
+        // the only other place this back-fill runs (`builder.rs`'s own
+        // "running and unlatched" arm). A company already registered in
+        // `state.registry()` never rebuilds across pause/resume (`transition`
+        // in `server/provision.rs` calls straight into this method on the
+        // live runtime), so a legacy pre-#1843 company — never seen by
+        // activation-aware code — that gets paused and resumed by the same
+        // long-lived process would otherwise keep reading as
+        // unconfirmed/unactivated, and the onboarding gate would wrongly
+        // reappear for an established operator, until the process eventually
+        // restarts and `build` finally applies the migration. Gated on
+        // `!gate_seen` and an unset latch exactly like the builder's own arm,
+        // so a genuinely new company still mid-onboarding (whose first save
+        // already stamped the marker `true`) is never falsely grandfathered
+        // by a resume.
+        let gate_seen_to_persist =
+            if to == "running" && !gate_seen && record.activation_completed_at.is_none() {
+                record.name_confirmed = true;
+                record.activation_completed_at = Some(crate::ports::now_millis());
+                true
+            } else {
+                gate_seen
+            };
+        self.store
+            .save_importing(&record, gate_seen_to_persist)
+            .await?;
         self.events
             .append(
                 &self.id,

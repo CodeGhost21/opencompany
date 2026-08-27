@@ -7771,21 +7771,35 @@ needs_reason = true
         );
     }
 
-    /// PR #1875 review finding: a legacy pre-#1843 record that is `paused`
-    /// (or `archived`) at its first post-upgrade boot is deliberately left
-    /// un-migrated by the "existing but not running" arm above — but an
-    /// unconditional `save` used to stamp `activation_gate_seen: true`
-    /// regardless, both at the end of `build` and from a bare lifecycle
-    /// transition (`CompanyRuntime::set_lifecycle`, the console's
-    /// pause/resume control). That poisoned the tiebreaker: once `true`, the
-    /// record could never again match the grandfather arm's
-    /// `!gate_already_seen` guard, so a company that later resumed to
-    /// `running` stayed permanently ungated — contrary to the "its own next
-    /// running boot does that instead" promise in the migration's own
-    /// comment above. Neither a `paused` rebuild nor a resume may stamp the
-    /// marker; only an actual migration (or a genuinely new company) may.
+    /// PR #1875 review finding, two rounds on the same scenario: a legacy
+    /// pre-#1843 record that is `paused` (or `archived`) at its first
+    /// post-upgrade boot is deliberately left un-migrated by the "existing
+    /// but not running" arm above.
+    ///
+    /// Round one's bug was premature: an unconditional `save` used to stamp
+    /// `activation_gate_seen: true` regardless, both at the end of `build`
+    /// and from a bare lifecycle transition (`CompanyRuntime::set_lifecycle`,
+    /// the console's pause/resume control) — poisoning the tiebreaker before
+    /// any migration had actually run, which permanently blocked the
+    /// grandfather arm's `!gate_already_seen` guard from ever firing again.
+    /// The fix at the time made `set_lifecycle` a pure passthrough for the
+    /// marker: never touch it, so a later `build()` could still decide.
+    ///
+    /// Round two's bug was the opposite failure mode of that same fix: a
+    /// company already registered in `state.registry()` never goes through
+    /// another `build()` across pause/resume — `server/provision.rs`'s
+    /// `transition` calls straight into the live runtime's `set_lifecycle`.
+    /// On a long-lived hosted tenant process, "its own next running boot"
+    /// might be days away, so a passthrough-only fix left an established
+    /// operator staring at the onboarding gate for the rest of that
+    /// process's uptime. The real fix is for `set_lifecycle` itself to make
+    /// the same decision the grandfather arm makes — gated on the identical
+    /// `!gate_already_seen` (and unset-latch) condition, so it still cannot
+    /// fire on a genuinely new company mid-onboarding — the moment a resume
+    /// puts an unmigrated record back to `running`, rather than only ever
+    /// forwarding the marker untouched.
     #[tokio::test]
-    async fn a_paused_legacy_company_stays_gate_unseen_through_a_resume() {
+    async fn a_paused_legacy_company_is_grandfathered_the_moment_it_resumes() {
         let home_dir = tempfile::Builder::new()
             .prefix("oc-wf-paused-backfill-")
             .tempdir()
@@ -7810,6 +7824,8 @@ needs_reason = true
 
         // Boot 1: `paused`, so the "existing but not running" arm leaves the
         // record un-migrated — and must leave the gate marker unseen too.
+        // Unaffected by round two's fix: `set_lifecycle` is never called
+        // here, only `build`.
         let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
             .with_id(id.clone())
             .build()
@@ -7822,9 +7838,9 @@ needs_reason = true
              by an ordinary rebuild"
         );
 
-        // Resume: the console's pause/resume control. A bare lifecycle
-        // transition alone must not decide the record has been seen by
-        // activation-aware code either.
+        // Resume: the console's pause/resume control, on the same
+        // already-registered runtime — no rebuild in between, exactly the
+        // in-place-resume shape round two's finding describes.
         use crate::ports::types::{Actor, ActorKind};
         runtime
             .set_lifecycle(
@@ -7836,26 +7852,113 @@ needs_reason = true
             )
             .await
             .unwrap();
+
+        // Round two's fix: the resume itself must grandfather the record
+        // immediately — an established operator must not see the onboarding
+        // gate reappear for however long this process happens to stay up.
         assert!(
-            !store.activation_gate_seen(&id).await.unwrap(),
-            "a bare lifecycle transition must not poison the gate marker either"
+            store.activation_gate_seen(&id).await.unwrap(),
+            "a resume that puts an unmigrated legacy record back to `running` \
+             must grandfather it in place, not leave it waiting for a restart \
+             that may not come for a long time on a long-lived process"
+        );
+        let resumed = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            resumed.name_confirmed,
+            "the grandfathered record must read as name-confirmed immediately \
+             after resume"
+        );
+        assert!(
+            resumed.activation_completed_at.is_some(),
+            "the grandfathered record must read as activated immediately \
+             after resume, not only after the next full boot"
         );
         drop(runtime);
 
-        // Boot 2, now `running`: the grandfather arm must finally be free to
-        // fire.
+        // Boot 2: already grandfathered by the resume above, so a rebuild
+        // must simply carry that forward — the "already latched" arm, not
+        // the grandfather arm, now applies.
         let runtime = RuntimeBuilder::new(home, manifest)
             .with_id(id.clone())
             .build()
             .await
             .unwrap();
         let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
-        assert!(
-            rebuilt.activation_completed_at.is_some(),
-            "a resumed legacy company must finally be grandfathered in on its \
-             first running boot, not left permanently ungated"
+        assert!(rebuilt.name_confirmed);
+        assert!(rebuilt.activation_completed_at.is_some());
+        assert_eq!(
+            rebuilt.activation_completed_at, resumed.activation_completed_at,
+            "a rebuild after the resume must carry the latch forward untouched, \
+             not recompute a fresh timestamp"
         );
         assert!(runtime.store().activation_gate_seen(&id).await.unwrap());
+    }
+
+    /// The narrower guarantee round one's fix protects, isolated from round
+    /// two's live-grandfather behavior above: a resume that does NOT clear
+    /// the grandfather condition (record already latched, or gate already
+    /// seen) must still forward the marker exactly as recorded rather than
+    /// touching it. `set_lifecycle`'s own guard
+    /// (`to == "running" && !gate_seen && activation_completed_at.is_none()`)
+    /// is what keeps a genuinely-new, still-onboarding company's `pause` /
+    /// `resume` cycle from being mistaken for the legacy grandfather case —
+    /// its first save already stamped the marker `true`, so the guard never
+    /// fires for it.
+    #[tokio::test]
+    async fn a_resume_mid_onboarding_does_not_falsely_grandfather_a_new_company() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-resume-no-false-grandfather-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        // A brand-new company: first boot stamps `gate_seen: true` and
+        // leaves `name_confirmed`/`activation_completed_at` unset — the
+        // real funnel applies, matching
+        // `a_brand_new_company_is_not_backfilled_as_activated`.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        assert!(store.activation_gate_seen(&id).await.unwrap());
+
+        use crate::ports::types::{Actor, ActorKind};
+        runtime
+            .set_lifecycle(
+                "paused",
+                Actor {
+                    kind: ActorKind::Operator,
+                    id: "test-op".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        runtime
+            .set_lifecycle(
+                "running",
+                Actor {
+                    kind: ActorKind::Operator,
+                    id: "test-op".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let record = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            !record.name_confirmed,
+            "a pause/resume cycle mid-onboarding must not silently confirm the \
+             name for a company that never went near the name-confirm route"
+        );
+        assert!(
+            record.activation_completed_at.is_none(),
+            "a pause/resume cycle mid-onboarding must not activate a company \
+             that has not actually cleared the funnel"
+        );
     }
 
     /// The other half of the migration: a genuinely new company (no `existing`
