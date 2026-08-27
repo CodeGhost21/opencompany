@@ -227,6 +227,17 @@ pub struct CompanyRuntime {
     /// for expiry tests).
     pub(crate) gate_injected: bool,
     pub(crate) journal: Arc<RuntimeJournal>,
+    /// Where this company's turns are reported, if anywhere (issue #1739).
+    ///
+    /// Always present and always compiled — the port and its no-op default live
+    /// in the default build, exactly as `steer` and `grants` do. A desktop or
+    /// self-hosted instance holds a
+    /// [`NullTracker`](crate::analytics::NullTracker) here and nothing it does
+    /// leaves the process; only a hosted tenant that resolved to
+    /// [`Decision::Report`](crate::analytics::Decision::Report) holds anything
+    /// else, and only a build compiled with `--features analytics` has anything
+    /// else to hold.
+    pub(crate) tracker: Arc<dyn crate::analytics::Tracker>,
     /// Per-company secrets, read by the feedback scrubber (and webhook HMAC
     /// verification, later).
     pub(crate) secrets: Arc<dyn SecretStore>,
@@ -492,6 +503,7 @@ impl CompanyRuntime {
             approval_gate,
             gate_injected: false,
             journal,
+            tracker: crate::analytics::null_tracker(),
             secrets,
             inbox,
             mail,
@@ -585,6 +597,14 @@ impl CompanyRuntime {
     /// and the manifest's `[users].mode`.
     pub(crate) fn set_auth_mode(&mut self, mode: AuthMode) {
         self.auth_mode = mode;
+    }
+
+    /// Points this company's turn reporting at `tracker` (issue #1739). Wired
+    /// once by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the
+    /// process-wide decision; the default is a
+    /// [`NullTracker`](crate::analytics::NullTracker).
+    pub(crate) fn set_tracker(&mut self, tracker: Arc<dyn crate::analytics::Tracker>) {
+        self.tracker = tracker;
     }
 
     /// How humans sign in to this company.
