@@ -181,7 +181,7 @@ function resolveEndRef(to) {
 // for a first release you actually want to read.
 function resolveStartRef(repo, from) {
   if (from !== 'latest-release') {
-    return from;
+    return { ref: from, fromRoot: false };
   }
   let tag = '';
   try {
@@ -192,14 +192,20 @@ function resolveStartRef(repo, from) {
     tag = '';
   }
   if (tag) {
-    return tag;
+    return { ref: tag, fromRoot: false };
   }
   const root = runGit(['rev-list', '--max-parents=0', 'HEAD']).split('\n').at(-1)?.trim();
   if (!root) {
     throw new Error(`No GitHub Release for ${repo} and no root commit to fall back to`);
   }
-  console.error(`[release-notes] No previous release for ${repo}; ranging from the root commit ${root.slice(0, 9)}.`);
-  return root;
+  console.error(`[release-notes] No previous release for ${repo}; ranging over the full history from ${root.slice(0, 9)}.`);
+  // `fromRoot` matters because `A..B` is EXCLUSIVE of A. Ranging `root..tag`
+  // for a first release drops the repository's very first commit from notes
+  // that claim to cover everything, and worse, puts its author in the
+  // prior-author set — so the person who made the first commit is the one
+  // contributor the first release does not credit. Callers use this flag to
+  // range over the whole history instead.
+  return { ref: root, fromRoot: true };
 }
 
 // A shallow clone is the usual cause of a miss here, and its failure mode is
@@ -266,16 +272,22 @@ export function parseGitLog(logText) {
     });
 }
 
-function collectCommits(from, to) {
+function collectCommits(from, to, fromRoot = false) {
   const format = '%H%x1f%s%x1f%an%x1f%ae%x1f%aI%x1e';
-  const output = runGit(['log', `${from}..${to}`, '--reverse', `--format=${format}`]);
+  // `git log <to>` rather than `<root>..<to>`, so the root commit is included.
+  const range = fromRoot ? [to] : [`${from}..${to}`];
+  const output = runGit(['log', ...range, '--reverse', `--format=${format}`]);
   return parseGitLog(output);
 }
 
 // Everything reachable from the START of the range. Anyone absent from this set
 // is a first-time contributor, which is the fact the built-in generator cannot
 // produce.
-function priorAuthorKeys(from) {
+function priorAuthorKeys(from, fromRoot = false) {
+  // Nothing precedes a first release, so EVERY contributor in it is a new one.
+  if (fromRoot) {
+    return new Set();
+  }
   const output = runGit(['log', from, '--format=%an%x1f%ae%x1e']);
   const keys = new Set();
   for (const entry of output.split('\x1e')) {
