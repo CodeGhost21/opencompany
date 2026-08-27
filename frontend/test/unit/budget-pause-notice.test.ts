@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatMessage } from "@/lib/chat";
-import { latestBudgetPauseMessageIdByAgent, type Transcripts } from "@/views/chat/model";
+import {
+  budgetPauseRedeemId,
+  latestBudgetPauseMessageIdByAgent,
+  mergeBudgetPauseMarkerRead,
+  type Transcripts,
+} from "@/views/chat/model";
 
 const toasts = vi.hoisted(() => ({
   base: vi.fn(),
@@ -181,6 +186,76 @@ describe("latestBudgetPauseMessageIdByAgent", () => {
       "channel-b": [],
     };
     expect(latestBudgetPauseMessageIdByAgent(transcripts).size).toBe(0);
+  });
+});
+
+/**
+ * Issue #1846 review (Codex #3868962374) — **the regression.** `ChatView`'s
+ * "Add credits & resend" CTA used to re-read the live marker inside its own
+ * click handler and send THAT id — which sounds like it binds the click to a
+ * specific marker, but the read happens at click time, so the comparison is
+ * always "whatever is live right now" against itself. A background turn
+ * re-parking the SAME agent's marker (no chat destination, so
+ * `isBudgetPauseNoticeSuperseded` cannot see it) BEFORE the click would have
+ * its id picked up by that live read and silently redeemed instead.
+ *
+ * `mergeBudgetPauseMarkerRead` and `budgetPauseRedeemId` are the pure halves
+ * of the fix: read the marker back once, at render time (the moment a notice
+ * becomes the latest for its agent), and send THAT cached id at click time
+ * instead of re-reading live. No component-test harness exists in this
+ * project to mount `ChatView`'s effect/click-handler directly (see this
+ * file's header doc comment), so these pin the logic they are built from.
+ */
+describe("mergeBudgetPauseMarkerRead", () => {
+  it("caches a fresh read for a notice with nothing cached yet", () => {
+    const next = mergeBudgetPauseMarkerRead(new Map(), "msg-1", "marker-a");
+    expect(next.get("msg-1")).toBe("marker-a");
+  });
+
+  it("does NOT overwrite an id already cached for the same notice", () => {
+    // The regression this guards: a SECOND read for the SAME notice landing
+    // later (e.g. a background re-park happened in between the two GETs)
+    // must not clobber the first — the first read is the one that happened
+    // closest to when the card actually appeared.
+    const prev = new Map([["msg-1", "marker-a"]]);
+    const next = mergeBudgetPauseMarkerRead(prev, "msg-1", "marker-b-from-a-later-read");
+    expect(next.get("msg-1")).toBe("marker-a");
+  });
+
+  it("is additive across different notices", () => {
+    const prev = new Map([["msg-1", "marker-a"]]);
+    const next = mergeBudgetPauseMarkerRead(prev, "msg-2", "marker-b");
+    expect(next.get("msg-1")).toBe("marker-a");
+    expect(next.get("msg-2")).toBe("marker-b");
+  });
+
+  it("returns the SAME map reference when nothing changes — a no-op update must not re-render", () => {
+    const prev = new Map([["msg-1", "marker-a"]]);
+    const next = mergeBudgetPauseMarkerRead(prev, "msg-1", "marker-a-again");
+    expect(next).toBe(prev);
+  });
+});
+
+describe("budgetPauseRedeemId", () => {
+  it("prefers the render-time cached id for this exact notice", () => {
+    const cache = new Map([["msg-1", "marker-cached"]]);
+    expect(budgetPauseRedeemId("msg-1", cache, "marker-live")).toBe("marker-cached");
+  });
+
+  it("falls back to the live id when the cache has nothing for this notice yet", () => {
+    // The narrow case: a click landing faster than the render-time GET
+    // resolved. Falling back keeps this no worse than the pre-fix
+    // always-live-at-click-time behaviour, rather than refusing the click.
+    expect(budgetPauseRedeemId("msg-1", new Map(), "marker-live")).toBe("marker-live");
+  });
+
+  it("is undefined when neither the cache nor the live fallback has anything", () => {
+    expect(budgetPauseRedeemId("msg-1", new Map(), undefined)).toBeUndefined();
+  });
+
+  it("never reaches for a DIFFERENT notice's cached id", () => {
+    const cache = new Map([["msg-other", "marker-other"]]);
+    expect(budgetPauseRedeemId("msg-1", cache, "marker-live")).toBe("marker-live");
   });
 });
 

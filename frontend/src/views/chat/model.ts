@@ -80,6 +80,48 @@ export function latestBudgetPauseMessageIdByAgent(transcripts: Transcripts): Map
 }
 
 /**
+ * Folds one `GET …/budget-pause` read into `ChatView`'s
+ * `budgetPauseMarkerByNotice` cache (issue #1846 review, Codex #3868962374)
+ * — the notice-render-time read that replaces redeeming off a live re-read
+ * at click time. Pure so it can be pinned directly; there is no
+ * component-test harness in this project to mount the effect it backs (see
+ * `budget-pause-notice.test.ts`'s header doc for the same constraint).
+ *
+ * Never overwrites an id already cached for `messageId` — the FIRST
+ * successful read for a given notice is the one that landed closest to when
+ * the card actually appeared, which is exactly the property this cache
+ * exists to buy: a later read racing a background re-park would otherwise
+ * silently replace the correct id with a newer, unrelated one.
+ */
+export function mergeBudgetPauseMarkerRead(
+  prev: Map<string, string>,
+  messageId: string,
+  markerId: string,
+): Map<string, string> {
+  if (prev.has(messageId)) return prev;
+  const next = new Map(prev);
+  next.set(messageId, markerId);
+  return next;
+}
+
+/**
+ * The marker id `redeemBudgetPause` should send for a click on `noticeMessageId`
+ * (issue #1846 review, Codex #3868962374): the notice-render-time cached read
+ * when one landed in time, else `liveFallback` — a live read performed AT
+ * click time, for the narrow case the cache has nothing yet (a click landing
+ * faster than the render-time `GET` resolved). Falling back rather than
+ * refusing the click keeps this no worse than the pre-fix behaviour, which
+ * always read live at click time.
+ */
+export function budgetPauseRedeemId(
+  noticeMessageId: string,
+  markerByNotice: Map<string, string>,
+  liveFallback: string | undefined,
+): string | undefined {
+  return markerByNotice.get(noticeMessageId) ?? liveFallback;
+}
+
+/**
  * How far a channel's persisted history has got, per channel.
  *
  * {@link Transcripts} cannot answer this on its own: an absent key and a key

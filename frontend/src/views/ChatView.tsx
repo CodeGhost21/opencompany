@@ -85,10 +85,12 @@ import {
   firstChannel,
   historyReady,
   HISTORY_UNTRACKED,
+  budgetPauseRedeemId,
   clearTaskCardEverywhere,
   directMessageChannels,
   directMessageForId,
   latestBudgetPauseMessageIdByAgent,
+  mergeBudgetPauseMarkerRead,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
@@ -1035,6 +1037,52 @@ export function ChatView({
     [transcripts],
   );
 
+  /**
+   * The marker id `GET …/budget-pause` returned for each budget-pause
+   * notice, keyed by the notice's OWN `message.id` (issue #1846 review,
+   * Codex #3868962374) — read back once, at the moment a notice becomes the
+   * latest for its agent, rather than re-read live at click time.
+   *
+   * `redeemBudgetPause` used to re-read the live marker in its own click
+   * handler and send THAT id as `?id=` — which sounds like it binds the
+   * click to a specific marker, but the read happens at click time, so it is
+   * always comparing "whatever is live right now" against itself. A
+   * background turn (a workflow node, an unstreamed task) that re-parks the
+   * SAME agent's marker with no chat destination BEFORE the click — which
+   * `isBudgetPauseNoticeSuperseded` cannot see, since a chat-less park never
+   * touches the transcript it watches — would have its id picked up by that
+   * live read and redeemed instead, silently, under the operator's "add
+   * credits" intent for the card they actually clicked.
+   *
+   * Reading the marker at RENDER time instead — the moment this becomes the
+   * latest notice for its agent — narrows that window from "however long the
+   * operator takes to notice the card" down to the round-trip of the one GET
+   * fired here, the same "narrow, not eliminate" shape the server's own
+   * `?id=` 409 guard already accepts for the GET→POST race it closes.
+   */
+  const [budgetPauseMarkerByNotice, setBudgetPauseMarkerByNotice] = useState<
+    Map<string, string>
+  >(new Map());
+  useEffect(() => {
+    let live = true;
+    for (const [agentId, messageId] of budgetPauseMessageIdByAgent) {
+      if (budgetPauseMarkerByNotice.has(messageId)) continue;
+      void client.getBudgetPause(agentId, company).then((marker) => {
+        if (!live || marker == null) return;
+        setBudgetPauseMarkerByNotice((prev) =>
+          mergeBudgetPauseMarkerRead(prev, messageId, marker.id),
+        );
+      });
+    }
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `client`/`company`
+    // intentionally excluded: this effect's job is "a new notice appeared",
+    // not "the client changed"; a client/company change already clears
+    // `transcripts` (and therefore this map) via the boot/company-switch path.
+  }, [budgetPauseMessageIdByAgent]);
+
   // An open thread only makes sense while its parent is on screen; switching
   // channels closes it rather than leaving a panel pointing at nothing.
   useEffect(() => {
@@ -1568,36 +1616,51 @@ export function ChatView({
    * over the SSE feed like any other, so there is nothing to inject here on
    * success — only the busy state and a failure toast.
    *
-   * Re-reads the live marker via {@link OpenCompanyClient.getBudgetPause}
-   * immediately before redeeming, and sends its id (issue #1846 review, Codex
-   * #3866418876 / #3866802268): this card can only ever have been rendered
+   * Sends `noticeMessageId`'s cached read from
+   * {@link budgetPauseMarkerByNotice} as `?id=` (issue #1846 review, Codex
+   * #3868962374, replacing the live-read-at-click-time shape Codex
+   * #3866418876/#3866802268 first added): that cache is read back once, at
+   * the moment THIS notice became the latest for its agent — see its own doc
+   * for why re-reading live in this handler, at CLICK time, defeated the
+   * point of sending an id at all. The card can only ever have been rendered
    * from a chat-transcript notice, and the click can lag that render by
-   * however long the operator took to notice it. A background turn (a
-   * workflow node, an unstreamed task) pausing for the SAME agent in the
-   * meantime re-parks with no chat destination, which
+   * however long the operator took to notice it; a background turn (a
+   * workflow node, an unstreamed task) pausing for the SAME agent in that gap
+   * re-parks with no chat destination, which
    * {@link isBudgetPauseNoticeSuperseded} cannot see — a chat-less park never
-   * touches the transcript it watches — so without this read-back the click
-   * would silently redeem and re-dispatch the background turn's message
-   * under the operator's own "add credits" intent instead of theirs.
+   * touches the transcript it watches — so a live re-read at click time would
+   * silently pick up ITS id and redeem the background turn's message under
+   * the operator's own "add credits" intent instead of theirs.
+   *
+   * Falls back to a live read when the cache has nothing yet for this notice
+   * — a click landing faster than the render-time `GET` resolved, or a host
+   * that predates {@link OpenCompanyClient.getBudgetPause} entirely — rather
+   * than refusing the click outright; a live-at-click read is exactly this
+   * function's own pre-fix behaviour, so this degrades to no worse than
+   * before rather than to broken.
    *
    * A 404 means the marker is already gone: redeemed from another tab,
    * expired with the process, or already handled. Read as a (delayed) success
    * rather than an error — the operator's intent ("get this moving again") is
    * either already satisfied or nothing this click can fix by retrying.
    *
-   * A 409 means the live re-read above raced a background park between the
-   * `GET` and the `POST` — the server's own atomic check caught what the
-   * read-back could only narrow the window on, not close outright. Same
-   * "nothing this click can fix by retrying blindly" shape as the 404: the
-   * operator is told to look again rather than have their click silently
-   * redeem the wrong marker.
+   * A 409 means the id sent above no longer names the live marker — the
+   * server's own atomic check caught what the cached (or live-fallback) read
+   * could only narrow the window on, not close outright. Same "nothing this
+   * click can fix by retrying blindly" shape as the 404: the operator is told
+   * to look again rather than have their click silently redeem the wrong
+   * marker.
    */
-  async function redeemBudgetPause(agentId: string) {
+  async function redeemBudgetPause(agentId: string, noticeMessageId: string) {
     if (redeemingBudgetPauseAgent) return;
     setRedeemingBudgetPauseAgent(agentId);
     try {
-      const live = await client.getBudgetPause(agentId, company);
-      await client.redeemBudgetPause(agentId, company, live?.id);
+      // Only falls through to a live GET when the render-time cache has
+      // nothing yet for this notice — see `redeemBudgetPause`'s doc.
+      const cached = budgetPauseMarkerByNotice.get(noticeMessageId);
+      const live = cached == null ? await client.getBudgetPause(agentId, company) : null;
+      const expectedId = budgetPauseRedeemId(noticeMessageId, budgetPauseMarkerByNotice, live?.id);
+      await client.redeemBudgetPause(agentId, company, expectedId);
       toast.success("Resending the stalled message.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
@@ -1935,7 +1998,9 @@ export function ChatView({
               decidingApprovals={decidingApprovals}
               failedApprovals={failedApprovals}
               onDecideApproval={onDecideApproval}
-              onRedeemBudgetPause={(agentId) => void redeemBudgetPause(agentId)}
+              onRedeemBudgetPause={(agentId, noticeMessageId) =>
+                void redeemBudgetPause(agentId, noticeMessageId)
+              }
               redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
               latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
             />

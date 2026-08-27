@@ -87,8 +87,13 @@ interface Props {
    * The Add-Credits CTA (issue #1846): redeems the parked re-issue marker for
    * a budget-paused teammate. `undefined` when the shell has not wired
    * redemption — the notice still renders, just without a working button.
+   *
+   * Carries the clicked notice's own `message.id` alongside the agent id
+   * (issue #1846 review, Codex #3868962374) — the caller binds the redeem to
+   * the marker THIS card was rendered from, rather than whatever is live at
+   * click time.
    */
-  onRedeemBudgetPause?: (agentId: string) => void;
+  onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
   /** The agent id whose redeem is currently in flight, so only that row's
    * button shows a busy state and the others stay clickable. */
   redeemingBudgetPauseAgent?: string | null;
@@ -335,7 +340,11 @@ function SystemPill({
   latestBudgetPauseMessageIdByAgent,
 }: {
   message: ChatMessage;
-  onRedeemBudgetPause?: (agentId: string) => void;
+  // Issue #1846 review (Codex #3868962374): carries `message.id` alongside
+  // the agent id, so the caller can bind the redeem to the SPECIFIC marker
+  // this card was rendered from — see `ChatView.redeemBudgetPause`'s doc for
+  // why a live re-read at click time cannot do that on its own.
+  onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
   redeemingBudgetPauseAgent?: string | null;
   latestBudgetPauseMessageIdByAgent?: Map<string, string>;
 }) {
@@ -367,7 +376,7 @@ function SystemPill({
               className="w-fit border-status-blocked/40 bg-transparent text-xs hover:bg-status-blocked-soft"
               disabled={redeeming || superseded}
               title={superseded ? "A newer pause replaced this one — see the latest notice." : undefined}
-              onClick={() => onRedeemBudgetPause(agentId)}
+              onClick={() => onRedeemBudgetPause(agentId, message.id)}
             >
               {redeeming
                 ? "Resending…"

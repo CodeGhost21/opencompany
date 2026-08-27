@@ -91,8 +91,13 @@ interface Props {
    * and why it carries the cause rather than a boolean.
    */
   cognition?: CognitionState | null;
-  /** The Add-Credits CTA (issue #1846). Passed straight through to `MessageRow`. */
-  onRedeemBudgetPause?: (agentId: string) => void;
+  /**
+   * The Add-Credits CTA (issue #1846). Passed straight through to
+   * `MessageRow`, which is why the signature carries the clicked notice's
+   * own `message.id` alongside the agent id (issue #1846 review, Codex
+   * #3868962374) — see `MessageRow`'s doc.
+   */
+  onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
   redeemingBudgetPauseAgent?: string | null;
   /**
    * The message id of the MOST RECENT budget-pause notice per agent,
