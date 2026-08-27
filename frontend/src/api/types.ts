@@ -1118,12 +1118,15 @@ export interface AgentDetailDto {
  *
  * The distinction is the point: `requested` is what the agent's own `tools`
  * line asks for, `companyAllow` is the ceiling it is intersected with, and
- * `effective` is what the agent actually holds. An **empty `requested` means
- * the company's standard grant**, not "no tools", so a surface that renders the
- * request alone reports the opposite of the truth for exactly those agents.
+ * `effective` is what the agent actually holds. Since issue #1804 `requested`
+ * is three-state: **`null` means the company's standard grant** (the agent
+ * lists no tools of its own and inherits `[tools].allow`), an **empty array
+ * `[]` is a deliberate deny-all** (holds nothing), and a **non-empty array
+ * narrows**. A surface that treats `null` and `[]` alike reports the opposite
+ * of the truth for exactly those agents.
  */
 export interface AgentToolsDto {
-  requested: string[];
+  requested: string[] | null;
   companyAllow: string[];
   /**
    * The ceiling contributed by the desks this agent sits on — the union of
@@ -1191,8 +1194,16 @@ export interface EditAgentInput {
   model?: string | null;
   /** Which declared harness this teammate runs on. */
   harness?: string | null;
-  /** The teammate's own tool-grant globs. */
-  tools?: string[];
+  /**
+   * The teammate's own tool-grant globs, three-state since issue #1804 (like a
+   * double-`Option` on the wire): `undefined` leaves the grant untouched,
+   * `null` resets it to the standard company-wide grant, an empty array `[]` is
+   * a deliberate deny-all (holds nothing), and a non-empty array narrows. The
+   * four are different on the wire (`JSON.stringify` keeps `null`/`[]`, drops
+   * `undefined`) and must never be collapsed, or a partial save would silently
+   * re-scope a grant the operator did not touch.
+   */
+  tools?: string[] | null;
 }
 
 /** One declared or detected harness. */

@@ -195,7 +195,7 @@ fn evidence() -> Evidence {
             id: a.id.clone(),
             role: a.role.clone(),
             description: a.description.clone(),
-            grants: crate::runtime::builder::agent_effective_grants(&allow, &a.tools),
+            grants: crate::runtime::builder::agent_effective_grants(&allow, a.tools.as_deref()),
             global: a.global,
         })
         .collect();
@@ -1629,7 +1629,7 @@ async fn add_overlay_agent(runtime: &Arc<CompanyRuntime>, id: &str, role: &str, 
             name: id.to_string(),
             role: role.to_string(),
             description: Some(description.to_string()),
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });

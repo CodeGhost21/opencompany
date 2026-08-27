@@ -313,7 +313,7 @@ members = []
             name: "Nova".into(),
             role: "Growth".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -349,7 +349,7 @@ members = []
             name: "Nova".into(),
             role: "Growth".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -479,7 +479,7 @@ members = ["ceo"]
             name: "Shane".into(),
             role: "Support".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -506,7 +506,7 @@ members = ["ceo"]
             name: "engineer".into(),
             role: "Support".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -529,7 +529,7 @@ members = ["ceo"]
                 name: "Shane".into(),
                 role: "Support".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             });

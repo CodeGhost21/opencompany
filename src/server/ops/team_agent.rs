@@ -235,10 +235,13 @@ pub(super) struct AgentDetailDto {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AgentToolsDto {
-    /// The globs the agent asks for. **Empty means "the company's standard
-    /// grant"**, not "no tools" — an agent that lists nothing inherits the whole
-    /// allow-list. The console has to say which of the two it is looking at.
-    requested: Vec<String>,
+    /// The grant the agent asks for, in its three representable states (issue
+    /// #1804): `null` = **inherit** the company's standard grant, `[]` = an
+    /// **explicit no-tools** grant (deny-all), `[globs]` = **narrow**. The
+    /// console renders all three distinctly and lets an admin set each — before
+    /// #1804 an empty list was ambiguous between "standard" and "nothing", and
+    /// this field could not tell them apart.
+    requested: Option<Vec<String>>,
     /// The company-wide `[tools].allow` ceiling.
     company_allow: Vec<String>,
     /// The ceiling contributed by the desks this agent sits on — the union of
@@ -278,24 +281,25 @@ pub(super) struct AgentDeskDto {
 /// A manifest teammate's `[[agent]].tools` line, or — for an overlay teammate —
 /// its own [`OverlayAgent::tools`](crate::ports::types::OverlayAgent::tools)
 /// grant (issue #661 / L5), which mirrors `harness::overlay_agent_to_manifest`.
-/// An **empty** list from either source means "the company's standard grant",
-/// not "no tools", so the Team tab shows the teammate's real effective grant
-/// rather than the full company allow-list for every overlay member.
+///
+/// Returns the field's three-state value verbatim (issue #1804): `None` =
+/// **inherit** the company's standard grant, `Some(vec![])` = an **explicit
+/// no-tools** grant, `Some(globs)` = **narrow**. The Team tab renders all three
+/// distinctly rather than showing the full company allow-list for a teammate the
+/// operator emptied.
 ///
 /// Its callers have already established that `agent_id` is on the roster, so a
-/// miss in the manifest half can only be the overlay half.
-pub(super) fn requested_grants(record: &CompanyRecord, agent_id: &str) -> Vec<String> {
+/// miss in the manifest half can only be the overlay half; a genuine miss reads
+/// as `None`, which the callers treat as the inherit default.
+pub(super) fn requested_grants(record: &CompanyRecord, agent_id: &str) -> Option<Vec<String>> {
+    if let Some(agent) = record.effective_agent(agent_id) {
+        return agent.tools.clone();
+    }
     record
-        .effective_agent(agent_id)
-        .map(|agent| agent.tools.clone())
-        .or_else(|| {
-            record
-                .overlay_agents
-                .iter()
-                .find(|agent| agent.id == agent_id)
-                .map(|agent| agent.tools.clone())
-        })
-        .unwrap_or_default()
+        .overlay_agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .and_then(|agent| agent.tools.clone())
 }
 
 /// The **declared** cognition-tier hint for `agent_id`: the manifest
@@ -452,13 +456,16 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
     // falling back to the company allow-list.
     let desk_ceiling_active = !desk_tools.iter().all(Vec::is_empty);
     let desk_allow = if desk_ceiling_active {
-        agent_scoped_grants(company_allow, &desk_refs, &[])
+        // The desk ceiling as it stands with the agent contributing nothing —
+        // `None` (inherit), not `Some(&[])` (deny-all): this row previews what
+        // the desks grant a teammate that has stated no scope of its own.
+        agent_scoped_grants(company_allow, &desk_refs, None)
     } else {
         Vec::new()
     };
 
     AgentToolsDto {
-        effective: agent_scoped_grants(company_allow, &desk_refs, &requested),
+        effective: agent_scoped_grants(company_allow, &desk_refs, requested.as_deref()),
         requested,
         company_allow: company_allow.to_vec(),
         desk_allow,
@@ -491,18 +498,28 @@ pub(super) struct EditAgent {
     role: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
-    /// The teammate's tool scope (issue #619). Absent leaves it alone; an
-    /// **empty array** is the deliberate way back to the company's standard
-    /// grant, which is why this is a plain `Option` and not a double option —
-    /// `[]` already spells "clear it" without needing `null` to mean something
-    /// different from omission.
+    /// The teammate's tool scope (issues #619, #1804). A **double option**,
+    /// because since #1804 the grant has three representable states and "leave it
+    /// alone" has to stay apart from every one of them:
+    ///
+    /// | body | parses as | means |
+    /// |---|---|---|
+    /// | `{}` | `None` | leave the scope alone |
+    /// | `{"tools": null}` | `Some(None)` | reset to the company's **standard grant** (inherit) |
+    /// | `{"tools": []}` | `Some(Some([]))` | an **explicit no-tools** grant (deny-all) |
+    /// | `{"tools": ["…"]}` | `Some(Some([…]))` | **narrow** to those globs |
+    ///
+    /// This is the deliberate contract inversion #1804 makes: before it, `[]`
+    /// was documented as "reset to standard". `[]` now means deny-all and the
+    /// reset moves to `null`. The failure mode of an out-of-date client sending
+    /// the old `[]` is soft — it removes capability rather than granting it.
     ///
     /// #661 made a teammate scopable at *creation* (`POST …/team` and
-    /// `add_agent`). This is the half that was missing: narrowing one that
+    /// `add_agent`). This is the half that was missing: re-scoping one that
     /// already exists, without deleting and recreating it — which would orphan
     /// its workspace folder, budget row, desk memberships and inbox.
-    #[serde(default)]
-    tools: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    tools: Option<Option<Vec<String>>>,
     /// The teammate's persona instructions (issue #1530). A **double option**,
     /// the same three-state contract as `description`:
     ///
@@ -599,14 +616,14 @@ async fn agent_detail(
 /// write that settles something *on behalf of* the company rather than one a
 /// member makes for themselves.
 ///
-/// `tools` is the sharpest edge: **an empty `tools` list means "inherit the
-/// company's standard grant"** — the widest grant the company has. So
-/// `{"tools": []}` is not a small edit, it is a *widening*, and left
+/// `tools` is the sharpest edge. Since #1804 it is three-state: **`null` means
+/// "reset to the company's standard grant"** — the widest grant the company
+/// has — while `[]` is a deliberate deny-all and `[globs]` narrows. So
+/// `{"tools": null}` is not a small edit, it is a *widening*, and left
 /// member-open it would let any signed-in member hand a deliberately-scoped
 /// teammate the company's whole grant back. That is the exact inversion this
-/// field was added to prevent, and `add_agent` already refuses its own version
-/// of it (a narrowing that lands empty is a hard error there, never a stored
-/// empty list).
+/// field was added to prevent. Every `tools` state is admin-gated regardless,
+/// so a member cannot narrow to a deny-all either.
 ///
 /// `model` and `harness` are admin-gated for the same *kind* of reason without
 /// that sharp edge: both are routing decisions the company owns rather than
@@ -761,9 +778,14 @@ async fn edit_agent(
 
     let name = trimmed_field(body.name.as_deref(), "name").map_err(|e| e.into_response())?;
     let role = trimmed_field(body.role.as_deref(), "role").map_err(|e| e.into_response())?;
-    let tools = body
+    // The double option is preserved end to end: the outer layer says whether
+    // the field was sent at all (leave-alone vs set), the inner says which of
+    // the three grant states it was set to (`None` = reset to standard,
+    // `Some([])` = deny-all, `Some(globs)` = narrow). Only the innermost glob
+    // list is trimmed.
+    let tools: Option<Option<Vec<String>>> = body
         .tools
-        .map(|globs| trimmed_globs(&globs))
+        .map(|maybe_globs| maybe_globs.map(|globs| trimmed_globs(&globs)).transpose())
         .transpose()
         .map_err(|e| e.into_response())?;
     // Present-and-null clears; a blank string clears too — an empty override
@@ -915,12 +937,15 @@ async fn edit_agent(
                 .map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty());
         }
-        // Issue #619: stored verbatim, exactly like a manifest `[[agent]].tools`
-        // line. The company `allow` ceiling is applied at *read* time by
-        // `agent_effective_grants`, so a glob the company does not cover is
-        // surfaced as asked-for-but-not-granted rather than silently dropped
-        // here — and this route can only ever narrow a teammate within a grant
-        // the company already made.
+        // Issues #619, #1804: stored verbatim, exactly like a manifest
+        // `[[agent]].tools` line, in its three-state form — `None` (inherit the
+        // standard grant), `Some([])` (explicit deny-all), or `Some(globs)`
+        // (narrow). The outer option here is "was the field sent"; the inner is
+        // the grant state, which is exactly `OverlayAgent::tools`. The company
+        // `allow` ceiling is applied at *read* time by `agent_effective_grants`,
+        // so a glob the company does not cover is surfaced as
+        // asked-for-but-not-granted rather than silently dropped here — and this
+        // route can only ever narrow a teammate within a grant the company made.
         if let Some(tools) = tools {
             agent.tools = tools;
         }
@@ -1041,11 +1066,16 @@ fn trimmed_field(value: Option<&str>, field: &str) -> Result<Option<String>, Api
 /// Trims a submitted tool-scope list, refusing a blank entry and dropping
 /// duplicates (issue #619).
 ///
-/// A blank glob is a `400` rather than a stored empty string for a sharper
-/// reason than tidiness: `""` matches nothing an operator meant, so it would
-/// read as a scope that grants nothing while looking like a scope that was set.
-/// Duplicates are dropped rather than refused — a repeated glob is harmless and
-/// the resolved grant list is de-duplicated downstream anyway.
+/// A blank *string* glob (`""` / `"  "`) is a `400` rather than a stored empty
+/// string for a sharper reason than tidiness: `""` matches nothing an operator
+/// meant, so it would read as a scope that grants nothing while looking like a
+/// scope that was set. Duplicates are dropped rather than refused — a repeated
+/// glob is harmless and the resolved grant list is de-duplicated downstream.
+///
+/// An empty *list* (`[]`) is **not** an error since issue #1804: it is the
+/// explicit deny-all grant, and the caller has already distinguished it from an
+/// absent field and from `null` (reset to standard) via the double option. Only
+/// a blank entry *inside* a list still 400s.
 ///
 /// Same `ApiError`-not-`Response` return shape as [`trimmed_field`], for the
 /// reason given there.
@@ -1056,7 +1086,10 @@ fn trimmed_globs(globs: &[String]) -> Result<Vec<String>, ApiError> {
         let trimmed = glob.trim();
         if trimmed.is_empty() {
             return Err(ApiError(OpenCompanyError::InvalidRequest(
-                "a tool grant can't be empty. Send an empty list to give this teammate the company's standard grant.".to_string(),
+                "a tool grant can't be a blank string. Omit `tools` to leave the scope as is, \
+                 send `null` to reset it to the company's standard grant, or send an empty list \
+                 to give this teammate no tools."
+                    .to_string(),
             )));
         }
         if seen.insert(trimmed.to_string()) {
@@ -1979,11 +2012,11 @@ agent = "claude"
             .expect("tempdir")
     }
 
-    /// Issue #661 / L5: `requested_grants` reads a manifest agent's `tools` line,
-    /// falls back to an overlay teammate's own grant, and reads an empty grant
-    /// (from either source, and for an unknown id) as the standard company-wide
-    /// grant — so the Team tab shows an overlay teammate's real grant instead of
-    /// the full company allow-list.
+    /// Issue #661 / L5, updated for #1804's three-state grant: `requested_grants`
+    /// reads a manifest agent's `tools` line, falls back to an overlay teammate's
+    /// own grant, and returns the three states verbatim — `None` (absent line,
+    /// the standard company-wide grant), `Some(vec![])` (an explicit deny-all),
+    /// and `Some(globs)` (a narrowed grant). An unknown id reads as `None`.
     #[test]
     fn requested_grants_reads_overlay_then_manifest_then_empty() {
         use crate::ports::types::OverlayAgent;
@@ -2020,7 +2053,7 @@ agent = "claude"
             name: "Scoped".to_string(),
             role: "Researcher".to_string(),
             description: None,
-            tools: vec!["docs.*".to_string()],
+            tools: Some(vec!["docs.*".to_string()]),
             model: None,
             harness: None,
         });
@@ -2029,7 +2062,18 @@ agent = "claude"
             name: "Standard".to_string(),
             role: "Generalist".to_string(),
             description: None,
-            tools: Vec::new(),
+            // `None` = no line of its own → the standard company-wide grant.
+            tools: None,
+            model: None,
+            harness: None,
+        });
+        record.overlay_agents.push(OverlayAgent {
+            id: "denied".to_string(),
+            name: "Denied".to_string(),
+            role: "Contractor".to_string(),
+            description: None,
+            // `Some(vec![])` = an explicit deny-all since #1804, distinct from None.
+            tools: Some(Vec::new()),
             model: None,
             harness: None,
         });
@@ -2037,14 +2081,19 @@ agent = "claude"
         // A manifest agent's own line.
         assert_eq!(
             super::requested_grants(&record, "ceo"),
-            vec!["workspace.read"]
+            Some(vec!["workspace.read".to_string()])
         );
         // An overlay teammate's own grant (the L5 read side).
-        assert_eq!(super::requested_grants(&record, "scoped"), vec!["docs.*"]);
-        // An overlay teammate with no grant → empty (the standard grant).
-        assert!(super::requested_grants(&record, "standard").is_empty());
-        // An unknown id → empty, as before.
-        assert!(super::requested_grants(&record, "nobody").is_empty());
+        assert_eq!(
+            super::requested_grants(&record, "scoped"),
+            Some(vec!["docs.*".to_string()])
+        );
+        // An overlay teammate with no line of its own → None (the standard grant).
+        assert_eq!(super::requested_grants(&record, "standard"), None);
+        // An explicit deny-all reads back as `Some(vec![])`, NOT None (#1804).
+        assert_eq!(super::requested_grants(&record, "denied"), Some(Vec::new()));
+        // An unknown id → None, as before.
+        assert_eq!(super::requested_grants(&record, "nobody"), None);
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
@@ -2320,10 +2369,7 @@ agent = "claude"
         );
 
         let (_, writer) = get_agent(&state, "writer").await;
-        assert!(
-            strings(&writer["tools"]["requested"]).is_empty(),
-            "{writer}"
-        );
+        assert!(writer["tools"]["requested"].is_null(), "{writer}");
         assert_eq!(
             strings(&writer["tools"]["effective"]),
             vec!["workspace", "workspace.*", "composio"],
@@ -2534,7 +2580,7 @@ tools = ["media"]
         assert_eq!(agent["name"], "Jamie");
         assert!(agent["tier"].is_null(), "{agent}");
         assert_eq!(agent["isOrchestrator"], false, "{agent}");
-        assert!(strings(&agent["tools"]["requested"]).is_empty(), "{agent}");
+        assert!(agent["tools"]["requested"].is_null(), "{agent}");
         assert_eq!(
             strings(&agent["tools"]["effective"]),
             vec!["workspace", "workspace.*", "composio"],
@@ -2596,10 +2642,7 @@ tools = ["media"]
             "a request the company never allowed is not a grant: {ceo}"
         );
         let writer = row_of("writer");
-        assert!(
-            strings(&writer["tools"]["requested"]).is_empty(),
-            "{writer}"
-        );
+        assert!(writer["tools"]["requested"].is_null(), "{writer}");
         assert_eq!(
             strings(&writer["tools"]["effective"]),
             vec!["workspace", "workspace.*", "composio"],
@@ -3451,7 +3494,7 @@ prompt = "Lead decisively."
 
         let (_, before) = get_agent(&state, &jamie).await;
         assert!(
-            strings(&before["tools"]["requested"]).is_empty(),
+            before["tools"]["requested"].is_null(),
             "unscoped to begin with: {before}"
         );
         assert_eq!(
@@ -3487,14 +3530,26 @@ prompt = "Lead decisively."
             "{reread}"
         );
 
-        // An empty list is the deliberate way back to the standard grant, and
-        // must read as "inherits everything" rather than "holds nothing".
-        let (status, cleared) = patch_agent(&state, &jamie, json!({"tools": []})).await;
-        assert_eq!(status, StatusCode::OK, "{cleared}");
-        assert!(
-            strings(&cleared["tools"]["requested"]).is_empty(),
-            "{cleared}"
+        // Since #1804 an explicit empty list is a deliberate deny-all, NOT the
+        // way back to the standard grant: it stores `[]` (not null) and must
+        // read as "holds nothing".
+        let (status, denied) = patch_agent(&state, &jamie, json!({"tools": []})).await;
+        assert_eq!(status, StatusCode::OK, "{denied}");
+        assert_eq!(
+            strings(&denied["tools"]["requested"]),
+            Vec::<String>::new(),
+            "an explicit empty list stores an empty (deny-all) grant, not null: {denied}"
         );
+        assert!(
+            strings(&denied["tools"]["effective"]).is_empty(),
+            "a deny-all teammate holds nothing: {denied}"
+        );
+
+        // `null` is the deliberate way back to the standard grant, and must read
+        // as "inherits everything" (requested null) rather than "holds nothing".
+        let (status, cleared) = patch_agent(&state, &jamie, json!({"tools": null})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["tools"]["requested"].is_null(), "{cleared}");
         assert_eq!(
             strings(&cleared["tools"]["effective"]),
             vec!["workspace", "workspace.*", "composio"],
@@ -3503,13 +3558,15 @@ prompt = "Lead decisively."
     }
 
     /// **The review finding (#745).** A member must not be able to widen a
-    /// teammate's scope — and because an empty list means "the company's
-    /// standard grant", `{"tools": []}` is the widest possible widening.
+    /// teammate's scope — and since #1804 the widest possible widening is
+    /// `{"tools": null}`, the reset back to the company's standard grant. (An
+    /// empty list `{"tools": []}` is now a deny-all, the *narrowest* scope, but
+    /// it is equally admin-only: every `tools` edit is gated, whichever state.)
     ///
     /// This is #619's own defect reachable through the route added to fix it:
-    /// `add_agent` refuses a narrowing that lands empty precisely because an
-    /// empty list inherits everything, and leaving `edit_agent` member-open
-    /// would have let any signed-in member undo any scoping with one call.
+    /// resetting to the standard grant inherits everything, and leaving
+    /// `edit_agent` member-open would have let any signed-in member undo any
+    /// scoping with one call.
     ///
     /// The two-account shape is the point: the harness signs every other
     /// request in as an admin, so a check verified only as an admin passes
@@ -3528,13 +3585,20 @@ prompt = "Lead decisively."
         let uri = format!("/api/v1/company/team/{jamie}");
         let member = || crate::server::test_support::member_cookie("acme");
 
-        // The widening a member must not be able to perform.
-        let (status, refusal) =
-            send_as(&state, "PATCH", &uri, Some(json!({"tools": []})), member()).await;
+        // The widening a member must not be able to perform: `null` resets to
+        // the company's whole standard grant.
+        let (status, refusal) = send_as(
+            &state,
+            "PATCH",
+            &uri,
+            Some(json!({"tools": null})),
+            member(),
+        )
+        .await;
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
-            "an empty list is the company's whole grant: {refusal}"
+            "resetting to null is the company's whole grant: {refusal}"
         );
 
         // …and neither may a member set a different scope at all.
@@ -4095,7 +4159,7 @@ agent = "claude"
 
         let (_, unchanged) = get_agent(&state, &jamie).await;
         assert!(
-            strings(&unchanged["tools"]["requested"]).is_empty(),
+            unchanged["tools"]["requested"].is_null(),
             "and nothing was written: {unchanged}"
         );
     }
@@ -4419,7 +4483,7 @@ agent = "claude"
             name: "Growth".to_string(),
             role: "Growth Marketer".to_string(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });

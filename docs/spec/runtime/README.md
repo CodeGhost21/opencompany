@@ -59,8 +59,9 @@ Supporting docs:
   prompts, checked-in briefing documents versus routed workspace documents, and
   the `classes` routing exclusions
 - [tools.md](tools.md) — the three-level tool grant
-  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an empty grant list means
-  "inherit" rather than "nothing", the four namespaces `*` never confers, the
+  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an absent grant means
+  "inherit" rather than "nothing" (and why an explicit empty agent grant is a
+  deny-all since #1804), the four namespaces `*` never confers, the
   unified tool catalog, and the seed-wins rule for console desk overrides
 - [lifecycle.md](lifecycle.md) — company state machine and durability
 - [planning.md](planning.md) — the board's Planning station: one tool-less model

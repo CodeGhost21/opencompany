@@ -857,6 +857,9 @@ name = "{name}"
         CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_tool_grants: None,
+            name_confirmed: false,
+            activation_completed_at: None,
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
