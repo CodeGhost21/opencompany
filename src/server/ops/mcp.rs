@@ -1066,10 +1066,13 @@ role = "Chief Executive"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -1181,6 +1184,7 @@ role = "Chief Executive"
             name: "Creative".to_string(),
             description: None,
             members: vec!["jamie".to_string()],
+            responder: crate::ports::types::ResponderMode::default(),
         });
         scoped
             .overlay_desk_tools

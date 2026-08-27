@@ -34,7 +34,8 @@ use crate::error::OpenCompanyError;
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{
     Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, OutboundMessage,
-    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
+    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent, TurnStep,
+    Verdict,
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
@@ -137,6 +138,15 @@ struct DeskDto {
     /// the blueprint and cannot be removed at runtime). Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     overlay_members: Vec<String>,
+    /// How this desk's unmentioned messages find their answerer (issue #1835):
+    /// `"lead"` — `members[0]` leads and answers — or `"auto"`, a channel with
+    /// **no lead**, whose answerer is picked per message by best fit over the
+    /// membership. Omitted when `lead` (which is every manifest desk and every
+    /// desk created before the field existed), so old consoles and old wire
+    /// shapes are byte-for-byte unchanged. The console reads this to suppress
+    /// every lead affordance — crown, badge, Make-lead — on `auto` channels.
+    #[serde(skip_serializing_if = "ResponderMode::is_lead")]
+    responder: ResponderMode,
     /// Whether the whole desk was operator-created (an overlay desk) rather than
     /// declared in the manifest blueprint. The console offers a delete action
     /// only for these — blueprint desks cannot be deleted at runtime. Omitted
@@ -180,6 +190,9 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     description: chat.description.clone(),
                     members,
                     overlay_members,
+                    // Manifest desks are always lead-routed — the blueprint
+                    // syntax carries no responder field (issue #1835).
+                    responder: ResponderMode::Lead,
                     overlay_created: false,
                     system: false,
                 }
@@ -199,6 +212,7 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     description: desk.description.clone(),
                     members,
                     overlay_members,
+                    responder: desk.responder,
                     overlay_created: true,
                     system: false,
                 }
@@ -494,11 +508,18 @@ struct CreateDesk {
     /// omitted.
     #[serde(default)]
     id: Option<String>,
-    /// The desk's founding member ids, in order (the first becomes the lead).
+    /// The desk's founding member ids, in order (the first becomes the lead —
+    /// unless `responder` is `"auto"`, in which case order carries no rank).
     /// Each must resolve to a roster teammate. Optional — a desk can start empty
     /// and gain members through the desk-member overlay.
     #[serde(default)]
     members: Vec<String>,
+    /// How the desk routes its unmentioned messages (issue #1835). Absent means
+    /// `"lead"` — today's model, and what every existing caller sends — so the
+    /// org chart's create is unchanged. `"auto"` creates a leadless channel
+    /// whose answerer is picked per message.
+    #[serde(default)]
+    responder: ResponderMode,
 }
 
 /// Derives a snake_case desk id from a display name: lowercase, runs of
@@ -601,6 +622,18 @@ async fn create_desk(
         }
     }
 
+    // An `auto` channel with nobody in it is unroutable by construction
+    // (issue #1835, codex review): the selector has no candidates and the
+    // first-member fallback has no first member, so an unmentioned message
+    // there would fall through to the orchestrator — contradicting the
+    // channel's own stated model. A *lead* desk may still start empty and be
+    // staffed from the org chart, exactly as before.
+    if !body.responder.is_lead() && members.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "a channel with per-message routing needs at least one member — with nobody in it, there is nobody to pick"
+                .to_string(),
+        )));
+    }
     let description = body
         .description
         .map(|d| d.trim().to_string())
@@ -610,6 +643,7 @@ async fn create_desk(
         name: name.clone(),
         description: description.clone(),
         members: members.clone(),
+        responder: body.responder,
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
@@ -623,6 +657,7 @@ async fn create_desk(
             description,
             members: effective,
             overlay_members: Vec::new(),
+            responder: body.responder,
             overlay_created: true,
             system: false,
         }),
@@ -3865,10 +3900,13 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -3963,10 +4001,13 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -4188,10 +4229,13 @@ mode = "full"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -4294,10 +4338,13 @@ mode = "full"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -4332,10 +4379,13 @@ mode = "full"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -4863,10 +4913,13 @@ mode = "full"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -5007,10 +5060,13 @@ mode = "full"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -5342,6 +5398,114 @@ mode = "full"
         assert_eq!(arr[1]["overlayCreated"], true);
         assert_eq!(arr[2]["id"], "operator"); // system channel last
         assert_eq!(arr[2]["system"], true);
+    }
+
+    /// Issue #1835, both wire directions. A create that never mentions
+    /// `responder` — every existing caller, and the org chart today — answers
+    /// and lists with **no** `responder` key at all, so old consoles see the
+    /// pre-#1835 shape byte-for-byte. A create with `responder: "auto"`
+    /// answers and lists `"auto"`, and the mode survives the store round-trip
+    /// rather than collapsing back to a lead desk.
+    #[tokio::test]
+    async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/company/desks")
+                            .header("cookie", &cookie)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::CREATED);
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            }
+        };
+
+        let lead = post(r#"{"name":"Growth desk","members":["eng"]}"#).await;
+        assert!(
+            lead.get("responder").is_none(),
+            "a mode never stated must not appear on the wire: {lead}"
+        );
+        let auto =
+            post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
+        assert_eq!(auto["responder"], "auto", "{auto}");
+
+        // The list re-reads the store, so this is the round-trip half: the
+        // manifest desk and the defaulted create stay keyless, the channel
+        // keeps its mode.
+        let desks = get_desks(&app, &cookie).await;
+        let arr = desks.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert!(arr[0].get("responder").is_none(), "manifest desk: {desks}");
+        assert!(
+            arr[1].get("responder").is_none(),
+            "defaulted create: {desks}"
+        );
+        assert_eq!(arr[2]["responder"], "auto", "{desks}");
+    }
+
+    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
+    /// the selector would have no candidates and the first-member fallback no
+    /// first member, so its unmentioned messages would silently fall to the
+    /// orchestrator, contradicting the channel's own model. A **lead** desk
+    /// keeps its right to start empty and be staffed from the org chart.
+    /// Revert the guard in `create_desk` and the first assertion answers 201.
+    #[tokio::test]
+    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            body.contains("at least one member"),
+            "the refusal names the reason, not a generic 400: {body}"
+        );
+
+        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
+        assert_eq!(
+            empty_lead.status(),
+            StatusCode::CREATED,
+            "an empty lead desk is still legal — it gains members from the org chart"
+        );
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a

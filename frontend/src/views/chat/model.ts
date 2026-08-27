@@ -30,6 +30,7 @@ export function deskFromDto(d: DeskDto): Desk {
     // Issue #1757: carry the Operator system-channel flag through so the chat
     // view can render it read-only.
     system: d.system,
+    responder: d.responder,
   };
 }
 
@@ -152,6 +153,13 @@ export interface Channel {
    * it and it offers no membership editing.
    */
   system?: boolean;
+  /**
+   * Whether this channel has **no lead** (issue #1835): an `auto` desk, whose
+   * answerer is picked per message. `memberIds[0]` carries no rank here, so a
+   * consumer must not badge it — the host's own `desk_lead` is `None` for such
+   * a channel by definition. Absent/false for every lead desk and DM.
+   */
+  leadless?: boolean;
 }
 
 export interface ChannelSection {
@@ -185,10 +193,16 @@ export function buildChannels(
     name: d.channel,
     voice: d.name,
     kind: "channel" as const,
-    purpose: d.blurb,
+    // An `auto` channel with no blurb of its own states its routing rule —
+    // the honest line about who answers, in place of a rank nothing confers
+    // (issue #1835). An operator-written blurb still wins.
+    purpose:
+      d.blurb ||
+      (d.responder === "auto" ? "Best fit picks up anything you don't @-mention" : d.blurb),
     tone: d.tone,
     memberIds: d.members,
     system: d.system,
+    leadless: d.responder === "auto" || undefined,
   }));
 
   const dms = directMessageChannels(members)

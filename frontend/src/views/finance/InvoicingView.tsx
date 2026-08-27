@@ -13,6 +13,8 @@ import { cn } from "@/lib/utils";
 import { ChargebeeForm } from "@/views/finance/ChargebeeForm";
 import { ConnectionPanel } from "@/views/finance/ConnectionPanel";
 import { chargebeeHealth, startsExpanded } from "@/views/finance/health";
+import { grantNamespace } from "@/components/grant-namespace";
+import { me as fetchMe } from "@/api/auth";
 import { fromMinorUnits, invoiceStatus } from "@/views/finance/money";
 import { SendInvoiceDialog } from "@/views/finance/SendInvoiceDialog";
 
@@ -46,6 +48,14 @@ const STATUSES = ["", "paid", "payment_due", "posted", "not_paid", "voided"] as 
 export function InvoicingView({ client, company }: Props) {
   const [status, setStatus] = useState<BillingStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  // Issue #1796: whether the `chargebee` grant is in flight. The panel renders the
+  // control; this page owns the write and the re-read that follows it, because
+  // the panel is shared by both providers and holds neither one's status.
+  const [granting, setGranting] = useState(false);
+  // Whether this viewer may widen the company's tool grants (issue #1796).
+  // Resolved as `OAuthView` resolves it and defaulted CLOSED: the grant write is
+  // admin-only, so an unresolved role must not render an enabled button.
+  const [canManage, setCanManage] = useState(false);
   const [expanded, setExpanded] = useState(false);
   // A latch, not render state: set once from the first status that arrives.
   // Re-deriving the panel's openness on every status would slam it shut the
@@ -103,6 +113,22 @@ export function InvoicingView({ client, company }: Props) {
   }, [client, company, filter, customerEmail]);
 
   useEffect(() => {
+    let live = true;
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin.
+      }
+      if (live) setCanManage(admin);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
 
@@ -148,6 +174,21 @@ export function InvoicingView({ client, company }: Props) {
           expanded={expanded}
           onExpandedChange={setExpanded}
           onTest={usable ? () => testChargebee(client, company) : undefined}
+          granting={granting}
+          canManage={canManage}
+          onGrant={() => {
+            void (async () => {
+              setGranting(true);
+              try {
+                // Re-read on success so the panel's own verdict moves off
+                // "not granted" — a button that works and leaves the warning
+                // standing reads exactly like one that did not.
+                if (await grantNamespace(client, company, "chargebee")) await loadStatus();
+              } finally {
+                setGranting(false);
+              }
+            })();
+          }}
         >
           <ChargebeeForm
             client={client}

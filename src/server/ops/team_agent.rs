@@ -1217,7 +1217,16 @@ pub(super) fn desks_for(record: &CompanyRecord, agent_id: &str) -> Vec<AgentDesk
             members.iter().any(|m| m == agent_id).then(|| AgentDeskDto {
                 id: id.to_string(),
                 name: name.to_string(),
-                lead: members.first().map(String::as_str) == Some(agent_id),
+                // Position is a rank only on a **lead** desk. An `auto`
+                // channel (issue #1835) orders its members without conferring
+                // anything, so `members[0]` there is whoever happens to be
+                // listed first — badging them "(lead)" on TeamView, the agent
+                // detail page and the profile sheet states a rank nothing
+                // confers (codex on #1872). Read through `desk_lead`, the
+                // one definition that is `None` for an auto channel, rather
+                // than re-deriving the rule from position here.
+                lead: crate::runtime::delegation_tools::desk_lead(record, id).as_deref()
+                    == Some(agent_id),
             })
         })
         .collect()
@@ -1998,10 +2007,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         record.overlay_agents.push(OverlayAgent {
             id: "scoped".to_string(),
@@ -2054,10 +2066,13 @@ agent = "claude"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -2215,6 +2230,64 @@ agent = "claude"
         let (_, hermit) = get_agent(&state, "hermit").await;
         assert_eq!(hermit["desks"].as_array().unwrap().len(), 0, "{hermit}");
         assert_eq!(hermit["isOrchestrator"], false, "{hermit}");
+    }
+
+    /// Issue #1872 (codex): an `auto` channel confers no lead, so the roster
+    /// surfaces must not badge one.
+    ///
+    /// `desks_for` used to read `members[0] == agent_id` straight off the
+    /// effective order, which is a rank only on a lead desk — on a channel it
+    /// is whoever happens to be listed first, and TeamView, the agent detail
+    /// page and the profile sheet all rendered them "(lead)". Reading through
+    /// `desk_lead` (`None` for an auto channel by definition) is what keeps
+    /// this honest; revert that and the first assertion below reads `true`.
+    ///
+    /// The lead desk beside it is the half that must not move: a mode nobody
+    /// stated still badges its first member exactly as before.
+    #[tokio::test]
+    async fn an_auto_channel_badges_no_lead_but_a_desk_still_does() {
+        let home = tempfile::tempdir().unwrap();
+        let state = state_with_manifest(home.path(), ROSTER).await;
+        // A channel and a lead desk, both holding `ceo` first.
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+        let store = runtime.store();
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["ceo".to_string(), "writer".to_string()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "growth".to_string(),
+            name: "Growth".to_string(),
+            description: None,
+            members: vec!["ceo".to_string(), "writer".to_string()],
+            responder: crate::ports::types::ResponderMode::Lead,
+        });
+        store.save(&record).await.unwrap();
+
+        let (_, ceo) = get_agent(&state, "ceo").await;
+        let desks = ceo["desks"].as_array().unwrap();
+        let by = |id: &str| {
+            desks
+                .iter()
+                .find(|d| d["id"] == id)
+                .unwrap_or_else(|| panic!("{id} missing from {ceo}"))
+                .clone()
+        };
+        assert_eq!(
+            by("launch")["lead"],
+            false,
+            "an auto channel confers no rank on its first member: {ceo}"
+        );
+        assert_eq!(
+            by("growth")["lead"],
+            true,
+            "a lead desk is unchanged: {ceo}"
+        );
     }
 
     /// The verification gap the issue names: what an agent *asks* for and what
@@ -4333,10 +4406,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         record.overlay_agents.push(crate::ports::OverlayAgent {
             id: "growth".to_string(),
@@ -4420,10 +4496,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 

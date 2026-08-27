@@ -172,7 +172,10 @@ export function buildOrgTree(
           avatar: member?.avatar ?? avatarFor(id),
           // The host's order carries the hierarchy: index 0 is the lead. Read
           // the position, never re-derive the lead by sorting or by name.
-          lead: index === 0,
+          // Unless the desk is an `auto` channel (issue #1835): there
+          // `members[0]` carries no rank — the host's `desk_lead` is `None` by
+          // definition — so no seat wears the crown.
+          lead: index === 0 && desk.responder !== "auto",
           provenance: overlay.has(id) ? "overlay" : "blueprint",
           known: member !== undefined,
         };

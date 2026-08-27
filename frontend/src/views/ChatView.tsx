@@ -54,6 +54,7 @@ import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
 import { useIsDesktop } from "@/hooks/use-mobile";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
+import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
@@ -79,6 +80,7 @@ import {
   channelIdFromSegment,
   channelMembers,
   channelTitle,
+  deskFromDto,
   dmChannelId,
   findChannel,
   firstChannel,
@@ -413,6 +415,8 @@ export function ChatView({
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  // The rail's "+" (issue #1835) — chat's own door for creating a channel.
+  const [channelCreateOpen, setChannelCreateOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
   // Whether the transcript is actually on screen. At `lg` (≥1024) the rail and
   // transcript share the viewport (`hidden lg:flex`), so it is visible even
@@ -678,6 +682,18 @@ export function ChatView({
   // dead — and a stale answer landing last would replace the current company's
   // channels with the previous one's.
   const desksRun = useRef(0);
+  /**
+   * Whether the current `desks` state is `defaultDesks()` — the fabricated
+   * starter set shown when the host exposes no desks — rather than the host's
+   * own list. `onCreated` below needs the distinction (codex on #1872):
+   * appending the company's first real channel *beside* the fallback would
+   * leave nonexistent channels in the rail until reload, and a channel named
+   * "Strategy" would collide with the fallback row of the same id, so
+   * navigation could land on the fabrication instead of the real thing. The
+   * moment one real desk exists the fallback set has no business rendering —
+   * that is the fallback's own contract (`lib/desks.ts`).
+   */
+  const desksAreFallback = useRef(false);
 
   /**
    * The company's real desks, when the host exposes them — a company with its
@@ -700,10 +716,18 @@ export function ChatView({
     try {
       const dtos = await client.listDesks(company);
       if (run !== desksRun.current) return;
+      // Keyed on *real* (non-system) desks, not raw response length — the
+      // always-present Operator system channel (issue #1757) means a
+      // desk-less company's `/desks` answer is never actually empty, so
+      // `dtos.length === 0` would never trip here and the fabricated
+      // defaults would linger in the rail once a real channel is created
+      // (see `resolveDesks` in `chat/model.ts`).
+      desksAreFallback.current = !dtos.some((d) => !d.system);
       setDesks(resolveDesks(dtos));
     } catch (error) {
       if (run !== desksRun.current) return;
       if (error instanceof ApiError && error.status === 404) {
+        desksAreFallback.current = true;
         setDesks(defaultDesks());
         return;
       }
@@ -1669,6 +1693,15 @@ export function ChatView({
     }
   }
 
+  /**
+   * The rail's create affordance (issue #1835) — or `undefined`, which is the
+   * rule this codebase follows for a control that would be refused: absent,
+   * not disabled. A starter roster (`!fromHost`) has no saved teammates to
+   * staff a channel with, and an empty roster has nobody at all.
+   */
+  const onAddChannel =
+    fromHost && members.length > 0 ? () => setChannelCreateOpen(true) : undefined;
+
   function selectChannel(id: string) {
     onNavigate(id);
     setMobilePane("chat");
@@ -1696,6 +1729,7 @@ export function ChatView({
         onToggleSection={toggleRailSection}
         directMessages={directMessageChannels(members)}
         onStartDirectMessage={selectChannel}
+        onAddChannel={onAddChannel}
         className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
       />
       <ChannelRail
@@ -1708,6 +1742,7 @@ export function ChatView({
         onToggleSection={toggleRailSection}
         directMessages={directMessageChannels(members)}
         onStartDirectMessage={selectChannel}
+        onAddChannel={onAddChannel}
         collapsed={channelsCollapsed}
         onExpand={toggleChannels}
         className="hidden lg:flex"
@@ -1959,7 +1994,15 @@ export function ChatView({
               others={outsideChannel}
               people={companyPeople}
               presence={presence}
-              leadId={active.kind === "channel" ? active.memberIds?.[0] : undefined}
+              leadId={
+                // An `auto` channel has no lead (issue #1835): its memberIds
+                // are the channel's membership in the host's order, not a
+                // hierarchy, so badging [0] would state a rank nothing
+                // confers — the host's own `desk_lead` is `None` for it.
+                active.kind === "channel" && !active.leadless
+                  ? active.memberIds?.[0]
+                  : undefined
+              }
               loading={loadingTeam}
               fromHost={fromHost}
               onToggleInbox={(m) => void toggleMemberInbox(m)}
@@ -2002,6 +2045,28 @@ export function ChatView({
       </div>
 
       <AddMemberDialog open={addOpen} onOpenChange={setAddOpen} onAdd={(fields) => void addMember(fields)} />
+      <ChannelCreateDialog
+        client={client}
+        company={company}
+        members={members}
+        open={channelCreateOpen}
+        onOpenChange={setChannelCreateOpen}
+        onCreated={(dto) => {
+          // Fold the new channel into the rail and land the operator in it —
+          // the same deskFromDto every fetched desk goes through, so a
+          // just-created channel is indistinguishable from a reloaded one.
+          //
+          // REPLACING the fallback set, not appending to it, when the rail was
+          // showing `defaultDesks()`: the company's first real channel is the
+          // event that ends the fallback's mandate, and appending beside it
+          // would keep fabricated rows in the rail — one of which could share
+          // the new channel's very id — until a reload (codex on #1872).
+          const desk = deskFromDto(dto);
+          setDesks((prev) => (desksAreFallback.current ? [desk] : [...(prev ?? []), desk]));
+          desksAreFallback.current = false;
+          selectChannel(desk.id);
+        }}
+      />
       <BudgetDialog
         member={budgetFor}
         onOpenChange={(open) => {

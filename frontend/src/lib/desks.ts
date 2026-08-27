@@ -34,6 +34,12 @@ export interface Desk {
    * view renders it but disables its composer and offers no membership editing.
    */
   system?: boolean;
+  /**
+   * How the desk routes its unmentioned messages (issue #1835). `"auto"` is a
+   * leadless channel — `members[0]` carries no rank and the host picks a
+   * best-fit member per message. Absent means `"lead"`, today's model.
+   */
+  responder?: "lead" | "auto";
 }
 
 /** The main line plus a few focused desks. */
