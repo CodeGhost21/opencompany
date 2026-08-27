@@ -2363,6 +2363,15 @@ export function AppShell({
             ...rows[idx],
             status,
             detail: event.detail ?? rows[idx].detail,
+            // `result` is what came back — the summary `StepTimeline` renders
+            // under the label. Carried for the same reason `detail` is: the
+            // live row and the folded step it is replaced by should not say
+            // different amounts about the same call. It was dropped here while
+            // only the built-in harness streamed (its rows lean on `detail`,
+            // derived from the arguments); an ACP tool call carries its
+            // summary in `result` and nothing else, so a dropped `result` is
+            // the whole of what the row could have said.
+            result: event.result ?? rows[idx].result,
             elapsedMs: event.elapsedMs,
           };
         } else {
@@ -2371,6 +2380,7 @@ export function AppShell({
             status,
             label: event.label ?? "Working",
             detail: event.detail,
+            result: event.result,
             elapsedMs: event.elapsedMs,
             toolCallId: event.toolCallId,
           });

@@ -179,6 +179,114 @@ declares `RunnerDispatch`, but it does not implement `AcpAgent`, and nothing
 wires it into `lanes::build`. A `runner`-transport harness resolves
 `unavailable` on every build today, `local` included.
 
+### One conversation per teammate, and it survives a restart
+
+A session is per **(company, agent)** — `AcpRunTurn::session_key` is
+`"{company}::{agent_id}"` — so two desks never share a conversation and the
+second question in a thread does not arrive with no memory of the first. That
+key is deliberately *not* per chat thread: a teammate is one correspondent, the
+same way a `built_in` teammate is one live agent object however many threads it
+answers on.
+
+`LocalAcpAgent` maps that key to an ACP `sessionId` in memory, and **writes it
+down**: `<workspace_root>/<company>/<agent>/acp-session.json`, beside the
+agent's workspace rather than inside it (`workspace/` is the `cwd` the adapter
+is given, and a file dropped in there is one the teammate can list, read and
+edit).
+
+On the first turn a process runs for a teammate, the agent tries
+`session/load` before `session/new`. Without this, every runtime rebuild —
+a manifest edit, an inference-settings change, an app restart — silently
+started the teammate's conversation over: `LocalAcpAgentFactory::build` mints a
+fresh agent with an empty session map, and nothing on the operator's screen
+said the memory had gone.
+
+Four things make the attempt safe to make unconditionally:
+
+- It is **capability-gated** on `agentCapabilities.loadSession` from the
+  adapter's own `initialize` response, read at spawn. Both catalogue adapters
+  answer `true` today (confirmed live: `claude-agent-acp` 0.70.0, `codex-acp`
+  1.6.2), and one that answers `false` gets a fresh session instead of a
+  "method not found".
+- A record naming a **different harness** is ignored, not tried: a Claude
+  session id means nothing to `codex-acp`, and the record outlives a teammate
+  being rebound between them.
+- **Every failure falls through to `session/new`.** An adapter that no longer
+  holds the session answers `Resource not found` (`-32002`) — what a cleared
+  CLI session store looks like from here — and the record is dropped so the
+  next cold start does not re-spend the round trip.
+- The **replay is not the turn.** `session/load` replays the conversation as
+  ordinary `session/update` notifications, including the operator's own past
+  messages (`user_message_chunk`, which `parse_update` maps to nothing).
+  `prompt` clears the session's buffer after the load and registers its live
+  observer only afterwards, so replayed history reaches neither the folded
+  timeline nor a watching console.
+
+Model steering runs against whichever session results, so an operator who
+changed the model between runs is not left talking to the old one — best-effort,
+since a load response that advertises no model option leaves the resumed
+session on what it was created with.
+
+### Execution state, before the result
+
+An ACP turn publishes its tool calls onto the transient turn-stream bus
+(`src/turn_stream.rs`) **as they happen**, the same bus and the same frame
+shapes the built-in harness's collector uses — so the console renders an ACP
+teammate's timeline live, with no frontend change to tell the two engines
+apart.
+
+It did not, until now: `session/prompt` buffered every update and handed back
+one `AcpTurn` at the end, so an ACP-run teammate sat silent for the whole turn
+and then produced a finished timeline. On a five-minute coding turn that is
+indistinguishable from a hang — beside a `built_in` teammate that shows each
+call as it starts.
+
+The seam is an optional observer on the port (`ports::acp::AcpObserver`),
+passed into `AcpAgent::prompt` and called by the transport as each
+`session/update` arrives. A tee, never a hand-off: the transport still buffers
+everything, `fold` still reads the buffer, and the live view is therefore the
+same events read twice rather than a second derivation that could drift. A
+dropped live frame (a lagging console) is cosmetic.
+
+Which surface a turn streams to follows the same rules as `built_in`:
+
+| turn | streams to |
+|---|---|
+| chat (`run` / `run_steered`) | the frame's own `chatId`, falling back to the default desk |
+| dispatched card (`run_steered_background`) | nothing — its steps fold into the card's note |
+| workflow node (`run_background_workflow`) | the run-trace sheet, by `workflowRunId`/`nodeId` |
+
+`run_background`/`run_background_workflow` are **overridden** rather than
+inherited for exactly this reason: the trait default forwards to `run` with no
+chat id, which would now publish a workflow node's tool calls onto the default
+desk's chat timeline.
+
+Two things do not stream. Assistant text adds no live row (the reply is the
+bubble body, and nothing on this bus carries the text itself), and a
+non-terminal `tool_call_update` (`pending`/`in_progress`) publishes nothing —
+its row is already on screen as `running`, which is also exactly what `fold`
+leaves the step as.
+
+A tool call's `title` and result summary are **bounded by the transport**
+(`MAX_TITLE_CHARS` / `MAX_RESULT_CHARS` in `local_agent.rs`) before either
+view sees them. Unlike a built-in step's server-computed label, these are
+unvalidated text from an external agent process, and they now reach two places
+at once — the durable step and every watching console.
+
+`transport = "runner"` streams nothing: its wire hands back a whole `AcpTurn`
+when the remote turn is over, so there is no per-update stream on this side to
+tee. Making it live is a change to the runner wire, not to this fold.
+
+**Still missing: the durable run trace.** `AcpRunTurn` ignores the
+`RunTraceSink` every `RunTurn` method offers it, so a *dispatched card* run by
+an ACP teammate mints its attempt row and persists no steps under it — its
+timeline exists only in the card's note, written at the end. The live bus
+above does not close that gap: it is deliberately ephemeral and journal-less.
+The blocker is shape, not plumbing — `RunTraceSink::record` takes an
+`oh::AgentProgress`, which is what the built-in collector has and an ACP fold
+does not; giving the sink a `TurnStep`-shaped entry point means owning step
+ordinals and the running→finalized rewrite from a second producer.
+
 ### Readiness
 
 For `transport = "local"`, the desktop probes four states rather than two:
@@ -442,8 +550,11 @@ running on an operator-supplied credential rather than a signed-in account.
 | per-agent dispatch | `src/harness/router.rs` |
 | building the lanes at boot, resolving `acp` engines | `src/harness/lanes.rs` |
 | the built-in engine | `src/harness/built_in/` |
-| the `AcpAgent`/`AcpAgentFactory` ports (ungated) | `src/ports/acp.rs` |
+| the `AcpAgent`/`AcpAgentFactory`/`AcpObserver` ports (ungated) | `src/ports/acp.rs` |
 | the ACP `RunTurn` (folds a port `AcpTurn` into `TurnStep`) | `src/harness/acp/run_turn.rs` |
+| live frames while an ACP turn runs (`live_frame_from`, `observer_for`) | `src/harness/acp/run_turn.rs` |
+| remembering + resuming a session (`session_record_path`, `resume_session`) | `src-tauri/src/acp/local_agent.rs` |
+| the transport's bounds on a tool call's title/result | `src-tauri/src/acp/local_agent.rs` (`MAX_TITLE_CHARS`, `MAX_RESULT_CHARS`) |
 | wiring an `AcpAgentFactory` onto a host | `AppState::with_acp_agents` (`src/app/types.rs`), consumed by `desktop::register` |
 | local transport: discovery, spawn, codec | `src-tauri/src/acp/` (`client.rs`, `discovery.rs`, `confine.rs`) |
 | the `local` `AcpAgentFactory` implementation | `src-tauri/src/acp/local_agent.rs` (`LocalAcpAgent`/`LocalAcpAgentFactory`) |

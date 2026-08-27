@@ -45,6 +45,23 @@
 //! Dropped rather than approximated: a `plan` is a task board, and inventing
 //! `TurnStep`s for its entries would put rows on the operator's timeline that
 //! no tool call produced.
+//!
+//! ## Execution state, before the result
+//!
+//! The same updates are published onto the transient
+//! [`turn_stream`](crate::turn_stream) bus **as they arrive**, so the console
+//! renders an ACP teammate's tool calls while the turn is still running —
+//! exactly what the built-in harness's collector does with `AgentProgress`
+//! (`built_in::steps::stream_event_from`), and what an ACP-run teammate had
+//! none of: it sat silent for the whole turn and then produced a finished
+//! timeline, which on a long coding turn is indistinguishable from a hang.
+//!
+//! The live frames and the folded [`TurnStep`]s are **the same events read
+//! twice**, not two derivations that could drift: [`live_frame_from`] and
+//! [`fold`] switch on the identical [`AcpUpdate`] stream, and the transport
+//! still buffers everything it observes. A dropped live frame (a lagging
+//! console) is therefore cosmetic — the authoritative timeline arrives folded
+//! on the reply.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,13 +71,153 @@ use async_trait::async_trait;
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::harness::TurnOutcome;
-pub use crate::ports::acp::{AcpAgent, AcpAgentFactory, AcpTurn, AcpUpdate};
+pub use crate::ports::acp::{AcpAgent, AcpAgentFactory, AcpObserver, AcpTurn, AcpUpdate};
 use crate::ports::types::{CompanyId, TurnStep, TurnStepKind, TurnStepStatus};
 use crate::runtime::delegation::RunTurn;
+use crate::turn_stream::{LiveRoute, TurnStreamCtx, TurnStreamEvent};
 
 /// [`RunTurn`] over an [`AcpAgent`].
 pub struct AcpRunTurn {
     agent: Arc<dyn AcpAgent>,
+}
+
+/// Per-turn state the live mapping carries between updates.
+///
+/// Mirrors the two locals the built-in harness's collector keeps
+/// (`built_in/mod.rs`'s `seq` + `thinking_open`): a monotonic sequence the
+/// console orders and dedups frames by, and whether a run of thoughts is
+/// already open so a burst of `agent_thought_chunk`s coalesces into one row
+/// rather than hundreds.
+#[derive(Default)]
+struct LiveState {
+    seq: u64,
+    thinking_open: bool,
+    /// The tool calls this turn has published a `running` row for.
+    ///
+    /// [`fold`] drops an update for a call it never saw start ("a step with no
+    /// label is worse on a timeline than no step"), and the live view has to
+    /// drop the same one or the two disagree about how many rows the turn
+    /// had — a row that appears live and is gone from the finished timeline
+    /// reads as work that was undone.
+    started: std::collections::HashSet<String>,
+}
+
+/// Map one [`AcpUpdate`] to the live frame the console renders, or `None` for
+/// an update with no operator-facing row.
+///
+/// The live counterpart of [`fold`], and deliberately the same shape: a
+/// `tool_call` opens a `running` row, a **terminal** `tool_call_update` flips
+/// it in place by `toolCallId`, and the first thought of a run opens one
+/// coalesced `Thinking` row that visible assistant text closes.
+///
+/// A non-terminal `tool_call_update` (`pending` / `in_progress`) emits
+/// nothing: the row it would carry is already on screen as `running` from its
+/// `tool_call`, and re-publishing it as a second `tool_call` frame would
+/// either duplicate the row or overwrite the label the console is showing.
+/// [`fold`] treats those statuses the same way — it leaves the step
+/// `Running` — so the two views still agree.
+///
+/// Assistant text adds no row here for the same reason it adds no step in
+/// [`fold`]: the reply *is* the bubble body. Nothing on this bus carries the
+/// text itself.
+fn live_frame_from(update: &AcpUpdate, state: &mut LiveState) -> Option<TurnStreamEvent> {
+    let seq = state.seq;
+    match update {
+        AcpUpdate::ToolCall { id, title } => {
+            state.thinking_open = false;
+            state.started.insert(id.clone());
+            Some(TurnStreamEvent {
+                kind: "tool_call",
+                seq,
+                tool_call_id: Some(id.clone()),
+                label: Some(title.clone()),
+                status: Some(TurnStepStatus::Running.wire_word()),
+                ..TurnStreamEvent::default()
+            })
+        }
+        AcpUpdate::ToolCallUpdate { id, status, result } => {
+            // Closed first, and unconditionally: `fold` clears its own
+            // thinking run on *any* tool-call update, including the ones it
+            // then drops, so clearing it only on the updates that publish a
+            // row would leave the live view opening a second `Thinking` row
+            // where the folded timeline opens none.
+            state.thinking_open = false;
+            let status = match status.as_str() {
+                "completed" => TurnStepStatus::Ok,
+                "failed" => TurnStepStatus::Error,
+                // Not done yet — see the doc comment.
+                _ => return None,
+            };
+            if !state.started.contains(id) {
+                // An update for a call this turn never saw start, exactly as
+                // `fold` treats one. See `LiveState::started`.
+                return None;
+            }
+            Some(TurnStreamEvent {
+                kind: "tool_result",
+                seq,
+                tool_call_id: Some(id.clone()),
+                result: result.clone(),
+                status: Some(status.wire_word()),
+                ..TurnStreamEvent::default()
+            })
+        }
+        AcpUpdate::ThoughtChunk if !state.thinking_open => {
+            state.thinking_open = true;
+            Some(TurnStreamEvent {
+                kind: "thinking",
+                seq,
+                label: Some("Thinking".to_string()),
+                status: Some(TurnStepStatus::Ok.wire_word()),
+                ..TurnStreamEvent::default()
+            })
+        }
+        AcpUpdate::ThoughtChunk => None,
+        AcpUpdate::MessageChunk(_) => {
+            state.thinking_open = false;
+            None
+        }
+    }
+}
+
+/// The [`AcpObserver`] that publishes a turn's updates onto the live bus.
+///
+/// `None` when the turn has no console surface to stream to — a dispatched
+/// card's background turn, whose steps are folded into its note and must not
+/// reach the chat timeline (the same reason `built_in` has
+/// `LiveStream::Off`). Building no observer at all, rather than one that
+/// publishes to nowhere, is what keeps the transport from doing per-update
+/// work for a turn nobody is watching.
+fn observer_for(ctx: Option<TurnStreamCtx>) -> Option<AcpObserver> {
+    let ctx = ctx?;
+    let state = std::sync::Mutex::new(LiveState::default());
+    Some(Arc::new(move |update: &AcpUpdate| {
+        // The transport calls this from its wire-reading task, so the lock is
+        // held only for the mapping itself and never across an await.
+        let mut state = match state.lock() {
+            Ok(state) => state,
+            // A poisoned lock means a previous call panicked mid-mapping.
+            // Losing live frames is cosmetic (the fold still carries the
+            // authoritative timeline), so this drops the frame rather than
+            // propagating a panic into the transport's read loop and killing
+            // the turn.
+            Err(_) => return,
+        };
+        let Some(frame) = live_frame_from(update, &mut state) else {
+            return;
+        };
+        state.seq += 1;
+        drop(state);
+
+        let frame = frame.with_agent(ctx.agent_id.clone());
+        let frame = match &ctx.route {
+            LiveRoute::Chat { chat_id } => frame.with_chat(chat_id.clone()),
+            LiveRoute::Workflow { run_id, node_id } => {
+                frame.with_workflow(run_id.clone(), node_id.clone())
+            }
+        };
+        crate::turn_stream::publish(&ctx.company, frame);
+    }))
 }
 
 impl AcpRunTurn {
@@ -77,14 +234,37 @@ impl AcpRunTurn {
         format!("{}::{agent_id}", company.as_ref())
     }
 
+    /// The live-stream context for a **chat** turn.
+    ///
+    /// Falls back to the default desk when the caller addressed none, so the
+    /// live rows land on the same thread the durable reply does — byte for
+    /// byte the rule `built_in`'s `LiveStream::On` applies, because a frame
+    /// routed to a different thread than its reply is worse than no frame.
+    fn chat_ctx(company: &CompanyId, agent_id: &str, chat_id: Option<&str>) -> TurnStreamCtx {
+        TurnStreamCtx {
+            company: company.clone(),
+            agent_id: agent_id.to_string(),
+            route: LiveRoute::Chat {
+                chat_id: chat_id
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+            },
+        }
+    }
+
     async fn run_once(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
+        stream: Option<TurnStreamCtx>,
     ) -> Result<TurnOutcome> {
         let key = Self::session_key(company, agent_id);
-        let turn = self.agent.prompt(company, &key, message).await?;
+        let observer = observer_for(stream);
+        let turn = self
+            .agent
+            .prompt(company, &key, message, observer.as_ref())
+            .await?;
         Ok(fold(turn))
     }
 }
@@ -343,9 +523,10 @@ impl RunTurn for AcpRunTurn {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
-        _chat_id: Option<&str>,
+        chat_id: Option<&str>,
     ) -> Result<TurnOutcome> {
-        self.run_once(company, agent_id, message).await
+        let ctx = Self::chat_ctx(company, agent_id, chat_id);
+        self.run_once(company, agent_id, message, Some(ctx)).await
     }
 
     async fn run_steered(
@@ -354,10 +535,12 @@ impl RunTurn for AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
-        _chat_id: Option<&str>,
+        chat_id: Option<&str>,
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
-        self.steered(company, agent_id, message, control).await
+        let ctx = Self::chat_ctx(company, agent_id, chat_id);
+        self.steered(company, agent_id, message, control, Some(ctx))
+            .await
     }
 
     async fn run_steered_background(
@@ -366,13 +549,74 @@ impl RunTurn for AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
+        // Still dropped, and this is the one place worth saying why: the sink
+        // takes `oh::AgentProgress` (`RunTraceSink::record`), which is what
+        // the built-in collector has and an ACP fold does not. So a dispatched
+        // card run by an ACP teammate persists no step trace under its attempt
+        // row — its timeline lives only in the card's note. Closing that needs
+        // a `TurnStep`-shaped entry point on the sink, which means owning step
+        // ordinals and the running→finalized rewrite from a second producer.
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
-        self.steered(company, agent_id, message, control).await
+        // No live context on purpose: a dispatched card's turn shows no chat
+        // bubble, and its rows must not appear on whatever thread most
+        // recently sent. Same rule as `built_in`'s `LiveStream::Off`.
+        self.steered(company, agent_id, message, control, None)
+            .await
+    }
+
+    /// Overridden to suppress the live stream.
+    ///
+    /// The trait default forwards to [`run`](RunTurn::run) with no chat id,
+    /// which — now that `run` streams — would publish a workflow node's tool
+    /// calls onto the **default desk's** chat timeline, attributing them to a
+    /// thread the node has nothing to do with. That is the misattribution
+    /// `built_in` grew `run_background` to avoid, and inheriting the default
+    /// here would reintroduce it for ACP alone.
+    async fn run_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+    ) -> Result<TurnOutcome> {
+        self.run_once(company, agent_id, message, None).await
+    }
+
+    /// A workflow agent node, streaming onto the run-trace sheet.
+    ///
+    /// Routed by the workflow run + node rather than a chat thread (issue
+    /// #1702's dimension), so an ACP-run node's tool calls appear live on the
+    /// sheet the same way a `built_in`-run node's do.
+    async fn run_background_workflow(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        workflow_run_id: &str,
+        node_id: &str,
+    ) -> Result<TurnOutcome> {
+        let ctx = TurnStreamCtx {
+            company: company.clone(),
+            agent_id: agent_id.to_string(),
+            route: LiveRoute::Workflow {
+                run_id: workflow_run_id.to_string(),
+                node_id: node_id.to_string(),
+            },
+        };
+        self.run_once(company, agent_id, message, Some(ctx)).await
     }
 }
 
-impl AcpRunTurn {
+/// The two windows a cancelled turn is bounded by.
+///
+/// One value rather than two parameters because they are only ever chosen
+/// together, and because the test-visible entry point that takes them was one
+/// argument over `clippy::too_many_arguments` once the live-stream context
+/// joined it — a signature that long is worth grouping rather than silencing.
+#[derive(Clone, Copy)]
+struct CancelBounds {
     /// How long a cancelled turn may keep running before the waiter gives up.
     ///
     /// Cancellation in ACP is cooperative: `session/cancel` is a notification,
@@ -381,15 +625,24 @@ impl AcpRunTurn {
     /// turn that has not drained its output within this window is abandoned,
     /// not waited on forever. The window is generous enough for a slow tool
     /// call to finish and its updates to flush.
-    const CANCEL_GRACE: Duration = Duration::from_secs(30);
-
+    grace: Duration,
     /// Bound on a single `session/cancel` round trip. A cancel that never
     /// answers — a wedged host, a dead subprocess — must not pin the steered
     /// turn forever; the grace wait is what actually reaps a turn that ignores
     /// the cancel, and this bound just keeps the attempt to tell it from
     /// blocking that.
-    const CANCEL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+    rpc: Duration,
+}
 
+impl CancelBounds {
+    /// What a real turn runs under. The tests substitute milliseconds.
+    const DEFAULT: Self = Self {
+        grace: Duration::from_secs(30),
+        rpc: Duration::from_secs(5),
+    };
+}
+
+impl AcpRunTurn {
     /// A turn that can be cancelled while it runs.
     ///
     /// The turn and the steer check race each other. A cancel forwards
@@ -397,7 +650,7 @@ impl AcpRunTurn {
     /// turn: ACP cancellation is cooperative, the agent still answers with
     /// `stopReason: "cancelled"`, and dropping the future here would leave a
     /// harness mid-tool-call with nothing reading its output. That wait is
-    /// bounded by [`Self::CANCEL_GRACE`]: a turn that ignores the cancel past
+    /// bounded by [`CancelBounds::grace`]: a turn that ignores the cancel past
     /// the grace window is abandoned with an error, not awaited forever.
     async fn steered(
         &self,
@@ -405,14 +658,15 @@ impl AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
+        stream: Option<TurnStreamCtx>,
     ) -> Result<TurnOutcome> {
         self.steered_with_grace(
             company,
             agent_id,
             message,
             control,
-            Self::CANCEL_GRACE,
-            Self::CANCEL_RPC_TIMEOUT,
+            stream,
+            CancelBounds::DEFAULT,
         )
         .await
     }
@@ -426,11 +680,20 @@ impl AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
-        grace: Duration,
-        cancel_rpc: Duration,
+        stream: Option<TurnStreamCtx>,
+        bounds: CancelBounds,
     ) -> Result<TurnOutcome> {
+        let CancelBounds {
+            grace,
+            rpc: cancel_rpc,
+        } = bounds;
         let key = Self::session_key(company, agent_id);
-        let turn = self.agent.prompt(company, &key, message);
+        // Held for the whole select below: the observer must outlive every
+        // branch, including the post-cancel grace wait, or a turn that keeps
+        // producing updates after a cancel would stop streaming them at the
+        // moment the operator most wants to see what it is still doing.
+        let observer = observer_for(stream);
+        let turn = self.agent.prompt(company, &key, message, observer.as_ref());
         tokio::pin!(turn);
 
         loop {
@@ -896,7 +1159,21 @@ mod test {
 
     #[async_trait]
     impl AcpAgent for Scripted {
-        async fn prompt(&self, _c: &CompanyId, _k: &str, _m: &str) -> Result<AcpTurn> {
+        async fn prompt(
+            &self,
+            _c: &CompanyId,
+            _k: &str,
+            _m: &str,
+            observer: Option<&AcpObserver>,
+        ) -> Result<AcpTurn> {
+            // Observed before the hang/hold gates, so a steer test still sees
+            // the frames a real transport would have already published by the
+            // time the operator reaches for cancel.
+            if let Some(observer) = observer {
+                for update in &self.turn.updates {
+                    observer(update);
+                }
+            }
             if self.hang {
                 std::future::pending::<()>().await;
             }
@@ -1029,8 +1306,11 @@ mod test {
                 "ceo",
                 "go",
                 &control,
-                Duration::from_millis(20), // post-cancel grace
-                Duration::from_millis(50), // cancel RPC bound
+                None,
+                CancelBounds {
+                    grace: Duration::from_millis(20),
+                    rpc: Duration::from_millis(50),
+                },
             ),
         )
         .await
@@ -1069,8 +1349,11 @@ mod test {
                 "ceo",
                 "go",
                 &control,
-                Duration::from_millis(20),
-                Duration::from_millis(50),
+                None,
+                CancelBounds {
+                    grace: Duration::from_millis(20),
+                    rpc: Duration::from_millis(50),
+                },
             )
             .await
             .expect_err("a hung turn is abandoned, not awaited");
@@ -1105,5 +1388,274 @@ mod test {
             AcpRunTurn::session_key(&acme, "ceo"),
             AcpRunTurn::session_key(&acme, "ceo")
         );
+    }
+    /// Drains the live frames a turn published, giving up once the bus goes
+    /// quiet — a turn that published nothing must be provable, not merely
+    /// unobserved, so this returns an empty vec rather than hanging.
+    async fn drain_live(
+        stream: &mut futures::stream::BoxStream<'static, crate::turn_stream::LiveFrame>,
+    ) -> Vec<crate::turn_stream::TurnStreamEvent> {
+        use futures::StreamExt;
+        let mut frames = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(Duration::from_millis(50), stream.next()).await
+        {
+            if let Some(event) = frame.as_turn() {
+                frames.push(event.clone());
+            }
+        }
+        frames
+    }
+
+    /// The updates a coding turn produces: a thought, a tool call that runs
+    /// and then completes, and the answer.
+    fn a_working_turn() -> Vec<AcpUpdate> {
+        vec![
+            AcpUpdate::ThoughtChunk,
+            AcpUpdate::ThoughtChunk,
+            AcpUpdate::ToolCall {
+                id: "c1".into(),
+                title: "Read src/main.rs".into(),
+            },
+            AcpUpdate::ToolCallUpdate {
+                id: "c1".into(),
+                status: "in_progress".into(),
+                result: None,
+            },
+            AcpUpdate::ToolCallUpdate {
+                id: "c1".into(),
+                status: "completed".into(),
+                result: Some("42 lines".into()),
+            },
+            AcpUpdate::MessageChunk("done".into()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_chat_turn_streams_its_execution_state_onto_the_watching_thread() {
+        // The gap this closes: an ACP turn used to be observable only once it
+        // was over. On a five-minute coding turn that is indistinguishable
+        // from a hang, while a `built_in` teammate beside it shows every tool
+        // call as it starts.
+        let company = CompanyId::new("acme-live-chat");
+        let mut bus = crate::turn_stream::subscribe(&company);
+
+        let run_turn = AcpRunTurn::new(Arc::new(Scripted::answering(a_working_turn())));
+        let outcome = run_turn
+            .run(&company, "ceo", "go", Some("design"))
+            .await
+            .expect("the turn answers");
+
+        let frames = drain_live(&mut bus).await;
+        let kinds: Vec<&str> = frames.iter().map(|f| f.kind).collect();
+        assert_eq!(
+            kinds,
+            vec!["thinking", "tool_call", "tool_result"],
+            "one coalesced thinking row, the call, and its completion"
+        );
+
+        // Routed to the thread that asked, and labelled with the desk that
+        // answered — a frame on the wrong thread is worse than no frame.
+        assert!(frames.iter().all(
+            |f| f.chat_id.as_deref() == Some("design") && f.agent_id.as_deref() == Some("ceo")
+        ));
+        // Ordered and dedupable by the console.
+        assert_eq!(
+            frames.iter().map(|f| f.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+
+        let call = &frames[1];
+        assert_eq!(call.tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(call.label.as_deref(), Some("Read src/main.rs"));
+        assert_eq!(call.status, Some("running"));
+
+        let result = &frames[2];
+        assert_eq!(
+            result.tool_call_id.as_deref(),
+            Some("c1"),
+            "the completion pairs back to its row"
+        );
+        assert_eq!(result.status, Some("ok"));
+        assert_eq!(result.result.as_deref(), Some("42 lines"));
+
+        // And the live view did not replace the durable one.
+        assert_eq!(outcome.reply, "done");
+        assert_eq!(
+            outcome
+                .steps
+                .iter()
+                .filter(|s| s.kind == TurnStepKind::ToolCall)
+                .count(),
+            1,
+            "the same updates still fold into the timeline that rides the reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unaddressed_chat_turn_streams_onto_the_default_desk() {
+        // Where the durable reply lands is where the live rows must land: an
+        // API client that omits `chat` still gets a coherent timeline.
+        let company = CompanyId::new("acme-live-default");
+        let mut bus = crate::turn_stream::subscribe(&company);
+
+        let run_turn = AcpRunTurn::new(Arc::new(Scripted::answering(vec![AcpUpdate::ToolCall {
+            id: "c1".into(),
+            title: "Search".into(),
+        }])));
+        run_turn
+            .run(&company, "ceo", "go", None)
+            .await
+            .expect("the turn answers");
+
+        let frames = drain_live(&mut bus).await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].chat_id.as_deref(),
+            Some(crate::server::ops::language::DEFAULT_DESK)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dispatched_card_turn_streams_nothing_onto_the_console() {
+        // A dispatched card shows no chat bubble and its steps are folded into
+        // the card's own note. Streaming them would put rows on whatever
+        // thread most recently sent — the misattribution `LiveStream::Off`
+        // exists to prevent.
+        let company = CompanyId::new("acme-live-card");
+        let mut bus = crate::turn_stream::subscribe(&company);
+
+        let run_turn = AcpRunTurn::new(Arc::new(Scripted::answering(a_working_turn())));
+        let control = crate::company::steer::SteerControl::new();
+        run_turn
+            .run_steered_background(&company, "ceo", "go", &control, None)
+            .await
+            .expect("the turn answers");
+
+        assert!(
+            drain_live(&mut bus).await.is_empty(),
+            "a background turn publishes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workflow_node_streams_onto_its_run_rather_than_a_desk() {
+        // The trait default for `run_background_workflow` forwards to `run`
+        // with no chat id — which, now that `run` streams, would publish a
+        // node's tool calls onto the DEFAULT DESK. This asserts the override
+        // that keeps them on the run-trace sheet instead.
+        let company = CompanyId::new("acme-live-workflow");
+        let mut bus = crate::turn_stream::subscribe(&company);
+
+        let run_turn = AcpRunTurn::new(Arc::new(Scripted::answering(vec![AcpUpdate::ToolCall {
+            id: "c1".into(),
+            title: "Fetch".into(),
+        }])));
+        run_turn
+            .run_background_workflow(&company, "ceo", "go", None, "run-7", "node-2")
+            .await
+            .expect("the turn answers");
+
+        let frames = drain_live(&mut bus).await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].workflow_run_id.as_deref(), Some("run-7"));
+        assert_eq!(frames[0].node_id.as_deref(), Some("node-2"));
+        assert!(
+            frames[0].chat_id.is_none(),
+            "a node has no chat thread to attribute to"
+        );
+    }
+
+    /// How many rows a console holding these frames ends up showing.
+    ///
+    /// A tool call is two frames and one row: `tool_call` opens it and
+    /// `tool_result` flips that same row in place, paired by `toolCallId`
+    /// (`app-shell.tsx`'s `onTurnEvent`). Counting frames instead of rows
+    /// would make the live view look like it shows twice the work.
+    fn rendered_rows(frames: &[TurnStreamEvent]) -> usize {
+        let paired: std::collections::HashSet<&str> = frames
+            .iter()
+            .filter_map(|f| f.tool_call_id.as_deref())
+            .collect();
+        paired.len() + frames.iter().filter(|f| f.tool_call_id.is_none()).count()
+    }
+
+    #[test]
+    fn the_live_rows_and_the_folded_steps_stay_in_step() {
+        // The two views are the same updates read twice, and the property that
+        // matters is that neither invents or drops a row the other has. A
+        // non-terminal `tool_call_update` is the one that could: it leaves the
+        // folded step `Running` and must publish no second row.
+        let updates = a_working_turn();
+        let mut state = LiveState::default();
+        let frames: Vec<_> = updates
+            .iter()
+            .filter_map(|u| live_frame_from(u, &mut state))
+            .collect();
+
+        let outcome = fold(turn(updates));
+        assert_eq!(
+            rendered_rows(&frames),
+            outcome.steps.len(),
+            "one live row per folded step: {frames:?} vs {:?}",
+            outcome.steps
+        );
+        assert_eq!(
+            frames.iter().filter(|f| f.kind == "tool_call").count(),
+            outcome
+                .steps
+                .iter()
+                .filter(|s| s.kind == TurnStepKind::ToolCall)
+                .count()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completion_for_a_call_nobody_saw_start_publishes_no_row() {
+        // `fold` drops these ("a step with no label is worse on a timeline
+        // than no step"), so the live view must too — a row that appears while
+        // the turn runs and is missing from the finished timeline reads as
+        // work that was undone.
+        let company = CompanyId::new("acme-live-ghost");
+        let mut bus = crate::turn_stream::subscribe(&company);
+
+        let run_turn = AcpRunTurn::new(Arc::new(Scripted::answering(vec![
+            AcpUpdate::ToolCallUpdate {
+                id: "ghost".into(),
+                status: "completed".into(),
+                result: Some("x".into()),
+            },
+        ])));
+        let outcome = run_turn
+            .run(&company, "ceo", "go", Some("design"))
+            .await
+            .expect("the turn answers");
+
+        assert!(drain_live(&mut bus).await.is_empty());
+        assert!(
+            outcome
+                .steps
+                .iter()
+                .all(|s| s.kind != TurnStepKind::ToolCall)
+        );
+    }
+
+    #[test]
+    fn a_burst_of_thoughts_is_one_row_until_something_else_happens() {
+        // A model emits these by the hundred; a timeline of them is noise.
+        // Mirrors `fold`'s own coalescing so the live view does not show a
+        // different number of thinking rows than the finished one.
+        let mut state = LiveState::default();
+        let thoughts = vec![AcpUpdate::ThoughtChunk; 5];
+        let frames: Vec<_> = thoughts
+            .iter()
+            .filter_map(|u| live_frame_from(u, &mut state))
+            .collect();
+        assert_eq!(frames.len(), 1);
+
+        // Text closes the run, so the next thought opens a new row — exactly
+        // what `fold` does with its own `thinking` flag.
+        assert!(live_frame_from(&AcpUpdate::MessageChunk("hi".into()), &mut state).is_none());
+        assert!(live_frame_from(&AcpUpdate::ThoughtChunk, &mut state).is_some());
     }
 }
