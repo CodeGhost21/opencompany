@@ -1551,18 +1551,20 @@ impl<'a> DelegationRunner<'a> {
                     .text
                     .clone()
                     .unwrap_or_else(|| message.to_string());
-                let marker = crate::runtime::grants::budget_pauses_for(self.company).park(
-                    pause.agent.clone(),
-                    chat_id.map(str::to_string),
-                    park_message,
-                    pause.summary.clone(),
-                    now_millis(),
-                    redeem_context,
-                );
+                let marker = crate::runtime::grants::budget_pauses_for(self.company)
+                    .park_preserving_background(
+                        pause.agent.clone(),
+                        chat_id.map(str::to_string),
+                        park_message,
+                        pause.summary.clone(),
+                        now_millis(),
+                        redeem_context,
+                    );
                 tracing::info!(
                     company = %self.company,
                     agent = %pause.agent,
                     marker_id = %marker.id,
+                    background = marker.background,
                     "[budget-pause] re-parked the CEO-relay's pause with the original operator \
                      message, replacing the relay prompt `run_inner` parked by default"
                 );
@@ -2111,18 +2113,20 @@ impl<'a> DelegationRunner<'a> {
                 .text
                 .clone()
                 .unwrap_or_else(|| original.clone());
-            let marker = crate::runtime::grants::budget_pauses_for(self.company).park(
-                pause.agent.clone(),
-                chat_id.map(str::to_string),
-                park_message,
-                pause.summary.clone(),
-                now_millis(),
-                redeem_context,
-            );
+            let marker = crate::runtime::grants::budget_pauses_for(self.company)
+                .park_preserving_background(
+                    pause.agent.clone(),
+                    chat_id.map(str::to_string),
+                    park_message,
+                    pause.summary.clone(),
+                    now_millis(),
+                    redeem_context,
+                );
             tracing::info!(
                 company = %self.company,
                 agent = %pause.agent,
                 marker_id = %marker.id,
+                background = marker.background,
                 "[budget-pause] re-parked the delegated pause with the original request, \
                  replacing the hand-off instruction `run_inner` parked by default"
             );

@@ -1239,6 +1239,38 @@ impl BudgetPauseSet {
         self.park_marked(agent, chat_id, message, summary, at_millis, redeem, true)
     }
 
+    /// Re-parks a marker for `agent` with corrected text/context — same
+    /// shape as [`park`](Self::park), but carries forward whatever
+    /// `background` bit is CURRENTLY set on `agent`'s marker, rather than
+    /// resetting it to `false` (issue #1846 review, Codex #3870400579).
+    ///
+    /// For the delegation re-park sites in `runtime/delegation.rs`, which
+    /// don't have their own `LiveStream` context to answer `background`
+    /// from directly (see [`BudgetPauseMarker::background`]'s own doc for
+    /// why plain [`park`](Self::park) there defaults to `false`): those
+    /// sites run AFTER the delegate's own turn has already gone through
+    /// `run_inner`, which DOES have that context and already parked (or
+    /// not) a `background` marker for the SAME agent under the SAME turn,
+    /// moments earlier. Reading that bit back before overwriting is what
+    /// keeps a genuinely background-originated delegate turn's marker from
+    /// silently losing the flag — and the redemption refusal it drives — on
+    /// every delegation re-park.
+    pub fn park_preserving_background(
+        &self,
+        agent: impl Into<String>,
+        chat_id: Option<String>,
+        message: impl Into<String>,
+        summary: impl Into<String>,
+        at_millis: u64,
+        redeem: RedeemContext,
+    ) -> BudgetPauseMarker {
+        let agent = agent.into();
+        let background = self.peek(&agent).is_some_and(|m| m.background);
+        self.park_marked(
+            agent, chat_id, message, summary, at_millis, redeem, background,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn park_marked(
         &self,
@@ -2381,6 +2413,85 @@ mod test {
         assert_eq!(first.id, second.id, "the same marker both times");
         assert_eq!(first.message, "hi");
         assert_eq!(first.chat_id.as_deref(), Some("desk-1"));
+    }
+
+    /// Issue #1846 review (Codex #3870400579) — **the regression.** A
+    /// delegation re-park (`runtime/delegation.rs`) has no `LiveStream`
+    /// context of its own to answer `background` from, so it must carry
+    /// forward whatever the delegate's own `run_inner` call already set,
+    /// rather than resetting it to `false` via plain `park`.
+    #[test]
+    fn park_preserving_background_carries_the_flag_forward() {
+        let set = BudgetPauseSet::default();
+        set.park_background(
+            "ceo",
+            None,
+            "the hand-off instruction",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
+        assert!(
+            set.peek("ceo").expect("parked").background,
+            "fixture sanity: the marker `run_inner` would have parked is background"
+        );
+
+        let reparked = set.park_preserving_background(
+            "ceo",
+            None,
+            "the corrected original request",
+            "paused",
+            2_000,
+            RedeemContext::default(),
+        );
+        assert!(
+            reparked.background,
+            "re-parking with corrected text must not silently reset background to false"
+        );
+        assert_eq!(reparked.message, "the corrected original request");
+    }
+
+    /// The other half: an ordinary (non-background) marker's re-park must
+    /// stay non-background — this method is not a way to ACCIDENTALLY turn
+    /// an interactive marker into a background one either.
+    #[test]
+    fn park_preserving_background_leaves_a_non_background_marker_alone() {
+        let set = BudgetPauseSet::default();
+        set.park(
+            "ceo",
+            Some("general".to_string()),
+            "hi",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
+        assert!(!set.peek("ceo").expect("parked").background);
+
+        let reparked = set.park_preserving_background(
+            "ceo",
+            Some("general".to_string()),
+            "hi, corrected",
+            "paused",
+            2_000,
+            RedeemContext::default(),
+        );
+        assert!(!reparked.background);
+    }
+
+    /// No prior marker to read a flag off of — defaults to `false`, the
+    /// same as plain `park`, rather than panicking or guessing `true`.
+    #[test]
+    fn park_preserving_background_defaults_to_false_with_nothing_parked_yet() {
+        let set = BudgetPauseSet::default();
+        let marker = set.park_preserving_background(
+            "ceo",
+            None,
+            "hi",
+            "paused",
+            1_000,
+            RedeemContext::default(),
+        );
+        assert!(!marker.background);
     }
 
     #[test]
