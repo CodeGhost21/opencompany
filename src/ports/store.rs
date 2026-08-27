@@ -19,6 +19,28 @@ pub trait CompanyStore: Send + Sync {
     async fn list(&self) -> Result<Vec<CompanySummary>>;
     /// Appends one entry to a company's ledger.
     async fn append_ledger(&self, id: &CompanyId, entry: LedgerEntry) -> Result<()>;
+
+    /// Whether `id` has ever been saved by code that already understands the
+    /// activation funnel (issue #1843) — the signal `RuntimeBuilder::build`
+    /// checks before applying its pre-#1843 grandfather back-fill (PR #1875
+    /// review finding: without this, a genuinely new company's *second* boot
+    /// — `lifecycle == "running"`, `activation_completed_at: None`, exactly
+    /// the shape a legacy pre-#1843 record has — was indistinguishable from
+    /// the legacy case, so a restart before the operator ever opened the
+    /// onboarding funnel silently activated the company).
+    ///
+    /// The default implementation always answers `false` ("never seen"),
+    /// which preserves the pre-fix grandfathering behaviour for any store
+    /// that does not override it — safe because it only ever makes a record
+    /// *more* eligible for the back-fill, never less. [`FsCompanyStore`] is
+    /// the only store this crate actually deploys in production (see
+    /// `src/bin/opencompany.rs` / `src/desktop.rs`) and overrides this with a
+    /// real on-disk marker — see its own doc comment.
+    ///
+    /// [`FsCompanyStore`]: crate::store::FsCompanyStore
+    async fn activation_gate_seen(&self, _id: &CompanyId) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Per-company write serialization: a shared mutex map, keyed by company id, so

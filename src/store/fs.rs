@@ -786,6 +786,22 @@ struct Meta {
     /// [`crate::ports::types::CompanyRecord::activation_completed_at`].
     #[serde(default)]
     activation_completed_at: Option<u64>,
+    /// Whether this bundle has ever been saved by activation-aware code — the
+    /// on-disk marker behind [`CompanyStore::activation_gate_seen`]
+    /// (PR #1875 review finding).
+    ///
+    /// `#[serde(default)]` reads a meta.json written before this field
+    /// existed as `false`: a genuinely pre-#1843 record. `save` below always
+    /// writes `true`, since every save from this build understands the
+    /// activation funnel — which is what makes a *second* save of the same
+    /// bundle (e.g. a restart before the operator finishes onboarding)
+    /// distinguishable from a bundle that predates activation tracking
+    /// entirely, even though both can otherwise have the identical
+    /// `lifecycle == "running"`, `activation_completed_at: None` shape.
+    ///
+    /// [`CompanyStore::activation_gate_seen`]: crate::ports::store::CompanyStore::activation_gate_seen
+    #[serde(default)]
+    activation_gate_seen: bool,
 }
 
 impl Default for Meta {
@@ -812,6 +828,7 @@ impl Default for Meta {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            activation_gate_seen: false,
         }
     }
 }
@@ -945,9 +962,25 @@ impl CompanyStore for FsCompanyStore {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            // Every `save` call in this build is, by definition, made by
+            // code that understands the activation funnel — see
+            // `CompanyStore::activation_gate_seen`'s doc comment.
+            activation_gate_seen: true,
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
         Ok(())
+    }
+
+    async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {
+        let bundle = self.bundle(id);
+        let meta_src = read_optional(&bundle.meta_json()).await?;
+        if meta_src.trim().is_empty() {
+            // No meta.json at all: this bundle has never been saved by any
+            // code, activation-aware or not.
+            return Ok(false);
+        }
+        let meta: Meta = serde_json::from_str(&meta_src)?;
+        Ok(meta.activation_gate_seen)
     }
 
     async fn list(&self) -> Result<Vec<CompanySummary>> {
