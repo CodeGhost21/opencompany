@@ -122,9 +122,35 @@ pub async fn advance_settled_card(
         reason,
     ));
     card.column = column.to_string();
+    // Issue #1865: the board's bounce chip, set on the exact same landing this
+    // function already computed and cleared on any other one. `column` is
+    // `column_for_settled_run`'s answer, so this cannot drift from the write
+    // above into a second, independent reading of "did this bounce".
+    card.bounced = bounced_reason(column, status, reason);
     card.updated_at_millis = now_millis();
     tasks.upsert(company, &card).await?;
     Ok(Some(column))
+}
+
+/// Whether a settle lands a card back on [`COLUMN_TODO`] because the attempt
+/// **failed or was cancelled**, as opposed to any other landing this function
+/// writes (issue #1865).
+///
+/// The single rule both card-write sites (this module's system mover, and
+/// `run_task`'s own rich settle in `harness::built_in::brain`) apply, so
+/// "which card gets the bounce chip" cannot answer differently depending on
+/// which of the two paths happened to settle a given run.
+///
+/// `WaitingApproval`/`Paused` also land on a column other than
+/// [`COLUMN_IN_PROGRESS`] but never on `COLUMN_TODO` — see
+/// [`column_for_settled_run`] — so checking the column alone already excludes
+/// them; the status check on top is what tells a genuine failure apart from
+/// the one other status [`column_for_settled_run`] maps to `COLUMN_TODO`... in
+/// practice there is none today, but the explicit check keeps this correct by
+/// construction rather than by the current shape of that mapping.
+pub fn bounced_reason(column: &str, status: RunStatus, reason: &str) -> Option<String> {
+    (column == COLUMN_TODO && matches!(status, RunStatus::Failed | RunStatus::Cancelled))
+        .then(|| reason.to_string())
 }
 
 /// The note a card gets when a planning pass was interrupted by the host going
@@ -233,6 +259,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         }
     }
 
@@ -287,6 +314,86 @@ mod test {
             after.note.as_deref(),
             Some("[system] the host restarted"),
             "the reason must be readable on the card"
+        );
+        // Issue #1865: the board's bounce chip, set on the same landing.
+        assert_eq!(
+            after.bounced.as_deref(),
+            Some("the host restarted"),
+            "a card failed back to To-do must carry the bounce reason"
+        );
+    }
+
+    /// A landing other than To-do — the far more common case — must never set
+    /// the bounce chip. `WaitingApproval` lands on Paused, which this test
+    /// exercises as the representative non-bounce settle.
+    #[tokio::test]
+    async fn a_non_todo_landing_never_sets_bounced() {
+        let (_dir, tasks) = store().await;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(&company, &card("t-2", COLUMN_IN_PROGRESS))
+            .await
+            .unwrap();
+
+        advance_settled_card(
+            tasks.as_ref(),
+            &company,
+            "t-2",
+            RunStatus::WaitingApproval,
+            "parked a gate",
+        )
+        .await
+        .unwrap();
+
+        let after = tasks
+            .list(&company)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-2")
+            .unwrap();
+        assert_eq!(after.column, COLUMN_PAUSED);
+        assert_eq!(
+            after.bounced, None,
+            "a card parked for approval did not bounce"
+        );
+    }
+
+    // ── Issue #1865: `bounced_reason`, the pure rule both card-write sites share ──
+
+    #[test]
+    fn bounced_reason_fires_on_failed_landing_on_todo() {
+        assert_eq!(
+            bounced_reason(COLUMN_TODO, RunStatus::Failed, "boom"),
+            Some("boom".to_string())
+        );
+    }
+
+    #[test]
+    fn bounced_reason_fires_on_cancelled_landing_on_todo() {
+        assert_eq!(
+            bounced_reason(COLUMN_TODO, RunStatus::Cancelled, "stopped"),
+            Some("stopped".to_string())
+        );
+    }
+
+    #[test]
+    fn bounced_reason_is_none_off_todo_even_for_a_failure() {
+        // Structurally `column_for_settled_run` never actually pairs `Failed`
+        // with anything but `COLUMN_TODO` — this pins the function's OWN
+        // contract regardless, so it stays correct if that mapping ever grows
+        // a second failure landing.
+        assert_eq!(
+            bounced_reason(COLUMN_IN_REVIEW, RunStatus::Failed, "boom"),
+            None
+        );
+    }
+
+    #[test]
+    fn bounced_reason_is_none_on_todo_for_a_non_failure_status() {
+        assert_eq!(
+            bounced_reason(COLUMN_TODO, RunStatus::Succeeded, "n/a"),
+            None
         );
     }
 
