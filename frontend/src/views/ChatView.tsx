@@ -25,6 +25,7 @@ import {
   type AttachmentDto,
   type CognitionState,
   type GrantScope,
+  type OperatorChannelDto,
   type TeamMemberDto,
   type TurnStep,
   type Verdict,
@@ -89,8 +90,9 @@ import {
   clearTaskCardEverywhere,
   directMessageChannels,
   directMessageForId,
+  isOperatorChannelDto,
   offersDeliverableChoice,
-  resolveDesks,
+  operatorSection,
   resolveDmChannelId,
   toggleReaction,
   type DecidedApproval,
@@ -406,6 +408,15 @@ export function ChatView({
   const [desks, setDesks] = useState<Desk[] | null>(null);
   /** Set when `/desks` failed for a reason that isn't "this host has none". */
   const [desksError, setDesksError] = useState<string | null>(null);
+  /**
+   * The identity of the always-present Operator feed (issue #1757 rework) —
+   * fetched separately from `desks`, since it is its own surface now rather
+   * than an entry `list_desks` returns. `null` until `/operator-channel` has
+   * answered; a fetch failure leaves it `null` rather than surfacing an
+   * error, since the pinned row degrading to absent is a much smaller loss
+   * than blocking the rest of Chat on it.
+   */
+  const [operator, setOperator] = useState<OperatorChannelDto | null>(null);
   const [sending, setSending] = useState(false);
   const [composerPrefill, setComposerPrefill] = useState<{
     text: string;
@@ -716,14 +727,8 @@ export function ChatView({
     try {
       const dtos = await client.listDesks(company);
       if (run !== desksRun.current) return;
-      // Keyed on *real* (non-system) desks, not raw response length — the
-      // always-present Operator system channel (issue #1757) means a
-      // desk-less company's `/desks` answer is never actually empty, so
-      // `dtos.length === 0` would never trip here and the fabricated
-      // defaults would linger in the rail once a real channel is created
-      // (see `resolveDesks` in `chat/model.ts`).
-      desksAreFallback.current = !dtos.some((d) => !d.system);
-      setDesks(resolveDesks(dtos));
+      desksAreFallback.current = dtos.length === 0;
+      setDesks(dtos.length ? dtos.map(deskFromDto) : defaultDesks());
     } catch (error) {
       if (run !== desksRun.current) return;
       if (error instanceof ApiError && error.status === 404) {
@@ -740,6 +745,28 @@ export function ChatView({
   useEffect(() => {
     void loadDesks();
   }, [loadDesks]);
+
+  /**
+   * The always-present Operator feed's identity (issue #1757 rework),
+   * fetched in parallel with `loadDesks` rather than derived from it — it is
+   * its own surface now, not an entry `list_desks` returns. A failure is
+   * swallowed rather than surfacing `desksError`: losing the pinned row is a
+   * much smaller degradation than blocking the whole channel list on it, and
+   * the fetch is retried on every company switch same as desks are.
+   */
+  const operatorRun = useRef(0);
+  useEffect(() => {
+    const run = ++operatorRun.current;
+    setOperator(null);
+    client
+      .getOperatorChannel(company)
+      .then((dto) => {
+        if (run === operatorRun.current && isOperatorChannelDto(dto)) setOperator(dto);
+      })
+      .catch(() => {
+        // Degrade silently — see the doc comment above.
+      });
+  }, [client, company]);
 
   /**
    * Re-entering Chat with no channel in the hash returns the operator to the
@@ -789,10 +816,13 @@ export function ChatView({
   // keeps updating its ref on every connection/company change, mounted or not,
   // so the comparison in `send` stays honest after Chat is gone (codex P1).
 
-  const sections = useMemo(
-    () => (desks ? buildChannels(members, desks, transcripts) : []),
-    [members, desks, transcripts],
-  );
+  // The pinned Operator row is appended *last* (issue #1757 rework) — after
+  // every desk/DM section `buildChannels` produces — so `firstChannel` below
+  // still defaults to a writable desk rather than the read-only feed.
+  const sections = useMemo(() => {
+    const base = desks ? buildChannels(members, desks, transcripts) : [];
+    return operator ? [...base, operatorSection(operator)] : base;
+  }, [members, desks, transcripts, operator]);
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
   // it matched nothing once a company's real desks loaded and matched the same

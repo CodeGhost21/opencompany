@@ -113,9 +113,10 @@ import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
 import {
   channelIdForThread,
+  deskFromDto,
   dmChannelId,
   HISTORY_UNSTARTED,
-  resolveDesks,
+  isOperatorChannelDto,
   type DecidedApproval,
   type HistoryHydration,
   type HistoryStatus,
@@ -1070,16 +1071,29 @@ export function AppShell({
       );
     };
 
-    client
-      .listDesks(company)
-      .then(async (desks) => {
+    Promise.all([
+      client.listDesks(company).catch(() => null),
+      // The always-present Operator feed's identity (issue #1757 rework) —
+      // fetched alongside desks, not derived from them, since it is its own
+      // surface now. `null` on any failure (offline, or a host that predates
+      // the route) rather than sinking the whole pass: a company can still
+      // rehydrate its real desks/DMs without the pinned Operator row.
+      client.getOperatorChannel(company).catch(() => null),
+    ])
+      .then(async ([desks, operatorChannelRaw]) => {
+        // See `isOperatorChannelDto`'s doc comment — a client stub that
+        // resolves every unlisted method to `[]` would otherwise satisfy the
+        // `Promise.all` type and reach the field reads below.
+        const operatorChannel = isOperatorChannelDto(operatorChannelRaw)
+          ? operatorChannelRaw
+          : null;
         if (cancelled || requestCompany !== company) return;
         // Issue #151 §3.3: desks first, then one DM thread per roster teammate.
         // The roster is fetched separately and tolerated as optional — a host
         // that 404s `/team` keeps its desks rather than losing the whole list.
         const team = await client.listTeam(company).catch(() => []);
         if (cancelled) return;
-        const deskThreads = threadsFromDesks(desks);
+        const deskThreads = desks === null ? defaultThreads() : threadsFromDesks(desks);
         const resolved = [
           ...deskThreads,
           ...agentDmThreads(
@@ -1094,15 +1108,29 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        const chatDesks = resolveDesks(desks);
+        const chatDesks =
+          desks === null ? defaultDesks() : desks.length ? desks.map(deskFromDto) : defaultDesks();
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
         setFirstDeskChannelId(chatDesks[0]?.id ?? null);
-        const threadIds = resolved.map((t) => t.id);
+        // Fold the Operator feed's id into the same rehydration pass, keyed on
+        // its own id both as channel and thread (its channel id *is* its
+        // thread id — `chat/history?desk=<id>` reads it through the ordinary
+        // path). Without this, `ChatView`'s pinned row would sit on a channel
+        // id `historyReady` never sees a status for until `discovered` alone
+        // resolves it, and `transcripts[operatorChannel.id]` would never fill
+        // in — the spinner-forever failure mode this pass exists to avoid.
+        const threadIds = [
+          ...resolved.map((t) => t.id),
+          ...(operatorChannel ? [operatorChannel.id] : []),
+        ];
         const channels = [
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
           ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+          ...(operatorChannel
+            ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
+            : []),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         // SSE remains the fast path. This catches a persisted channel message
@@ -1115,9 +1143,11 @@ export function AppShell({
         setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
-        // Host without `/desks`, or offline — keep the static default
-        // threads, but the operator/General line still deserves a
-        // rehydration attempt (it's the one every deployment has).
+        // Last-resort safety net: `listDesks`/`getOperatorChannel` already
+        // degrade to `null` on their own failure above, so this only fires on
+        // something unexpected inside the `.then` (e.g. a state setter
+        // throwing) — keep the static default threads so the console still
+        // renders something rather than getting stuck.
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
         setChatChannelByThread(channelMap(fallbackDesks, []));

@@ -42,7 +42,7 @@ import {
   type ApprovalSummary,
   type GrantScope,
 } from "@/api/types";
-import { type Desk } from "@/lib/desks";
+import { defaultDesks, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
@@ -54,7 +54,7 @@ import {
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { workflowHref } from "@/lib/task-output";
-import { channelIdForThread, dmChannelId, resolveDesks } from "@/views/chat/model";
+import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -616,7 +616,7 @@ export function useApprovalThreadLinks(
       // the success handler on purpose — a failed read must not be guessed at.
       client
         .listDesks(company)
-        .then((dtos) => resolveDesks(dtos))
+        .then((dtos) => (dtos.length ? dtos.map(deskFromDto) : defaultDesks()))
         .catch(() => []),
       client.listTeam(company).catch(() => []),
     ]).then(([desks, roster]) => {

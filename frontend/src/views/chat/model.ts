@@ -1,7 +1,7 @@
 // The chat workspace's data model: channels, direct messages, and the grouping
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
-import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
+import type { ApprovalSummary, DeskDto, OperatorChannelDto, Verdict } from "@/api/types";
 import { clearTaskCard, type ChatMessage, type Reaction } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
@@ -27,32 +27,8 @@ export function deskFromDto(d: DeskDto): Desk {
     blurb: d.description ?? "",
     members: d.members,
     overlayMembers: d.overlayMembers,
-    // Issue #1757: carry the Operator system-channel flag through so the chat
-    // view can render it read-only.
-    system: d.system,
     responder: d.responder,
   };
-}
-
-/**
- * Shape a `/desks` response into the console's `Desk[]`, applying the
- * empty-response fallback (issue #370): a host with no declared
- * `[[group_chat]]` entries still gets the default desks, so the workspace
- * isn't left with nothing to address.
- *
- * The fallback is keyed on *real* (non-system) desks, not the raw response
- * length. The always-present Operator system channel (issue #1757) means a
- * desk-less company's `/desks` answer is never actually empty, so checking
- * raw length would silently swap the writable default desks for the
- * read-only Operator feed alone, losing the main/general line a fresh
- * company needs. Any system desks the host did send (Operator) are kept
- * either way, so falling back never drops that feed either.
- */
-export function resolveDesks(dtos: DeskDto[]): Desk[] {
-  const real = dtos.filter((d) => !d.system);
-  if (real.length) return dtos.map(deskFromDto);
-  const system = dtos.filter((d) => d.system).map(deskFromDto);
-  return [...defaultDesks(), ...system];
 }
 
 /**
@@ -201,7 +177,6 @@ export function buildChannels(
       (d.responder === "auto" ? "Best fit picks up anything you don't @-mention" : d.blurb),
     tone: d.tone,
     memberIds: d.members,
-    system: d.system,
     leadless: d.responder === "auto" || undefined,
   }));
 
@@ -213,6 +188,50 @@ export function buildChannels(
     { id: "channels", label: "Channels", channels },
     { id: "dms", label: "Direct messages", channels: dms },
   ];
+}
+
+/**
+ * Shape `GET {scope}/operator-channel`'s response into the console's
+ * `Channel` (issue #1757 rework). A read-only system channel — the composer
+ * is disabled for it and it offers no membership editing — distinct from
+ * every desk-backed channel `buildChannels` produces.
+ */
+export function operatorChannelFrom(dto: OperatorChannelDto): Channel {
+  return {
+    id: dto.id,
+    name: dto.name,
+    kind: "channel",
+    purpose: dto.description,
+    system: true,
+  };
+}
+
+/**
+ * Whether `value` actually has the `OperatorChannelDto` shape — a runtime
+ * check, not just a type assertion. Callers hold this at the network
+ * boundary: a client stub/proxy that resolves every unlisted method to `[]`
+ * (a common test fixture pattern in this codebase) would otherwise satisfy
+ * TypeScript at the call site and only fail once `operatorChannelFrom` reads
+ * `dto.description` off an array and hands `channelSubtitle` an `undefined`
+ * `purpose` to `.trim()`. Treated the same as a fetch failure by callers:
+ * degrade to no pinned row rather than crash the view.
+ */
+export function isOperatorChannelDto(value: unknown): value is OperatorChannelDto {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const dto = value as Partial<OperatorChannelDto>;
+  return (
+    typeof dto.id === "string" && typeof dto.name === "string" && typeof dto.description === "string"
+  );
+}
+
+/**
+ * The pinned Operator row as its own {@link ChannelSection}, meant to be
+ * appended *after* every other section (issue #1757 rework) so the first
+ * writable desk still wins the "open by default" pick — see `buildChannels`'s
+ * `channels` section, which a caller composes ahead of this one.
+ */
+export function operatorSection(dto: OperatorChannelDto): ChannelSection {
+  return { id: "operator", label: "Operator", channels: [operatorChannelFrom(dto)] };
 }
 
 /** Every roster teammate as a DM target, including conversations not yet started. */
