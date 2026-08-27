@@ -681,6 +681,9 @@ async fn apply_workflow_proposal(
         Some(company.runtime.events()),
         draft,
         Some(&company.runtime.deliverable_channel_ids()),
+        // Issue #1843: the operator applying the proposal, when there is
+        // one — same attribution rule as the direct REST create path.
+        company.actor.clone(),
     )
     .await
     {
@@ -2683,10 +2686,13 @@ mod steer_redirect_test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

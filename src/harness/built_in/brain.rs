@@ -1933,6 +1933,11 @@ impl HarnessBrain {
                 let target = artifact_mirror::PublishTarget {
                     agent_id: author,
                     task_id: &card.id,
+                    // Issue #1687: the folder the deliverable lands in is
+                    // named for the work, not only keyed by it. The card is
+                    // right here and its title is the one string that says
+                    // what an operator is looking at.
+                    task_title: Some(card.title.as_str()),
                     source: &pending.source,
                     payload: match &pending.payload {
                         crate::harness::publish::PublishPayload::Text(text) => {
@@ -2373,26 +2378,18 @@ impl HarnessBrain {
         let Some(chat) = chat else {
             return self.responder.clone();
         };
-        if let Some(lead) = self.desk_lead(chat) {
-            return lead;
-        }
-        if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
-            return agent;
-        }
-        // Issue #982, step 3: the console's DM channel id, `dm:<teammate-id>`.
-        // Tried LAST, and for the same reason the case-folding above is safe —
-        // it can only claim a key that resolves to nothing today, so no existing
+        // The four arms — desk lead, bare roster id, then the console's
+        // `dm:<teammate-id>` key tried both ways (issue #982, step 3) — live on
+        // the brain-agnostic seam since issue #1725, so the cycle's small-talk
+        // fast path attributes its reply to the same teammate a turn would have.
+        // The DM arm stays LAST there for the reason it was last here: it can
+        // only claim a key that resolves to nothing today, so no existing
         // thread moves, and a company that really does have a desk or teammate
-        // called `dm:x` keeps it. Without it a `dm:`-keyed thread reached arm 4
-        // and the orchestrator answered a DM addressed to somebody else, which
-        // is the same misroute #884 closed for a bare key.
-        if let Some(key) = crate::runtime::assignee::dm_key(chat) {
-            if let Some(lead) = self.desk_lead(key) {
-                return lead;
-            }
-            if let Some(agent) = self.record().resolve_roster_agent_id(key) {
-                return agent;
-            }
+        // called `dm:x` keeps it.
+        if let Some(responder) =
+            crate::runtime::delegation_tools::chat_responder(&self.record(), chat)
+        {
+            return responder;
         }
         tracing::warn!(
             company = %self.record().id,
@@ -2415,23 +2412,6 @@ impl HarnessBrain {
             Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => chat,
             _ => crate::server::ops::language::DEFAULT_DESK,
         }
-    }
-
-    /// The lead member of a desk: the first member of the matching group chat
-    /// (by id, or by case-insensitive name) that is a real roster teammate.
-    /// `None` when no desk matches or none of its members are on the roster.
-    ///
-    /// Membership is the desk's **effective** roster — the manifest members
-    /// unioned with operator-added overlay members (issue #72) — resolved through
-    /// the same [`CompanyRecord::effective_desk_members`] the REST `list_desks`
-    /// handler uses, so the two cannot drift. A roster teammate is a manifest
-    /// agent or a team-overlay teammate, so an overlay-added lead is reachable on
-    /// a desk the manifest left empty.
-    fn desk_lead(&self, desk: &str) -> Option<String> {
-        // Desk-lead resolution is brain-agnostic — it reads only `CompanyRecord`
-        // — so it lives on the delegation seam (issue #176); this stays a thin
-        // wrapper for the routing callers on the brain.
-        delegation::desk_lead(&self.record(), desk)
     }
 
     /// Drains the MCP failure queue **onto the operator bubble's step timeline**
@@ -3355,10 +3335,13 @@ description = "Runs Acme."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -3548,10 +3531,13 @@ description = "Builds it."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -4150,7 +4136,10 @@ members = ["engineer"]
                     && n.parent_id
                         .as_deref()
                         .and_then(name_of)
-                        .is_some_and(|parent| parent == "t-1")
+                        // Issue #1687: the task folder is named for the work
+                        // and keyed by the card id — `<title>.<id>`, not the
+                        // bare id — so browsing by path lands on that name.
+                        .is_some_and(|parent| parent == "ship-the-thing.t-1")
             })
             .expect("agent B finds the deliverable by browsing the shared tree");
 
@@ -5586,10 +5575,13 @@ members = ["engineer"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -5690,7 +5682,7 @@ members = ["engineer"]
             "an absent record must not empty the roster"
         );
         assert_eq!(
-            brain.desk_lead("eng_desk"),
+            delegation::desk_lead(&brain.record(), "eng_desk"),
             Some("engineer".to_string()),
             "nor cost the company its desks"
         );
@@ -6070,13 +6062,19 @@ name = "Design"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
-        assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
+        assert_eq!(
+            delegation::desk_lead(&brain.record(), "design"),
+            Some("engineer".to_string())
+        );
         assert_eq!(brain.responder_for(Some("design")), "engineer");
     }
 
@@ -6138,13 +6136,19 @@ members = ["eng1", "eng2"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
-        assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
+        assert_eq!(
+            delegation::desk_lead(&brain.record(), "eng"),
+            Some("cto".to_string())
+        );
     }
 
     /// Regression for the builder seeding path (#133): a desk-order change written
@@ -6199,10 +6203,13 @@ members = ["eng1", "eng2"]
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -6211,7 +6218,7 @@ members = ["eng1", "eng2"]
         let loaded = store.load(&id).await.unwrap().unwrap();
         let (brain, _tasks) = brain_over(dir.path(), loaded);
         assert_eq!(
-            brain.desk_lead("eng"),
+            delegation::desk_lead(&brain.record(), "eng"),
             Some("eng1".to_string()),
             "blueprint lead before reorder"
         );
@@ -6231,7 +6238,7 @@ members = ["eng1", "eng2"]
         let reloaded = store.load(&id).await.unwrap().unwrap();
         let (rebuilt, _tasks2) = brain_over(dir.path(), reloaded);
         assert_eq!(
-            rebuilt.desk_lead("eng"),
+            delegation::desk_lead(&rebuilt.record(), "eng"),
             Some("eng2".to_string()),
             "reorder did not take effect on routing after rebuild"
         );
@@ -9310,10 +9317,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
 
         let brain = brain_over_mock_with(dir.path(), record);

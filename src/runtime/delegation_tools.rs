@@ -168,6 +168,30 @@ pub fn desk_lead(record: &CompanyRecord, desk: &str) -> Option<String> {
         .find(|m| record.is_roster_agent(m))
 }
 
+/// Which roster teammate answers a message addressed to `chat` — or `None`
+/// when the key names neither a desk nor a teammate.
+///
+/// The four arms, in order, are the ones the harness brain's `responder_for`
+/// has always tried: a desk key resolves to its
+/// [`desk_lead`], a bare roster agent id answers as itself, and the console's
+/// `dm:<teammate-id>` thread key is unwrapped and tried both ways (issue #982,
+/// step 3) — last, so it can only claim a key that resolves to nothing today.
+///
+/// **Returns `None` rather than falling back to the orchestrator**, because the
+/// two callers want different things from a miss: the harness brain logs a
+/// warning and answers as the orchestrator it resolved when it was built, while
+/// the cycle's small-talk fast path (issue #1725) resolves the orchestrator off
+/// the record in hand. Folding the fallback in here would make one of those
+/// wrong.
+///
+/// Lifted out of the harness brain so the fast path — which is brain-agnostic
+/// and runs before any brain — attributes its reply to the same teammate the
+/// turn it replaced would have been answered by.
+pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
+    let direct = |key: &str| desk_lead(record, key).or_else(|| record.resolve_roster_agent_id(key));
+    direct(chat).or_else(|| crate::runtime::assignee::dm_key(chat).and_then(direct))
+}
+
 /// How many desk ids a rejection message names before eliding the rest, so the
 /// message stays short enough to be useful on a company with many desks.
 const LISTED_DESKS: usize = 12;
@@ -830,11 +854,48 @@ members = ["counsel"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
+    }
+
+    /// Issue #1725: the four arms the harness brain used to hold inline. The
+    /// cycle's small-talk fast path answers in the same voice a turn would
+    /// have, and this is the resolution both now share.
+    #[test]
+    fn chat_responder_resolves_a_desk_a_teammate_and_a_dm_key() {
+        let record = record();
+        // A desk key -> its lead member.
+        assert_eq!(
+            chat_responder(&record, "engineering").as_deref(),
+            Some("ceo")
+        );
+        // A desk *name*, case-insensitively, resolves the same way.
+        assert_eq!(
+            chat_responder(&record, "Content desk").as_deref(),
+            Some("writer")
+        );
+        // A bare roster teammate id -> that teammate.
+        assert_eq!(chat_responder(&record, "writer").as_deref(), Some("writer"));
+        // The console's DM thread key, unwrapped (issue #982, step 3).
+        assert_eq!(
+            chat_responder(&record, "dm:writer").as_deref(),
+            Some("writer")
+        );
+        assert_eq!(
+            chat_responder(&record, "dm:engineering").as_deref(),
+            Some("ceo")
+        );
+        // A desk whose members are all off the roster resolves to nobody, and
+        // so does a key that names nothing — the caller decides the fallback.
+        assert_eq!(chat_responder(&record, "legal"), None);
+        assert_eq!(chat_responder(&record, "nope"), None);
+        assert_eq!(chat_responder(&record, "dm:"), None);
     }
 
     #[test]

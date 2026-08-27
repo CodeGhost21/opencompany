@@ -424,4 +424,9 @@ describe("how long a run took", () => {
     expect(formatDuration(179_800)).toBe("3m 00s");
     expect(formatDuration(187_000)).toBe("3m 07s");
   });
+
+  it("rolls long durations into hours and days", () => {
+    expect(formatDuration(3_967_000)).toBe("1h 06m 07s");
+    expect(formatDuration((28_741 * 60 + 19) * 1_000)).toBe("19d 23h 01m 19s");
+  });
 });

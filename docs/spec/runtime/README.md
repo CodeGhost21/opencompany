@@ -106,6 +106,11 @@ Supporting docs:
   each is documented
   - [Console write plane](api-write-plane.md) — every write the console makes,
     route by route
+    - [api-team-drafting.md](api-team-drafting.md) — the two draft routes behind
+      the teammate copilot, and why a model may write into a persona at all
+    - [api-tool-grants.md](api-tool-grants.md) — the three tool-grant routes
+      that widen `[tools].allow` from a connect page, and when a grant takes
+      effect
   - [api-graphql.md](api-graphql.md) — the `/graphql` read plane
 - [credentials.md](credentials.md) — the company's own TinyHumans key: the one
   seam a brokered surface resolves through (Composio today), why rotating it

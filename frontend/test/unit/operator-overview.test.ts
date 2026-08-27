@@ -2,16 +2,26 @@
 
 import { act, createElement, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { RunSummary } from "@/api/runs";
 import type { DeskDto } from "@/api/types";
 import type { CompanyFeed } from "@/hooks/use-company";
-import { OperatorOverview } from "@/views/OperatorOverview";
 
 let container: HTMLDivElement;
 let root: Root;
+
+/**
+ * The view, re-imported per test because a module registry is a page load.
+ *
+ * The since-visit boundary settles once per page load (issue #1700), and it is
+ * module state that remembers that. A statically imported view would carry one
+ * settled boundary across the whole file, so the first test's empty
+ * `localStorage` would decide the answer for every test that stages a stored
+ * visit afterwards.
+ */
+let OperatorOverview: typeof import("@/views/OperatorOverview")["OperatorOverview"];
 
 const scope = { connection: "test-host", company: "acme" };
 const readyFeed = { approvals: [], queue: "ready" as const };
@@ -83,9 +93,11 @@ async function settle() {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   window.localStorage.clear();
+  vi.resetModules();
+  ({ OperatorOverview } = await import("@/views/OperatorOverview"));
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -371,6 +383,97 @@ describe("the operator overview landing page (#1321)", () => {
     await settle();
 
     expect(container.querySelector('[href="#/chat/dm:ada-1f3k"]')?.textContent).toContain("Open");
+  });
+
+  it("keeps the since-visit boundary across a navigate-away-and-back (#1700)", async () => {
+    // The shell mounts this view conditionally, so a trip to Chat and back is
+    // an unmount and a remount inside one page load. The boundary must not
+    // advance across it: when it did, the second open compared against the
+    // first open — milliseconds earlier — and the panel answered "No failed
+    // attempts were recorded since the previous visit" over a failure the
+    // operator had never seen.
+    window.localStorage.setItem("oc.overview.last-visit:test-host::acme", "1700000000000");
+    const failed = run({ id: "failed-1", taskId: "failed-1", finishedAtMillis: 1_700_000_000_100 });
+
+    await render(client(Promise.resolve([failed])), readyFeed);
+    await settle();
+    expect(container.querySelector('[href="#/tasks/failed-1?run=failed-1"]')).not.toBeNull();
+
+    // …away to another view, and back. Same page load, so the same modules.
+    act(() => root.unmount());
+    container.remove();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await render(client(Promise.resolve([failed])), readyFeed);
+    await settle();
+
+    expect(container.textContent).toContain("Failed attempts recorded after the previous visit.");
+    expect(container.textContent).not.toContain("No failed attempts were recorded since the previous visit.");
+    expect(container.querySelector('[href="#/tasks/failed-1?run=failed-1"]')).not.toBeNull();
+  });
+
+  it("records the visit only once the mount commits (#1700)", async () => {
+    // Review of PR #1752: the durable write moved out of the render
+    // initializer and into an effect, so a render React discards cannot become
+    // the boundary the next page load hides failures behind. This is the other
+    // side of that — a mount that DOES commit still has to record itself, or
+    // the next page load would have no boundary at all.
+    expect(window.localStorage.getItem("oc.overview.last-visit:test-host::acme")).toBeNull();
+
+    await render(client(Promise.resolve([])), readyFeed);
+    await settle();
+
+    const recorded = window.localStorage.getItem("oc.overview.last-visit:test-host::acme");
+    expect(recorded).not.toBeNull();
+    expect(Number(recorded)).toBeGreaterThan(0);
+
+    // …and exactly once. A remount is a second mount, not a second visit, and a
+    // second write here would leave the NEXT page load comparing against a
+    // moment ago — #1700 again, one page load later. This is the assertion that
+    // catches a `writeOverviewVisit(scope, Date.now())` effect finding its way
+    // back in: the module map keeps THIS load's boundary right whatever the
+    // stored value does, so nothing else in this file would notice.
+    act(() => root.unmount());
+    container.remove();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await render(client(Promise.resolve([])), readyFeed);
+    await settle();
+
+    expect(window.localStorage.getItem("oc.overview.last-visit:test-host::acme")).toBe(recorded);
+  });
+
+  it("re-reads the boundary when the company changes under a mounted view (#1700)", async () => {
+    // `scope` is a connection plus a company, and switching company changes it
+    // while this component stays mounted. The panel would otherwise keep
+    // comparing against the previous company's boundary.
+    window.localStorage.setItem("oc.overview.last-visit:test-host::acme", "1700000000000");
+    const failed = run({ id: "failed-1", taskId: "failed-1", finishedAtMillis: 1_700_000_000_100 });
+    const host = client(Promise.resolve([failed]));
+
+    await render(host, readyFeed);
+    await settle();
+    expect(container.textContent).toContain("Failed attempts recorded after the previous visit.");
+
+    // Globex has never been opened in this browser, so it has no earlier visit
+    // to compare against — and must say so rather than reusing Acme's.
+    await act(async () => {
+      root.render(
+        createElement(OperatorOverview, {
+          client: host,
+          company: "globex",
+          companyName: "Globex",
+          feed: readyFeed,
+          scope: { connection: "test-host", company: "globex" },
+        }),
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("There is no earlier visit in this browser to compare yet.");
   });
 
   it("keeps the alert icon only for attempts with neither a task nor a conversation", async () => {

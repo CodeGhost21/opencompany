@@ -3695,10 +3695,13 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -3793,10 +3796,13 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -3826,7 +3832,10 @@ mod test {
                     .uri("/api/v1/company/chat")
                     .header("cookie", crate::server::test_support::fixed_cookie("acme"))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"text":"hi"}"#))
+                    // Issue #1725: not "hi". A bare pleasantry is answered by
+                    // the runtime without a turn, so the echo brain — which is
+                    // what this asserts is wired up — never sees it.
+                    .body(Body::from(r#"{"text":"ship the landing page"}"#))
                     .unwrap(),
             )
             .await
@@ -3835,7 +3844,10 @@ mod test {
 
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["responses"][0]["text"], "You said: hi");
+        assert_eq!(
+            value["responses"][0]["text"],
+            "You said: ship the landing page"
+        );
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 
@@ -3898,6 +3910,60 @@ mod test {
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
     }
 
+    /// Issue #1725, through the route an operator actually hits: "hi" comes
+    /// back answered, with no card, no steps, and no turn behind it.
+    ///
+    /// The unit-level proof that the brain is not called lives in
+    /// `runtime::cycle`'s `a_bare_greeting_answers_without_calling_the_brain`,
+    /// where a counting brain can be injected. This one pins that the chat
+    /// handler reaches that path at all — the two are separate failures, and a
+    /// correct fast path nothing routes to leaves the bug where it was.
+    ///
+    /// The echo brain answers `"You said: <text>"`, so the assertion below is
+    /// also the evidence: a canned greeting means the brain never ran.
+    #[tokio::test]
+    async fn a_bare_greeting_is_answered_without_a_turn() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["responses"][0]["text"],
+            crate::company::task_intent::SmallTalk::Hello.reply(),
+            "a greeting is answered by the runtime, not by a turn"
+        );
+        // The console showed "1 step" for a greeting on staging. There is no
+        // step to show, so the field is omitted entirely.
+        assert!(
+            value["responses"][0]["steps"].is_null(),
+            "no tool ran: {}",
+            value["responses"][0]
+        );
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "a greeting opens no card"
+        );
+    }
+
     // ── Issue #982: the card goes to whoever was addressed ──────────────────
 
     /// A roster with three teammates and one desk, so a chat can be addressed
@@ -3958,10 +4024,13 @@ mode = "full"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -4064,10 +4133,13 @@ mode = "full"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -4102,10 +4174,13 @@ mode = "full"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -4633,10 +4708,13 @@ mode = "full"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -4716,7 +4794,10 @@ mode = "full"
                     .uri("/api/v1/company/chat")
                     .header("cookie", crate::server::test_support::fixed_cookie("acme"))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"text":"hi"}"#))
+                    // Issue #1725: not "hi". A bare pleasantry is answered by
+                    // the runtime without a turn, so it would reach no brain at
+                    // all — which is the opposite of what this asserts.
+                    .body(Body::from(r#"{"text":"ship the landing page"}"#))
                     .unwrap(),
             )
             .await
@@ -4727,15 +4808,18 @@ mode = "full"
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let text = value["responses"][0]["text"].as_str().unwrap();
         // The mock provider's `mock: ` prefix proves the message went through an
-        // openhuman agent turn; the trailing `hi` is the operator message the
-        // agent forwarded (the agent prepends a date/time context line). Crucially
-        // it is NOT the echo brain's `"You said: hi"`.
+        // openhuman agent turn; the trailing words are the operator message the
+        // agent forwarded (the agent prepends a date/time context line).
+        // Crucially it is NOT the echo brain's `"You said: …"`.
         assert!(text.starts_with("mock: "), "not an agent reply: {text:?}");
         assert!(
-            text.trim_end().ends_with("hi"),
+            text.trim_end().ends_with("ship the landing page"),
             "message not forwarded: {text:?}"
         );
-        assert_ne!(text, "You said: hi", "still routing through the echo brain");
+        assert_ne!(
+            text, "You said: ship the landing page",
+            "still routing through the echo brain"
+        );
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 
@@ -4771,10 +4855,13 @@ mode = "full"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

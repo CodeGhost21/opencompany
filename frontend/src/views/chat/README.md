@@ -204,6 +204,15 @@ The name stays "You" — in your own transcript the second person is what
 identifies the line, and your name there would read as somebody else — so only
 the face is yours, which is the half you actually pick your lines out by.
 
+**Every surface that resolves a sender needs it, not just the timeline**
+(issue #1729). `ThreadPanel` resolves its own senders rather than reading
+`TimelineEntry`, and it was passing three arguments to `senderOf` instead of
+four — so a "you" line in a thread had no `avatar`, `TeammateAvatar` seeded on
+the name it was given, and `avatarFor("You")` hashes to the same mascot the
+agent happened to be wearing. Both participants drew one face and the thread
+could not be read. The panel takes a `youAvatar` prop from `ChatView` for
+exactly that reason; a new sender-resolving surface owes the same.
+
 The main timeline's `senderOf(message, channel, members)` carries the same
 seed for a message whose `channel` field names a distinct originating voice:
 it looks that id up against the roster (`members.find`) the same way

@@ -5,7 +5,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { listRuns, RUN_STATUS_LABEL, type RunSummary } from "@/api/runs";
 import type { LocalScope } from "@/connections/types";
 import type { CompanyFeed } from "@/hooks/use-company";
-import { readOverviewVisit, writeOverviewVisit } from "@/lib/overview-visit";
+import { commitOverviewVisit, openOverviewVisit } from "@/lib/overview-visit";
 import { chatHref } from "@/lib/run-source";
 import { PageHeader } from "@/components/page-header";
 
@@ -54,25 +54,40 @@ export function OperatorOverview({
   attemptEventTick,
 }: Props) {
   /**
-   * The previous-visit boundary for the current `scope`, captured once per
-   * scope during *render* rather than in an effect.
+  /**
+   * The boundary the panel below compares against, for the current `scope`.
    *
-   * `scope` is memoized by its owner ([`ConnectionConsole`]) on
-   * `[connectionId, company]`, so comparing it by reference below only
-   * re-reads when the connection or company actually changes — the same
-   * semantics the write effect's `[scope]` dependency already relies on.
+   * Two fixes meet here and both are load-bearing, so neither side of this
+   * merge could be taken whole.
    *
-   * Reading here, before any effect has run, is what keeps the boundary safe
-   * under React 18 StrictMode's mount→cleanup→remount effect replay. A
-   * `[scope]` *read* effect paired with a `[scope]` *write* effect looks
-   * idempotent, but it is not: StrictMode's replay reruns both effects in
-   * declaration order, so the replay's read would observe the timestamp the
-   * first pass's write had just recorded, silently replacing the true
-   * previous boundary with "now" on every dev mount (#1745).
+   * **From #1745, kept exactly:** the read happens during *render*, pinned in a
+   * ref keyed on `scope` — which its owner ([`ConnectionConsole`]) memoizes on
+   * `[connectionId, company]`, so reference identity is the right key. A
+   * `[scope]` read effect paired with a `[scope]` write effect looks idempotent
+   * and is not: StrictMode replays both in declaration order, so the replay's
+   * read observes what the first pass's write just recorded. Reading before any
+   * effect runs is what makes that replay harmless. A scope switch also gets
+   * the new scope's boundary in the same render rather than one frame late.
+   *
+   * **From #1700, and why the functions changed:** a ref lives as long as one
+   * component instance, and the shell mounts this view conditionally — every
+   * trip to Chat and back is a fresh instance with a fresh ref, re-reading a
+   * `localStorage` value the previous instance's write effect had already
+   * advanced. That is the remount half of #1700, and no per-instance pin can
+   * see it. [`openOverviewVisit`](overview-visit) pins the boundary in MODULE
+   * state instead, which lives exactly as long as one page load — the lifetime
+   * "since you last opened" is a claim about.
+   *
+   * `openOverviewVisit` records nothing, and `commitOverviewVisit` below is the
+   * only durable write. A render React starts and never commits — a descendant
+   * throws, the operator reloads out of the error boundary — is not a visit,
+   * and must not become the boundary the next page load hides failures behind.
+   * `commitOverviewVisit` is idempotent per page load per scope for the same
+   * reason the read is, so StrictMode replaying the effect writes once.
    */
   const visitRef = useRef<{ scope: LocalScope; previousVisit: number | null }>();
   if (!visitRef.current || visitRef.current.scope !== scope) {
-    visitRef.current = { scope, previousVisit: readOverviewVisit(scope) };
+    visitRef.current = { scope, previousVisit: openOverviewVisit(scope) };
   }
   const previousVisit = visitRef.current.previousVisit;
 
@@ -184,12 +199,17 @@ export function OperatorOverview({
       });
   }, [attemptEventTick, fetchRuns]);
 
-  // Record that this browser opened this scope's overview. This is the only
-  // actual side effect in the read/write pair — the read lives at render time
-  // above — so StrictMode replaying it twice on mount is harmless: the
-  // boundary was already captured before this effect's first pass ever ran.
+  // Record that this browser opened this scope's overview. The only durable
+  // side effect in the read/write pair — the read lives at render time above —
+  // so StrictMode replaying it twice on mount is harmless twice over: the
+  // boundary was already captured before this effect's first pass ran, and
+  // `commitOverviewVisit` writes once per page load per scope anyway.
+  //
+  // In an effect rather than beside the read, because a render React starts and
+  // discards is not a visit (review of PR #1752). It was `writeOverviewVisit`
+  // straight from render on both sides of this merge, in different places.
   useEffect(() => {
-    writeOverviewVisit(scope, Date.now());
+    commitOverviewVisit(scope);
   }, [scope]);
 
   const stopped = useMemo(

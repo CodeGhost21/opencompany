@@ -56,6 +56,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -962,6 +968,41 @@ function ComponentSection() {
               Nothing here.
             </TabsContent>
           </Tabs>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Popover</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="mb-3 text-sm text-muted-foreground">
+            Tooltip is hover/focus-only by design — a mouse-only glance. Use
+            Popover instead for anything a touch or keyboard user must be able
+            to open, not just see: it opens on click/tap out of the box, with{" "}
+            <code>openOnHover</code> layered on top when the mouse case should
+            still work like a tooltip.
+          </p>
+          <Popover>
+            <PopoverTrigger
+              openOnHover
+              render={<Button variant="outline" size="sm" />}
+            >
+              Click or hover me
+            </PopoverTrigger>
+            <PopoverContent>
+              {/* Codex review on #1821: this example's popup is the
+               * canonical Popover pattern shown in the styleguide, so it
+               * must demonstrate the accessible-name requirement it
+               * documents rather than contradict it — a bare-text popup has
+               * no PopoverTitle to supply Popover.Popup's aria-labelledby,
+               * so it opens as an unnamed dialog. */}
+              <PopoverTitle>Popover</PopoverTitle>
+              <p className="mt-1 text-muted-foreground">
+                Popovers open on click, tap, and hover.
+              </p>
+            </PopoverContent>
+          </Popover>
         </CardContent>
       </Card>
 

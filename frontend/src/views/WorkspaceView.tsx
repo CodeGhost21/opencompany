@@ -93,7 +93,12 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
-import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster-names";
+import {
+  rosterDisplayName,
+  rosterIdKey,
+  rosterNameMap,
+  type RosterNames,
+} from "@/lib/roster-names";
 import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { createSaveBuffer, createUnloadGuard, type SaveBuffer } from "@/lib/workspace-save-buffer";
@@ -125,6 +130,7 @@ import {
   pathOf,
   readLegacyLocalNodes,
   renameAudienceWarning,
+  rosterOwnerOf,
   SECRETS_LABEL,
   SECRETS_REASON,
   sortedFolders,
@@ -1682,6 +1688,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               loading={searching || searchQuery !== searchInput.trim()}
               error={searchError}
               onOpen={(hit) => void openHit(hit)}
+              rosterNames={rosterNames}
             />
           ) : loading ? (
             <div className="space-y-2 px-2 py-2">
@@ -1930,6 +1937,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
                 <Authorship
                   createdBy={openFile?.createdBy ?? openNode.createdBy}
                   updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
+                  rosterNames={rosterNames}
                 />
               )}
               {/* Labelled (issue #1382). A bare "2 days ago" beside the title
@@ -2342,12 +2350,17 @@ const ORIGIN_STYLES: Record<WorkspaceOrigin["kind"], string> = {
 function Authorship({
   createdBy,
   updatedBy,
+  rosterNames,
 }: {
   createdBy: WorkspaceOrigin;
   updatedBy: WorkspaceOrigin;
+  /** The roster read, so an agent origin reads as a name (issue #1723). */
+  rosterNames: RosterNames;
 }) {
-  const created = originLabel(createdBy);
-  const edited = sameOrigin(createdBy, updatedBy) ? null : originLabel(updatedBy);
+  const created = originLabel(createdBy, rosterNames);
+  const edited = sameOrigin(createdBy, updatedBy)
+    ? null
+    : originLabel(updatedBy, rosterNames);
   if (!created && !edited) return null;
   return (
     <span className="flex shrink-0 items-center gap-1.5" data-testid="workspace-authorship">
@@ -2392,6 +2405,25 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   // a roster id one level below one of those two roots.
   const isRosterFolder = isFolder && isRosterRoot(nodeById(nodes, node.parentId));
   const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
+  /**
+   * The provenance pill for this row, resolved — or `null` when there is
+   * nothing worth saying (issue #1723).
+   *
+   * Suppressed inside the author's own `agents/`/`artifacts/` subtree, where
+   * the enclosing folder already attributes everything under it: on the
+   * teammate's own folder the pill would repeat the row's own label back
+   * verbatim, and on the `<task>/` folders and files beneath it, the same pill
+   * four times down the pane — each one taking the width the name needs.
+   * Everywhere else it is the one place the tree says who wrote a node, which
+   * is the whole of #326's marker, and a node one teammate wrote inside
+   * another's folder still wears it.
+   */
+  const owner = rosterOwnerOf(nodes, node.id);
+  const agentBadge =
+    node.createdBy.kind === "agent" &&
+    (owner === undefined || rosterIdKey(owner) !== rosterIdKey(node.createdBy.id))
+      ? { id: node.createdBy.id, name: rosterDisplayName(node.createdBy.id, rosterNames) }
+      : null;
   /** What this row is actually called on screen. */
   const label = isFolder ? displayName : titleOf(node);
   /**
@@ -2543,15 +2575,24 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           {/* Agent-created nodes get a marker in the tree itself, so "what has
               the company been writing" is answerable by scanning rather than by
               opening each note. Only the agent case — badging the operator's
-              own notes back at them says nothing. */}
-          {node.createdBy.kind === "agent" && (
+              own notes back at them says nothing.
+
+              The pill reads the teammate's NAME, through the same
+              `rosterDisplayName` the row label one line up already goes through
+              (issue #1723). It used to print the raw roster handle —
+              `seo_specialist` beside a row already labelled "SEO Specialist" —
+              which is #1688's and #1369's leak on the one surface those fixes
+              did not cover. The handle is still reachable, on `title`, because
+              it is the folder's real name and the identity every artifact is
+              stamped with. */}
+          {agentBadge && (
             <Badge
               variant="outline"
               className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
-              title={`Created by teammate ${node.createdBy.id}`}
+              title={`Created by teammate ${agentBadge.id}`}
               data-testid="workspace-tree-agent-badge"
             >
-              {node.createdBy.id}
+              {agentBadge.name}
             </Badge>
           )}
         </button>

@@ -288,6 +288,18 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
         overlay_policy: Some(sample_policy_override()),
+        // Non-empty for the same reason: this is the one overlay that WIDENS
+        // `[tools].allow`, so a backend that drops it silently revokes an
+        // integration the operator granted from a connect surface and leaves
+        // the restored company "Connected" and reaching nobody (issue #1796).
+        overlay_tool_grants: Some(crate::ports::types::ToolGrantsOverride {
+            added: vec!["chargebee".to_string()],
+            set_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "admin@example.com".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }),
         // Non-empty so a backend that drops the field is caught: an empty map
         // survives every possible bug, including not persisting it at all.
         overlay_desk_tools: std::collections::BTreeMap::from([(
@@ -297,6 +309,8 @@ fn record(id: &CompanyId) -> CompanyRecord {
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
         setup: Some(sample_setup_answers()),
+        name_confirmed: false,
+        activation_completed_at: None,
     }
 }
 
