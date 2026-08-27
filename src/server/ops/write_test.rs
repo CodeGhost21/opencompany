@@ -7405,9 +7405,10 @@ async fn applying_a_proposal_creates_the_workflow_and_finishes_the_card() {
 /// so the created workflow must come out owned by `engineering` even though
 /// `digest_ops` never mentions it.
 ///
-/// `owner_desk` is deliberately not projected on the read routes (see
-/// `WorkflowFile::owner_desk`), so this reads it back off the persisted
-/// overlay TOML rather than the `GET …/workflows/{id}` response.
+/// This reads the default back off the persisted overlay TOML directly,
+/// rather than the `GET …/workflows/{id}` response (which now also projects
+/// `ownerDesk`, see `WorkflowGraph::owner_desk`) — pinning the actual stored
+/// effect of the defaulting logic, independent of the read projection.
 #[tokio::test]
 async fn applying_a_proposal_defaults_the_owner_desk_from_the_assignees_desk() {
     let home_dir = home();
@@ -7437,6 +7438,47 @@ async fn applying_a_proposal_defaults_the_owner_desk_from_the_assignees_desk() {
         file.owner_desk.as_deref(),
         Some("engineering"),
         "the assignee's desk fills the omitted owner_desk"
+    );
+}
+
+/// **Regression, issue #1882 review — blank must default the same as absent.**
+/// A stored proposal that names `ownerDesk` as a blank/whitespace string (a
+/// builder pass that emits the key but leaves it empty, rather than omitting
+/// it) must still fall through to the assignee-desk default. Before the fix,
+/// `Some("   ")` passed the `is_none()` gate in `apply_workflow_proposal`, so
+/// the default never ran and the blank string was persisted as the "owner"
+/// instead.
+#[tokio::test]
+async fn applying_a_proposal_with_a_blank_owner_desk_still_defaults_it() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let mut ops = digest_ops(None);
+    ops["ownerDesk"] = json!("   ");
+    let id = seed_proposal_card(&state, ops).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "a blank ownerDesk must default the same as an omitted one: {file:?}"
     );
 }
 
