@@ -14,6 +14,22 @@ on:
         description: Tag to publish, for example v0.1.0
         required: true
         type: string
+      notes_from:
+        description:
+          Start of the release-notes range, EXCLUDED. `latest-release` resolves
+          the previous GitHub Release, and falls back to the repository's root
+          commit when there is none — pass an explicit tag or SHA to bound a
+          first release.
+        required: false
+        default: latest-release
+        type: string
+      notes_ai:
+        description:
+          Polish the generated notes with OpenAI. Requires OPENAI_API_KEY; the
+          run falls back to the deterministic renderer rather than failing.
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -23,8 +39,16 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     steps:
+      # `fetch-depth: 0`. The release-notes generator walks
+      # `<previous release>..<tag>` and reads EVERY author before the range to
+      # tell a first-time contributor from a returning one. Under the default
+      # shallow checkout that history is not present, `git log A..B` prints
+      # nothing for an unknown A, and the notes come out empty and green — the
+      # one failure mode worth paying a full clone to remove.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
           persist-credentials: false
           submodules: true
 
@@ -66,8 +90,74 @@ jobs:
           cargo build --locked --all-targets
           cargo test --locked
 
+      # ---- Release notes ------------------------------------------------------
+      # `generate_release_notes: true` used to do this, and what it produced was
+      # a flat "* <title> by @who in <url>" list in merge order. The generator
+      # below groups the same PRs into themed highlights and, unlike anything
+      # GitHub derives, names FIRST-TIME contributors — it reads history before
+      # the range, which the built-in list never does.
+      #
+      # Node is needed only for the generator; nothing else in this job uses it.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # `continue-on-error` plus the fallback below, not `||` inside one step:
+      # a failed OpenAI call must still leave a `release-notes.md` behind, and
+      # the two-step form makes WHICH renderer ran visible in the job log rather
+      # than hiding a degraded release behind a green step.
+      #
+      # The 5-minute cap is above the generator's own 300s abort, so a hung API
+      # is caught by the script (which then exits non-zero and hands over to the
+      # fallback) rather than by the step, which would kill the job outright.
+      - name: Generate release notes (AI)
+        id: ai-notes
+        if: inputs.notes_ai
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TAG: ${{ inputs.tag }}
+          NOTES_FROM: ${{ inputs.notes_from }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::warning::OPENAI_API_KEY is empty — falling back to deterministic notes."
+            exit 1
+          fi
+          node scripts/release/generate-release-notes.mjs \
+            --from "$NOTES_FROM" \
+            --to "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --output release-notes.md
+
+      # Runs when AI notes were disabled, skipped, or failed. This one is NOT
+      # `continue-on-error`: if the deterministic renderer cannot produce notes
+      # either, something is wrong with the range itself and the release should
+      # not be cut with an empty body.
+      - name: Generate release notes (deterministic)
+        if: ${{ !inputs.notes_ai || steps.ai-notes.outcome != 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          NOTES_FROM: ${{ inputs.notes_from }}
+        run: |
+          set -euo pipefail
+          node scripts/release/generate-release-notes.mjs \
+            --from "$NOTES_FROM" \
+            --to "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --no-ai \
+            --output release-notes.md
+
+      # So the notes are readable without opening the Release, and so a bad
+      # range is diagnosable from the run that produced it.
+      - name: Print notes to job summary
+        run: cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Create release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ inputs.tag }}
-          generate_release_notes: true
+          body_path: release-notes.md
