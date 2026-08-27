@@ -1212,11 +1212,47 @@ impl CompanyAgent {
                         // into `budget_pause_summary` so the caller can build
                         // `TurnOutcome::budget_paused` once this future
                         // resolves — the same reason `spend_brake` exists.
+                        //
+                        // Issue #1846 review (Codex #3869193105): `summary`
+                        // embeds the provider's raw error chain
+                        // (`budget_paused_summary`'s `{err:#}`), which a
+                        // BYO/custom provider can return with a
+                        // credential-bearing URL or an echoed secret baked in.
+                        // Redact HERE, once, before the value is stored
+                        // anywhere — not just on the copy returned as the
+                        // authored reply — because `budget_pause_summary`'s
+                        // slot is what `TurnOutcome::budget_paused.summary`
+                        // carries onward into `BudgetPause`/`BudgetPauseMarker`,
+                        // which is durable and operator-visible (the parked
+                        // marker, the chat notice text via
+                        // `budget_pause_notice`, and a dispatched card's
+                        // settle note all read it straight through). A raw
+                        // copy in the mutex slot would have leaked the secret
+                        // to every one of those sinks even though the reply
+                        // itself was clean.
+                        //
+                        // `redact`, not the full `scrub` pipeline: `scrub`
+                        // additionally hard-truncates to
+                        // `mcp_probe::SCRUB_MAX_BYTES` (300 bytes), which is
+                        // the right ceiling for a transient reply bubble but
+                        // is shorter than `budget_paused_summary`'s own
+                        // `truncate_for_pause` cap (600 chars) already applied
+                        // to the error detail — stacking `scrub`'s cap on top
+                        // would silently chop the persisted marker/notice text
+                        // well short of the length `budget_paused_summary`
+                        // deliberately allows. `redact` does the same
+                        // secret-substring and URL-query stripping without the
+                        // second, shorter truncation.
                         AttemptOutcome::BudgetPaused { summary } => {
+                            let redacted = crate::harness::mcp_probe::redact(&summary, &[]);
                             if let Ok(mut slot) = budget_pause_summary.lock() {
-                                *slot = Some(summary.clone());
+                                *slot = Some(redacted.clone());
                             }
-                            Ok(crate::harness::mcp_probe::scrub(&summary, &[]))
+                            // The reply keeps the FULL `scrub` pipeline
+                            // (redact + the shorter 300-byte cap), unchanged
+                            // from before this fix — a chat bubble was always
+                            // meant to be terse.
+                            Ok(crate::harness::mcp_probe::scrub(&redacted, &[]))
                         }
                         AttemptOutcome::Empty => {
                             // Retry-guard edge: skip the one-shot retry when an
@@ -1308,11 +1344,20 @@ impl CompanyAgent {
                                     // handling as the first attempt's arm above
                                     // — this IS the retry, so there is no
                                     // further attempt to skip.
+                                    //
+                                    // Issue #1846 review (Codex #3869193105):
+                                    // redacted before it reaches the mutex
+                                    // slot, same as the first attempt's arm —
+                                    // see that arm's doc comment for why this
+                                    // is `redact`, not the shorter-truncating
+                                    // `scrub`.
                                     AttemptOutcome::BudgetPaused { summary } => {
+                                        let redacted =
+                                            crate::harness::mcp_probe::redact(&summary, &[]);
                                         if let Ok(mut slot) = budget_pause_summary.lock() {
-                                            *slot = Some(summary.clone());
+                                            *slot = Some(redacted.clone());
                                         }
-                                        Ok(crate::harness::mcp_probe::scrub(&summary, &[]))
+                                        Ok(crate::harness::mcp_probe::scrub(&redacted, &[]))
                                     }
                                     AttemptOutcome::Hard(err) => Err(err),
                                 }
@@ -7203,6 +7248,141 @@ description = "Builds the product."
             .expect("a re-issue marker must be parked for the paused agent");
         assert_eq!(marker.agent, "ceo");
         assert_eq!(marker.message, "Please summarize today's standup notes.");
+        assert_eq!(marker.summary, pause.summary);
+    }
+
+    /// Issue #1846 review (Codex #3869193105) — **the regression.** A
+    /// BYO/custom-provider budget error can carry a credential-bearing URL
+    /// (the account's own endpoint, with an API key riding in the query
+    /// string) baked into the provider's response body, which becomes the
+    /// raw `anyhow` error chain `budget_paused_summary` formats into
+    /// `summary`.
+    ///
+    /// Before this fix, only the copy returned as the turn's authored REPLY
+    /// was scrubbed (`Ok(mcp_probe::scrub(&summary, &[]))`); the copy stored
+    /// into the `budget_pause_summary` mutex slot — which becomes
+    /// `TurnOutcome::budget_paused.summary`, and from there the durable
+    /// `BudgetPauseMarker.summary` AND the chat notice text
+    /// `budget_pause_notice` renders from it — was the RAW, unscrubbed
+    /// `summary`. A secret that never should have left the reply bubble was
+    /// therefore persisted on the marker and shown in the chat notice, both
+    /// operator-visible and durable, independent of whatever the reply itself
+    /// said.
+    ///
+    /// Same fixture and scenario as the test above; the only difference is
+    /// what the scripted provider's error body contains. Proof this pins the
+    /// actual fix and not a coincidence: reverting the `scrub` call in
+    /// either `BudgetPaused` arm of `classify_turn`'s caller makes this
+    /// assertion fail while leaving the sibling test above green.
+    #[tokio::test]
+    async fn a_budget_pause_summary_is_scrubbed_before_it_is_persisted_anywhere() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-scrub-regress");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(ScriptedProvider::new(vec![
+                Err(
+                    "insufficient budget: BYO provider request to \
+                     https://api.byo-provider.example/v1/chat?api_key=sk-live-topsecret123 \
+                     failed with 400"
+                        .to_string(),
+                );
+                10
+            ])),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        let outcome = pool
+            .run(
+                &company,
+                "ceo",
+                "Please summarize today's standup notes.",
+                &deps,
+                None,
+            )
+            .await
+            .expect("a budget pause is a graceful stop, not an error");
+
+        let pause = outcome
+            .budget_paused
+            .as_ref()
+            .expect("the scripted body matches the budget-exhausted classifier");
+
+        assert!(
+            !pause.summary.contains("api_key=sk-live-topsecret123"),
+            "the credential must not survive into TurnOutcome::budget_paused.summary: {}",
+            pause.summary
+        );
+        assert!(
+            !outcome.reply.contains("api_key=sk-live-topsecret123"),
+            "the credential must not survive into the authored reply either: {}",
+            outcome.reply
+        );
+
+        // The durable marker — what the chat notice (`budget_pause_notice`)
+        // and the console's `GET …/budget-pause` both read — carries the SAME
+        // scrubbed summary, not a second, unscrubbed copy of the raw error.
+        let marker = crate::runtime::grants::budget_pauses_for(&company)
+            .peek("ceo")
+            .expect("a re-issue marker must be parked for the paused agent");
+        assert!(
+            !marker.summary.contains("api_key=sk-live-topsecret123"),
+            "the persisted marker must not carry the credential either: {}",
+            marker.summary
+        );
         assert_eq!(marker.summary, pause.summary);
     }
 
