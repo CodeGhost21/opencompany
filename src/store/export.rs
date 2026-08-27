@@ -1668,7 +1668,7 @@ mod test {
             name: "Dana Designer".into(),
             role: "Design".into(),
             description: Some("Owns the brand".into()),
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         }];
@@ -2159,7 +2159,7 @@ mod test {
             AgentOverride {
                 agent_id: "ceo".into(),
                 role: Some("Interim Chief".into()),
-                tools: Some(vec!["docs.read".into()]),
+                tools: Some(Some(vec!["docs.read".into()])),
                 ..Default::default()
             },
         ];
