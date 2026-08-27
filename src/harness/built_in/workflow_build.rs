@@ -1943,7 +1943,13 @@ pub(crate) enum CopilotSeed {
     /// Correct `spec` — the saved graph of a workflow whose run failed — grounded
     /// on the precise `failure` (issue #840, PR-3).
     FromFailure {
-        spec: WorkflowGraphSpec,
+        // Boxed (issue #1862 prerequisite): `WorkflowGraphSpec` grew an
+        // `owner_desk` field, which pushed this variant's size far enough
+        // past `FromDescription(String)`'s to trip
+        // `clippy::large_enum_variant`. Boxing is pure indirection here —
+        // every read site already goes through `&spec` or a field clone, both
+        // of which auto-deref through the `Box` unchanged.
+        spec: Box<WorkflowGraphSpec>,
         failure: RunFailureContext,
     },
 }
@@ -2157,7 +2163,7 @@ pub(crate) async fn fix_workflow_from_failure(
     run_copilot(
         runtime,
         CopilotSeed::FromFailure {
-            spec: failing.clone(),
+            spec: Box::new(failing.clone()),
             failure: failure.clone(),
         },
     )
