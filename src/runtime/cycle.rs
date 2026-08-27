@@ -461,6 +461,15 @@ impl<'a> CycleRunner<'a> {
     ) -> Result<CycleReport> {
         let cycle_id = crate::ports::generate_id();
         let trigger = cycle_trigger_of(&events);
+        // Issue #1739. Nothing in this tree measures how long a cycle takes —
+        // the journal records that one started and that one finished, never the
+        // span between — so this is new instrumentation rather than a read of
+        // something already kept. `Instant` because the only question is a
+        // duration, and a wall clock that steps backwards mid-cycle would
+        // report a negative one.
+        let started_at = std::time::Instant::now();
+        let analytics_trigger =
+            crate::analytics::Trigger::of(events.first().map(|(_, event)| event));
 
         // Best-effort, and it must stay that way: record-keeping does not get to
         // refuse a cycle. A failed open simply means this cycle is unbracketed,
@@ -509,7 +518,56 @@ impl<'a> CycleRunner<'a> {
             }
             None => self.rt.serial.clone().lock_owned().await,
         };
-        let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
+        let mut effects = EffectCounts::default();
+        // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
+        // the ambient `RedeemContext` for this cycle, read by every
+        // `BudgetPauseSet::park` call underneath it (the top-level turn, a
+        // CEO-relay call, a delegate's own turn) so a redeem replays the
+        // operator's ORIGINAL thread parent, deliverable choice, and
+        // resolved mentions instead of empty defaults. Derived from `events`
+        // before the batch moves into `run_locked` — see
+        // `RedeemContext::from_events` for why "first `OperatorMessage`" is
+        // the right read.
+        let redeem_context = crate::runtime::grants::RedeemContext::from_events(&events);
+        let outcome = crate::runtime::grants::with_redeem_context(
+            redeem_context,
+            self.run_locked(events, cycle_id.clone(), run_id, &mut effects),
+        )
+        .await;
+        // Issue #1739: the product's unit of work, reported as shape and outcome.
+        //
+        // Emitted here rather than inside `run_locked` for the same reason the
+        // bracket is opened here: this is where a cycle's whole span is
+        // observable, including the wait on the serial lock, which is the part
+        // an operator experiences as "nothing is happening". Nothing is awaited
+        // — `Tracker::track` is synchronous and infallible — so a turn is never
+        // delayed by, and can never fail because of, analytics.
+        self.rt
+            .tracker
+            .track(crate::analytics::Event::TurnFinished {
+                trigger: analytics_trigger,
+                outcome: match &outcome {
+                    Ok(_) => crate::analytics::Outcome::Ok,
+                    Err(_) => crate::analytics::Outcome::Failed,
+                },
+                // The coarse class only. `err.to_string()` is the single richest
+                // source of user content in this crate — absolute paths, company
+                // ids, MCP server names, tool names, ledger slugs, agent text — and
+                // is exactly what the journal line below carries and a payload must
+                // not.
+                failure: outcome
+                    .as_ref()
+                    .err()
+                    .map(crate::analytics::FailureCode::of),
+                duration_ms: started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                // From the host, not from the report: the report exists only on
+                // the success path, so reading it here reported zero effects
+                // and zero parked approvals for every failed cycle — including
+                // one that executed an irreversible effect and *then* hit an
+                // adapter error, which is the turn most worth counting.
+                effects_executed: effects.executed,
+                approvals_parked: effects.parked,
+            });
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
         let error = outcome.as_ref().err().map(|err| err.to_string());
@@ -535,6 +593,7 @@ impl<'a> CycleRunner<'a> {
         inputs: Vec<(Option<EventSeq>, CompanyEvent)>,
         cycle_id: String,
         run_id: Option<String>,
+        effects: &mut EffectCounts,
     ) -> Result<CycleReport> {
         let company = self.rt.id.clone();
 
@@ -749,6 +808,12 @@ impl<'a> CycleRunner<'a> {
         // that escapes it is a panic, which is the boot reaper's job.
         self.backstop_dispatched_runs(&company, &dispatched_runs, result.as_ref().err())
             .await;
+        // Before the `?`, and before the fallible persistence below, for the
+        // same reason the backstop is: an effect that executed and an approval
+        // that parked are facts, and a later adapter error does not un-happen
+        // them. Read here, the turn event reports them whichever way the cycle
+        // ends (issue #1739).
+        *effects = host.counts();
         let result = result?;
 
         // 6. Persist output.
@@ -2209,6 +2274,10 @@ fn cycle_task_id(
             | CompanyEvent::WorkspaceChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
+            // Issue #1805: an operator's deadline extension is a record of a
+            // decision, not a work trigger — it names no card and competes with
+            // none, exactly like the park it defers.
+            | CompanyEvent::ApprovalExtended { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
             // A reaction (issue #364) is a reader's response to a message that
             // already exists. It starts no work and rivals no conversation, so
@@ -2408,6 +2477,10 @@ fn cycle_conversation(
             | CompanyEvent::WorkspaceChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
+            // Issue #1805: an operator's deadline extension is a record of a
+            // decision, not a work trigger — it names no card and competes with
+            // none, exactly like the park it defers.
+            | CompanyEvent::ApprovalExtended { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
             // A reaction (issue #364) is a reader's response to a message that
             // already exists. It starts no work and rivals no conversation, so
@@ -2510,6 +2583,18 @@ fn cycle_conversation(
 
 /// The host the brain calls back into mid-cycle. Bridges tool, context, and
 /// effect callbacks to the runtime's ports and gates every effect.
+/// Effects executed and approvals parked by a cycle — counted, not owned.
+///
+/// Separate from `CycleReport` because the report only exists on success, while
+/// these two numbers describe work that has already happened and cannot be
+/// undone by a later failure. Reported as zero on a failed cycle, they made
+/// `turn_finished` systematically undercount exactly the turns worth looking at.
+#[derive(Clone, Copy, Default)]
+struct EffectCounts {
+    executed: u64,
+    parked: u64,
+}
+
 struct CycleHostImpl<'a> {
     company: CompanyId,
     cycle_id: String,
@@ -2580,6 +2665,20 @@ impl<'a> CycleHostImpl<'a> {
             external_trigger,
             thread_id: conversation.thread,
             thread_parent: conversation.parent,
+        }
+    }
+
+    /// What this host has irreversibly done so far, readable without consuming it.
+    ///
+    /// `into_outcomes` can only be reached on the success path, but an effect
+    /// that has executed and an approval that has parked are facts already —
+    /// they survive whatever fails afterwards. Reading the counts through the
+    /// same mutexes lets the turn report them even when the cycle goes on to
+    /// fail (issue #1739).
+    fn counts(&self) -> EffectCounts {
+        EffectCounts {
+            executed: self.executed.lock().expect("executed poisoned").len() as u64,
+            parked: self.parked.lock().expect("parked poisoned").len() as u64,
         }
     }
 
@@ -2870,6 +2969,26 @@ impl<'a> CycleHostImpl<'a> {
                 }),
             });
         };
+        // An `auto` channel is refused here even though an ordinary leadless
+        // desk is not (issue #1835, codex on #1872). The carve-out above is
+        // about a desk that has no lead *yet* — a card on the board is visible
+        // work either way. An auto channel has no lead by design and never
+        // will, so accepting one wrote a card noting "no lead member on the
+        // roster yet": false about a staffed channel, and permanently so. The
+        // reason comes from `reject_auto_channel_target`, the same definition
+        // the harness tool refuses through, so the two paths cannot drift.
+        if let Some(reason) = record
+            .as_ref()
+            .and_then(|r| crate::runtime::delegation_tools::reject_auto_channel_target(r, &desk_id))
+        {
+            return Ok(ToolResult {
+                ok: false,
+                output: serde_json::json!({
+                    "status": "no_lead",
+                    "error": reason,
+                }),
+            });
+        }
         // The desk's lead, when it has a roster-backed one, is recorded in the
         // note; the card is assigned to the DESK so an operator asking the desk
         // directly (chat targets the desk) sees the hand-off.
@@ -7806,6 +7925,61 @@ members = ["writer"]
         assert_eq!(cards[0].column, COLUMN_TODO);
     }
 
+    /// Issue #1872 (codex): the hosted path refuses an `auto` channel, and
+    /// says why.
+    ///
+    /// This path deliberately does **not** refuse an ordinary leadless desk —
+    /// a hosted hand-off is a durable card, visible on the board whether or
+    /// not anyone leads the desk yet. An auto channel is different in kind: it
+    /// has no lead by design and never will, so accepting one wrote a card
+    /// noting "no lead member on the roster yet", which is false about a
+    /// staffed channel and permanently so — and it disagreed with the
+    /// built-in tool, which refuses. Remove the guard and this opens a card.
+    #[tokio::test]
+    async fn delegate_to_desk_refuses_an_auto_channel_on_the_hosted_path() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::new(home.clone(), desk_manifest())
+            .build()
+            .await
+            .unwrap();
+        let mut record = rt.store().load(rt.id()).await.unwrap().unwrap();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["eng1".to_string()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        rt.store().save(&record).await.unwrap();
+
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+        let refused = host
+            .delegate_to_desk(
+                serde_json::json!({ "desk": "launch", "instruction": "ship the launch" }),
+            )
+            .await
+            .unwrap();
+        assert!(!refused.ok, "{:?}", refused.output);
+        assert_eq!(refused.output["status"], "no_lead");
+        let error = refused.output["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("picked per message"),
+            "the refusal says why, rather than reusing the leadless-desk wording: {error}"
+        );
+        assert!(
+            rt.tasks().list(rt.id()).await.unwrap().is_empty(),
+            "a refused hand-off opens no card"
+        );
+    }
+
     #[tokio::test]
     async fn call_tool_dispatches_delegation_tools() {
         let home_dir = tmp_home();
@@ -8925,5 +9099,133 @@ members = ["writer"]
             Some(seq),
             "the row is stamped with the seq the caller supplied"
         );
+    }
+
+    /// **Issue #1739.** A cycle reports one `turn_finished`, and the operator's
+    /// own words are not in it.
+    ///
+    /// The message text here is the thing the payload must never carry, so it is
+    /// deliberately distinctive: the assertion is a substring search over the
+    /// whole rendered event, which fails if any field ever starts holding
+    /// free-form text.
+    #[tokio::test]
+    async fn a_cycle_reports_its_shape_and_not_the_operators_words() {
+        let home_dir = tmp_home();
+        let recorder = Arc::new(crate::analytics::RecordingTracker::new());
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .with_analytics(recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            text: "acquire Northwind Traders for 4.2 million".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+
+        let turns: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .filter(|event| matches!(event, crate::analytics::Event::TurnFinished { .. }))
+            .collect();
+        assert_eq!(turns.len(), 1, "one cycle, one event: {turns:?}");
+
+        match turns[0] {
+            crate::analytics::Event::TurnFinished {
+                trigger,
+                outcome,
+                failure,
+                ..
+            } => {
+                assert_eq!(trigger, crate::analytics::Trigger::OperatorMessage);
+                assert_eq!(outcome, crate::analytics::Outcome::Ok);
+                assert_eq!(failure, None);
+            }
+            ref other => panic!("{other:?}"),
+        }
+
+        let rendered = format!("{:?}", turns[0]);
+        assert!(
+            !rendered.contains("Northwind"),
+            "the operator's message reached the payload: {rendered}"
+        );
+    }
+
+    /// `turn_finished` counts the effects the cycle actually performed.
+    ///
+    /// These two numbers used to be read off `CycleReport`, which exists only
+    /// on the success path — so every failed cycle reported zero effects and
+    /// zero parked approvals, including one that executed an irreversible
+    /// effect and *then* hit an adapter error on the way out. That is a
+    /// systematic undercount of exactly the turns worth looking at.
+    ///
+    /// They now come from the host, read before the fallible tail of
+    /// `run_locked` rather than after it. This covers the reading being
+    /// faithful: a cycle whose brain emits one effect reports one. The failure
+    /// case is covered by where the read happens — `*effects = host.counts()`
+    /// sits above `let result = result?;` and above every `?` that follows, so
+    /// no later error can reach the tracker with the counts unset.
+    #[tokio::test]
+    async fn a_cycle_reports_the_effects_it_actually_performed() {
+        let home_dir = tmp_home();
+        let recorder = Arc::new(crate::analytics::RecordingTracker::new());
+        let effect = Effect {
+            kind: "noop".into(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .with_brain(Arc::new(EffectBrain { effect }))
+            .with_analytics(recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            text: "do the thing".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+
+        let turns: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .filter(|event| matches!(event, crate::analytics::Event::TurnFinished { .. }))
+            .collect();
+        assert_eq!(turns.len(), 1, "one cycle, one event: {turns:?}");
+
+        match turns[0] {
+            crate::analytics::Event::TurnFinished {
+                effects_executed,
+                approvals_parked,
+                ..
+            } => {
+                assert_eq!(
+                    effects_executed + approvals_parked,
+                    1,
+                    "the cycle's one effect must be counted, executed or parked: {:?}",
+                    turns[0]
+                );
+            }
+            ref other => panic!("{other:?}"),
+        }
     }
 }

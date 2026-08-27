@@ -227,6 +227,17 @@ pub struct CompanyRuntime {
     /// for expiry tests).
     pub(crate) gate_injected: bool,
     pub(crate) journal: Arc<RuntimeJournal>,
+    /// Where this company's turns are reported, if anywhere (issue #1739).
+    ///
+    /// Always present and always compiled — the port and its no-op default live
+    /// in the default build, exactly as `steer` and `grants` do. A desktop or
+    /// self-hosted instance holds a
+    /// [`NullTracker`](crate::analytics::NullTracker) here and nothing it does
+    /// leaves the process; only a hosted tenant that resolved to
+    /// [`Decision::Report`](crate::analytics::Decision::Report) holds anything
+    /// else, and only a build compiled with `--features analytics` has anything
+    /// else to hold.
+    pub(crate) tracker: Arc<dyn crate::analytics::Tracker>,
     /// Per-company secrets, read by the feedback scrubber (and webhook HMAC
     /// verification, later).
     pub(crate) secrets: Arc<dyn SecretStore>,
@@ -492,6 +503,7 @@ impl CompanyRuntime {
             approval_gate,
             gate_injected: false,
             journal,
+            tracker: crate::analytics::null_tracker(),
             secrets,
             inbox,
             mail,
@@ -585,6 +597,14 @@ impl CompanyRuntime {
     /// and the manifest's `[users].mode`.
     pub(crate) fn set_auth_mode(&mut self, mode: AuthMode) {
         self.auth_mode = mode;
+    }
+
+    /// Points this company's turn reporting at `tracker` (issue #1739). Wired
+    /// once by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the
+    /// process-wide decision; the default is a
+    /// [`NullTracker`](crate::analytics::NullTracker).
+    pub(crate) fn set_tracker(&mut self, tracker: Arc<dyn crate::analytics::Tracker>) {
+        self.tracker = tracker;
     }
 
     /// How humans sign in to this company.
@@ -1619,6 +1639,55 @@ impl CompanyRuntime {
         }
         self.retire_approval(id, ExpiryReason::Ttl, now_millis())
             .await
+    }
+
+    /// Pushes a parked approval's deadline out to a fresh full TTL window,
+    /// giving the operator more time before it default-denies (issue #1805).
+    ///
+    /// Returns the approval's **new** deadline (epoch-millis: the extension
+    /// instant plus the gate's current TTL), the same number the card's
+    /// countdown will now project. Errors with
+    /// [`OpenCompanyError::NotFound`] when no such approval is parked — an
+    /// unknown id, or one already resolved or expired — so a caller answers 404
+    /// rather than reporting an extension of nothing.
+    ///
+    /// # Why a full window rather than "+N hours"
+    ///
+    /// Re-anchoring the TTL to now reuses the single deadline the sweeper and
+    /// the console already agree on (`parked_at + ttl`), so there is no second
+    /// stored offset for a projection to compute differently. Extend is the
+    /// mirror of the shortening path that made this issue matter: an approval
+    /// that vanishes on a deadline is only acceptable if the operator can also
+    /// keep it alive.
+    ///
+    /// The move is made durable in two places kept in step exactly as the park
+    /// instant already is: the live gate the sweeper reads, and the journal the
+    /// projection reads and the next boot rehydrates the gate from — so an
+    /// extension survives a redeploy instead of reverting.
+    pub async fn extend_approval(&self, id: &ApprovalId, by: Actor) -> Result<u64> {
+        self.ensure_accepting()?;
+        let now = now_millis();
+        // The gate is the existence check: `false` means nothing is parked under
+        // this id, so nothing is extended and the caller owes a 404.
+        if !self.approval_gate.extend(id, now) {
+            return Err(OpenCompanyError::NotFound(format!(
+                "no parked approval {id} to extend"
+            )));
+        }
+        // Durable half: the journal both projects the new deadline (its in-memory
+        // queue moved here) and replays it on the next boot.
+        self.journal.record_extended(id, now, by.clone()).await?;
+        // Audit half: who kept this alive, and when.
+        self.events
+            .append(
+                &self.id,
+                CompanyEvent::ApprovalExtended {
+                    approval_id: id.clone(),
+                    by,
+                },
+            )
+            .await?;
+        Ok(now.saturating_add(self.approval_gate.ttl_millis()))
     }
 
     /// How many **other** decisions the turn behind `id` is still blocked on
@@ -2989,13 +3058,19 @@ impl CompanyRuntime {
                 amount_usd: p.effect.amount_usd,
                 at_millis: p.at_millis,
                 // Issue #971: the deadline, filled in at the single projection
-                // point so every reader gets the same one. Read off the gate
-                // rather than recomputed from `[policy]`, because the gate is
-                // where the `None`-means-default rule resolves and a second
-                // resolution of it is a second thing that can disagree — the
-                // card would then promise a deadline the gate does not enforce.
+                // point so every reader gets the same one. The TTL is read off
+                // the gate rather than recomputed from `[policy]`, because the
+                // gate is where the `None`-means-default rule resolves and a
+                // second resolution of it is a second thing that can disagree —
+                // the card would then promise a deadline the gate does not
+                // enforce. Issue #1805: measured from the deadline anchor, not
+                // `at_millis` — the two coincide until an operator extends, at
+                // which point the anchor carries the pushed-out window and the
+                // card's countdown moves with it (the same anchor the gate's
+                // sweeper uses, so the two never disagree).
                 expires_at_millis: Some(
-                    p.at_millis.saturating_add(self.approval_gate.ttl_millis()),
+                    p.deadline_anchor_millis
+                        .saturating_add(self.approval_gate.ttl_millis()),
                 ),
                 // Issue #1024: the host's own classification, not the console's
                 // guess. `kind` is the tool name for a harness call, so this is
@@ -3285,17 +3360,19 @@ impl CompanyRuntime {
     /// A status snapshot, loading the company record for name and lifecycle.
     pub async fn status(&self) -> Result<CompanyStatus> {
         let record = self.store.load(&self.id).await?;
-        let (name, lifecycle, template_provenance) = match record {
+        let (name, logo_url, lifecycle, template_provenance) = match record {
             Some(record) => (
                 record.manifest.company.name,
+                record.manifest.company.logo_url,
                 record.lifecycle,
                 record.template_provenance,
             ),
-            None => (self.id.to_string(), "running".to_string(), None),
+            None => (self.id.to_string(), None, "running".to_string(), None),
         };
         Ok(CompanyStatus {
             id: self.id.clone(),
             name,
+            logo_url,
             lifecycle,
             pending_approvals: self.journal.pending().len(),
             template_provenance,
@@ -3591,6 +3668,7 @@ mod tests {
                 run_id: run_id.map(str::to_string),
             },
             at_millis: 1,
+            deadline_anchor_millis: 1,
             task,
             thread: None,
             batch: None,
@@ -4720,6 +4798,142 @@ mod tests {
             .await
             .expect("runtime");
         (rt, home_dir)
+    }
+
+    /// A helper effect and a manifest for the extend tests.
+    fn extend_test_effect() -> crate::ports::types::Effect {
+        crate::ports::types::Effect {
+            kind: "payment.send".into(),
+            group: crate::ports::types::EffectGroup::Spend,
+            amount_usd: Some(1_200.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "to": "vendor@example.test" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        }
+    }
+
+    /// Seeds one parked approval into BOTH the live gate and the durable journal
+    /// under a fixed id at `at_millis`, exactly as a real park leaves them — the
+    /// gate answers "is this live?" for extend/sweep, the journal projects the
+    /// deadline and replays on boot.
+    async fn seed_parked(
+        rt: &crate::company::runtime::CompanyRuntime,
+        id: &str,
+        at_millis: u64,
+    ) -> crate::ports::types::ApprovalId {
+        use crate::ports::types::ApprovalId;
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+        let approval = ApprovalId::new(id);
+        let effect = extend_test_effect();
+        rt.approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at_millis);
+        rt.journal
+            .record_parked(
+                &approval,
+                &effect,
+                at_millis,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        approval
+    }
+
+    /// Issue #971 (the projection this issue builds on): a card's deadline is the
+    /// deadline anchor plus the gate's TTL, resolved once at the single
+    /// projection point.
+    #[tokio::test]
+    async fn pending_approvals_projects_deadline_as_anchor_plus_ttl() {
+        let (rt, _home) = runtime_with_events().await;
+        seed_parked(&rt, "appr-deadline", 5_000).await;
+        let ttl = rt.approval_gate.ttl_millis();
+        assert_eq!(
+            rt.pending_approvals()[0].expires_at_millis,
+            Some(5_000 + ttl),
+            "a fresh card's deadline runs from when it was parked"
+        );
+    }
+
+    /// **The load-bearing extend test (issue #1805).** Extending moves the live
+    /// deadline, and — the half that a redeploy silently reverted before this —
+    /// the move survives a rebuild of the runtime from the same journal, because
+    /// the extension is replayed and the gate is rehydrated from the moved anchor.
+    #[tokio::test]
+    async fn extend_approval_moves_deadline_and_survives_replay() {
+        use crate::ports::types::{Actor, ActorKind};
+
+        let home_dir = tempfile::Builder::new()
+            .prefix("opencompany-extend-replay-")
+            .tempdir()
+            .expect("tempdir");
+        let manifest: crate::company::types::CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"supervised\"\n")
+                .expect("manifest");
+
+        // First boot: park an old approval, confirm its original deadline, extend.
+        let rt1 =
+            crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest.clone())
+                .build()
+                .await
+                .expect("runtime");
+        let id = seed_parked(&rt1, "appr-replay", 1_000).await;
+        let ttl = rt1.approval_gate.ttl_millis();
+        assert_eq!(
+            rt1.pending_approvals()[0].expires_at_millis,
+            Some(1_000 + ttl),
+            "the fresh deadline runs from the park instant"
+        );
+
+        let new_deadline = rt1
+            .extend_approval(
+                &id,
+                Actor {
+                    kind: ActorKind::User,
+                    id: "operator".into(),
+                },
+            )
+            .await
+            .expect("extend");
+        assert!(
+            new_deadline > 1_000 + ttl,
+            "the live deadline moved out: {new_deadline} vs {}",
+            1_000 + ttl
+        );
+        assert_eq!(
+            rt1.pending_approvals()[0].expires_at_millis,
+            Some(new_deadline),
+            "the live projection reflects the extension immediately"
+        );
+        drop(rt1);
+
+        // Second boot from the SAME journal — the redeploy the extension has to
+        // survive. Without the replayed `ApprovalExtended` the deadline would
+        // revert to `1_000 + ttl`.
+        let rt2 = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .expect("runtime");
+        let replayed = rt2.pending_approvals();
+        assert_eq!(
+            replayed.len(),
+            1,
+            "the approval is still parked after a redeploy"
+        );
+        assert_eq!(
+            replayed[0].expires_at_millis,
+            Some(new_deadline),
+            "the extended deadline survived the rebuild instead of reverting to the park window"
+        );
+        // The rehydrated gate enforces the extended window too: a sweep one tick
+        // before the new deadline leaves it parked.
+        assert!(
+            rt2.approval_gate.sweep_expired(new_deadline - 1).is_empty(),
+            "the rehydrated gate must enforce the extension, not the original park"
+        );
     }
 
     #[tokio::test]

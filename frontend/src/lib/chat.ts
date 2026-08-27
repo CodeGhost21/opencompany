@@ -16,6 +16,64 @@ import type {
  */
 export const MAIN_THREAD_ID = "main";
 
+/**
+ * The name of the company-wide channel, rendered after the `#`.
+ *
+ * Mirrors the host's `GENERAL_CHANNEL` (`src/server/ops/language.rs`), the same
+ * way {@link MAIN_THREAD_ID} mirrors its `MAIN_THREAD_ID`.
+ */
+export const GENERAL_CHANNEL = "general";
+
+/**
+ * Does this id name the built-in `#general` channel?
+ *
+ * Mirrors the host's `is_general_chat` (`src/server/chat_history.rs`), which
+ * has folded four spellings into one conversation since issue #65: the empty
+ * string, `main` (what this console addresses the line as), `General` (the
+ * name the host attributes an unaddressed turn to), and `general`. The host
+ * reserves every one of them — a desk cannot be created with any of them as
+ * its id — so this is a closed set, not a guess.
+ *
+ * **Case-folded and nothing else.** The host compares with
+ * `eq_ignore_ascii_case` against the string exactly as journaled, so it does
+ * not trim — and neither may this, or the two disagree about the same id.
+ * Trimming here was strictly worse than being strict: an API client posting
+ * `chat: "  Main  "` has that spelling journaled verbatim, so the console
+ * rendered the live reply in `#general` while `chat/history?desk=main` did not
+ * return it, and the message vanished on the next reload. A live frame that
+ * never lands is a message the operator has not seen; one that lands and then
+ * disappears reads as data loss.
+ *
+ * Lives here rather than in `lib/desks.ts` — where it used to — because it is a
+ * fact about chat *addressing*, like {@link MAIN_THREAD_ID} beside it, and
+ * because `dispatchMarkerPlacement` below has to apply it. `lib/desks.ts`
+ * re-exports it, so nothing that reads it had to move.
+ */
+export function isGeneralChannel(id: string): boolean {
+  const key = id.toLowerCase();
+  return key === "" || key === MAIN_THREAD_ID || key === GENERAL_CHANNEL;
+}
+
+/**
+ * The channel that renders `threadId`, given the shell's thread → channel map.
+ *
+ * A plain `map[threadId]` is not enough for the General line and never was: the
+ * map is seeded with four literal spellings, while the host accepts **any
+ * casing** of them and echoes back the one the caller addressed. So a live
+ * frame from an API client that posted `MAIN` matched nothing, and its reply
+ * and working indicator appeared only once polling recovered the durable
+ * history (issue #1743).
+ *
+ * `null` when the map does not know the thread — never a fall back to whatever
+ * the operator has open, which is issue #368's bug.
+ */
+export function generalAwareChannel(
+  map: Readonly<Record<string, string>>,
+  threadId: string,
+): string | null {
+  return map[threadId] ?? (isGeneralChannel(threadId) ? (map[MAIN_THREAD_ID] ?? null) : null);
+}
+
 /** One person's reaction on one line. Mirrors `ChatReactionDto` on the host. */
 export interface Reaction {
   emoji: string;
@@ -323,7 +381,12 @@ export function dispatchMarkerPlacement(
   const threadId = event.chatId === "" ? MAIN_THREAD_ID : event.chatId;
   return {
     threadId,
-    channelId: chatChannelByThread[threadId] ?? null,
+    // Resolved the same way every other live frame is (issue #1743): the map
+    // carries four literal General spellings, while the host accepts any casing
+    // and echoes back the one the caller addressed. A bare index dropped the
+    // marker for `MAIN` or `GENERAL`, so a dispatch settled with nothing to
+    // show for it until a reload.
+    channelId: generalAwareChannel(chatChannelByThread, threadId),
     message: makeMessage("system", dispatchMarkerText(event.column), {
       taskId: event.taskId,
       messageId: String(event.seq),

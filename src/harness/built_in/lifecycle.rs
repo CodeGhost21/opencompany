@@ -99,7 +99,13 @@ pub enum TaskRunEnd {
     Failed,
     /// An operator cancelled mid-flight. Partial work is discarded.
     Cancelled,
-    /// An operator paused mid-flight. Partial work is preserved in the note.
+    /// An operator paused mid-flight, **or** the turn itself paused for lack
+    /// of inference budget/credits (issue #1846 review, Codex #3864988168) —
+    /// a background dispatch's mirror of the operator-chat path's own
+    /// budget-paused bubble. Partial work is preserved in the note either
+    /// way; a budget pause additionally parks a durable per-agent re-issue
+    /// marker (`crate::runtime::grants::budget_pauses_for`), redeemable from
+    /// the console once credits are added.
     Paused,
     /// The operator spent the redirect budget
     /// (`MAX_REDIRECTS_PER_DISPATCH`); the last run's reply is finalized

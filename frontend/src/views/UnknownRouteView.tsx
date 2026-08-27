@@ -1,5 +1,6 @@
 import { MapPinOff } from "lucide-react";
 
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { withHostParam } from "@/hooks/use-host-route";
@@ -10,6 +11,14 @@ export function UnknownRouteView({ address }: { address: string | null }) {
 
   return (
     <div className="flex flex-1 items-center justify-center p-6">
+      {/*
+        Issue #1763: `hidden`, because the card *is* the page — a title bar
+        over a centred recovery card would be chrome above the one thing on
+        screen. What it was missing is the other half: with no `h1` at all,
+        this was a page a screen reader could not announce, and it is the page
+        an operator lands on precisely when they are already lost.
+      */}
+      <PageHeader title="Page not found" hidden />
       <Card className="w-full max-w-lg">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">

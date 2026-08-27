@@ -45,6 +45,15 @@ export interface InferenceStatus {
   baseUrl: string;
   /** Abstract-tier → concrete model id. */
   models: Record<string, string>;
+  /**
+   * The shipped tier → model defaults, independent of `provider`/`models`
+   * above. The console's OpenRouter preset used to hard-code its own copy of
+   * these ids so the form had something to prefill before an operator typed
+   * an override; that duplicate could silently drift from what the host
+   * actually defaults to. This is read off the host on every status load, so
+   * the preset is never more than one request stale.
+   */
+  defaultTierModels: Record<string, string>;
   /** Provenance badge. */
   source: InferenceSource;
   /** Whether an outbound key is stored — never the key itself. */
@@ -107,6 +116,13 @@ export interface InferenceMutation {
   note: string;
 }
 
+/** One model published by the OpenRouter registry. */
+export interface InferenceModel {
+  id: string;
+  name?: string;
+  contextLength?: number;
+}
+
 /** The live-probe result. */
 export interface InferenceTestResult {
   ok: boolean;
@@ -122,6 +138,14 @@ export function getInferenceStatus(
   company: string | null,
 ): Promise<InferenceStatus> {
   return client.get<InferenceStatus>(`${client.scopeFor(company)}/inference`);
+}
+
+/** The cached OpenRouter model catalog exposed by the company host. */
+export function listInferenceModels(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<InferenceModel[]> {
+  return client.get<InferenceModel[]>(`${client.scopeFor(company)}/inference/models`);
 }
 
 /** Set (or replace) the runtime provider override, optionally rotating the key. */

@@ -15,10 +15,28 @@ export type { FsNode } from "@/api/workspace";
 
 import { type LocalScope, scopedKey, scopedKeyAdoptingLegacy } from "@/connections/types";
 
-import type { FsNode, RepairOutcome } from "@/api/workspace";
+import { isBinary, type FsNode, type RepairOutcome } from "@/api/workspace";
 import { rosterDisplayName, type RosterNames } from "@/lib/roster-names";
 
 /* ---- queries ---- */
+
+/**
+ * How many **notes** the workspace holds, for the header's count (#1763).
+ *
+ * `kind` is only `"folder" | "file"`, so an uploaded image is a `file` too —
+ * filtering on `kind === "file"` alone reports one uploaded image and no prose
+ * as "1 note". The header's noun is notes and its description is "every note
+ * this company's teammates can read and write", which a binary asset is not:
+ * `isBinary` is what separates the two, and it is the same single test
+ * (`mime !== undefined`) the pane already uses to decide whether to render a
+ * note or offer a download.
+ *
+ * Folders are excluded for the reason the header comment already gives: a
+ * folder is how the tree is arranged rather than a thing the workspace holds.
+ */
+export function countNotes(nodes: FsNode[]): number {
+  return nodes.filter((n) => n.kind === "file" && !isBinary(n)).length;
+}
 
 export function childrenOf(nodes: FsNode[], parentId: string | null): FsNode[] {
   return nodes
@@ -810,4 +828,23 @@ export function clearLegacyLocal(scope: LocalScope): void {
   } catch {
     /* storage unavailable — nothing to clear */
   }
+}
+
+/**
+ * The count the Workspace header shows, or `undefined` for "not known yet".
+ *
+ * `nodes` starts empty with `loading` true, so a plain `countNotes(nodes)` put
+ * an authoritative `0` beside the title on every fresh visit before the tree
+ * request had settled — and if that request failed, it went on reporting zero
+ * next to the load error, stating a fact about a workspace nobody had managed
+ * to read. `PageHeader` omits the badge for `undefined` precisely because "no
+ * notes yet" and "this page is not counting" are different claims.
+ *
+ * Keyed on whether a tree has ever loaded, not on `loading`: a non-silent
+ * refresh raises `loading` over a tree already on screen, and blanking the
+ * badge there would be a flicker rather than honesty. Once a tree is known, a
+ * later failed refresh keeps the last count instead of retracting it.
+ */
+export function headerNoteCount(noteCount: number, treeKnown: boolean): number | undefined {
+  return treeKnown ? noteCount : undefined;
 }

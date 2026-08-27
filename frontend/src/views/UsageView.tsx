@@ -13,6 +13,7 @@ import { Coins, CreditCard, Gauge, Plug, Search, TriangleAlert, Zap } from "luci
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CapabilityStatusDto, UsageDto } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -141,15 +142,17 @@ export function UsageView({ client, company }: Props) {
   }, [client, company]);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight">Usage</h1>
-            <p className="text-sm text-muted-foreground">
-              What your company is burning — tokens and OAuth calls.
-            </p>
-          </div>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Usage"
+        width="6xl"
+        description={
+          <>
+            What your company is burning — tokens and OAuth calls.
+          </>
+        }
+        actions={
+          <>
           <Select value={range} onValueChange={(v) => v && setRange(v)} items={RANGE_LABELS}>
             <SelectTrigger className="w-40" aria-label="Usage date range">
               <SelectValue />
@@ -162,8 +165,10 @@ export function UsageView({ client, company }: Props) {
               ))}
             </SelectContent>
           </Select>
-        </div>
-
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {usageFailed ? (
           <Alert data-testid="usage-load-error">
             <TriangleAlert className="size-4" />
@@ -652,7 +657,7 @@ function Kpi({
 }) {
   return (
     <Card>
-      <CardContent className="space-y-2 py-5">
+      <CardContent className="space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium text-muted-foreground">{label}</span>
           <Icon className="size-4 text-muted-foreground" />
