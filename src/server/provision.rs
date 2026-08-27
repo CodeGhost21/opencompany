@@ -856,7 +856,28 @@ async fn archive(
         return resp;
     }
     let response = transition(&state, &auth, &id, "archived").await;
-    if response.status() == StatusCode::OK {
+    // Cleanup is gated on the archive having actually persisted, not on
+    // `response` being a full 200. `CompanyRuntime::set_lifecycle`
+    // (`src/company/runtime.rs`) writes `lifecycle: "archived"` to the store
+    // BEFORE it appends the `LifecycleChanged` audit event, and `transition`
+    // above then re-reads `status()` after that — so a failure in either the
+    // event append or that re-read surfaces here as a non-200 `response` even
+    // though the durable record really is archived. Re-reading status
+    // directly, the same way the create/reset console dialog's own
+    // reconciliation does client-side (`create-company-dialog.tsx`, commit
+    // 1191ad67e), catches both failure points so an already-archived company
+    // is never left registered — still occupying its tenant/global quota slot
+    // and still showing up in `listCompanies()` — for a request whose write
+    // already succeeded (issue #1828 comment 3875046440).
+    let archived = match state.registry().get(&id) {
+        Some(runtime) => runtime
+            .status()
+            .await
+            .map(|status| status.lifecycle == "archived")
+            .unwrap_or(false),
+        None => false,
+    };
+    if archived {
         state.registry().remove(&id);
         state.remove_owner(&id);
         if let Some(ownership) = state.stores().and_then(|s| s.ownership.clone())

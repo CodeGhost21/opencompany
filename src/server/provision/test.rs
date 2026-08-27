@@ -1858,3 +1858,92 @@ async fn a_company_registered_despite_a_failed_status_read_is_addressable() {
          status lookup afterward must succeed"
     );
 }
+
+// ── issue #1828 comment 3875046440: finish archive cleanup even when the ──
+// ── post-write status() read fails ─────────────────────────────────────
+
+/// A runtime that is already registered (as if provisioned normally), then
+/// rebuilt over the SAME durable record with a store whose THIRD `load` call
+/// fails. The first `load` is `build()`'s own rebuild check (finds the
+/// already-provisioned record and inherits it); the second is inside
+/// `set_lifecycle` (`CompanyRuntime::set_lifecycle`, `src/company/runtime.rs`)
+/// reading the current record before it flips `lifecycle` to `"archived"` and
+/// saves it; the third is `transition`'s own post-`set_lifecycle`
+/// `runtime.status()` read. `set_lifecycle`'s `store.save` — like `build()`'s
+/// — is unaffected by a later `load` failing, so by the time this third read
+/// fails, `lifecycle: "archived"` is already durably on disk.
+async fn build_runtime_with_archive_status_read_failing(
+    home: &std::path::Path,
+    id: &CompanyId,
+) -> crate::runtime::CompanyRuntime {
+    let inner = Arc::new(FsCompanyStore::new(home.to_path_buf()));
+    let store = Arc::new(FlakyLoadStore::new(inner, 3));
+    let manifest: CompanyManifest = toml::from_str(ACME_TOML).unwrap();
+    RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .with_store(store)
+        .build()
+        .await
+        .expect("build succeeds — its own save is unaffected by a later load failing")
+}
+
+/// `archive`'s registry/owner cleanup (`src/server/provision.rs`) is gated on
+/// `transition`'s whole response being `StatusCode::OK`. `set_lifecycle`
+/// persists `lifecycle: "archived"` to the store BEFORE it appends the
+/// `LifecycleChanged` audit event, and `transition` then re-reads `status()`
+/// after that — so a failure in either the event append or that re-read
+/// surfaces as a non-200 response even though the archive genuinely landed.
+/// Before the fix, that left the runtime (and its owner record) still
+/// registered: on a host at its per-tenant or global company quota
+/// (`provision.rs` quota checks) or one that just re-lists companies, an
+/// already-archived company kept occupying its slot and appearing in
+/// `listCompanies()` — exactly the gap a create/reset dialog's own
+/// reconciliation (`create-company-dialog.tsx`, commit 1191ad67e) cannot see
+/// or fix from the client, because the client has no visibility into the
+/// server's registry (issue #1828 comment 3875046440). This test provisions
+/// normally, then swaps in a runtime whose post-persist status() read fails on
+/// `archive`, and proves the registry entry does not survive that failure.
+#[tokio::test]
+async fn archive_removes_from_registry_even_when_the_status_read_fails() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+
+    // Provision normally first, so the durable record exists exactly as it
+    // would for a real company (matching `build()`'s rebuild-inherit path
+    // the flaky-load helper below relies on for its first `load` call).
+    let state = platform_state(&home, None);
+    let app = router(state.clone());
+    let provisioned = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+    assert_eq!(provisioned.status(), StatusCode::CREATED);
+
+    // Swap the registered runtime for one whose post-set_lifecycle status()
+    // read is made to fail on `archive`, modeling a read blip landing right
+    // after the archive write it would be reading back already succeeded.
+    let flaky_runtime = build_runtime_with_archive_status_read_failing(&home, &id).await;
+    state.registry().insert(id.clone(), Arc::new(flaky_runtime));
+
+    let app = router(state.clone());
+    let archived = app
+        .oneshot(post_req(
+            "/api/v1/companies/acme/archive",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        archived.status(),
+        StatusCode::OK,
+        "the status() read was made to fail — the response itself must report that"
+    );
+
+    assert!(
+        state.registry().get(&id).is_none(),
+        "set_lifecycle's own store.save already persisted lifecycle:\"archived\" before the \
+         status() read failed — the registry entry must not survive a response-body problem \
+         after the archive write already landed"
+    );
+}
