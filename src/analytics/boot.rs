@@ -151,9 +151,18 @@ pub fn describe(decision: &Decision) -> String {
 /// that secret verbatim into container logs, which the [`ProjectToken`]
 /// redaction does nothing about — it guards a different string.
 ///
-/// So only the scheme, host and path are logged, which is all an operator needs
-/// to answer "where is this going?". When something was removed the line says
-/// so, because a silently shortened URL is its own hour of confusion.
+/// A third place, which the two above do not reach: an opaque **path segment**,
+/// as in `https://collector.example/ingest/<token>`, which is how a signed-URL
+/// collector is usually configured. So the path is kept only as far as its first
+/// segment — enough to name the route, which is what makes the line useful — and
+/// the rest is elided rather than inspected, because "does this look like a
+/// secret?" is not a question worth answering heuristically. The default
+/// endpoint has a single segment (`/track`) and is unaffected.
+///
+/// So only the scheme, host and leading path segment are logged, which is all an
+/// operator needs to answer "where is this going?". When something was removed
+/// the line says so, because a silently shortened URL is its own hour of
+/// confusion.
 ///
 /// `pub(crate)` because the transport logs the same destination when a send
 /// fails (`crate::analytics::mixpanel`). One helper, deliberately: a second
@@ -178,7 +187,26 @@ pub(crate) fn loggable_endpoint(raw: &str) -> String {
                 .rsplit_once('@')
                 .map_or(authority, |(_userinfo, host)| host);
             match path {
-                Some(path) => format!("{scheme}://{host}/{path}"),
+                // Only the **first** path segment. A proxy can sign a request
+                // with an opaque path segment too — `https://collector/ingest/<token>`
+                // is how a signed-URL collector is usually configured — and that
+                // segment is a credential in a place neither the userinfo nor
+                // the query strip reaches. The first segment names the route,
+                // which is what makes the line useful; anything after it is
+                // elided rather than guessed at, because "does this look like a
+                // secret?" is not a question worth answering heuristically.
+                //
+                // The default endpoint has one segment (`/track`), so the
+                // ordinary line is unchanged.
+                Some(path) => {
+                    let mut segments = path.split('/');
+                    let first = segments.next().unwrap_or("");
+                    if segments.any(|segment| !segment.is_empty()) {
+                        format!("{scheme}://{host}/{first}/…")
+                    } else {
+                        format!("{scheme}://{host}/{path}")
+                    }
+                }
                 None => format!("{scheme}://{host}"),
             }
         }
@@ -299,6 +327,10 @@ mod test {
             "https://collector.invalid/track?key=NotARealCollectorKey",
             "https://collector.invalid/track#NotARealCollectorKey",
             "https://someone:NotARealCollectorKey@collector.invalid/t?k=NotARealCollectorKey",
+            // The third place a URL can carry one, which userinfo and query
+            // stripping both miss: a signed path segment.
+            "https://collector.invalid/ingest/NotARealCollectorKey",
+            "https://collector.invalid/v1/ingest/NotARealCollectorKey/track",
         ] {
             let line = describe(&Decision::Report {
                 endpoint: raw.to_string(),

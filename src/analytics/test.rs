@@ -198,6 +198,7 @@ fn vocabulary() -> Vec<&'static str> {
         SampleKind::PlanningCall,
         SampleKind::TriageCall,
         SampleKind::SetupCall,
+        SampleKind::AuthoringCall,
     ] {
         words.push(sample_kind_slug(kind));
     }

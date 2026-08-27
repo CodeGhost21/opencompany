@@ -317,9 +317,17 @@ review on PR #1751 and left for its own change.
 Kubernetes' default 30s `terminationGracePeriodSeconds`. The flush talks to a
 collector this process does not control, with a 5s client timeout of its own, so
 unbounded it took the worst case to 32s — buying a `SIGKILL` in the middle of the
-drain those 27s exist to protect. `shutdown::FLUSH_BUDGET` caps it at 2s, for a
-29s total, and a flush that does not finish is abandoned. A dropped batch costs a
-line in a dashboard; an overrun costs a half-finished turn.
+drain those 27s exist to protect.
+
+`shutdown::flush_budget(drain)` gives it whatever is left of the pod's default
+30s after the drain and the connection window, capped at
+`shutdown::FLUSH_BUDGET` (2s). Derived rather than added, because the drain is
+configurable: a flat two seconds on top of `OPENCOMPANY_SHUTDOWN_GRACE_SECONDS=28`
+— which fits in 30s exactly on its own — took it to 32 and recreated the same
+`SIGKILL`, for a value the operator had every reason to think was safe. A drain
+that already fills the budget leaves zero and the flush is skipped, and a flush
+that does not finish is abandoned. A dropped batch costs a line in a dashboard;
+an overrun costs a half-finished turn.
 
 Failure is silent by construction: `Tracker::track` is synchronous and
 infallible and returns nothing, so a call site cannot await a network or branch

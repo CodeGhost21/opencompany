@@ -2359,7 +2359,9 @@ async fn async_main() -> Result<()> {
             // batch is the right trade — a dropped batch costs a line in a
             // dashboard, an overrun costs a half-finished turn.
             if tokio::time::timeout(
-                opencompany::server::shutdown::FLUSH_BUDGET,
+                opencompany::server::shutdown::flush_budget(
+                    opencompany::server::shutdown::grace_from_env(),
+                ),
                 opencompany::analytics::Tracker::flush(analytics.as_ref()),
             )
             .await
