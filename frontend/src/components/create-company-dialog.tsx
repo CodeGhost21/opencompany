@@ -349,21 +349,36 @@ export function CreateCompanyDialog({
           // instead of asserting "Nothing was changed", which may be false
           // (issue #1828 comments 3865803912 and 3874840062).
           try {
-            await client.status(request.company);
-            // Still addressable and live: the archive genuinely did not
-            // take. This is a DEFINITIVE outcome, so it overrides any
-            // `archiveMaybe` a still-earlier retry's own ambiguous
-            // reconciliation left set — leaving that stale would have
-            // Cancel/close call `onClose(true)` for a company this lookup
-            // just confirmed is still live, wrongly telling the parent to
-            // drop its persisted default and reload the picker (codex
-            // review on #1828, PR comment 3874326104).
-            setArchiveMaybe(false);
-            setError(
-              `Couldn't archive ${request.name}: ${describeProvisionError(err)} Nothing was changed.`,
-            );
-            setBusy(false);
-            return;
+            const reconciled = await client.status(request.company);
+            if (reconciled.lifecycle === "archived") {
+              // The lookup resolved, but that alone doesn't mean "still
+              // live": `set_lifecycle` persists the archived record to the
+              // store BEFORE it appends the lifecycle event, and `archive`
+              // (`src/server/provision.rs`) only removes the runtime from
+              // the registry once `transition()` answers `200` — so a
+              // post-write failure here leaves the runtime registered
+              // (this lookup still resolves) with `archived` already
+              // persisted. Reconcile the same as `wasAlreadyArchived`
+              // below: the write landed, only the reply (or a step after
+              // it) failed (codex review on #1828, PR comment 3874947935).
+              setArchived(true);
+              didArchive = true;
+            } else {
+              // Resolved AND not archived: the archive genuinely did not
+              // take. This is a DEFINITIVE outcome, so it overrides any
+              // `archiveMaybe` a still-earlier retry's own ambiguous
+              // reconciliation left set — leaving that stale would have
+              // Cancel/close call `onClose(true)` for a company this lookup
+              // just confirmed is still live, wrongly telling the parent to
+              // drop its persisted default and reload the picker (codex
+              // review on #1828, PR comment 3874326104).
+              setArchiveMaybe(false);
+              setError(
+                `Couldn't archive ${request.name}: ${describeProvisionError(err)} Nothing was changed.`,
+              );
+              setBusy(false);
+              return;
+            }
           } catch (lookupErr) {
             if (wasAlreadyArchived(lookupErr)) {
               // Gone: this attempt's own archive landed and only its reply
