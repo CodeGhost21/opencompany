@@ -2761,15 +2761,18 @@ export function AppShell({
     }, []),
   });
 
-  // PR #1875 review finding, round 8: hold the shell in a neutral pending
-  // state — never the ordinary interactive shell, never the gate itself —
-  // for as long as `useActivationGate` is stuck retrying a transient
-  // failure. Without this, the gap below fell straight through to the full
-  // shell (its `shouldShowOnboardingGate` guard reads "not checked yet"
-  // identically for a live outage and a brief first read), leaving an
-  // operator clicking around a shell the funnel had not actually cleared for
-  // them to be in, until a retry finally landed and abruptly yanked the gate
-  // over it. `RouteLoading` is the same neutral loader every code-split route
+  // PR #1875 review finding, round 8 (widened round 10): hold the shell in a
+  // neutral pending state — never the ordinary interactive shell, never the
+  // gate itself — for as long as the first activation read is unresolved,
+  // whether it is still in flight or already failed once and is retrying.
+  // Without this, the gap below fell straight through to the full shell (its
+  // `shouldShowOnboardingGate` guard reads "not checked yet" identically for
+  // an unresolved read of any cause), leaving an operator clicking around a
+  // shell the funnel had not actually cleared for them to be in, until the
+  // read finally landed and abruptly yanked the gate over it — including on
+  // a merely slow first read (the host scans the journal for this company's
+  // funnel; see `shouldHoldShellPending`'s own doc), not only a proven
+  // outage. `RouteLoading` is the same neutral loader every code-split route
   // fallback in this file already uses — see its own doc for why a bare
   // "Loading…" line is not enough (`title` names the page for a screen reader
   // that never sees a mounted heading otherwise).
@@ -2783,7 +2786,7 @@ export function AppShell({
       retrying: activationGate.retrying,
     })
   ) {
-    return <RouteLoading title="Console" label="Reconnecting…" />;
+    return <RouteLoading title="Console" label="Loading…" />;
   }
 
   // Issue #1844: the blocking first-run gate. Held behind `!setupOpen` —

@@ -134,6 +134,25 @@ export function shouldShowOnboardingGate(input: GateDecisionInput): boolean {
  * already read incomplete — then had the gate abruptly replace it the
  * instant the role resolved, the same "abrupt replacement" this whole file
  * exists to prevent.
+ *
+ * The pre-`checked` branch had the same class of bug once more (PR #1875
+ * review finding, round 10): it held only while `retrying` was true, on the
+ * premise that the window before the very first read lands is always brief.
+ * `retrying` does not flip true until the first attempt has already
+ * *rejected* — it reads `false` for as long as that first `getActivation`
+ * call is merely in flight, indistinguishable here from "just mounted, read
+ * due any moment". That premise is false for exactly the population this
+ * gate exists to protect: an incomplete company's read is not a cached
+ * latch short-circuit (see `compute_and_latch`'s own doc) — it scans the
+ * journal for `WorkflowRunFinished`, so the very first call can legitimately
+ * take longer than one quick round trip. An admin of such a company got the
+ * fully interactive shell for that entire window, then the gate abruptly
+ * replacing it the instant the slow-but-successful read finally landed — the
+ * same failure this predicate exists to close, just triggered by latency
+ * instead of a caught rejection. `retrying` therefore no longer gates this
+ * branch: any unresolved first read holds, whether it is still in flight or
+ * has already failed once and is retrying — the caller cannot tell those
+ * two states apart from the outside, so neither should this predicate.
  */
 export function shouldHoldShellPending(
   input: GateDecisionInput & { retrying: boolean },
@@ -144,13 +163,19 @@ export function shouldHoldShellPending(
   // own guard) — nothing to hold the shell pending for.
   if (input.isAdmin === false) return false;
 
-  if (!input.checked || !input.status) {
-    // Mirrors `shouldShowOnboardingGate`'s own "nothing to gate on yet"
-    // guard: an unlanded first read (or one that settled terminally with no
-    // status — a legacy host's 404, which never retries) cannot make the
-    // gate appear either way, admin role resolved or not. Only an actual
-    // outage (`retrying`) is worth holding the ordinary shell back for.
-    return input.retrying;
+  if (!input.checked) {
+    // The first read has not landed at all yet — still in flight, or it has
+    // already failed once and is retrying. Both look identical from here,
+    // and both are worth holding the ordinary shell back for; see this
+    // function's own doc for why `retrying` cannot distinguish them safely.
+    return true;
+  }
+
+  if (!input.status) {
+    // `checked` landed with no `status`: a terminal legacy-host 404
+    // (`resolveActivationReadError`) — that answer is final, this hook never
+    // retries it, so there is nothing left to hold the shell for.
+    return false;
   }
 
   // Activation has landed. Once the company reads activated, no role can

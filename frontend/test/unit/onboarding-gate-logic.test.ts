@@ -257,8 +257,8 @@ describe("shouldHoldShellPending", () => {
     ).toBe(false);
   });
 
-  it("does not hold while merely waiting on the first read — not retrying yet", () => {
-    expect(shouldHoldShellPending({ ...pendingBase, checked: false, retrying: false })).toBe(false);
+  it("holds the shell pending while the very first read is still in flight, not yet failed (PR #1875 review finding, round 10) — `retrying` only flips true after a rejection, so a slow-but-eventually-successful first read (e.g. a large journal scan) read as identical to a brief one (was: does not hold while merely waiting on the first read — not retrying yet)", () => {
+    expect(shouldHoldShellPending({ ...pendingBase, checked: false, retrying: false })).toBe(true);
   });
 
   it("holds the shell pending once stuck retrying before the first read lands", () => {
