@@ -61,7 +61,7 @@ import { TourController } from "@/tour/TourController";
 import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
 import { gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
-import { shouldShowOnboardingGate } from "@/onboarding/gate-logic";
+import { resolveGateAdminCheckError, shouldShowOnboardingGate } from "@/onboarding/gate-logic";
 import { me as fetchMe } from "@/api/auth";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
@@ -392,6 +392,17 @@ const WORKFLOW_EVENT_WINDOW = 300;
  * right when the frames were missed), not to drive the animation.
  */
 const TURN_POLL_MS = 4000;
+
+/**
+ * How long the onboarding gate's admin check (PR #1875 review finding) waits
+ * before retrying a `fetchMe` failure that was not a definitive `401` — a
+ * dropped connection or a proxy 5xx, not "this user is not an admin". A few
+ * seconds is generous relative to how rarely this fires (a fresh mount's
+ * first read, or a genuine network blip) and cheap relative to how bad the
+ * alternative is: giving up and reading as non-admin would fail the blocking
+ * gate open for an actual admin.
+ */
+const GATE_ADMIN_CHECK_RETRY_MS = 3000;
 
 /**
  * Operator-facing copy for a legacy `connect_error` query from the former
@@ -867,27 +878,47 @@ export function AppShell({
    * Whether the signed-in user is this company's admin (PR #1875 review
    * finding) — `null` until the read lands. Mirrors the `admin =
    * (await fetchMe(...)).role === "admin"` pattern every other admin-gated
-   * view in this app already uses (`OAuthView`, `TeamView`, etc.); the only
-   * difference here is the `null` "not yet known" state, because this reader
-   * feeds a gate that must never flash open for a member who cannot clear
-   * it — see `shouldShowOnboardingGate`'s own guard.
+   * view in this app already uses (`OAuthView`, `TeamView`, etc.), with two
+   * differences, both because this reader feeds a *blocking* gate rather
+   * than a read-only view:
+   *
+   * - The `null` "not yet known" state — see `shouldShowOnboardingGate`'s own
+   *   guard for why the gate must never flash open on it.
+   * - A failed read is classified through `resolveGateAdminCheckError`
+   *   instead of settling straight to `false`. Every other view's `catch {
+   *   admin = false }` is safe because the worst case is a control staying
+   *   disabled one round trip longer; here `false` is what suppresses the
+   *   gate, so a transient failure (a dropped connection, a proxy 5xx) would
+   *   read exactly like a real "not an admin" and fail the gate open for an
+   *   actual admin for the rest of that mount (PR #1875 review finding,
+   *   round 2). Only a definitive `401` settles to `false`; anything else
+   *   retries.
    */
   const [isGateAdmin, setIsGateAdmin] = useState<boolean | null>(null);
   useEffect(() => {
     let live = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     setIsGateAdmin(null);
-    void (async () => {
-      let admin = false;
-      try {
-        admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No user plane on this host, or not signed in — treat as non-admin,
-        // same as every other `fetchMe`-gated view.
-      }
-      if (live) setIsGateAdmin(admin);
-    })();
+    const load = () => {
+      void (async () => {
+        try {
+          const admin = (await fetchMe(client, company)).role === "admin";
+          if (live) setIsGateAdmin(admin);
+        } catch (err) {
+          if (!live) return;
+          const outcome = resolveGateAdminCheckError(err);
+          if (outcome.settled) {
+            setIsGateAdmin(outcome.isAdmin);
+          } else {
+            retryTimer = setTimeout(load, GATE_ADMIN_CHECK_RETRY_MS);
+          }
+        }
+      })();
+    };
+    load();
     return () => {
       live = false;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
     };
   }, [client, company]);
 
