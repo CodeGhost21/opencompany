@@ -850,7 +850,7 @@ export function InferenceSection({
         <SectionUnreachable label="Couldn't read this company's inference settings" />
       ) : (
         <Card>
-          <CardContent className="space-y-4 py-4">
+          <CardContent className="space-y-4">
             {/* Status card. */}
             {status && (
               <div className="space-y-2">

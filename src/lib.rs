@@ -4,6 +4,7 @@
 //! TinyHumans Rust modules. The default build stays small; enable the `tiny`
 //! feature to compile against the sibling `tiny*` crates.
 
+pub mod analytics;
 pub mod app;
 pub mod brain;
 /// How `build.rs` picks the value behind [`BUILD_COMMIT`]. Compiled here only
