@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
 import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -74,11 +75,21 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
   const scoped = company ?? client.defaultCompany;
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
-        {/* This sub-page draws no visible title of its own — the sub-nav rail
-            beside it already says "Settings" (issue #1221). */}
-        <h1 className="text-2xl font-semibold tracking-tight lg:sr-only">General settings</h1>
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/*
+        This page used to hide its own title above `lg` (issue #1221), on the
+        reasoning that the sub-nav rail beside it already says "Settings".
+
+        Issue #1763 makes it visible at every width, because that reasoning
+        stopped being true of only this page: Brain, Skills, People, Hosting,
+        Search, OAuth, MCP, Inference and Usage all sit beside the same rail and
+        all show a title. General was the one settings page that did not, so the
+        rail argument had become an argument for an exception rather than for a
+        rule — and the rail says "Settings", which is the section, while this
+        says "General settings", which is the page.
+      */}
+      <PageHeader title="General settings" width="3xl" />
+      <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {/* Device pairing was here. Sessions are the frontend client's own
             business now — the desktop app holds its session the same way the
             browser does — so there is no machine for this page to pair. */}

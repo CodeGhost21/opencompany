@@ -5,6 +5,7 @@ import { getPaypal, type PaypalStatus } from "@/api/billing";
 import type { OpenCompanyClient } from "@/api/client";
 import { getBalance, listTransactions, testPaypal, type Balance, type Transaction } from "@/api/finance";
 import { ApiError } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -166,52 +167,82 @@ export function WalletView({ client, company }: Props) {
     void loadData();
   }, [loadData]);
 
+  /*
+    Hoisted above the state conditionals (codex review, #1785): both early
+    returns ran before the header, so this page had no `h1` while it loaded and
+    none at all once the read failed — a terminal state, since nothing retries.
+    The same defect and the same fix as `SearchView` and `HostingView`, which
+    these two are a copy of.
+  */
+  /*
+    Derived above the header rather than below the conditionals, and guarded
+    for a `status` that has not arrived: the environment badge is the header's
+    own, so it has to be computable in every state the header now renders in.
+    `usable` is false while `status` is null, which is the correct answer —
+    "this is a sandbox balance" is a claim, and a page that has read nothing
+    yet is not entitled to make it.
+  */
+  const connection = status ? paypalHealth(status) : null;
+  const usable = connection?.state === "connected" || connection?.state === "not_granted";
+  const sandbox = status ? (status.environment || "sandbox") !== "live" : false;
+
+  const header = (
+    <PageHeader
+      title="Wallet"
+      width="5xl"
+      description={
+        <>
+          What is in the company&rsquo;s PayPal account, and what has moved through it.
+          Read-only.
+        </>
+      }
+      /* On the page, not only in the connection panel. Reading a sandbox
+         balance and believing it is real money is the failure this prevents,
+         and the panel is collapsed most of the time. */
+      trailing={
+        usable ? (
+          <Badge
+            variant={sandbox ? "outline" : "secondary"}
+            data-testid="wallet-environment"
+            className={sandbox ? "text-status-blocked-text" : undefined}
+          >
+            {sandbox ? "Sandbox — not real money" : "Live"}
+          </Badge>
+        ) : null
+      }
+    />
+  );
+
   if (statusError) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-4 py-6">
-        <Alert variant="destructive" data-testid="wallet-status-error">
-          <AlertDescription>Could not load the PayPal connection: {statusError}</AlertDescription>
-        </Alert>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="mx-auto w-full max-w-5xl px-4 py-6">
+          <Alert variant="destructive" data-testid="wallet-status-error">
+            <AlertDescription>Could not load the PayPal connection: {statusError}</AlertDescription>
+          </Alert>
+        </div>
       </div>
     );
   }
 
   if (!status) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        <Loader2 className="mr-2 size-4 animate-spin" /> Loading wallet…
+      <div className="flex min-h-0 flex-1 flex-col">
+        {header}
+        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" /> Loading wallet…
+        </div>
       </div>
     );
   }
 
   const health = paypalHealth(status);
-  const usable = health.state === "connected" || health.state === "not_granted";
-  const sandbox = (status.environment || "sandbox") !== "live";
 
   return (
-    <div className="flex-1 overflow-y-auto" data-testid="wallet-view">
-      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="min-w-0 flex-1">
-            <h1 className="text-lg font-medium">Wallet</h1>
-            <p className="text-sm text-muted-foreground">
-              What is in the company&rsquo;s PayPal account, and what has moved through it.
-              Read-only.
-            </p>
-          </div>
-          {/* On the page, not only in the connection panel. Reading a sandbox
-              balance and believing it is real money is the failure this
-              prevents, and the panel is collapsed most of the time. */}
-          {usable ? (
-            <Badge
-              variant={sandbox ? "outline" : "secondary"}
-              data-testid="wallet-environment"
-              className={sandbox ? "text-status-blocked-text" : undefined}
-            >
-              {sandbox ? "Sandbox — not real money" : "Live"}
-            </Badge>
-          ) : null}
-        </div>
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="wallet-view">
+      {header}
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         <ConnectionPanel
           title="PayPal"
@@ -270,7 +301,7 @@ export function WalletView({ client, company }: Props) {
               .sort((a, b) => Number(b.primary) - Number(a.primary))
               .map((balance) => (
                 <Card key={balance.currency_code}>
-                  <CardContent className="space-y-1 py-4">
+                  <CardContent className="space-y-1">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium text-muted-foreground">
                         {balance.currency_code}
@@ -292,7 +323,7 @@ export function WalletView({ client, company }: Props) {
         ) : null}
 
         <Card>
-          <CardContent className="space-y-4 py-4">
+          <CardContent className="space-y-4">
             <div className="flex flex-wrap items-end gap-3">
               <div className="space-y-1">
                 <label className="text-xs text-muted-foreground" htmlFor="tx-since">

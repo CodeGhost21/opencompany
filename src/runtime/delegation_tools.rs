@@ -258,7 +258,7 @@ pub fn desk_default_responder(record: &CompanyRecord, desk: &str) -> Option<Stri
 /// Only the manifest is searched. An overlay desk on a General key is refused
 /// by `resolve_desk_id` and unaddressable, so letting one claim the line here
 /// would hand `#general` to a desk nothing else routes to.
-fn general_claimant(record: &CompanyRecord) -> Option<String> {
+pub(crate) fn general_claimant(record: &CompanyRecord) -> Option<String> {
     let general = |s: &str| crate::server::chat_history::is_general_chat(Some(s));
     record
         .manifest
@@ -291,9 +291,20 @@ pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
     if crate::server::chat_history::is_general_chat(Some(chat)) {
         return general_claimant(record).and_then(|desk| desk_default_responder(record, &desk));
     }
-    record
-        .resolve_roster_agent_id(chat)
-        .or_else(|| crate::runtime::assignee::dm_key(chat).and_then(direct))
+    if let Some(agent) = record.resolve_roster_agent_id(chat) {
+        return Some(agent);
+    }
+    // A `dm:` key names a **teammate**, so the roster is asked first when the
+    // prefix was used. Unwrapping straight into the desk-first `direct`
+    // resolver let a desk capture it: a blueprint may declare both a teammate
+    // and a desk with id `main` — manifest validation does not forbid the
+    // collision — and the prefixed address exists precisely to reach that
+    // teammate, so handing it to the desk's lead answers the wrong party in
+    // the one case the prefix was added for (issue #1743). The desk arm stays
+    // as the fallback, so `dm:<desk>` still resolves a desk that no teammate
+    // shares an id with, exactly as before.
+    crate::runtime::assignee::dm_key(chat)
+        .and_then(|key| record.resolve_roster_agent_id(key).or_else(|| direct(key)))
 }
 
 /// How many desk ids a rejection message names before eliding the rest, so the
@@ -1090,7 +1101,7 @@ members = ["counsel"]
                 name: "Mainard".to_string(),
                 role: "Analyst".to_string(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             });
@@ -1124,6 +1135,45 @@ members = ["counsel"]
         .expect("valid manifest");
         record.manifest.group_chats.extend(declared.group_chats);
         assert_eq!(chat_responder(&record, "main").as_deref(), Some("writer"));
+    }
+
+    /// A `dm:` key names a teammate, even when a desk shares that id.
+    ///
+    /// A blueprint may declare both — manifest validation does not forbid the
+    /// collision — and unwrapping the prefix into the desk-first resolver let
+    /// the desk's lead answer a DM addressed to the teammate. The prefixed
+    /// address exists precisely to reach that teammate, so it would have been
+    /// wrong in the one case it was added for.
+    #[test]
+    fn a_prefixed_dm_reaches_the_teammate_even_when_a_desk_shares_the_id() {
+        let mut record = record();
+        let declared: crate::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\n[[group_chat]]\nid = \"main\"\nname = \"Front office\"\nmembers = [\"writer\"]\n",
+        )
+        .expect("valid manifest");
+        record.manifest.group_chats.extend(declared.group_chats);
+        record
+            .overlay_agents
+            .push(crate::ports::types::OverlayAgent {
+                id: "main".to_string(),
+                name: "Mainard".to_string(),
+                role: "Analyst".to_string(),
+                description: None,
+                tools: None,
+                model: None,
+                harness: None,
+            });
+        assert_eq!(
+            chat_responder(&record, "dm:main").as_deref(),
+            Some("main"),
+            "the prefix names the teammate, not the desk that shares its id"
+        );
+        // The bare key still belongs to the desk, which is what claims the line.
+        assert_eq!(
+            chat_responder(&record, "main").as_deref(),
+            Some("writer"),
+            "the desk still answers its own id"
+        );
     }
 
     /// ...and so does one that claims it by **id**, which is the other half.

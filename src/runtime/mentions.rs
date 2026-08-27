@@ -1709,7 +1709,7 @@ members = ["engineer", "ceo"]
             name: "Dana".to_string(),
             role: "Designer".to_string(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -1744,7 +1744,7 @@ members = ["engineer", "ceo"]
             name: "Dana".to_string(),
             role: "Designer".to_string(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });

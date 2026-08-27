@@ -49,6 +49,11 @@ import { cn } from "@/lib/utils";
  * The tone of a run's status chip. `waiting_approval` and `paused` share the
  * amber "parked" tone the waiting band already uses — they differ in *who*
  * unblocks them, not in whether the company is stuck.
+ *
+ * `declined` shares the neutral muted tone `cancelled` uses (issue #1809): a
+ * by-design compiler refusal is terminal but is neither a failure nor a
+ * success, so it must never take the red failure tone — nor the blue "running"
+ * tone the default arm would otherwise hand a status it did not recognise.
  */
 export function runStatusTone(status: RunStatus): string {
   switch (status) {
@@ -57,6 +62,7 @@ export function runStatusTone(status: RunStatus): string {
     case "failed":
       return "border-status-failed/40 text-status-failed-text";
     case "cancelled":
+    case "declined":
       return "border-muted-foreground/30 text-muted-foreground";
     case "waiting_approval":
     case "paused":

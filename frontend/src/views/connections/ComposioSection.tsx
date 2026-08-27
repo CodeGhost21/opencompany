@@ -243,7 +243,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
 
           {showTokenCard && (
             <Card>
-              <CardContent className="space-y-4 py-4">
+              <CardContent className="space-y-4">
                 {/* The explainer has to name what the token would displace,
                     and that differs by tier: an attested company falls back to
                     the pod's cluster identity, a company-key one falls back to

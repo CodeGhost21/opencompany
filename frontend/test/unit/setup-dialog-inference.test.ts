@@ -34,6 +34,7 @@ const HARNESS: InferenceStatus = {
   slug: "openrouter",
   baseUrl: "https://example.invalid/v1",
   models: {},
+  defaultTierModels: {},
   source: "manifest",
   keyConfigured: true,
   cognition: "harness",

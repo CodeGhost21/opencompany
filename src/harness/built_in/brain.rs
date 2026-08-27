@@ -122,6 +122,40 @@ pub(crate) fn spend_halt_notice(halt: &crate::harness::SpendHalt) -> String {
     )
 }
 
+/// The authored bubble's placeholder text when a turn paused for lack of
+/// inference budget/credits (issue #1846) — see the override in
+/// [`HarnessBrain::handle_operator_message`]'s caller for why this exists
+/// instead of the teammate's own words: the model call itself failed, so
+/// there is no partial answer to attribute, unlike a step-cap pause or a spend
+/// halt.
+pub(crate) const BUDGET_PAUSED_PLACEHOLDER_REPLY: &str = "(no reply — see the notice below)";
+
+/// The stable prefix every budget-pause system notice starts with (issue
+/// #1846). Kept as a named constant, not just embedded in
+/// [`budget_pause_notice`]'s format string, because the console frontend
+/// pattern-matches on it (`text.startsWith(...)`) to render this notice
+/// distinctly from an ordinary system bubble and offer an "Add credits" CTA —
+/// there is no structured wire field for a notice "kind" here (unlike
+/// `TurnStepFailure` for a tool result), so the prefix IS the contract. A
+/// drift-coupling test on the frontend side should assert against this exact
+/// string; keep the two in sync by hand until a structured field exists.
+pub(crate) const BUDGET_PAUSE_NOTICE_PREFIX: &str = "⏸ Paused — out of credits:";
+
+/// The system bubble emitted when a turn paused for lack of inference
+/// budget/credits (issue #1846) — the sibling of
+/// [`ITERATION_CAP_PAUSE_NOTICE`] and [`spend_halt_notice`], and, like both,
+/// deliberately unauthored: no teammate said this, the account ran out of
+/// money before the model ever replied.
+///
+/// Unlike either sibling, the operator's only lever here is adding credits —
+/// not "continue" (there is no checkpoint to resume) and not "raise the
+/// budget / narrow the ask" (the account itself, not a company-declared cap,
+/// is exhausted). The prefix is load-bearing: see
+/// [`BUDGET_PAUSE_NOTICE_PREFIX`].
+pub(crate) fn budget_pause_notice(pause: &crate::harness::BudgetPause) -> String {
+    format!("{BUDGET_PAUSE_NOTICE_PREFIX} {}", pause.summary)
+}
+
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
@@ -270,6 +304,34 @@ fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
         reply_to: None,
         mentions: Vec::new(),
         steps: outcome.steps,
+    }
+}
+
+/// The bubble a confined workflow-copilot turn's outcome becomes on the
+/// operator channel — the boundary [`HarnessBrain`]'s copilot arm calls
+/// (issue #1846 review, Codex #3869277640).
+///
+/// A budget pause is a RUNTIME terminal state (issue #1846), the same as the
+/// iteration-cap pause and the spend halt the interactive operator-turn path
+/// already reports via [`system_notice`] rather than folding into a reply —
+/// never something the confined copilot itself said. `run_confined`
+/// deliberately bypasses `run_inner` (the only place that parks a redeemable
+/// re-issue marker): `CONFINED_AGENT_ID` "names no teammate and cannot be
+/// addressed" (see [`confined_bubble`]'s doc), so there is no safe way to
+/// replay ITS confined workflow context through the generic chat-message
+/// redeem path a marker would offer. Before this, `confined_bubble` folded
+/// the placeholder pause text straight into `outcome.reply` and attributed
+/// it to the copilot as an ordinary answer — exactly the #966 misattribution
+/// class `system_notice` exists to prevent, just one call site short of it.
+///
+/// Emits the SAME unauthored notice copy the interactive path shows, with no
+/// CTA (nothing was parked to redeem) — the honest middle ground the review
+/// asked for, between a fabricated copilot reply and a redemption this agent
+/// id can never honour.
+fn confined_turn_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
+    match &outcome.budget_paused {
+        Some(pause) => system_notice(budget_pause_notice(pause)),
+        None => confined_bubble(outcome),
     }
 }
 
@@ -660,7 +722,24 @@ impl HarnessBrain {
         drop(delegation_claim);
 
         let text = match outcome {
-            Ok(outcome) => outcome.reply,
+            // Issue #1846 review (Codex #3869725683): `run_steered_background`
+            // runs through the SAME `run_inner` the interactive chat path
+            // does, so a provider that is out of credits parks a re-issue
+            // marker for `grant.agent` here exactly as it would for an
+            // ordinary message — but `outcome.reply` is just the
+            // budget-paused placeholder text (`classify_turn`'s
+            // `AttemptOutcome::BudgetPaused` handling), which does NOT start
+            // with `BUDGET_PAUSE_NOTICE_PREFIX`. Sent straight through as an
+            // ordinary reply, the console's `isBudgetPauseNotice` check never
+            // fires, so the bubble rendered as a normal (if oddly-worded)
+            // answer with no "Add credits & resend" CTA — even though a
+            // marker was sitting there, parked and redeemable, the whole time.
+            // Swap in the SAME notice text the interactive and confined-turn
+            // paths already emit so the console recognises and renders it.
+            Ok(outcome) => match &outcome.budget_paused {
+                Some(pause) => budget_pause_notice(pause),
+                None => outcome.reply,
+            },
             Err(err) => {
                 // The grant stays live: the call did not go through, so the
                 // operator's approval has not been spent and the TTL sweep will
@@ -917,6 +996,35 @@ impl HarnessBrain {
                     // A dispatched task discards its steps — the note is text-only.
                     match outcome {
                         Ok(outcome) => {
+                            // Issue #1846 review (Codex #3864988168): a budget
+                            // pause is a terminal state, exactly like a spend
+                            // halt or an iteration-cap pause — the model call
+                            // itself failed, so `outcome.reply` is not a
+                            // completed answer, it is the placeholder/notice
+                            // text `classify_turn` substitutes (mirrors the
+                            // operator-chat path's own
+                            // `BUDGET_PAUSED_PLACEHOLDER_REPLY` treatment
+                            // below). Settling this as `Completed` let a
+                            // background dispatch's exhausted-budget failure
+                            // read on the board as a finished, reviewable
+                            // result — the same asymmetry this issue's
+                            // headline fix closes for the top-level
+                            // orchestrator's own call, just on the dispatched-
+                            // card path instead.
+                            //
+                            // Checked, and returned on, BEFORE the delegation
+                            // drain: per `classify_turn`, the budget-paused arm
+                            // only fires when the model call itself errored,
+                            // which cannot also have queued a hand-off on the
+                            // same attempt — so there is nothing below worth
+                            // draining, and doing so unconditionally would risk
+                            // running a stale hand-off from an earlier retry
+                            // still sitting in the queue.
+                            if let Some(pause) = &outcome.budget_paused {
+                                let result = budget_pause_notice(pause);
+                                settle(&mut card, TaskRunEnd::Paused, &responder, &result);
+                                break (TaskRunEnd::Paused, result);
+                            }
                             // Issue #204: the turn may have DELEGATED rather
                             // than done the work. The dispatched responder is
                             // the orchestrator, which carries `delegate_to_desk`
@@ -952,6 +1060,14 @@ impl HarnessBrain {
                                 // its steps and its spend belong to the card's
                                 // run, not to nothing (#242).
                                 .for_run(sink.clone())
+                                // Issue #1846 review (Codex #3864988176): the
+                                // card's own (possibly redirect-augmented)
+                                // instruction — the closest thing a dispatched
+                                // task has to "the operator's own words" — so a
+                                // delegate's budget-pause marker re-parks with
+                                // the brief this attempt is actually running,
+                                // not the hand-off instruction the model wrote.
+                                .reissue_message(instruction.clone())
                                 .handle_task_delegations(&mut card, &responder)
                                 .await
                             {
@@ -972,15 +1088,30 @@ impl HarnessBrain {
                                 // every downstream write credits them.
                                 Some(handoff) => {
                                     responder = handoff.delegate;
+                                    let budget_paused = handoff.budget_paused;
                                     match handoff.reply {
                                         Some(reply) => {
-                                            settle(
-                                                &mut card,
-                                                TaskRunEnd::Completed,
-                                                &responder,
-                                                &reply,
-                                            );
-                                            (TaskRunEnd::Completed, reply)
+                                            // Issue #1846 review (Codex
+                                            // #3865395868): `TaskHandoff` now
+                                            // carries the delegate's own
+                                            // budget pause through from
+                                            // `DeskReply` — this is the other
+                                            // half of the asymmetry the
+                                            // top-level orchestrator's own
+                                            // dispatched call already closed
+                                            // above (`outcome.budget_paused`).
+                                            // Without it a delegate that ran
+                                            // out of credits still settled
+                                            // `Completed`, landing the pause
+                                            // notice in In Review as though it
+                                            // were a finished answer.
+                                            let end = if budget_paused.is_some() {
+                                                TaskRunEnd::Paused
+                                            } else {
+                                                TaskRunEnd::Completed
+                                            };
+                                            settle(&mut card, end, &responder, &reply);
+                                            (end, reply)
                                         }
                                         // The hand-off ran and an operator
                                         // CANCELLED it in flight, so it produced
@@ -2431,15 +2562,26 @@ impl HarnessBrain {
     /// **whole roster** instead of the desk that was actually addressed — a
     /// broadcast escaping the scope of the one case the fold exists to keep
     /// working. Asking the record first costs one lookup and cannot be wrong.
-    fn everyone_desk<'a>(record: &CompanyRecord, chat: Option<&'a str>) -> &'a str {
+    fn everyone_desk(record: &CompanyRecord, chat: Option<&str>) -> String {
         match chat {
             Some(chat)
                 if record.resolve_desk_id(chat).is_some()
                     || !crate::server::chat_history::is_general_chat(Some(chat)) =>
             {
-                chat
+                chat.to_string()
             }
-            _ => crate::server::ops::language::DEFAULT_DESK,
+            // A General alias resolves to whichever desk claims the line, not
+            // to the literal `DEFAULT_DESK`. A blueprint desk declared
+            // `id = "main", name = "Front office"` claims it by id, so
+            // `resolve_desk_id("General")` misses and the guard above falls
+            // through — and expanding `@everyone` against a desk called
+            // `General` that does not exist scoped the broadcast to the entire
+            // roster, while the channel it was posted in is that desk and its
+            // lead answers there. The alias and the raw key have to name the
+            // same membership or `@everyone` means two different things in one
+            // channel (issue #1743).
+            _ => crate::runtime::delegation_tools::general_claimant(record)
+                .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
         }
     }
 
@@ -3003,7 +3145,11 @@ impl HarnessBrain {
                                 &confinement,
                             )
                             .await?;
-                        channel_responses.push(confined_bubble(outcome));
+                        // Issue #1846 review (Codex #3869277640): see
+                        // `confined_turn_bubble`'s doc for why a budget pause
+                        // is handled separately from an ordinary copilot
+                        // reply here.
+                        channel_responses.push(confined_turn_bubble(outcome));
                         continue;
                     }
                     // Route to the teammate the message named, else to the
@@ -3054,7 +3200,7 @@ impl HarnessBrain {
                     let addressed_desk = Self::everyone_desk(&self.record(), chat.as_deref());
                     let also_mentioned = crate::runtime::mentions::mentioned_agents(
                         &self.record(),
-                        addressed_desk,
+                        &addressed_desk,
                         mentions,
                         Some(&responder),
                     );
@@ -3119,10 +3265,30 @@ impl HarnessBrain {
                         // Who else this message named (issue: mentions). Context
                         // for the turn, never a second dispatch.
                         .also_mentioned(also_mentioned)
+                        // Issue #1846 review (Codex #3864988176): the operator's
+                        // own words, so a delegate's budget-pause marker re-parks
+                        // with what the operator actually asked for rather than
+                        // the hand-off instruction the model wrote.
+                        .reissue_message(composed.clone())
                         .handle_operator_message(&responder, &composed, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
                     let mut operator_reply = turn.reply;
+                    // Issue #1846: unlike a step-cap pause or a spend halt —
+                    // both of which stop a turn that had already produced SOME
+                    // text — a budget pause fires on the model call itself
+                    // failing, so `turn.reply` is not a partial answer, it is
+                    // the SAME actionable "add credits" copy the sibling
+                    // notice below carries. Left as-is it would double: the
+                    // operator reads it once attributed to the teammate (who
+                    // said nothing — the call never returned) and again,
+                    // correctly, as the unauthored system notice. Overwritten
+                    // here with a short, honest placeholder so the authored
+                    // bubble never claims words the teammate did not produce,
+                    // and the full explanation lives in exactly one place.
+                    if turn.budget_paused.is_some() {
+                        operator_reply = BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string();
+                    }
 
                     // Drain what the conversation published (#445). Unconditional
                     // so nothing survives into the next turn, and only *recorded*
@@ -3331,6 +3497,28 @@ impl HarnessBrain {
                             mentions: Vec::new(),
                         });
                     }
+                    // Issue #1846: and a turn paused for lack of inference
+                    // budget/credits says so, in its own bubble, for every
+                    // reason the two blocks above give — sibling not appended,
+                    // unauthored, no steps. Mutually exclusive with a spend
+                    // halt (opposite lever: add money vs. don't ask for more
+                    // work), but not with an iteration-cap pause in principle —
+                    // in practice `classify_turn` only ever reaches the
+                    // budget-paused arm when the model call itself errored,
+                    // which cannot also have hit the iteration cap on the same
+                    // attempt.
+                    if let Some(pause) = &turn.budget_paused {
+                        channel_responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: "operator".to_string(),
+                            agent: None,
+                            text: budget_pause_notice(pause),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
                     channel_responses.extend(turn.bubbles);
                 }
                 CompanyEvent::TaskDispatched { task_id, run_id } => {
@@ -3412,7 +3600,7 @@ mod tests {
     use crate::ports::brain::CycleHost;
     // Issue #301: every lifecycle return now lands in To-do (the `backlog` pool
     // is gone), so these assertions read the const rather than a literal.
-    use crate::ports::tasks::{COLUMN_IN_REVIEW, COLUMN_TODO};
+    use crate::ports::tasks::{COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO};
     use crate::ports::types::{
         ApprovalId, CompanyId, ContextOp, ContextOpResult, Effect, EffectDisposition, OverlayAgent,
         ToolCall, ToolResult,
@@ -3776,6 +3964,143 @@ description = "Builds it."
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
             tasks,
         )
+    }
+
+    /// A model whose every call fails with the exact wire shape
+    /// `is_top_level_budget_exhausted` recognises (issue #1846 review, Codex
+    /// #3864988168) — the same body `a_top_level_budget_exhaustion_pauses_
+    /// gracefully_and_parks_a_reissue_marker` in `mod.rs` scripts, reused here
+    /// to prove the DISPATCHED-CARD path settles on the pause rather than
+    /// completing.
+    struct BudgetExhaustedProvider;
+
+    #[async_trait]
+    impl ChatModel<()> for BudgetExhaustedProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
+            Err(tinyagents::TinyAgentsError::Model(
+                "USER_INSUFFICIENT_CREDITS: insufficient budget for this account — add credits \
+                 to continue"
+                    .to_string(),
+            ))
+        }
+    }
+
+    impl HarnessModel for BudgetExhaustedProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "scripted".to_string()
+        }
+    }
+
+    /// As [`brain_with_tasks`], but every model call fails with a
+    /// budget-exhausted body (issue #1846 review, Codex #3864988168) —
+    /// otherwise byte-identical, so the only variable a test built on this
+    /// exercises is how the dispatch path reacts to that one failure shape.
+    fn brain_with_tasks_and_budget_exhausted_provider(
+        dir: &std::path::Path,
+    ) -> (HarnessBrain, Arc<FsOps>) {
+        let tasks = Arc::new(FsOps::new(dir));
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(BudgetExhaustedProvider),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter: Some(Arc::new(FsOps::new(dir))),
+            workspace_root: dir.to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: Some(tasks.clone()),
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
+        };
+        (
+            HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
+            tasks,
+        )
+    }
+
+    /// **The regression.** Issue #1846 review (Codex #3864988168): `run_task`
+    /// never inspected `outcome.budget_paused` before this fix — a dispatched
+    /// card whose model call ran out of credits fell straight into the
+    /// `None => { ... None => settle(Completed) }` arm, since a budget pause
+    /// carries an `Ok(TurnOutcome)` with no delegation queued, and landed in
+    /// `in_review` looking like a finished, reviewable result instead of the
+    /// graceful pause the operator-chat path already gave the same failure.
+    #[tokio::test]
+    async fn a_dispatched_tasks_budget_exhaustion_pauses_rather_than_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks_and_budget_exhausted_provider(dir.path());
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(&company, &card("t-1", "engineer"))
+            .await
+            .expect("seed");
+        // Driven directly, not through `run_cycle`, so the roster has to be
+        // built explicitly — see
+        // `dispatched_card_with_an_origin_stops_in_review_and_still_posts_back`.
+        brain
+            .pool
+            .ensure(&brain.record(), &brain.deps)
+            .await
+            .expect("roster");
+
+        brain.run_task("t-1", None).await.expect("run");
+
+        let settled = only_card(&tasks).await;
+        assert_eq!(
+            settled.column, COLUMN_PAUSED,
+            "a budget-exhausted model call is a graceful pause, not a completed result — \
+             it must not read on the board as a finished, reviewable card"
+        );
+        let note = settled.note.expect("note");
+        assert!(
+            note.contains("add credits") || note.contains("Add credits"),
+            "the note must carry the actionable ask a genuine budget pause gives, not just \
+             an opaque dispatch failure: {note}"
+        );
     }
 
     /// As [`brain_with_tasks`], but the roster also carries an `eng` desk led by
@@ -5617,7 +5942,7 @@ members = ["engineer"]
                 name: "Nova".into(),
                 role: "Growth".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             })
@@ -6062,6 +6387,19 @@ members = ["ceo", "engineer"]
 
         // The raw key, not the General fold: this desk answers to it.
         assert_eq!(HarnessBrain::everyone_desk(&record, Some("main")), "main");
+
+        // Every folded alias names the same membership as the raw key. A desk
+        // that claims the line by *id* is missed by `resolve_desk_id("General")`,
+        // so the alias used to fall through to a `General` desk that does not
+        // exist — scoping `@everyone` to the whole roster in a channel whose
+        // own lead answers (issue #1743).
+        for alias in ["", "General", "general", "MAIN"] {
+            assert_eq!(
+                HarnessBrain::everyone_desk(&record, Some(alias)),
+                "main",
+                "the alias {alias:?} must scope @everyone to the claiming desk"
+            );
+        }
         // And with no such desk, the fold still applies as before.
         assert_eq!(
             HarnessBrain::everyone_desk(&record_with_desk(), Some("main")),
@@ -6076,7 +6414,7 @@ members = ["ceo", "engineer"]
         }];
         let expanded = crate::runtime::mentions::mentioned_agents(
             &record,
-            HarnessBrain::everyone_desk(&record, Some("main")),
+            &HarnessBrain::everyone_desk(&record, Some("main")),
             &mentions,
             None,
         );
@@ -6150,6 +6488,7 @@ members = ["ceo", "engineer"]
                 id: "main".into(),
                 name: "Front office".into(),
                 description: None,
+                responder: Default::default(),
                 members: vec!["engineer".into()],
             })
         });
@@ -6186,7 +6525,7 @@ members = ["ceo", "engineer"]
                 name: "Mainard".into(),
                 role: "Analyst".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             })
@@ -6484,7 +6823,7 @@ members = ["eng1", "eng2"]
                 name: "Cto".to_string(),
                 role: "CTO".to_string(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             }],
@@ -7715,6 +8054,72 @@ members = ["eng1", "eng2"]
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
 
+    /// As [`brain_with_queue_and_events`], but every model call fails with a
+    /// budget-exhausted body via [`BudgetExhaustedProvider`] (issue #1846
+    /// review, Codex #3869725683) — otherwise byte-identical, so the only
+    /// variable a test built on this exercises is how the approval-
+    /// continuation redispatch path reacts to that one failure shape.
+    fn brain_with_queue_and_events_and_budget_exhausted_provider(
+        dir: &std::path::Path,
+        requests: crate::harness::policy::ApprovalRequestQueue,
+        events: Arc<dyn crate::ports::EventLog>,
+    ) -> HarnessBrain {
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(BudgetExhaustedProvider),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter: None,
+            workspace_root: dir.to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: Some(events),
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: requests,
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
+        };
+        HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
+    }
+
     fn approval_resolved(id: &str, verdict: Verdict) -> CompanyEvent {
         CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -7827,6 +8232,80 @@ members = ["eng1", "eng2"]
             .unwrap()
             .iter()
             .all(|e| !matches!(e.event, CompanyEvent::AgentReply { .. }))
+    }
+
+    /// Issue #1846 review (Codex #3869725683) — **the regression.** Same
+    /// fixture as `an_approved_grant_redispatches_its_agent_with_the_exact_arguments`
+    /// above, but the re-issued call's provider is now out of credits.
+    ///
+    /// `run_steered_background` runs through the SAME `run_inner` the
+    /// interactive chat path does, so it parks a re-issue marker for the
+    /// granting agent exactly as an ordinary paused message would — proven
+    /// below by reading it straight off `BudgetPauseSet`. Before this fix, the
+    /// bubble `redispatch_granted_call` built from that outcome carried
+    /// `outcome.reply` (the budget-paused placeholder text) verbatim, which
+    /// does not start with `BUDGET_PAUSE_NOTICE_PREFIX` — so the console's
+    /// `isBudgetPauseNotice` check never recognised it, and the operator saw
+    /// an ordinary-looking reply with no "Add credits & resend" CTA for a
+    /// marker that was sitting there, parked and redeemable, the whole time.
+    #[tokio::test]
+    async fn a_budget_paused_approval_continuation_surfaces_the_notice_and_parks_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let args = crate::policy::test_support::composio_args_with(
+            crate::policy::test_support::COMPOSIO_SEND_SLUG,
+            serde_json::json!({ "to": "a@b.test" }),
+        );
+        requests
+            .grants()
+            .grant(crate::runtime::grants::GrantedCall {
+                approval_id: ApprovalId::new("appr-1"),
+                agent: "ceo".into(),
+                tool: "composio_execute".into(),
+                args: args.clone(),
+                at_millis: now_millis(),
+                origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
+            });
+        let brain = brain_with_queue_and_events_and_budget_exhausted_provider(
+            dir.path(),
+            requests,
+            log.clone(),
+        );
+
+        let result = brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 1);
+        let bubble = &result.channel_responses[0];
+        assert_eq!(bubble.channel, "ceo");
+        assert!(
+            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the console's SystemPill only renders the highlighted pause card for this exact \
+             prefix — got: {}",
+            bubble.text
+        );
+        assert!(
+            bubble.text.to_ascii_lowercase().contains("add credits"),
+            "the actionable ask survives into the notice: {}",
+            bubble.text
+        );
+
+        // And a re-issue marker really was parked for the granting agent —
+        // the CTA this notice's text is asking the console to render would
+        // have nothing to redeem otherwise.
+        let marker = crate::runtime::grants::budget_pauses_for(&CompanyId::new("acme"))
+            .peek("ceo")
+            .expect("run_steered_background parks a marker on the same terms run_inner does");
+        assert_eq!(marker.agent, "ceo");
     }
 
     /// Issue #374: a resolution that minted only a STANDING grant must still
@@ -9797,7 +10276,10 @@ members = ["eng1", "eng2"]
                 reply: self.label.clone(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                // Test fixture, not the ACP fold (PR #1880 review).
+                abnormal_stop: None,
                 halted_for_spend: None,
+                budget_paused: None,
             })
         }
         async fn run_steered(
@@ -10077,7 +10559,10 @@ agent = "claude"
             reply: "here is what that node does".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: false,
+            // Test fixture, not the ACP fold (PR #1880 review).
+            abnormal_stop: None,
             halted_for_spend: None,
+            budget_paused: None,
         });
         assert_eq!(bubble.channel, "operator", "the destination is unchanged");
         assert_eq!(
@@ -10088,6 +10573,65 @@ agent = "claude"
             bubble.agent.as_deref(),
             Some(bubble.channel.as_str()),
             "author and destination must not be the same value — that conflation is issue #885"
+        );
+    }
+
+    /// Issue #1846 review (Codex #3869277640) — **the regression.** A budget
+    /// pause from a confined workflow-copilot turn must NOT read as the
+    /// copilot's own answer.
+    ///
+    /// Before this fix, `confined_bubble` folded `outcome.reply` — the
+    /// budget-paused placeholder text, per `classify_turn`'s
+    /// `AttemptOutcome::BudgetPaused` handling — straight into an ordinary
+    /// bubble authored by `CONFINED_AGENT_ID`, exactly the #885/#966
+    /// author-vs-channel conflation this file exists to prevent, just for a
+    /// pause instead of an authored reply. `confined_turn_bubble` is the
+    /// fixed boundary: this asserts it routes a paused outcome to
+    /// `system_notice` (unauthored, `SYSTEM_AUTHOR`) instead.
+    #[test]
+    fn a_confined_turns_budget_pause_is_a_system_notice_not_a_copilot_reply() {
+        let outcome = crate::harness::TurnOutcome {
+            // What `classify_turn`'s `AttemptOutcome::BudgetPaused` arm
+            // actually leaves in `reply` — irrelevant to the notice text,
+            // which is built fresh from `budget_paused` below, but present
+            // here so this fixture matches what `run_confined` really
+            // returns rather than an idealised one.
+            reply: "Paused — copilot's turn ran out of inference budget/credits.".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: confine::CONFINED_AGENT_ID.to_string(),
+                summary: "Add credits to your account, then resend your message.".to_string(),
+            }),
+        };
+
+        let bubble = confined_turn_bubble(outcome);
+
+        assert_eq!(
+            bubble.agent.as_deref(),
+            Some(crate::ports::SYSTEM_AUTHOR),
+            "a budget pause is never something the copilot said — it must be unauthored, not \
+             attributed to CONFINED_AGENT_ID like an ordinary reply: {:?}",
+            bubble.agent
+        );
+        assert_ne!(
+            bubble.agent.as_deref(),
+            Some(confine::CONFINED_AGENT_ID),
+            "the pre-fix defect: falling through to confined_bubble would attribute the pause \
+             notice to the copilot itself"
+        );
+        assert!(
+            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the console's SystemPill only renders the highlighted pause card for this exact \
+             prefix: {}",
+            bubble.text
+        );
+        assert!(
+            bubble.text.to_ascii_lowercase().contains("add credits"),
+            "the actionable ask survives into the notice: {}",
+            bubble.text
         );
     }
 
