@@ -671,7 +671,7 @@ impl Tool for UpdateWorkflowTool {
                 )));
             }
         };
-        let draft: RawWorkflow = match RawWorkflow::try_from(parsed) {
+        let mut draft: RawWorkflow = match RawWorkflow::try_from(parsed) {
             Ok(draft) => draft,
             Err(msg) => {
                 tracing::debug!(company = %self.admin.company, error = %msg, "update_workflow: unstorable config");
@@ -696,6 +696,15 @@ impl Tool for UpdateWorkflowTool {
         if let Some(stored) = overlay_body(&overlays, &wid)
             && let Ok(raw) = raw_workflow_from_toml(stored)
         {
+            // Issue #1882 review: this tool's schema never exposes
+            // `owner_desk` to the model (an agent-authored draft carries
+            // none — see `TryFrom<CreateWorkflowArgs>` above), so a
+            // full-replacement update has to carry the STORED value forward
+            // itself. Without this, an agent editing an unrelated node on an
+            // owner-assigned workflow would silently clear the desk an
+            // operator (or the workflow-proposal apply path) had already
+            // set.
+            draft.owner_desk = raw.owner_desk.clone();
             let projection = project_workflow_spec(&raw);
             if let Some(message) = refuse_scheduled(&wid, &projection, "change") {
                 tracing::debug!(company = %self.admin.company, workflow = %wid, "update_workflow: refused scheduled target");

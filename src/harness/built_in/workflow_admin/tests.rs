@@ -333,6 +333,27 @@ fn graph_args(id: &str, name: &str, worker_name: &str) -> Value {
     })
 }
 
+/// A graph with an owning desk set (issue #1862 prerequisite). Only an
+/// operator or the workflow-proposal apply path can author `owner_desk` — the
+/// agent tool schema has no field for it — so tests put it on the record
+/// directly, the same reason `SCHEDULED_TOML` does.
+const OWNED_TOML: &str = r#"
+id = "owned"
+name = "Owned flow"
+owner_desk = "engineering"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "done"
+"#;
+
 const SEED_TOML: &str = r#"
 id = "seeded"
 name = "Seeded flow"
@@ -725,6 +746,50 @@ async fn an_update_will_not_silently_drop_a_nodes_approval_gate() {
             .unwrap()
             .unwrap();
     assert_eq!(reloaded.nodes[1].requires_approval, Some(true));
+}
+
+/// **Regression, issue #1882 review.** `owner_desk` must survive an
+/// agent-tool update that never mentions it. `UpdateWorkflowTool` parses
+/// `CreateWorkflowArgs`, whose `TryFrom` always writes `owner_desk: None` —
+/// an agent-authored draft carries no owner, the same reason `schedule` /
+/// `on_error` / `retry` / `repeatable` are not carried either. Before the
+/// fix, ANY full-replacement update through this tool cleared whatever desk
+/// was already on the workflow. The args schema has no field for
+/// `owner_desk` at all, so there is nothing for the model to echo back — the
+/// preserve has to happen server-side, which is what this pins.
+#[tokio::test]
+async fn an_update_preserves_the_workflows_owner_desk() {
+    let fx = Fixture::new();
+    fx.put_overlay("owned", OWNED_TOML).await;
+
+    let read = ReadWorkflowTool::new(fx.admin())
+        .execute(json!({ "id": "owned" }))
+        .await
+        .unwrap();
+    let version = data(&read)["version"]
+        .as_str()
+        .expect("a version token")
+        .to_string();
+
+    // A full-replacement edit built the way an agent naturally would — the
+    // args schema simply has no `owner_desk` field to carry one in.
+    let mut graph = graph_args("owned", "Owned flow", "Worker");
+    graph["expected_version"] = json!(version);
+    let updated = UpdateWorkflowTool::new(fx.admin())
+        .execute(graph)
+        .await
+        .unwrap();
+    assert!(!updated.is_error, "{}", err_text(&updated));
+
+    let reloaded =
+        crate::company::load_workflow_union(Some(fx.source_dir()), &fx.overlays().await, "owned")
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        reloaded.owner_desk.as_deref(),
+        Some("engineering"),
+        "an agent update must not clear a desk it was never shown"
+    );
 }
 
 // ---------------------------------------------------------------------------
