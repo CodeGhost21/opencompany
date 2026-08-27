@@ -411,6 +411,12 @@ async fn run_workflow_inner(
     // survive that. An approval card is durable the moment it is written, so a
     // run that ended badly must still be able to say it opened one.
     let blocks = super::caps::RunBlocks::default();
+    // Issue #1865: the sideways channel an agent node's turn reports through
+    // when it truncates at the `max_tool_iterations` cap — owned out here like
+    // `blocks`, for the same reason: the node's attempt row already settles
+    // `Failed` for this, and the run-level row must be told to agree before the
+    // capability bundle (and the fact it is carrying) drops.
+    let capped = super::caps::RunCappedNodes::default();
     let approvals = super::caps::RunApprovals::default();
     // Card-less files written by agent nodes. Kept outside the capability
     // bundle so a failed/blocked engine future cannot drop the capture before
@@ -443,6 +449,7 @@ async fn run_workflow_inner(
             notices: notices.clone(),
             board: board.clone(),
             blocks: blocks.clone(),
+            capped: capped.clone(),
             approvals: approvals.clone(),
             artifacts: run_artifacts.clone(),
             // A dry run records nothing: it makes no effects, so an attempt row
@@ -1151,6 +1158,15 @@ async fn run_workflow_inner(
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
+    // Issue #1865: the sibling reclassification — a node whose turn truncated
+    // at the `max_tool_iterations` cap reports `Success` at the engine
+    // boundary (see `RunCappedNodes`), so its row lands here as `Ok` while its
+    // attempt already settled `Failed`. Relabel it `Error` so the two agree,
+    // exactly as `reclassify_blocked` relabels a parked node `Blocked` so ITS
+    // row agrees with what actually happened. Ordered after `reclassify_blocked`
+    // but the two cannot collide: `run_turn` returns `Err` on the blocked arm
+    // before it ever reaches the iteration-cap check, so no node is ever both.
+    reclassify_capped_nodes(&mut nodes, &capped.take());
     // Issue #899 (Stage 1): stash the workflow id and trigger input each blocked
     // agent node's continuation needs, keyed by the same per-(run, node) turn key
     // its parked calls armed `ContinuationQueue` under. The resolve path releases
@@ -1170,6 +1186,20 @@ async fn run_workflow_inner(
     // cannot drift into disagreement about what a block reads as.
     for b in &blocked_nodes {
         notices.push(blocked_notice(b));
+    }
+    // Issue #1865: a node under `on_error = "continue"`/`"route"` errors and
+    // the graph keeps going — the run reaches this arm (not `blocked_run`)
+    // carrying an `Error` row the reclassification above deliberately left
+    // alone, because it is not waiting on anyone. `WorkflowRunVerdict::of`
+    // now folds that into a `degraded` verdict, but a verdict is one word —
+    // this is the sentence naming *which* node, so an operator does not have
+    // to open the canvas to find the red chip. One notice per errored node,
+    // in the order the nodes finished, the same order `nodes` already carries.
+    for row in nodes
+        .iter()
+        .filter(|n| n.status == WorkflowNodeStatus::Error)
+    {
+        notices.push(errored_node_notice(&row.node_id));
     }
 
     Ok(WorkflowRun {
@@ -1249,6 +1279,45 @@ fn reclassify_blocked(
     for b in blocked {
         if !pending_approvals.contains(&b.node_id) {
             pending_approvals.push(b.node_id.clone());
+        }
+    }
+}
+
+/// Relabels a capped agent node's row `Error` so it agrees with its attempt
+/// (issue #1865).
+///
+/// Host-side, exactly on [`reclassify_blocked`]'s terms and right beside it:
+/// `tinyflows::observability` reports `StepStatus::Success` for a turn that
+/// truncated at the `max_tool_iterations` cap — the model produced a reply,
+/// the node "finished" from the engine's point of view — so the row this
+/// function receives already carries [`WorkflowNodeStatus::Ok`]. Only the
+/// host, via [`super::caps::RunCappedNodes`], knows the reply was a partial
+/// checkpoint rather than a completed answer, which is the same shape of gap
+/// `reclassify_blocked` closes for a parked node: the engine reported the only
+/// thing it could see, and the host relabels the row on the way out rather
+/// than rewriting the engine's own account of what happened.
+///
+/// `capped` names node ids, not rows with a status to overwrite — unlike
+/// `blocked`, which carries [`WorkflowBlockedNode`](crate::ports::WorkflowBlockedNode)
+/// structs the caller already built. A plain id list is all
+/// [`RunCappedNodes`](super::caps::RunCappedNodes) needs to carry: there is no
+/// second fact about a capped node the run-level record is missing, the way
+/// `blocked_nodes` carries `tools`/`approval_ids` for the notice
+/// `blocked_notice` composes.
+fn reclassify_capped_nodes(nodes: &mut [crate::ports::WorkflowRunNodeRow], capped: &[String]) {
+    if capped.is_empty() {
+        return;
+    }
+    for row in nodes.iter_mut() {
+        // `Blocked` is deliberately never overridden here, even though
+        // `run_turn` structurally never puts one node in both lists (see this
+        // function's own doc): a node waiting on a person is the more
+        // specific fact, and a future caller that somehow did name one in
+        // both must not have this flip hide the approval behind a plain
+        // failure — the same direction `only_blocked_nodes_errored`'s guard
+        // already leans in.
+        if row.status != WorkflowNodeStatus::Blocked && capped.iter().any(|id| id == &row.node_id) {
+            row.status = WorkflowNodeStatus::Error;
         }
     }
 }
@@ -1397,6 +1466,29 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
         "The step \"{}\" needed your approval for {tools}, so it produced nothing and the steps \
          after it did not run.{tail}",
         blocked.node_id
+    )
+}
+
+/// Names a step that settled `Error` on a run that otherwise kept going (issue
+/// #1865) — a node under `on_error = "continue"`/`"route"` whose capability
+/// genuinely errored, or an agent node whose turn was relabelled `Error`
+/// because it truncated at the `max_tool_iterations` cap (see
+/// `reclassify_capped_nodes`). Both settle the run without an `error`, and
+/// both are exactly what `Degraded` exists to stop hiding.
+///
+/// The sentence half of `degraded`: `WorkflowRunVerdict::Degraded` says one
+/// word about the whole run, and this says which node — mirroring how
+/// `blocked_notice` is the sentence behind a `blocked`/`stranded` verdict.
+/// Worded to cover either cause without claiming which one it was, since the
+/// row carries no reason text (issue #371's no-`String`-arm invariant). Called
+/// once per errored, non-blocked row in `nodes`, in finish order, so a graph
+/// with more than one recovering branch names every one of them rather than
+/// only the first — the console's `failedNodeOf` picks one node for a
+/// *stopped* run's headline, but this run did not stop.
+fn errored_node_notice(node_id: &str) -> String {
+    format!(
+        "The step \"{node_id}\" did not finish cleanly, and the run continued past it — check \
+         its output for details."
     )
 }
 
@@ -1977,6 +2069,73 @@ mod tests {
     use crate::harness::provider::MockProvider;
     use crate::ports::run_output::WorkflowRunOutputStore;
     use crate::store::{FsCompanyStore, FsContextStore, FsOps};
+
+    /// One node row, for the reclassification tests below — the three
+    /// structural scalars only, matching what `reclassify_capped_nodes` and
+    /// `reclassify_blocked` both read and write.
+    fn node_row(id: &str, status: WorkflowNodeStatus) -> crate::ports::WorkflowRunNodeRow {
+        crate::ports::WorkflowRunNodeRow {
+            node_id: id.to_string(),
+            status,
+            elapsed_ms: 10,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// Issue #1865: the run-level half of the iteration-cap reconciliation —
+    /// `caps::mod`'s own test
+    /// (`a_capped_turn_settles_failed_and_feeds_run_capped_nodes`) pins that a
+    /// capped turn feeds the node id into `RunCappedNodes`; this pins that
+    /// `reclassify_capped_nodes` turns that id into the row flip the run's
+    /// verdict needs (`WorkflowRunVerdict::of` reads `Error`, never a node
+    /// id list).
+    #[test]
+    fn reclassify_capped_nodes_flips_the_capped_row_to_error() {
+        let mut nodes = vec![
+            node_row("fetch", WorkflowNodeStatus::Ok),
+            node_row("summarize", WorkflowNodeStatus::Ok),
+        ];
+        reclassify_capped_nodes(&mut nodes, &["summarize".to_string()]);
+        assert_eq!(nodes[0].status, WorkflowNodeStatus::Ok, "untouched sibling");
+        assert_eq!(
+            nodes[1].status,
+            WorkflowNodeStatus::Error,
+            "the capped node's row must read Error, agreeing with its attempt"
+        );
+    }
+
+    /// An empty capped list is a no-op — every row keeps whatever status the
+    /// engine (or `reclassify_blocked`) already gave it. The common case: most
+    /// runs cap no node at all.
+    #[test]
+    fn reclassify_capped_nodes_is_a_no_op_when_nothing_capped() {
+        let mut nodes = vec![
+            node_row("fetch", WorkflowNodeStatus::Ok),
+            node_row("gate", WorkflowNodeStatus::Blocked),
+        ];
+        let before = nodes.clone();
+        reclassify_capped_nodes(&mut nodes, &[]);
+        assert_eq!(nodes, before);
+    }
+
+    /// The two reclassifications are structurally exclusive (a blocked node's
+    /// turn returns `Err` before the iteration-cap check is ever reached — see
+    /// `run_turn`'s `#881` block above the cap check), so this can never fire
+    /// against a real run. The guard is defensive anyway: a node the blocked
+    /// pass already relabelled must never be re-flipped by this one, because
+    /// `Blocked` is the more specific fact — a future caller that somehow
+    /// named one node in both lists must not have this hide a real approval
+    /// wait behind a plain failure.
+    #[test]
+    fn reclassify_capped_nodes_never_overrides_an_already_blocked_row() {
+        let mut nodes = vec![node_row("gate", WorkflowNodeStatus::Blocked)];
+        reclassify_capped_nodes(&mut nodes, &["gate".to_string()]);
+        assert_eq!(
+            nodes[0].status,
+            WorkflowNodeStatus::Blocked,
+            "a blocked node must never be relabelled Error"
+        );
+    }
 
     /// A workflow lane that records which agent it served. Its reply names the
     /// lane so the run output proves the same routing decision as the call log.
