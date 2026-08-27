@@ -572,6 +572,51 @@ pub enum OnboardingStep {
     WorkflowRunSucceeded,
 }
 
+/// Who or what started a workflow run (issue #1862 prerequisite).
+///
+/// A static fact stamped at **trigger time**, not a judgment made at failure —
+/// the run that hits a blocker later needs to know who to hand it back to, and
+/// that is whoever's errand the run was, not whoever happened to be watching
+/// when it stalled. `WorkflowRunStarted` carries it; every entry point already
+/// has the identity in hand when it starts a run, so this only ever writes
+/// down a fact that already existed.
+///
+/// `Schedule` and `Operator` are fieldless because there is exactly one cron
+/// scheduler and, on that boundary, exactly one operator concept; `Agent`
+/// carries the triggering agent's id because there can be many.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartedBy {
+    /// An operator pressed Run (or the run route otherwise fired manually).
+    Operator,
+    /// An agent triggered the run — `run_workflow` from a turn, or a
+    /// dispatched card. The id is that agent's roster id.
+    Agent(String),
+    /// A cron schedule fired the run with nobody watching.
+    Schedule,
+}
+
+impl StartedBy {
+    /// The default reading of the run route's `scheduled: bool` flag, for
+    /// entry points that have not been taught to name a triggering agent yet.
+    ///
+    /// `true` is unambiguous (only the scheduler sets it) — `false` defaults to
+    /// [`Operator`](Self::Operator) even though not every manual run is
+    /// literally an operator's Run click (`run_workflow` also fires with
+    /// `scheduled: false`, see the site named on
+    /// [`WorkflowRunContext::new`](crate::ports::workflow_runner::WorkflowRunContext::new)).
+    /// That is deliberately the coarser, unwired default: a caller that knows
+    /// the real agent should build a [`StartedBy::Agent`] directly instead of
+    /// going through this conversion.
+    pub fn from_scheduled(scheduled: bool) -> Self {
+        if scheduled {
+            Self::Schedule
+        } else {
+            Self::Operator
+        }
+    }
+}
+
 /// An external stimulus fed into a company's cycle loop.
 ///
 /// Serialized internally-tagged under `kind` so each JSONL line is
@@ -1660,6 +1705,18 @@ pub enum CompanyEvent {
         run_id: String,
         /// Whether a cron schedule started this run rather than an operator.
         scheduled: bool,
+        /// Who or what started the run (issue #1862 prerequisite) — the fact a
+        /// parked blocker later attributes its DM to.
+        ///
+        /// `Option` and `#[serde(default)]`, unlike `scheduled`: every current
+        /// entry point already knows this at trigger time, but a journal line
+        /// written before this field existed carries none, and `None` is also
+        /// the honest reading for any future entry point that genuinely has no
+        /// identity to give. `skip_serializing_if` keeps a line with no
+        /// attribution serializing byte-identically to before this field
+        /// existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_by: Option<StartedBy>,
     },
     /// One non-trigger node of a workflow run began executing (issue #382),
     /// reported by the engine's `RunObserver` immediately before the node's
@@ -8037,8 +8094,54 @@ mod test {
             workflow_id: "digest".to_string(),
             run_id: "run-1".to_string(),
             scheduled: true,
+            started_by: Some(StartedBy::Operator),
         };
         assert_eq!(round_trip(&event), event);
+    }
+
+    /// Every [`StartedBy`] arm round-trips, including the fielded `Agent` one —
+    /// the shape a parked blocker's sender resolution reads back.
+    #[test]
+    fn started_by_round_trips_all_arms() {
+        for started_by in [
+            StartedBy::Operator,
+            StartedBy::Agent("ceo".to_string()),
+            StartedBy::Schedule,
+        ] {
+            let event = CompanyEvent::WorkflowRunStarted {
+                workflow_id: "digest".to_string(),
+                run_id: "run-1".to_string(),
+                scheduled: matches!(started_by, StartedBy::Schedule),
+                started_by: Some(started_by.clone()),
+            };
+            assert_eq!(
+                round_trip(&event),
+                event,
+                "{started_by:?} did not round-trip"
+            );
+        }
+    }
+
+    /// A `WorkflowRunStarted` line written before this field existed (issue
+    /// #1862 prerequisite) still replays, with `started_by` reading back
+    /// `None` rather than failing to parse. Pinned against a hand-written
+    /// legacy payload rather than a round-trip, for the same reason
+    /// `a_pre_881_run_finished_line_still_replays` is: a round-trip can only
+    /// ever prove the new shape agrees with itself.
+    #[test]
+    fn a_pre_1862_run_started_line_still_replays_with_no_sender() {
+        let legacy = serde_json::json!({
+            "kind": "WorkflowRunStarted",
+            "workflow_id": "digest",
+            "run_id": "run-1",
+            "scheduled": false
+        });
+        let event: CompanyEvent =
+            serde_json::from_value(legacy).expect("a pre-#1862 journal line must still parse");
+        let CompanyEvent::WorkflowRunStarted { started_by, .. } = &event else {
+            panic!("expected a WorkflowRunStarted, got {event:?}");
+        };
+        assert_eq!(started_by, &None, "a legacy line names no sender");
     }
 
     /// Both node outcomes round-trip, including the elapsed reading — the field
@@ -8126,14 +8229,17 @@ mod test {
 
     /// Every field on both #371 variants is required, and that is the point:
     /// the correlation id is what groups a run's nodes with its outcome, so a
-    /// line without one would be unfoldable. Nothing is `skip_serializing_if`,
-    /// so the wire form is fully self-describing.
+    /// line without one would be unfoldable. Nothing is `skip_serializing_if`
+    /// — except `WorkflowRunStarted::started_by` (issue #1862 prerequisite),
+    /// which is additive and `None` here on purpose, so the wire form stays
+    /// self-describing for every field that predates it.
     #[test]
     fn workflow_progress_variants_serialize_every_field() {
         let started = serde_json::to_string(&CompanyEvent::WorkflowRunStarted {
             workflow_id: "digest".to_string(),
             run_id: "run-1".to_string(),
             scheduled: false,
+            started_by: None,
         })
         .expect("serialize");
         assert_eq!(
