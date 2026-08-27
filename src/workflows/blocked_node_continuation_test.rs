@@ -187,19 +187,20 @@ fn seed_home() -> tempfile::TempDir {
 ///
 /// The model is served by `turns` on loopback. Everything the resolve path
 /// touches is the runtime's own handle, or every assertion here would be vacuous.
-async fn runtime(
+/// Wires a built [`CompanyRuntime`] up to a [`RecordingRunner`] — the block
+/// every `runtime*` fixture below shares byte-for-byte (CodeRabbit nitpick,
+/// review 5038258829): scripted-model deps, delivery parking, the harness
+/// pool/turn, and the runner itself, in that order. Each fixture differs only
+/// in how it builds `rt` (a plain builder, a pinned run-supervisor limit, or a
+/// swapped-in journal/company store) before calling this; extracting it means
+/// a future change to `DeliveryParking` (or anything else this wires) lands
+/// once instead of once per fixture, where a missed site would otherwise
+/// silently change what a test proves.
+async fn wire_recording_runner(
+    rt: &mut crate::company::runtime::CompanyRuntime,
     home: &std::path::Path,
     turns: Vec<Turn>,
-) -> (
-    Arc<crate::company::runtime::CompanyRuntime>,
-    Arc<RecordingRunner>,
-) {
-    let mut rt = RuntimeBuilder::new(home.to_path_buf(), manifest())
-        .with_seed_dir(home.to_path_buf())
-        .build()
-        .await
-        .expect("runtime builds");
-
+) -> Arc<RecordingRunner> {
     let (base_url, _script) = spawn_script_recording(turns).await;
     let (mut deps, _unused) = deps(base_url, home);
     // Production wiring: the workflow policy redeems from the SAME grant set the
@@ -227,6 +228,22 @@ async fn runtime(
         started: Mutex::new(Vec::new()),
     });
     rt.set_workflow_runner(runner.clone());
+    runner
+}
+
+async fn runtime(
+    home: &std::path::Path,
+    turns: Vec<Turn>,
+) -> (
+    Arc<crate::company::runtime::CompanyRuntime>,
+    Arc<RecordingRunner>,
+) {
+    let mut rt = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_seed_dir(home.to_path_buf())
+        .build()
+        .await
+        .expect("runtime builds");
+    let runner = wire_recording_runner(&mut rt, home, turns).await;
     (Arc::new(rt), runner)
 }
 
@@ -256,30 +273,7 @@ async fn runtime_with_run_limit(
         .await
         .expect("runtime builds");
     rt.set_run_supervisor(crate::runtime::RunSupervisor::with_limit(limit));
-
-    let (base_url, _script) = spawn_script_recording(turns).await;
-    let (mut deps, _unused) = deps(base_url, home);
-    deps.approval_requests = ApprovalRequestQueue::with_grants(rt.grants.clone());
-    let delivery = deps.delivery.as_mut().expect("the fixture wires delivery");
-    delivery.parking = Some(super::delivery::DeliveryParking {
-        approvals: rt.approvals.clone(),
-        journal: rt.journal().clone(),
-        continuations: rt.continuations.clone(),
-        gates: rt.workflow_gates().clone(),
-        blocked_nodes: rt.blocked_nodes().clone(),
-    });
-
-    let pool = Arc::new(HarnessPool::new());
-    pool.ensure(&record(), &deps).await.expect("roster builds");
-    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
-        pool,
-        Arc::new(deps.clone()),
-    ));
-    let runner = Arc::new(RecordingRunner {
-        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
-        started: Mutex::new(Vec::new()),
-    });
-    rt.set_workflow_runner(runner.clone());
+    let runner = wire_recording_runner(&mut rt, home, turns).await;
     (Arc::new(rt), runner)
 }
 
@@ -369,30 +363,7 @@ async fn runtime_with_gated_journal_store(
         .build()
         .await
         .expect("runtime builds");
-
-    let (base_url, _script) = spawn_script_recording(turns).await;
-    let (mut deps, _unused) = deps(base_url, home);
-    deps.approval_requests = ApprovalRequestQueue::with_grants(rt.grants.clone());
-    let delivery = deps.delivery.as_mut().expect("the fixture wires delivery");
-    delivery.parking = Some(super::delivery::DeliveryParking {
-        approvals: rt.approvals.clone(),
-        journal: rt.journal().clone(),
-        continuations: rt.continuations.clone(),
-        gates: rt.workflow_gates().clone(),
-        blocked_nodes: rt.blocked_nodes().clone(),
-    });
-
-    let pool = Arc::new(HarnessPool::new());
-    pool.ensure(&record(), &deps).await.expect("roster builds");
-    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
-        pool,
-        Arc::new(deps.clone()),
-    ));
-    let runner = Arc::new(RecordingRunner {
-        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
-        started: Mutex::new(Vec::new()),
-    });
-    rt.set_workflow_runner(runner.clone());
+    let runner = wire_recording_runner(&mut rt, home, turns).await;
     (Arc::new(rt), store, runner)
 }
 
@@ -484,30 +455,7 @@ async fn runtime_with_failing_journal_store(
         .build()
         .await
         .expect("runtime builds");
-
-    let (base_url, _script) = spawn_script_recording(turns).await;
-    let (mut deps, _unused) = deps(base_url, home);
-    deps.approval_requests = ApprovalRequestQueue::with_grants(rt.grants.clone());
-    let delivery = deps.delivery.as_mut().expect("the fixture wires delivery");
-    delivery.parking = Some(super::delivery::DeliveryParking {
-        approvals: rt.approvals.clone(),
-        journal: rt.journal().clone(),
-        continuations: rt.continuations.clone(),
-        gates: rt.workflow_gates().clone(),
-        blocked_nodes: rt.blocked_nodes().clone(),
-    });
-
-    let pool = Arc::new(HarnessPool::new());
-    pool.ensure(&record(), &deps).await.expect("roster builds");
-    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
-        pool,
-        Arc::new(deps.clone()),
-    ));
-    let runner = Arc::new(RecordingRunner {
-        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
-        started: Mutex::new(Vec::new()),
-    });
-    rt.set_workflow_runner(runner.clone());
+    let runner = wire_recording_runner(&mut rt, home, turns).await;
     (Arc::new(rt), store, runner)
 }
 
@@ -610,30 +558,7 @@ async fn runtime_with_gated_store(
         .build()
         .await
         .expect("runtime builds");
-
-    let (base_url, _script) = spawn_script_recording(turns).await;
-    let (mut deps, _unused) = deps(base_url, home);
-    deps.approval_requests = ApprovalRequestQueue::with_grants(rt.grants.clone());
-    let delivery = deps.delivery.as_mut().expect("the fixture wires delivery");
-    delivery.parking = Some(super::delivery::DeliveryParking {
-        approvals: rt.approvals.clone(),
-        journal: rt.journal().clone(),
-        continuations: rt.continuations.clone(),
-        gates: rt.workflow_gates().clone(),
-        blocked_nodes: rt.blocked_nodes().clone(),
-    });
-
-    let pool = Arc::new(HarnessPool::new());
-    pool.ensure(&record(), &deps).await.expect("roster builds");
-    let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
-        pool,
-        Arc::new(deps.clone()),
-    ));
-    let runner = Arc::new(RecordingRunner {
-        inner: super::runner::HarnessWorkflowRunner::new(turn, deps, record()),
-        started: Mutex::new(Vec::new()),
-    });
-    rt.set_workflow_runner(runner.clone());
+    let runner = wire_recording_runner(&mut rt, home, turns).await;
     (Arc::new(rt), store, runner)
 }
 
