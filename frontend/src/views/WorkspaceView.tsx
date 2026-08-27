@@ -130,8 +130,7 @@ import {
   sortedFolders,
   subtreeCounts,
   subtreeIds,
-  titleOf,
-} from "@/lib/workspace";
+  titleOf, headerNoteCount } from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { MoveAudienceConfirm } from "@/views/workspace/MoveAudienceConfirm";
 import { SearchResults } from "@/views/workspace/SearchResults";
@@ -454,6 +453,15 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   // uploaded faces, not only deletes initiated by this view.
   const nodesRef = useRef<FsNode[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * Has a tree ever actually loaded?
+   *
+   * Distinct from `!loading`, which a non-silent refresh sets back to `true`
+   * over a tree already on screen, and from `nodes.length`, which cannot tell
+   * "not fetched yet" from "fetched, and empty" — the two states the header
+   * count has to keep apart (codex review on #1785).
+   */
+  const [treeKnown, setTreeKnown] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The roster names the `agents/` folders resolve against (issue #973). Best
@@ -600,6 +608,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
             ),
           );
         }
+        setTreeKnown(true);
         return tree;
       } catch (e) {
         if (mine !== treeGen.current) return null;
@@ -1509,7 +1518,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
       */}
       <PageHeader
         title="Workspace"
-        count={noteCount}
+        count={headerNoteCount(noteCount, treeKnown)}
         /*
           Not "every note this company's teammates can read and write", which
           the tree contradicts in two places: `secrets/` is the one folder the

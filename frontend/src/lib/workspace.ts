@@ -805,3 +805,22 @@ export function clearLegacyLocal(scope: LocalScope): void {
     /* storage unavailable — nothing to clear */
   }
 }
+
+/**
+ * The count the Workspace header shows, or `undefined` for "not known yet".
+ *
+ * `nodes` starts empty with `loading` true, so a plain `countNotes(nodes)` put
+ * an authoritative `0` beside the title on every fresh visit before the tree
+ * request had settled — and if that request failed, it went on reporting zero
+ * next to the load error, stating a fact about a workspace nobody had managed
+ * to read. `PageHeader` omits the badge for `undefined` precisely because "no
+ * notes yet" and "this page is not counting" are different claims.
+ *
+ * Keyed on whether a tree has ever loaded, not on `loading`: a non-silent
+ * refresh raises `loading` over a tree already on screen, and blanking the
+ * badge there would be a flicker rather than honesty. Once a tree is known, a
+ * later failed refresh keeps the last count instead of retracting it.
+ */
+export function headerNoteCount(noteCount: number, treeKnown: boolean): number | undefined {
+  return treeKnown ? noteCount : undefined;
+}

@@ -8,7 +8,9 @@ import { act, createElement, lazy, Suspense } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { financeFallbackTitle } from "@/components/app-shell";
 import { RouteLoading } from "@/components/route-loading";
+import { FINANCE_PAGES } from "@/views/finance/FinanceSection";
 
 /**
  * A code-split route is named while its chunk is still in flight (codex review
@@ -89,10 +91,21 @@ type Boundary = {
  * A regex cannot do this: every real fallback in this repo contains nested
  * braces, and the lazy one (`[^}]*`) stops at the first `}` of a `className`
  * interpolation and reports an empty fallback for a boundary that has one.
+ *
+ * The *attribute* is matched with a regex, though, and with optional whitespace
+ * around the `=`. A literal `"fallback="` search missed
+ * `<Suspense fallback = {…}>` — which is valid JSX and which prettier has no
+ * reason to touch inside a multi-line prop list — and a missed boundary is not
+ * a missed assertion here: `boundaries()` simply would not yield it, so it
+ * would skip every heading check silently rather than fail one.
  */
+const FALLBACK_ATTR = /fallback\s*=\s*/g;
+
 function fallbackAt(source: string, from: number): { text: string; end: number } | null {
-  const at = source.indexOf("fallback=", from);
-  if (at < 0) return null;
+  FALLBACK_ATTR.lastIndex = from;
+  const match = FALLBACK_ATTR.exec(source);
+  if (!match) return null;
+  const at = match.index + match[0].length;
   const open = source.indexOf("{", at);
   if (open < 0) return null;
   let depth = 0;
@@ -266,5 +279,71 @@ describe("RouteLoading names the page it is standing in for", () => {
     });
     const h1 = container.querySelector("h1");
     expect(h1?.className).toContain("sr-only");
+  });
+});
+
+/**
+ * The scanner itself, held to the JSX it claims to read.
+ *
+ * `boundaries()` yielding nothing is indistinguishable from every boundary
+ * passing — the suite goes green either way — so the one failure mode worth
+ * asserting directly is the scanner missing a boundary it should have found.
+ * A literal `"fallback="` search missed `<Suspense fallback = {…}>`, which is
+ * valid JSX.
+ */
+describe("the fallback scanner", () => {
+  it("finds the attribute with or without spaces around the `=`", () => {
+    for (const spelling of [
+      "fallback={<RouteLoading title=\"Wallet\" />}",
+      "fallback = {<RouteLoading title=\"Wallet\" />}",
+      "fallback ={<RouteLoading title=\"Wallet\" />}",
+      "fallback= {<RouteLoading title=\"Wallet\" />}",
+    ]) {
+      const found = fallbackAt(`<Suspense ${spelling}>`, 0);
+      expect(found, spelling).not.toBeNull();
+      expect(found?.text, spelling).toContain("RouteLoading");
+      expect(found?.text, spelling).toContain("Wallet");
+    }
+  });
+
+  it("still balances braces rather than stopping at the first `}`", () => {
+    const found = fallbackAt(
+      '<Suspense fallback = {<RouteLoading className={`a ${b}`} title="Wallet" />}>',
+      0,
+    );
+    expect(found?.text).toContain("Wallet");
+  });
+
+  it("answers null when there is no boundary at all", () => {
+    expect(fallbackAt("<div>nothing here</div>", 0)).toBeNull();
+  });
+});
+
+/**
+ * The finance boundary names the subpage it is standing in for.
+ *
+ * On a cold direct visit to `#/finances/wallet` this boundary is the whole
+ * page, so its `h1` is what a screen reader announces — and a single
+ * "Finances" for every subpage announced the wrong page to someone who had
+ * bookmarked one, correcting itself only once the chunk landed.
+ *
+ * The shell cannot import its titles from `FinanceSection`: a static import of
+ * anything in that module pulls the chunk eagerly and there is no lazy boundary
+ * left to name. So the map is spelled out there and reconciled here, where
+ * importing both is free — a subpage added to `FINANCE_PAGES` without a title
+ * fails this rather than quietly inheriting the section heading.
+ */
+describe("the finance fallback names every subpage", () => {
+  it("matches each subpage's own label", () => {
+    for (const page of FINANCE_PAGES) {
+      if (page.id === "overview") continue;
+      expect(financeFallbackTitle(page.id), page.id).toBe(page.label);
+    }
+  });
+
+  it("falls back to the section for the overview and for no subpage at all", () => {
+    expect(financeFallbackTitle(null)).toBe("Finances");
+    expect(financeFallbackTitle("overview")).toBe("Finances");
+    expect(financeFallbackTitle("not-a-page")).toBe("Finances");
   });
 });

@@ -16,7 +16,7 @@
 import { describe, expect, it } from "vitest";
 
 import { OPERATOR_ORIGIN, type FsNode } from "@/api/workspace";
-import { countNotes } from "@/lib/workspace";
+import { countNotes, headerNoteCount } from "@/lib/workspace";
 
 /** A prose note: the host omits `mime`/`size`/`sha256` on one entirely. */
 function note(id: string, name: string, parentId: string | null = null): FsNode {
@@ -74,5 +74,33 @@ describe("the Workspace header's note count", () => {
 
   it("is zero for an empty workspace, so a zero reads as a zero", () => {
     expect(countNotes([])).toBe(0);
+  });
+});
+
+/**
+ * A count is a claim, and the header must not make one it cannot support.
+ *
+ * `nodes` starts empty with `loading` true, so the header put an authoritative
+ * `0` beside the title on every fresh visit before the tree request settled —
+ * and went on reporting zero next to a load error, describing a workspace
+ * nobody had managed to read. `PageHeader` omits the badge for `undefined`
+ * exactly so "no notes yet" and "not counting" stay different claims.
+ */
+describe("the header count while the tree is unknown", () => {
+  it("says nothing before a tree has ever loaded", () => {
+    expect(headerNoteCount(0, false)).toBeUndefined();
+    // Not even a count it happens to have: unknown is unknown.
+    expect(headerNoteCount(7, false)).toBeUndefined();
+  });
+
+  it("reports an authoritative empty workspace as zero", () => {
+    expect(headerNoteCount(0, true)).toBe(0);
+  });
+
+  it("keeps the last known count rather than retracting it", () => {
+    // A non-silent refresh raises `loading` over a tree already on screen, and
+    // a failed one leaves `error` set; neither un-knows the tree, so blanking
+    // the badge in either case would be a flicker rather than honesty.
+    expect(headerNoteCount(7, true)).toBe(7);
   });
 });
