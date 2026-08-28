@@ -257,7 +257,7 @@ impl LifecycleScheduler {
                 if elapsed >= SEVEN_DAYS_MILLIS + LOOKBACK_MILLIS {
                     continue; // past the bounded catch-up window; see LOOKBACK_MILLIS
                 }
-                match self.maybe_nudge(&company, &runtime, &user).await {
+                match self.maybe_nudge(&company, &runtime, &user, now).await {
                     Ok(true) => nudged += 1,
                     Ok(false) => {}
                     Err(err) => {
@@ -276,11 +276,18 @@ impl LifecycleScheduler {
 
     /// Decides and, if owed, dispatches one user's week-1 nudge. Returns
     /// whether a nudge was actually filed.
+    ///
+    /// `now` is this tick's own evaluation instant (from [`Self::tick`]'s
+    /// `self.clock.now_millis()`) — passed through to
+    /// [`user_saved_workflow_in_week1`] so a save that lands after the
+    /// nominal week-1 window but before this tick actually runs still
+    /// suppresses the nudge; see that function's docs.
     async fn maybe_nudge(
         &self,
         company: &CompanyId,
         runtime: &CompanyRuntime,
         user: &UserRecord,
+        now: u64,
     ) -> crate::Result<bool> {
         // The idempotency ledger: has this user already been nudged?
         let existing = runtime.notifications().list(company, &user.id).await?;
@@ -290,10 +297,16 @@ impl LifecycleScheduler {
         {
             return Ok(false);
         }
-        if user_saved_workflow_in_week1(company, runtime.events(), &user.id, user.created_at_millis)
-            .await?
+        if user_saved_workflow_in_week1(
+            company,
+            runtime.events(),
+            &user.id,
+            user.created_at_millis,
+            now,
+        )
+        .await?
         {
-            return Ok(false); // earned activation inside the window: no nudge owed
+            return Ok(false); // earned activation by the time this tick ran: no nudge owed
         }
 
         // The in-app row lands FIRST and unconditionally — it is both the

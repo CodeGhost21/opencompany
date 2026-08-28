@@ -63,7 +63,25 @@ pub(crate) const NUDGE_KIND: &str = "workflow_nudge";
 
 /// Whether `user_id` has at least one workflow attributed to them
 /// (`WorkflowCreated { by: Some(Actor { id: user_id, .. }), .. }`) journaled
-/// inside their week-1 window `[signup_millis, signup_millis + 7d)`.
+/// at or before `evaluated_at_millis` — the instant the scheduler is
+/// actually deciding whether to nudge, not the nominal week-1 boundary.
+///
+/// # Why `evaluated_at_millis`, not a fixed `signup_millis + 7d` cutoff
+///
+/// [`LifecycleScheduler::tick`](crate::runtime::LifecycleScheduler::tick)
+/// runs at most once a day, so the tick that first finds a user past their
+/// day-7 boundary can land anywhere up to ~24h after it (the scheduler's own
+/// `TICK_INTERVAL`). A save that lands in that gap — after the
+/// nominal week-1 window closes but before the scheduler actually looks — is
+/// a save all the same, and the module docs above already frame the bar as
+/// "never saved a workflow **at all**", not "saved one in exactly the first
+/// 168 hours". Stopping the count at a fixed `signup_millis + 7d` regardless
+/// of when the scheduler is asking would nudge (and email) a user who, by
+/// the time the message lands, has already done the thing being asked of
+/// them. The caller always passes its tick's own `now`, so this is
+/// equivalent to "has the user saved one by the moment we're about to nudge
+/// them" — never wider than that, since a save has to exist to be counted at
+/// all.
 ///
 /// Reads the whole journal — the same cost
 /// [`activation::any_workflow_run_succeeded`](crate::company::activation)
@@ -77,14 +95,14 @@ pub(crate) async fn user_saved_workflow_in_week1(
     events: &Arc<dyn EventLog>,
     user_id: &str,
     signup_millis: u64,
+    evaluated_at_millis: u64,
 ) -> Result<bool> {
-    let window_end = signup_millis.saturating_add(SEVEN_DAYS_MILLIS);
     let stored = events
         .read_from(company, crate::ports::types::EventSeq::new(0), usize::MAX)
         .await?;
     Ok(stored.iter().any(|entry| {
         entry.at_millis >= signup_millis
-            && entry.at_millis < window_end
+            && entry.at_millis <= evaluated_at_millis
             && matches!(
                 &entry.event,
                 CompanyEvent::WorkflowCreated { by: Some(actor), .. }
@@ -182,9 +200,15 @@ mod test {
         journal_created(&events, &id, signup, Some("user-1")).await;
 
         assert!(
-            user_saved_workflow_in_week1(&id, &events, "user-1", signup)
-                .await
-                .unwrap(),
+            user_saved_workflow_in_week1(
+                &id,
+                &events,
+                "user-1",
+                signup,
+                signup + SEVEN_DAYS_MILLIS
+            )
+            .await
+            .unwrap(),
             "the user's own attributed create must count"
         );
     }
@@ -200,9 +224,15 @@ mod test {
         journal_created(&events, &id, signup, Some("teammate")).await;
 
         assert!(
-            !user_saved_workflow_in_week1(&id, &events, "user-1", signup)
-                .await
-                .unwrap(),
+            !user_saved_workflow_in_week1(
+                &id,
+                &events,
+                "user-1",
+                signup,
+                signup + SEVEN_DAYS_MILLIS
+            )
+            .await
+            .unwrap(),
             "a teammate's create must not activate a different user"
         );
     }
@@ -218,9 +248,15 @@ mod test {
         journal_created(&events, &id, signup, None).await;
 
         assert!(
-            !user_saved_workflow_in_week1(&id, &events, "user-1", signup)
-                .await
-                .unwrap(),
+            !user_saved_workflow_in_week1(
+                &id,
+                &events,
+                "user-1",
+                signup,
+                signup + SEVEN_DAYS_MILLIS
+            )
+            .await
+            .unwrap(),
         );
     }
 
@@ -236,10 +272,44 @@ mod test {
         journal_created(&events, &id, future_signup, Some("user-1")).await;
 
         assert!(
-            !user_saved_workflow_in_week1(&id, &events, "user-1", future_signup)
+            !user_saved_workflow_in_week1(
+                &id,
+                &events,
+                "user-1",
+                future_signup,
+                future_signup + SEVEN_DAYS_MILLIS
+            )
+            .await
+            .unwrap(),
+            "a create that landed before the window opened must not count"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_create_after_the_nominal_window_but_before_the_tick_counts() {
+        // The false-nudge gap this fix closes: the scheduler's own tick can
+        // land hours after the nominal `signup + 7d` boundary, and a save in
+        // that gap is a save all the same.
+        let (store, events, _dir) = stores();
+        let id = CompanyId::new("acme");
+        seed_company(&store, &id).await;
+
+        // Claim a signup far enough in the past that "now" (when this create
+        // actually lands) is already outside the nominal 7-day window.
+        let signup = crate::ports::now_millis() - SEVEN_DAYS_MILLIS - 60_000;
+        journal_created(&events, &id, signup, Some("user-1")).await;
+        let evaluated_at = crate::ports::now_millis();
+
+        assert!(
+            evaluated_at > signup + SEVEN_DAYS_MILLIS,
+            "test setup: the create must land after the nominal window closes"
+        );
+        assert!(
+            user_saved_workflow_in_week1(&id, &events, "user-1", signup, evaluated_at)
                 .await
                 .unwrap(),
-            "a create that landed before the window opened must not count"
+            "a save after the nominal window but before the scheduler's own \
+             evaluation instant must still count — the user did save one"
         );
     }
 }
