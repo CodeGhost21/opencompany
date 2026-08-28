@@ -408,6 +408,24 @@
        non-text mark needs, so neither theme has to bend it. Their navy (#012A38)
        and white variants each vanish into one of the two. */
     --brand-chargebee: #ff3300;
+
+    /* PayPal's monogram, which is three colours rather than one: the back P,
+       the front P, and the region where they cross.
+
+       The back P is the only one that moves with the theme, and it has to.
+       #002991 on the dark canvas measures 1.61:1 — under the 3:1 a mark needs,
+       and far enough under that the back P stops reading as a letter and starts
+       reading as a hole. #008cff is PayPal's own next step up and clears it at
+       5.77:1. Same argument as `--brand-discord-on-light` above: still their
+       palette, only a different step of it.
+
+       On dark the back P and the crossing region land on the same value, which
+       is correct — the crossing only exists to darken the front P where it
+       passes over the back one, and there is nothing left to darken. */
+    --brand-paypal-back: #002991;
+    --brand-paypal-back-on-dark: #008cff;
+    --brand-paypal-front: #60cdff;
+    --brand-paypal-overlap: #008cff;
 }
 
 .dark {

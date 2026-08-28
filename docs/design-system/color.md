@@ -358,5 +358,15 @@ mark on Finance → Invoicing. One token where Discord needs three: as a mark
 rather than a label it only has to clear 3:1, which it does on both grounds
 (5.36:1 dark, 3.67:1 light), so neither theme needs its own step.
 
+PayPal's monogram on Finance → Wallet needs four, because the mark is two
+overlapping P's and their crossing is its own colour: `--brand-paypal-back`,
+`--brand-paypal-front`, `--brand-paypal-overlap`, and a themed
+`--brand-paypal-back-on-dark`. The back P is the one that has to move —
+`#002991` measures 1.61:1 on the dark canvas, well under the 3:1 above, at
+which point it stops reading as a letter and reads as a hole. `#008cff` is
+PayPal's own next step up and clears it at 5.77:1. A two-tone mark also cannot
+take `currentColor`, so these are referenced as `fill-(--brand-paypal-*)` on
+the paths rather than inherited from the call site.
+
 Anything drawn on top of a provider colour must not assume a light or dark
 ground — they span `#0F0F0F` to `#EA4335`.

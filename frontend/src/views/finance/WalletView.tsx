@@ -6,6 +6,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { getBalance, listTransactions, testPaypal, type Balance, type Transaction } from "@/api/finance";
 import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
+import { PaypalIcon } from "@/components/paypal-icon";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -247,6 +248,7 @@ export function WalletView({ client, company }: Props) {
         <ConnectionPanel
           title="PayPal"
           testId="paypal"
+          logo={<PaypalIcon className="size-4" />}
           health={health}
           expanded={expanded}
           onExpandedChange={setExpanded}
