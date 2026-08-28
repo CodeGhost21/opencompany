@@ -675,7 +675,10 @@ async fn apply_workflow_proposal(
     // desk (or a company record that fails to load) leaves `owner_desk`
     // `None` rather than blocking the apply — the same permissive stance
     // `resolve_assignee` above takes toward an unloadable record.
-    if draft.owner_desk.is_none()
+    if draft
+        .owner_desk
+        .as_deref()
+        .is_none_or(|desk| desk.trim().is_empty())
         && let Ok(Some(company_record)) = company.runtime.store().load(company.id()).await
     {
         // Issue #1882 review: a card assigned directly to a desk stores the
