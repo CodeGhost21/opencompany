@@ -1062,7 +1062,7 @@ export function LedgersView({
                   taskFor={
                     isBoard ? (entry) => taskById.get(entry.id) : undefined
                   }
-                  approvals={approvals}
+                  approvals={authoritativeApprovals}
                   now={clock}
                   // #1891: a blocked card decides in place, through the shell's
                   // one resolve. The same four the run drawer already receives.
