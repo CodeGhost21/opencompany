@@ -48,7 +48,8 @@ use crate::harness::HarnessPool;
 use crate::harness::policy::ApprovalRequestQueue;
 use crate::ports::journal::MemoryJournalStore;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyId, CompanyRecord, CompanySummary, LedgerEntry, Verdict,
+    Actor, ActorKind, ApprovalId, CompanyId, CompanyRecord, CompanySummary, LedgerEntry, StartedBy,
+    Verdict,
 };
 use crate::ports::{
     CompanyStore, Durability, JournalStore, WorkflowRun, WorkflowRunContext, WorkflowRunner,
@@ -566,8 +567,18 @@ async fn runtime_with_gated_store(
 /// returns the run id. The agent node parks its gated call and the run settles
 /// Blocked rather than erroring.
 async fn cold_run(rt: &Arc<crate::company::runtime::CompanyRuntime>) -> String {
+    cold_run_with_started_by(rt, StartedBy::Operator).await
+}
+
+/// Same as [`cold_run`], but names the triggering `started_by` explicitly —
+/// for tests that need an agent- or schedule-started run rather than the
+/// operator default (issue #1862 prerequisite).
+async fn cold_run_with_started_by(
+    rt: &Arc<crate::company::runtime::CompanyRuntime>,
+    started_by: StartedBy,
+) -> String {
     let file = parse_workflow(SOLO_TOML).expect("graph parses");
-    let ctx = WorkflowRunContext::new(false);
+    let ctx = WorkflowRunContext::new(false).with_started_by(started_by);
     let run_id = ctx.run_id.clone();
     let runner = rt.workflow_runner().cloned().expect("a runner is wired");
     runner
@@ -751,6 +762,77 @@ async fn a_restart_between_park_and_approve_still_continues_the_run() {
             .iter()
             .all(|(t, ..)| t != &turn),
         "the resolved block's durable stash is retired on release"
+    );
+}
+
+/// Issue #1862 prerequisite (`CodeRabbit`, comment `3879554180`; also raised by
+/// `chatgpt-codex-connector`, comment `3879402310`): a restart between park and
+/// approve must not silently reattribute an agent-started run to `Operator`.
+///
+/// [`BlockedNodeQueue::rearm`](crate::runtime::blocked_nodes::BlockedNodeQueue::rearm)
+/// used to hardcode `StartedBy::Operator` for every stash it rehydrated,
+/// because the durable [`BlockedNodeStashed`](crate::runtime::journal::JournalRecord::BlockedNodeStashed)
+/// record only ever carried `(turn, workflow_id, input)` — the run's real
+/// attribution never made it onto that record in the first place, so `rearm`
+/// had nothing but the coarse default to fall back on. An agent-started run
+/// that blocked and outlived a process/host replacement would come back
+/// attributed to `Operator`, so a later blocker DM would address the wrong
+/// sender — defeating the whole point of issue #1862's prerequisite for any
+/// run a restart landed on. This is otherwise the identical scenario
+/// `a_restart_between_park_and_approve_still_continues_the_run` drives; that
+/// test's cold run is operator-started, so it could not have caught a
+/// mis-attribution to the very value it never left.
+#[tokio::test]
+async fn a_restart_between_park_and_approve_preserves_agent_attribution() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run_with_started_by(&rt, StartedBy::Agent("ceo".to_string())).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1, "the cold run parks exactly one card");
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // Simulate the process/host replacement: the in-memory queue is gone.
+    let lost = rt.blocked_nodes().release(&turn);
+    assert!(
+        lost.is_some(),
+        "precondition: the block was in the in-memory queue before the drop"
+    );
+
+    // Boot rehydrate — byte-for-byte the call `RuntimeBuilder` makes from the
+    // journal's still-live stashes.
+    rt.blocked_nodes().rearm(rt.journal().blocked_stashes());
+    let rehydrated = rt
+        .blocked_nodes()
+        .peek(&turn)
+        .expect("the durable record re-armed the queue after the restart");
+    assert_eq!(
+        rehydrated.started_by,
+        StartedBy::Agent("ceo".to_string()),
+        "a restart between park and approve must rehydrate the run's real \
+         attribution, not silently degrade an agent-started run to Operator"
+    );
+
+    // The operator approves after the restart; the rehydrated stash's
+    // attribution rides the continuation exactly as it would have with no
+    // restart at all.
+    resolve_and_settle(&rt, &cards[0], Verdict::Approve).await;
+    assert_eq!(
+        runner.started(),
+        2,
+        "an approval after a restart re-dispatches the run from the durable stash"
     );
 }
 
