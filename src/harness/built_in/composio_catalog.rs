@@ -899,12 +899,19 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// identity documents, etc.) are served from `files.stripe.com` — a sibling
 /// host again, not a subdomain of `api.stripe.com`, so it needs its own entry
 /// the same way `uploads.github.com` did.
+///
+/// Gmail repeats the Drive shape (PR #1780 review, round 7): sending or
+/// importing a message through the legacy media/resumable upload route hits
+/// `www.googleapis.com/upload/gmail/v1/users/me/messages/send` — a sibling
+/// path prefix under the shared gateway host, not a deeper path under
+/// `/gmail/`, exactly like Drive's `/upload/drive/` entry above. It needs its
+/// own prefix in Gmail's set the same way.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
         "github" => &[("api.github.com", &[]), ("uploads.github.com", &[])],
         "gmail" => &[
             ("gmail.googleapis.com", &[]),
-            ("www.googleapis.com", &["/gmail/"]),
+            ("www.googleapis.com", &["/gmail/", "/upload/gmail/"]),
         ],
         "googlecalendar" => &[
             ("calendar.googleapis.com", &[]),
@@ -1776,6 +1783,15 @@ mod tests {
     /// shared legacy gateway an agent plausibly curls by hand. Before the fix
     /// the table only had the dedicated host, so this call passed through
     /// unscoped.
+    ///
+    /// PR #1780 review: like Drive's `/upload/drive/` sibling prefix
+    /// (finding 7), Gmail's legacy-gateway media/resumable upload route for
+    /// sending or importing a message with an attachment is
+    /// `/upload/gmail/v1/users/me/messages/send`, not `/gmail/v1/...` — a
+    /// sibling path prefix under the same host, not a deeper path under
+    /// `/gmail/`. Before the fix `gmail`'s prefix set only had `/gmail/`, so
+    /// this raw unauthenticated request passed straight through instead of
+    /// being deflected to Composio.
     #[test]
     fn gmail_deflection_on_the_legacy_host_is_scoped_to_gmail_paths() {
         let connected = vec!["gmail".to_string()];
@@ -1798,6 +1814,15 @@ mod tests {
             )
             .is_some(),
             "the dedicated Gmail host stays deflected unscoped"
+        );
+        assert!(
+            web_call_deflection(
+                &connected,
+                "https://www.googleapis.com/upload/gmail/v1/users/me/messages/send"
+            )
+            .is_some(),
+            "the legacy media/resumable upload route on the shared gateway host must also be \
+             deflected, the same as Drive's sibling /upload/drive/ prefix"
         );
     }
 
