@@ -4460,6 +4460,31 @@ impl CompanyRecord {
     /// blueprint that authored the company's General desk keeps it, which is
     /// the grandfathering this host has always honoured.
     pub fn resolve_desk_id(&self, key: &str) -> Option<String> {
+        // **Exact ids win over display-name aliases, everywhere** (issue #1862
+        // review). Desk creation enforces id uniqueness but not name
+        // uniqueness, so `{id: "ops", name: "sales"}` is a valid desk that can
+        // sit ahead of `{id: "sales", …}` in either list. A single pass whose
+        // predicate is `id == key || name == key` returns whichever comes
+        // first, so asking for the id `sales` could answer `ops` — an
+        // ownership write silently targeting a different desk. Resolve the
+        // unambiguous thing first: a key that *is* an id always means that
+        // desk. Only when no desk owns the key as an id does a display-name
+        // alias get a say, and the alias pass below keeps the manifest-first
+        // order and the General guards exactly as they were.
+        if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
+            return Some(exact.id.clone());
+        }
+        if !crate::server::chat_history::is_general_chat(Some(key)) {
+            if let Some(exact) = self
+                .overlay_desks
+                .iter()
+                .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                .find(|d| d.id == key)
+            {
+                return Some(exact.id.clone());
+            }
+        }
+
         self.manifest
             .group_chats
             .iter()
@@ -6938,6 +6963,68 @@ mod test {
         let mut record = mint_record();
         add_overlay(&mut record, "Dana_Designer", "Dana Designer");
         assert_eq!(record.mint_agent_id("Dana Designer"), "dana_designer_2");
+    }
+
+    /// **Issue #1862 review**: an exact desk id must win over another desk's
+    /// display name.
+    ///
+    /// Desk creation enforces id uniqueness but not name uniqueness, so
+    /// `{id: "ops", name: "sales"}` is a valid desk that can sit ahead of
+    /// `{id: "sales", …}`. A single pass whose predicate is
+    /// `id == key || name == key` returns whichever comes first, so asking for
+    /// the id `sales` answered `ops` — an ownership write silently targeting a
+    /// different desk than the caller named.
+    #[test]
+    fn an_exact_desk_id_beats_another_desks_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        // Deliberately in the order that loses under a first-match search: the
+        // desk merely *named* "sales" is created first.
+        record.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "sales".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+        record.overlay_desks.push(OverlayDesk {
+            id: "sales".into(),
+            name: "Revenue".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+
+        assert_eq!(
+            record.resolve_desk_id("sales").as_deref(),
+            Some("sales"),
+            "an exact id must resolve to itself, not to a desk that merely \
+             carries it as a display name"
+        );
+        // The alias still resolves for a key no desk owns as an id.
+        assert_eq!(record.resolve_desk_id("Revenue").as_deref(), Some("sales"));
+        assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+    }
+
+    /// A manifest desk's id also beats an overlay desk's display name — the
+    /// exact-id pass spans both lists, so ordering between them cannot decide
+    /// an ownership write either.
+    #[test]
+    fn a_manifest_desk_id_beats_an_overlay_desks_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"growth\"\nname = \"Content\"\nmembers = [\"ceo\"]\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_desks.push(OverlayDesk {
+            id: "studio".into(),
+            name: "growth".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+
+        assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
     }
 
     /// Desks resolve *before* teammates in `assignee::resolve`, by id and by
