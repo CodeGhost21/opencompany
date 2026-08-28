@@ -746,6 +746,40 @@ impl Drop for SseStreamGuard {
 /// user added or renamed after the stream opened picks up the new label.
 const LABEL_REFRESH_EVERY: Duration = Duration::from_secs(60);
 
+/// Re-derives whether `actor` (the human behind an open SSE connection) still
+/// holds admin access, for [`company_events`]'s periodic refresh.
+///
+/// Fixes issue #1781 review (Codex P1): the `is_admin` this feeds used to be
+/// captured once at stream-open time and never reconsidered, so a mid-stream
+/// demotion kept projecting the admin-only owner-fallback report to the
+/// now-non-admin user for as long as their tab stayed open — `PATCH
+/// …/users/{id}` updates the stored role without revoking sessions on a plain
+/// demotion (only a suspension does that; see `src/server/users/admin.rs`'s
+/// `update_user`), and an already-open SSE response performs no further
+/// authentication of its own.
+///
+/// Returns `previous` unchanged — rather than defaulting either direction —
+/// for the machine principal (`actor: None`, unrestricted by construction per
+/// [`ScopedCompany::is_admin`]'s own doc), on a store error, or when the user
+/// record is missing. This matches the label refresh's own fail-quiet error
+/// handling just above its call site: a transient read failure should not
+/// flip a live connection's access either way.
+async fn refreshed_is_admin(
+    runtime: &CompanyRuntime,
+    actor: Option<&Actor>,
+    previous: bool,
+) -> bool {
+    let Some(actor) = actor else {
+        return previous;
+    };
+    match runtime.users().get_user(runtime.id(), &actor.id).await {
+        Ok(Some(user)) => {
+            user.role.may_administer() && user.status == crate::ports::users::UserStatus::Active
+        }
+        _ => previous,
+    }
+}
+
 /// `GET {scope}/events` — the company → operator attention feed (issue #66).
 ///
 /// Subscribes to the company's [`EventLog`](crate::ports::EventLog) and streams a
@@ -772,7 +806,18 @@ async fn company_events(
     // `history_for_desk` already gates it (issue #1781 review, Codex P1) — a
     // non-admin must never see the admin-only report just because they had
     // the stream open when it landed.
-    let is_admin = scope.is_admin;
+    //
+    // Held in a shared cell, not a captured `bool`: `scope.is_admin` is only
+    // this connection's role *at open time*, and this stream can outlive a
+    // demotion. `PATCH …/users/{id}` updates the stored role without
+    // revoking sessions on a plain demotion (only a suspension does that),
+    // and an already-open SSE response performs no further authentication —
+    // so a captured `true` would keep projecting the owner-fallback report to
+    // a now-non-admin user for as long as their tab stayed open (issue #1781
+    // review, Codex P1). The periodic refresh below re-derives it from the
+    // live user record, the same bounded staleness window the label refresh
+    // just below already accepts for mention chips.
+    let is_admin = Arc::new(std::sync::atomic::AtomicBool::new(scope.is_admin));
     let subscription = scope.runtime.events().subscribe(&company);
     // Roster display labels for mention chips. Held in a shared lock rather
     // than captured once: the stream outlives membership changes that can add
@@ -787,6 +832,8 @@ async fn company_events(
     let label_refresh = {
         let runtime = scope.runtime.clone();
         let shared = Arc::clone(&authors);
+        let is_admin_cell = Arc::clone(&is_admin);
+        let actor = scope.actor.clone();
         tokio::spawn(async move {
             let mut cancel = cancel_rx;
             loop {
@@ -802,6 +849,9 @@ async fn company_events(
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
                 }
+                let previous = is_admin_cell.load(std::sync::atomic::Ordering::Relaxed);
+                let refreshed = refreshed_is_admin(&runtime, actor.as_ref(), previous).await;
+                is_admin_cell.store(refreshed, std::sync::atomic::Ordering::Relaxed);
             }
         })
     };
@@ -816,6 +866,7 @@ async fn company_events(
         let authors = authors
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_admin = is_admin.load(std::sync::atomic::Ordering::Relaxed);
         let event = project_stream_item_for_viewer(&item, &authors, &viewer, is_admin)
             .map(|value| Ok(Event::default().data(value.to_string())));
         std::future::ready(event)
@@ -11640,5 +11691,94 @@ mode = "full"
             "engineering",
             "a desk with a lead still stores its canonical id"
         );
+    }
+
+    /// Issue #1781 review (Codex P1): [`company_events`]'s periodic refresh
+    /// must re-derive admin access from the live user record, not keep
+    /// answering with whatever it was when the SSE stream opened. Proven
+    /// directly against [`refreshed_is_admin`] — the seam that refresh loop
+    /// calls on every tick — rather than the SSE handler itself, since the
+    /// handler's own timing (a real `EventSource`, a 60s interval) is not
+    /// what this bug is about.
+    #[tokio::test]
+    async fn refreshed_is_admin_reflects_a_mid_stream_demotion() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut user = crate::ports::users::UserRecord {
+            id: "u1".to_string(),
+            email: "admin@acme.test".to_string(),
+            display_name: None,
+            avatar: None,
+            role: crate::ports::users::UserRole::Admin,
+            status: crate::ports::users::UserStatus::Active,
+            password_hash: None,
+            must_change_password: false,
+            created_at_millis: crate::ports::now_millis(),
+            last_seen_at_millis: None,
+            updated_at_millis: crate::ports::now_millis(),
+        };
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+        let actor = Actor {
+            kind: ActorKind::User,
+            id: user.id.clone(),
+        };
+
+        assert!(
+            refreshed_is_admin(&runtime, Some(&actor), false).await,
+            "an active admin's record must resolve to admin, even starting from a stale `false`"
+        );
+
+        // The demotion itself: same shape `PATCH …/users/{id}` writes, and —
+        // critically — it does not touch sessions, so a connection opened
+        // before this write stays open exactly as it would in production.
+        user.role = crate::ports::users::UserRole::Member;
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+
+        assert!(
+            !refreshed_is_admin(&runtime, Some(&actor), true).await,
+            "a demoted user's live record must flip a stale `true` to `false` — this is \
+             exactly the check `company_events` failed to make before this fix, leaking the \
+             owner-fallback admin-only report to a demoted viewer for the rest of their stream"
+        );
+
+        // Suspension revokes admin the same way, even if role were untouched.
+        user.role = crate::ports::users::UserRole::Admin;
+        user.status = crate::ports::users::UserStatus::Suspended;
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+
+        assert!(
+            !refreshed_is_admin(&runtime, Some(&actor), true).await,
+            "a suspended admin must not keep admin-only visibility either"
+        );
+    }
+
+    /// The machine principal has no user record to look up — `actor: None` —
+    /// and [`ScopedCompany::is_admin`]'s own doc says it is unrestricted by
+    /// construction, so the refresh must leave it alone rather than treating
+    /// a missing actor as "look up nothing, therefore not admin".
+    #[tokio::test]
+    async fn refreshed_is_admin_leaves_the_machine_principal_unchanged() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        assert!(refreshed_is_admin(&runtime, None, true).await);
+        assert!(!refreshed_is_admin(&runtime, None, false).await);
     }
 }
