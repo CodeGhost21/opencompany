@@ -936,6 +936,18 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// `/upload/gmail/` sibling above. Gmail's prefix set only had `/gmail/` and
 /// `/upload/gmail/`, so a batched Gmail request bypassed deflection the same
 /// way Drive's and Calendar's batch requests did before rounds 8 and 9.
+///
+/// Dropbox was missing from this table entirely (PR #1780 review, round 11):
+/// it is a first-class toolkit in the operator console's connection
+/// catalogue (`frontend/src/lib/connections.ts`), but had no match arm here,
+/// so it fell through to the `_ => &[]` default — no hosts, meaning no
+/// deflection ever fired for a connected Dropbox toolkit. Like GitHub and
+/// Stripe, Dropbox's API is split across two SIBLING hosts rather than one
+/// host with path prefixes: `api.dropboxapi.com` for the RPC-style calls
+/// (`/2/files/list_folder`, ...) and `content.dropboxapi.com` for the
+/// content-transfer calls (`/2/files/upload`, `/2/files/download`), so both
+/// get their own unscoped entry the same way `uploads.github.com` and
+/// `files.stripe.com` do.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
         "github" => &[("api.github.com", &[]), ("uploads.github.com", &[])],
@@ -967,6 +979,7 @@ fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'stat
             ("atlassian.net", &["/rest/"]),
         ],
         "discord" => &[("discord.com", &["/api/"]), ("discordapp.com", &["/api/"])],
+        "dropbox" => &[("api.dropboxapi.com", &[]), ("content.dropboxapi.com", &[])],
         _ => &[],
     }
 }
@@ -1968,6 +1981,29 @@ mod tests {
         assert!(
             web_call_deflection(&connected, "https://api.stripe.com/v1/charges").is_some(),
             "the dedicated API host stays deflected"
+        );
+    }
+
+    /// PR #1780 review (round 11): `dropbox` is a first-class toolkit in the
+    /// operator console's connection catalogue
+    /// (`frontend/src/lib/connections.ts`), but `toolkit_api_hosts` had no
+    /// match arm for it and fell through to the `_ => &[]` default, so a
+    /// company that connected Dropbox got no deflection at all — a raw call
+    /// to either of Dropbox's two API hosts (the RPC host and the
+    /// content-transfer host used for upload/download) passed straight
+    /// through unauthenticated instead of being deflected to Composio.
+    #[test]
+    fn dropbox_is_deflected_across_its_api_and_content_hosts() {
+        let connected = vec!["dropbox".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://api.dropboxapi.com/2/files/list_folder")
+                .is_some(),
+            "the RPC API host must be deflected"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://content.dropboxapi.com/2/files/upload")
+                .is_some(),
+            "the content-transfer host (upload/download) must also be deflected"
         );
     }
 }
