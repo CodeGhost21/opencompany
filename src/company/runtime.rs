@@ -2922,12 +2922,6 @@ impl CompanyRuntime {
                 // stalled workflow up.
                 workflow_id: crate::runtime::workflow_resume::gate_workflow_id(&p.effect)
                     .map(str::to_owned),
-                owner_task_id: p
-                    .effect
-                    .run_id
-                    .as_deref()
-                    .and_then(|run_id| self.task_id_for_run(run_id))
-                    .or_else(|| p.task.as_ref().and_then(|task| task.task_id().map(str::to_owned))),
                 id: p.id,
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
