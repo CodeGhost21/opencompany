@@ -927,4 +927,123 @@ mod tests {
         assert_eq!(body["added"], json!([]));
         assert_eq!(body["takesEffect"], TAKES_EFFECT);
     }
+
+    // --- Lock-release-before-rebuild (PR #1875 review finding, CodeRabbit) --
+
+    /// A rebuilder that always succeeds, so `apply_to_runtime` actually reaches
+    /// `rebuild_company` instead of short-circuiting on `can_rebuild_in_place()
+    /// == false` — the default `state()` fixture has none wired, which is why
+    /// every other test above reads `TAKES_EFFECT_RESTART` rather than
+    /// exercising the rebuild path at all.
+    struct AlwaysRebuilds {
+        home: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::RuntimeRebuilder for AlwaysRebuilds {
+        async fn rebuild(
+            &self,
+            _state: &AppState,
+            request: crate::runtime::RebuildRequest,
+        ) -> crate::Result<crate::company::runtime::CompanyRuntime> {
+            RuntimeBuilder::new(self.home.clone(), request.manifest)
+                .with_id(request.id)
+                .with_handover(request.handover)
+                .build()
+                .await
+        }
+    }
+
+    async fn state_with_rebuilder(home: &std::path::Path) -> AppState {
+        state(home)
+            .await
+            .with_rebuilder(std::sync::Arc::new(AlwaysRebuilds {
+                home: home.to_path_buf(),
+            }))
+    }
+
+    /// `add_grant` drops `company_write_lock` before `apply_to_runtime` might
+    /// call into `rebuild_company` — which now takes that same non-reentrant
+    /// lock itself, so a task still holding it across the call would deadlock
+    /// against its own rebuild. Nothing proved that until this test; proven
+    /// the same way `rebuild_company_serializes_against_the_company_write_lock`
+    /// (`src/runtime/rebuild.rs`) proves the equivalent property one layer
+    /// down: hold the lock externally, drive the real request through the
+    /// router, and demand it completes only once the lock is released.
+    #[tokio::test]
+    async fn add_grant_does_not_deadlock_against_its_own_rebuild() {
+        let dir = home();
+        let state = state_with_rebuilder(dir.path()).await;
+
+        let lock = company_write_lock(&CompanyId::new("acme"));
+        let guard = lock.lock().await;
+
+        let state_for_task = state.clone();
+        let mut task = tokio::spawn(async move {
+            call(
+                &state_for_task,
+                "PUT",
+                URI,
+                Some(json!({"namespace": "hosting"})),
+            )
+            .await
+        });
+
+        // The request must be blocked behind the held lock — give it every
+        // chance to (wrongly) race ahead before declaring it stuck.
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "add_grant completed while company_write_lock was held elsewhere — it is not \
+             serializing its save against a concurrent writer"
+        );
+
+        drop(guard);
+        let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect(
+                "add_grant never resumed after the lock was released — it deadlocked against \
+                 its own rebuild_company call",
+            )
+            .expect("task panicked");
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// Same property, for `clear_grants` (PR #1875 review finding, CodeRabbit).
+    #[tokio::test]
+    async fn clear_grants_does_not_deadlock_against_its_own_rebuild() {
+        let dir = home();
+        let state = state_with_rebuilder(dir.path()).await;
+        // Seeded before the lock is held externally, so the withdrawal below
+        // actually changes the manifest and reaches `apply_to_runtime`.
+        call(&state, "PUT", URI, Some(json!({"namespace": "hosting"}))).await;
+
+        let lock = company_write_lock(&CompanyId::new("acme"));
+        let guard = lock.lock().await;
+
+        let state_for_task = state.clone();
+        let mut task =
+            tokio::spawn(async move { call(&state_for_task, "DELETE", URI, None).await });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "clear_grants completed while company_write_lock was held elsewhere — it is not \
+             serializing its save against a concurrent writer"
+        );
+
+        drop(guard);
+        let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect(
+                "clear_grants never resumed after the lock was released — it deadlocked \
+                 against its own rebuild_company call",
+            )
+            .expect("task panicked");
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
 }
