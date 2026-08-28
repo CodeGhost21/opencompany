@@ -897,6 +897,10 @@ export function AppShell({
    * state rather than showing the previous attempt's error under a live one.
    */
   const [failedApprovals, setFailedApprovals] = useState<Record<string, string>>({});
+  /** Cards whose detached approval continuation has not settled yet. */
+  const [continuationTaskIds, setContinuationTaskIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   // The sidebar badge, and the rising edge behind the "needs a sign-off" push.
   //
