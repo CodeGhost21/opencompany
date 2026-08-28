@@ -1,3 +1,5 @@
+import { channelForThread } from "@/views/chat/model";
+
 /**
  * The drain half of app-shell's deferred transcript re-read (issue #1701).
  *
@@ -25,6 +27,14 @@
  * channel is still unknown stay parked for a later drain. The folds `reRead`
  * performs are idempotent (both stores drop already-known message ids), so a
  * deferred replay adds nothing a live frame already delivered.
+ *
+ * Checked through `channelForThread`, not a bare `channelMap[threadId]` index
+ * (issue #1781 review, Codex P2): a settled turn can park under any casing
+ * the host accepted for the General line (`MAIN`, `General`, …), and the map
+ * only ever holds the four canonical spellings. A bare index on an
+ * uncanonical id never matches, even once the map is fully populated, so
+ * that thread would stay parked — and its transcript stale — forever, not
+ * just until the next drain.
  */
 export function drainReReadQueue(
   pending: Set<string>,
@@ -32,7 +42,7 @@ export function drainReReadQueue(
   reRead: (threadId: string) => void,
 ): void {
   for (const threadId of [...pending]) {
-    if (!channelMap[threadId]) continue;
+    if (!channelForThread(channelMap, threadId)) continue;
     pending.delete(threadId);
     reRead(threadId);
   }
