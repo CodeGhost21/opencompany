@@ -367,6 +367,20 @@ export function verdictOf(run: WorkflowRunOutcome): WorkflowRunVerdict {
   if (isBlocked(run)) return "blocked";
   if (undeliveredCount(run.deliveries) > 0) return "undelivered";
   if (awaitingCount(run) > 0) return "awaiting-approval";
+  // Issue #1865 (CodeRabbit review, PR #1883): the host's own ladder —
+  // `WorkflowRunVerdict::of` — checks its `errored_nodes` fact here, last,
+  // immediately before `Ok`. Adding `degraded` to `VERDICT_TONE` alone did not
+  // extend this compatibility ladder to match, so a host predating #981's
+  // `verdict` field still fell through every arm above to `ok` for a settled
+  // run with an `on_error: continue|route` node that errored — even though
+  // `run.nodes[].status` already carries the same fact the host reads. By the
+  // time this arm runs, `isBlocked` above has already returned false, so a
+  // node genuinely blocked on a person was excluded there, not here — the same
+  // ordering the host's own reclassify-then-count rule relies on. Without this
+  // arm the same run reads amber against a new host and green against an old
+  // one, contradicting this fallback's own promise that switching hosts does
+  // not change what a run means.
+  if (run.nodes?.some((node) => node.status === "error")) return "degraded";
   return "ok";
 }
 
