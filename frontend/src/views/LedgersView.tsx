@@ -307,6 +307,7 @@ export function LedgersView({
   decidingApprovals = EMPTY_DECIDING,
   decidedApprovals = EMPTY_DECIDED,
   failedApprovals = EMPTY_FAILED,
+  continuationTaskIds,
   onDecideApproval,
   onListsChanged,
 }: Props) {
