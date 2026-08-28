@@ -2782,6 +2782,44 @@ export function AppShell({
     }, []),
   });
 
+  // PR #1875 review finding, round 13: `shouldHoldShellPending` holds on
+  // `!setupChecked` precisely because `SetupController`'s own `onOpenChange`
+  // is the *only* thing that ever sets it (see `setupChecked`'s own doc) —
+  // but the JSX that mounted `<SetupController>` lived below both of this
+  // function's early returns, reachable only once the ordinary shell itself
+  // was chosen. Every fresh mount starts `setupChecked === false`, so the
+  // very predicate this component exists to satisfy made `SetupController`
+  // unreachable: the hold fired, returned before that JSX, `SetupController`
+  // never mounted, `onOpenChange` never fired, and `setupChecked` stayed
+  // `false` forever — a permanent loader, not a brief hold, for every
+  // signed-in operator except a confirmed non-admin (`isAdmin === false`,
+  // the one path `shouldHoldShellPending` returns early on before ever
+  // reaching `setupChecked`) or one who had already skipped in this tab.
+  // Hoisted here and rendered in every branch below so its roster read can
+  // land regardless of which content this render currently picks. Radix's
+  // `Dialog` (via `SetupDialog`) portals its own content and renders nothing
+  // into normal flow while closed, so mounting it alongside `RouteLoading`
+  // or `OnboardingGate` costs nothing visually.
+  const setupController = (
+    <SetupController
+      client={client}
+      company={company}
+      force={setupForced}
+      routeOpen={view === "setup"}
+      deepLinked={deepLinked}
+      onForceHandled={() => setSetupForced(false)}
+      onOpenChange={handleSetupOpenChange}
+      onCompleted={() => {
+        // Keep these together: Company mounts with the new refresh key, and
+        // setup's payoff is the roster rather than the Overview graph.
+        setTeamBuilt((n) => n + 1);
+        setSetupCompleted(true);
+        setView("company");
+      }}
+      onRouteDismiss={() => setView("overview")}
+    />
+  );
+
   // PR #1875 review finding, round 8 (widened round 10): hold the shell in a
   // neutral pending state — never the ordinary interactive shell, never the
   // gate itself — for as long as the first activation read is unresolved,
@@ -2808,7 +2846,12 @@ export function AppShell({
       retrying: activationGate.retrying,
     })
   ) {
-    return <RouteLoading title="Console" label="Loading…" />;
+    return (
+      <>
+        {setupController}
+        <RouteLoading title="Console" label="Loading…" />
+      </>
+    );
   }
 
   // Issue #1844: the blocking first-run gate. Held behind `!setupOpen` —
@@ -2834,14 +2877,17 @@ export function AppShell({
     activationGate.status
   ) {
     return (
-      <OnboardingGate
-        client={client}
-        company={company}
-        status={activationGate.status}
-        currentName={feed.status.name}
-        onRefresh={activationGate.refresh}
-        onSkip={skipGate}
-      />
+      <>
+        {setupController}
+        <OnboardingGate
+          client={client}
+          company={company}
+          status={activationGate.status}
+          currentName={feed.status.name}
+          onRefresh={activationGate.refresh}
+          onSkip={skipGate}
+        />
+      </>
     );
   }
 
@@ -3339,23 +3385,7 @@ export function AppShell({
         onOpenChange={setFeedbackOpen}
       />
 
-      <SetupController
-        client={client}
-        company={company}
-        force={setupForced}
-        routeOpen={view === "setup"}
-        deepLinked={deepLinked}
-        onForceHandled={() => setSetupForced(false)}
-        onOpenChange={handleSetupOpenChange}
-        onCompleted={() => {
-          // Keep these together: Company mounts with the new refresh key, and
-          // setup's payoff is the roster rather than the Overview graph.
-          setTeamBuilt((n) => n + 1);
-          setSetupCompleted(true);
-          setView("company");
-        }}
-        onRouteDismiss={() => setView("overview")}
-      />
+      {setupController}
 
       <TourController
         company={company}
