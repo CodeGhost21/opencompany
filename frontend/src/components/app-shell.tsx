@@ -410,6 +410,24 @@ const TURN_POLL_MS = 4000;
 const GATE_ADMIN_CHECK_RETRY_MS = 3000;
 
 /**
+ * How many consecutive non-settled `fetchMe` failures before the admin check
+ * reports itself stuck, mirroring `useActivationGate`'s `STUCK_AFTER_FAILURES`
+ * (PR #1875 review finding).
+ *
+ * That hook's `stuck` only tracks its own `getActivation` reads — it has no
+ * way to know the admin check is the one wedged. A durable non-401 `fetchMe`
+ * failure (the same class of backend fault: a proxy 5xx, a downstream outage)
+ * leaves `isGateAdmin` at `null` forever, which keeps `shouldHoldShellPending`
+ * returning `true` (its own `input.isAdmin === null` branch) even while
+ * activation itself is reading fine — so `activationGate.stuck` never flips
+ * and the recovery affordance below never appears, wedging an admin who
+ * cannot reach it behind a loader indistinguishable from the one the
+ * activation-side fix already closed. Three failures matches
+ * `STUCK_AFTER_FAILURES`'s own ~9s-at-`GATE_ADMIN_CHECK_RETRY_MS` reasoning.
+ */
+const GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES = 3;
+
+/**
  * Operator-facing copy for a legacy `connect_error` query from the former
  * native OAuth callback (issue #300). The callback now ends in its own dated
  * explanatory page (#838), but an older bookmarked URL still gets a safe
@@ -920,21 +938,37 @@ export function AppShell({
    * input now reads this state — PR #1875 review finding, round 5.
    */
   const [isGateAdmin, setIsGateAdmin] = useState<boolean | null>(null);
+  /**
+   * True once `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES` consecutive `fetchMe`
+   * failures have failed to settle — see that constant's own doc. Read
+   * alongside `activationGate.stuck` below so the recovery affordance covers
+   * either read wedging, not only the activation one.
+   */
+  const [isGateAdminStuck, setIsGateAdminStuck] = useState(false);
   useEffect(() => {
     let live = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
     setIsGateAdmin(null);
+    setIsGateAdminStuck(false);
     const load = () => {
       void (async () => {
         try {
           const admin = (await fetchMe(client, company)).role === "admin";
-          if (live) setIsGateAdmin(admin);
+          if (!live) return;
+          setIsGateAdmin(admin);
+          failures = 0;
+          setIsGateAdminStuck(false);
         } catch (err) {
           if (!live) return;
           const outcome = resolveGateAdminCheckError(err);
           if (outcome.settled) {
             setIsGateAdmin(outcome.isAdmin);
+            failures = 0;
+            setIsGateAdminStuck(false);
           } else {
+            failures += 1;
+            if (failures >= GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES) setIsGateAdminStuck(true);
             retryTimer = setTimeout(load, GATE_ADMIN_CHECK_RETRY_MS);
           }
         }
@@ -2870,7 +2904,14 @@ export function AppShell({
     // (PR #1875 review finding). Offer the same escape here instead of a
     // loader that never resolves. The polling continues underneath, so a
     // recovered backend still settles the gate on its own.
-    if (activationGate.stuck) {
+    //
+    // `isGateAdminStuck` covers the other read this hold depends on (PR #1875
+    // review finding): a durable non-401 `fetchMe` failure leaves `isGateAdmin`
+    // at `null` forever with activation reading fine the whole time, so
+    // `activationGate.stuck` alone never flips even though the hold above is
+    // just as permanent — see `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES`'s own
+    // doc.
+    if (activationGate.stuck || isGateAdminStuck) {
       return (
         <ConsoleProvider client={client} company={company}>
           {setupController}

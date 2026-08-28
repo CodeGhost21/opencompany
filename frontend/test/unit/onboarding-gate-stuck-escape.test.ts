@@ -4,8 +4,9 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { ActivationStatus } from "@/api/activation";
 import type { OpenCompanyClient } from "@/api/client";
-import type { CompanyStatus, TeamMemberDto } from "@/api/types";
+import { ApiError, type CompanyStatus, type TeamMemberDto } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import type { ConnectionId, LocalScope } from "@/connections/types";
@@ -67,6 +68,51 @@ function buildClient(activationCalls: { count: number }): OpenCompanyClient {
       if (path.includes("/activation")) {
         activationCalls.count += 1;
         return Promise.reject(new Error("activation scan failed"));
+      }
+      return hang();
+    },
+    status: hang,
+    approvals: hang,
+    listDesks: hang,
+  };
+  return new Proxy(known, {
+    get(target, prop, receiver) {
+      if (prop in target) return Reflect.get(target, prop, receiver);
+      return hang;
+    },
+  }) as unknown as OpenCompanyClient;
+}
+
+/** A real, incomplete funnel read — used so `activationGate.stuck` never flips. */
+const INCOMPLETE_ACTIVATION: ActivationStatus = {
+  nameConfirmed: true,
+  integrationConnected: false,
+  workflowRunSucceeded: false,
+  isActivated: false,
+};
+
+/**
+ * `/activation` succeeds immediately with an incomplete status — so
+ * `activationGate.stuck` never flips — and `/auth/me` fails every time with a
+ * non-401 `ApiError`, the shape `resolveGateAdminCheckError` does NOT settle.
+ * Isolates the admin-check stuck path (`isGateAdminStuck`, PR #1875 review
+ * finding, round 16) from the activation-read one `buildClient` above covers:
+ * this proves the escape appears even when activation itself never fails
+ * once.
+ */
+function buildAdminCheckStuckClient(meCalls: { count: number }): OpenCompanyClient {
+  const known = {
+    baseUrl: "",
+    scopeFor: (company: string | null) => `/api/v1/companies/${company ?? ""}`,
+    listTeam: vi.fn(async () => STAFFED),
+    subscribeToEvents: () => () => {},
+    get: (path: string) => {
+      if (path.includes("/auth/me")) {
+        meCalls.count += 1;
+        return Promise.reject(new ApiError(502, "bad_gateway", "upstream failure"));
+      }
+      if (path.includes("/activation")) {
+        return Promise.resolve(INCOMPLETE_ACTIVATION);
       }
       return hang();
     },
@@ -144,6 +190,67 @@ describe("a durable activation-read failure does not strand the operator", () =>
 
     expect(activationCalls.count).toBeGreaterThanOrEqual(3);
     // The operator must now have a way forward rather than an endless loader.
+    expect(container.textContent).toContain("Continue to the console");
+  });
+});
+
+/**
+ * PR #1875 review finding, round 16.
+ *
+ * `useActivationGate`'s `stuck` only tracks its own `getActivation` reads.
+ * The admin check `AppShell` runs alongside it (`isGateAdmin`, behind
+ * `fetchMe`) has the identical shape — it retries a non-401 failure forever
+ * and never settles `isGateAdmin` — but round 15's fix gave the recovery
+ * affordance no way to know *that* read is the one wedged: a durable
+ * `fetchMe` fault leaves `isGateAdmin` at `null` forever while activation
+ * itself reads fine the whole time, so `activationGate.stuck` never flips and
+ * the operator is locked behind the exact same permanent loader round 15
+ * closed for the activation side only.
+ *
+ * The fix mirrors round 15's shape on the admin-check effect: a
+ * `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES`-failure counter feeding
+ * `isGateAdminStuck`, and the same recovery affordance now renders on
+ * `activationGate.stuck || isGateAdminStuck`.
+ */
+describe("a durable admin-check failure does not strand the operator either", () => {
+  it("offers a way into the console once /auth/me keeps failing, even though activation itself never fails", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const meCalls = { count: 0 };
+    const client = buildAdminCheckStuckClient(meCalls);
+
+    await act(async () => {
+      root.render(
+        createElement(ConnectionScopeProvider, {
+          scope: SCOPE,
+          children: createElement(AppShell, {
+            client,
+            company: null,
+            initialStatus: STATUS,
+            companies: [STATUS],
+            onSwitchCompany: () => {},
+          }),
+        }),
+      );
+    });
+
+    // isGateAdmin starts null and the first fetchMe hasn't failed yet: still
+    // the neutral loader, no error shown — activation itself reads fine
+    // immediately, so nothing here comes from the activation-read path.
+    expect(container.textContent).toContain("Loading");
+    expect(container.textContent).not.toContain("Continue to the console");
+
+    // Drive the retries. Each non-settled failure schedules the next attempt
+    // at GATE_ADMIN_CHECK_RETRY_MS; GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES of
+    // them flips `isGateAdminStuck`.
+    for (let i = 0; i < 4; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+    }
+
+    expect(meCalls.count).toBeGreaterThanOrEqual(3);
+    // The operator must now have a way forward rather than an endless loader,
+    // driven entirely by the admin check — activation never failed once.
     expect(container.textContent).toContain("Continue to the console");
   });
 });
