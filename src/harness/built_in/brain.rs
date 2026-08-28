@@ -1543,6 +1543,11 @@ impl HarnessBrain {
             );
         }
 
+        // The terminal timeline is written before the relay is returned so the
+        // event journal preserves the causal order: task outcome, then the
+        // origin-thread relay. The dispatch-cycle wrapper persists the returned
+        // relay after this function completes.
+        //
         // Issue #151 §3.2: answer in the conversation the card was spawned
         // from. Only a card that remembers an origin posts back — one created
         // straight on the board, or written before `origin_chat_id` existed,
