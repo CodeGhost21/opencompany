@@ -4108,6 +4108,30 @@ members = ["writer"]
         );
         let note = card.note.expect("the board must say why");
         assert!(note.contains(RUN_UNSETTLED_ERROR), "{note}");
+
+        // The caller-level backstop must announce the same bounce through the
+        // durable notification feed, not merely update the board.
+        let notifications = rt
+            .notifications()
+            .list(rt.id(), "owner")
+            .await
+            .expect("read notifications");
+        let notification = notifications
+            .iter()
+            .find(|n| n.notification.kind == "dispatch_failed")
+            .expect("a bounced To-do card emits a dispatch-failed notification");
+        assert_eq!(
+            notification.notification.subject.id, "t-1",
+            "the notification must point at the affected task"
+        );
+        assert!(
+            notification
+                .notification
+                .title
+                .contains(RUN_UNSETTLED_ERROR),
+            "the notification must carry the failure reason: {:?}",
+            notification.notification.title
+        );
     }
 
     /// The guard, at the backstop: a card an operator has already parked is
