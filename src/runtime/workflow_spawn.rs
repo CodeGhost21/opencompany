@@ -90,7 +90,14 @@ pub(crate) const PANICKED_BEFORE_FINISH: &str = concat!(
 /// the raw engine error here would broadcast whatever internal detail it
 /// happens to carry to everyone in the company instead of just the people who
 /// open that run.
-const RUN_FAILED_DETAIL: &str =
+///
+/// Shared with the orchestrator's own `run_workflow` tool path (PR #1883
+/// review comment 3877185396): that call is the second run-outcome
+/// chokepoint [`WorkflowSpawn::notifications`] names as not routing through
+/// here, and its failure arm owes the identical wording rather than a second,
+/// possibly-drifting sentence for the same fact — the same reasoning
+/// [`PANICKED_BEFORE_FINISH`] above already applies.
+pub(crate) const RUN_FAILED_DETAIL: &str =
     "the run errored before it could finish; open its run history for the reason";
 
 /// Everything starting a supervised workflow run needs, and nothing else.
@@ -472,6 +479,10 @@ impl WorkflowSpawn {
     /// full verdict read, which needs the live-approvals queue join this
     /// hot path deliberately does not make (see the sync run response's own
     /// `stranded_approvals` comment in `server::ops::workflows`).
+    ///
+    /// Thin wrapper over [`file_run_unhealthy_notification`] — see that
+    /// function for why the write itself is free-standing rather than kept
+    /// only here.
     async fn notify_run_unhealthy(
         &self,
         workflow_id: &str,
@@ -479,28 +490,63 @@ impl WorkflowSpawn {
         kind: &str,
         detail: &str,
     ) {
-        let note = crate::ports::notifications::Notification {
-            id: crate::ports::generate_id(),
-            kind: format!("workflow_run_{kind}"),
-            subject: crate::ports::notifications::Subject {
-                kind: crate::ports::notifications::SubjectKind::Run,
-                id: run_id.to_string(),
-            },
-            created_at: crate::ports::now_millis(),
-            title: format!("Workflow `{workflow_id}` {kind}: {detail}"),
-            audience: None,
-            context: None,
-        };
-        if let Err(err) = self.notifications.append(&self.company, &note).await {
-            tracing::warn!(
-                company = %self.company,
-                workflow = %workflow_id,
-                run = %run_id,
-                error = %err,
-                "a workflow-run-unhealthy notification could not be recorded; the run's own \
-                 outcome is unaffected, but nobody is badged for it"
-            );
-        }
+        file_run_unhealthy_notification(
+            &self.notifications,
+            &self.company,
+            workflow_id,
+            run_id,
+            kind,
+            detail,
+        )
+        .await;
+    }
+}
+
+/// Files a durable notification that a workflow run settled unhealthy —
+/// failed, blocked, or stranded (issue #1865). Best-effort and after the
+/// journal write, matching every other notification producer in the tree: a
+/// notification that could not be filed must not touch the run's own
+/// outcome, which has already landed.
+///
+/// Free-standing rather than a [`WorkflowSpawn`] method so the orchestrator's
+/// `run_workflow` tool (PR #1883 review comment 3877185396) can reach the
+/// identical write. That tool is the second run-outcome chokepoint
+/// [`WorkflowSpawn::notifications`]'s own doc comment names as not routing
+/// through this type at all — it never builds a `WorkflowSpawn` (no spawned
+/// task, no `RunStore` handle; see that call site's own comment on why it
+/// cannot re-raise the way this module's catch does) — so duplicating this
+/// write inline there, instead of sharing it, would be exactly the kind of
+/// second copy of a rule this module's file-level doc comment already warns
+/// drifts.
+pub(crate) async fn file_run_unhealthy_notification(
+    notifications: &Arc<dyn crate::ports::notifications::NotificationStore>,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+    kind: &str,
+    detail: &str,
+) {
+    let note = crate::ports::notifications::Notification {
+        id: crate::ports::generate_id(),
+        kind: format!("workflow_run_{kind}"),
+        subject: crate::ports::notifications::Subject {
+            kind: crate::ports::notifications::SubjectKind::Run,
+            id: run_id.to_string(),
+        },
+        created_at: crate::ports::now_millis(),
+        title: format!("Workflow `{workflow_id}` {kind}: {detail}"),
+        audience: None,
+        context: None,
+    };
+    if let Err(err) = notifications.append(company, &note).await {
+        tracing::warn!(
+            company = %company,
+            workflow = %workflow_id,
+            run = %run_id,
+            error = %err,
+            "a workflow-run-unhealthy notification could not be recorded; the run's own \
+             outcome is unaffected, but nobody is badged for it"
+        );
     }
 }
 
