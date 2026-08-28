@@ -689,10 +689,18 @@ async fn apply_workflow_proposal(
         // to nothing even though the card already names its owning desk.
         // Resolve as a desk first; only fall back to the teammate's desk when
         // the assignee is not itself a desk.
+        //
+        // Issue #1882 review: the teammate fallback uses `sole_desk_of_member`,
+        // not `desk_of_member` — a teammate who sits on two or more desks gives
+        // no basis for picking either one, and `desk_of_member` would silently
+        // persist whichever desk happens to be declared first in the manifest.
         draft.owner_desk = company_record
             .resolve_desk_id(&record.assignee)
             .or_else(|| {
-                crate::runtime::delegation_tools::desk_of_member(&company_record, &record.assignee)
+                crate::runtime::delegation_tools::sole_desk_of_member(
+                    &company_record,
+                    &record.assignee,
+                )
             });
     }
 

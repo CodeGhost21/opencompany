@@ -7562,6 +7562,54 @@ async fn applying_a_proposal_for_a_desk_assigned_card_defaults_to_that_desk() {
     );
 }
 
+/// **Regression, issue #1882 review — a multi-desk teammate must not default
+/// an arbitrary owner.** `desk_of_member` returns the first desk in
+/// `desk_ids` declaration order, which is fine for the informational message
+/// it was written for (`unknown_desk_message`) but wrong for a value that
+/// gets persisted: a proposal naming no `ownerDesk`, assigned to a teammate
+/// who sits on two desks, has no basis for picking either one. Before the
+/// fix, `apply_workflow_proposal`'s fallback used `desk_of_member` directly
+/// and silently persisted `"engineering"` — the desk declared first in the
+/// manifest — even though `ceo` sits on `legal` too. The fix must leave
+/// `owner_desk` `None` rather than guess.
+#[tokio::test]
+async fn applying_a_proposal_for_a_multi_desk_assignee_leaves_owner_desk_unset() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+         [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n\
+         [[group_chat]]\nid = \"legal\"\nname = \"Legal\"\nmembers = [\"ceo\"]\n\
+         [policy]\nmode = \"full\"\n",
+    )
+    .unwrap();
+    let state = state_with_manifest(&home, manifest).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk, None,
+        "a teammate on two desks gives no basis for picking either one: {file:?}"
+    );
+}
+
 /// #276: applying a proposal whose trigger carries a schedule creates the
 /// workflow **switched off** — armed only by a person, never by approving the
 /// proposal.
