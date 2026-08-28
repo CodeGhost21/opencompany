@@ -629,6 +629,44 @@ pub(crate) mod stall_probe {
     pub(crate) async fn wait_blocked() {
         BLOCKED.notified().await;
     }
+
+    static COMMIT_GATES: LazyLock<Mutex<HashMap<PathBuf, Receiver<()>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static COMMIT_BLOCKED: LazyLock<Notify> = LazyLock::new(Notify::new);
+
+    /// Same idea as [`arm`]/[`maybe_block`]/[`wait_blocked`] above, but for
+    /// [`commit_staged`]'s blocking closure instead of [`stage_atomic_bytes`]'s
+    /// (issue #1828 review, twelfth round follow-up). A separate gate set
+    /// because the two stall on the *same* destination path at different
+    /// points in the same `save` call — arming one must not be consumed by
+    /// the other.
+    pub(crate) fn arm_commit(path: &Path) -> Sender<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        COMMIT_GATES
+            .lock()
+            .expect("stall-probe poisoned")
+            .insert(key(path), rx);
+        tx
+    }
+
+    /// Called from inside `commit_staged`'s blocking closure, before the
+    /// rename. No-op unless `path` was armed.
+    pub(crate) fn maybe_block_commit(path: &Path) {
+        let gate = COMMIT_GATES
+            .lock()
+            .expect("stall-probe poisoned")
+            .remove(&key(path));
+        if let Some(gate) = gate {
+            COMMIT_BLOCKED.notify_one();
+            let _ = gate.recv();
+        }
+    }
+
+    /// Waits until an armed commit has reached its stall point, i.e. the
+    /// rename is genuinely about to run, not merely staged.
+    pub(crate) async fn wait_blocked_commit() {
+        COMMIT_BLOCKED.notified().await;
+    }
 }
 
 /// Reads a file to a string, returning an empty string if it does not exist.
@@ -1041,6 +1079,12 @@ async fn commit_staged(path: &Path, tmp: PathBuf) -> std::result::Result<(), Com
     // One `spawn_blocking` for the rename-then-sync pair rather than two
     // `tokio::fs` calls, mirroring `stage_atomic_bytes` above.
     let joined = tokio::task::spawn_blocking(move || {
+        // Test-only: see `stall_probe::arm_commit`. Parks this blocking-pool
+        // thread just before the rename, giving a test a deterministic
+        // window to cancel the caller while the rename has not happened yet
+        // but is genuinely about to.
+        #[cfg(test)]
+        stall_probe::maybe_block_commit(&owned_path);
         if let Err(e) = std::fs::rename(&tmp, &owned_path) {
             // Ownership of `tmp` passed to this job, so nothing upstream is
             // still guarding it — reclaim it here when the rename did not
@@ -1250,6 +1294,125 @@ async fn remove_staged(tmp: &Path) {
             );
         }
     }
+}
+
+/// The commit half of [`FsCompanyStore::save`]: forgets both staged temps
+/// from `guard` in commit order, renames each into place, and runs the
+/// manifest-rollback branch if the second commit fails outright.
+///
+/// Spawned as a detached task from `save` (issue #1828 review, twelfth
+/// round follow-up, finding on 3878400729) — see that call site for why:
+/// nothing below this point may be torn down by `save`'s own
+/// cancellation, because `commit_staged`'s rename cannot be stopped once
+/// dispatched (issue #1828 review, sixth/eleventh rounds), and each
+/// commit's failure-handling assumes the *other* file's temp is still
+/// exactly where `guard` left it.
+async fn commit_bundle_writes(
+    bundle: Bundle,
+    updating_existing_bundle: bool,
+    meta_tmp: PathBuf,
+    toml_tmp: PathBuf,
+    mut guard: StagedGuard,
+) -> Result<()> {
+    if updating_existing_bundle {
+        // The two commits are independent renames, so publishing
+        // `company.toml` and then failing to publish `meta.json` would
+        // return `Err` with the manifest change already durable — a save
+        // that reports failure while a logo or name edit persists, and a
+        // mixed record when the call changed both files (issue #1828
+        // review, ninth round). Snapshot the manifest we are about to
+        // overwrite so that failure can put it back. The file is a small
+        // TOML document, so holding it in memory beats managing another
+        // temp path.
+        let previous_toml = match tokio::fs::read(&bundle.company_toml()).await {
+            Ok(bytes) => Some(bytes),
+            // Nothing to roll back to; `updating_existing_bundle` was
+            // decided by a probe that can race a concurrent delete.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                remove_staged(&toml_tmp).await;
+                remove_staged(&meta_tmp).await;
+                return Err(io_err(&bundle.company_toml(), e));
+            }
+        };
+        guard.forget(&toml_tmp);
+        if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
+            remove_staged(&toml_tmp).await;
+            remove_staged(&meta_tmp).await;
+            return Err(f.error);
+        }
+        guard.forget(&meta_tmp);
+        if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
+            remove_staged(&meta_tmp).await;
+            // Only roll the manifest back when `meta.json` genuinely did
+            // not publish. If its rename landed and only the durability
+            // step failed, readers already see the new metadata —
+            // restoring the old manifest would pair it with new metadata
+            // and manufacture the mixed record this rollback exists to
+            // prevent (issue #1828 review, tenth round).
+            if f.published {
+                tracing::warn!(
+                    path = %bundle.meta_json().display(),
+                    error = %f.error,
+                    "[store] meta.json was renamed into place but its directory sync failed; \
+                     leaving both new files published rather than rolling the manifest back \
+                     onto newer metadata"
+                );
+                return Err(f.error);
+            }
+            if let Some(previous) = previous_toml {
+                // Best-effort: the caller is already being told the save
+                // failed, so a failed rollback must not mask the original
+                // error — but it must be loud, because it is the one case
+                // that leaves the record genuinely mixed.
+                match stage_atomic_bytes(&bundle.company_toml(), &previous).await {
+                    Ok(rollback_tmp) => {
+                        // Ownership passes straight to the commit below;
+                        // never guarded, for the same reason as above.
+                        if let Err(rollback_failure) =
+                            commit_staged(&bundle.company_toml(), rollback_tmp.clone()).await
+                        {
+                            let rollback_err = rollback_failure.error;
+                            remove_staged(&rollback_tmp).await;
+                            tracing::error!(
+                                path = %bundle.company_toml().display(),
+                                error = %rollback_err,
+                                "[store] could not restore the previous manifest after a \
+                                 failed meta.json commit — the bundle is left with the new \
+                                 manifest and the old meta.json"
+                            );
+                        }
+                    }
+                    Err(rollback_err) => {
+                        tracing::error!(
+                            path = %bundle.company_toml().display(),
+                            error = %rollback_err,
+                            "[store] could not stage the previous manifest to roll back after \
+                             a failed meta.json commit — the bundle is left with the new \
+                             manifest and the old meta.json"
+                        );
+                    }
+                }
+            }
+            return Err(f.error);
+        }
+    } else {
+        guard.forget(&meta_tmp);
+        if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
+            remove_staged(&meta_tmp).await;
+            remove_staged(&toml_tmp).await;
+            return Err(f.error);
+        }
+        guard.forget(&toml_tmp);
+        if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
+            remove_staged(&toml_tmp).await;
+            return Err(f.error);
+        }
+    }
+    // Both files are committed: the renames moved each temp away, so the
+    // guard has nothing left to reclaim.
+    guard.disarm();
+    Ok(())
 }
 
 /// Bundle metadata persisted alongside the manifest.
@@ -1609,105 +1772,38 @@ impl CompanyStore for FsCompanyStore {
             }
         };
         guard.watch(&toml_tmp);
-        if updating_existing_bundle {
-            // The two commits are independent renames, so publishing
-            // `company.toml` and then failing to publish `meta.json` would
-            // return `Err` with the manifest change already durable — a save
-            // that reports failure while a logo or name edit persists, and a
-            // mixed record when the call changed both files (issue #1828
-            // review, ninth round). Snapshot the manifest we are about to
-            // overwrite so that failure can put it back. The file is a small
-            // TOML document, so holding it in memory beats managing another
-            // temp path.
-            let previous_toml = match tokio::fs::read(&bundle.company_toml()).await {
-                Ok(bytes) => Some(bytes),
-                // Nothing to roll back to; `updating_existing_bundle` was
-                // decided by a probe that can race a concurrent delete.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => {
-                    remove_staged(&toml_tmp).await;
-                    remove_staged(&meta_tmp).await;
-                    return Err(io_err(&bundle.company_toml(), e));
-                }
-            };
-            guard.forget(&toml_tmp);
-            if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
-                remove_staged(&toml_tmp).await;
-                remove_staged(&meta_tmp).await;
-                return Err(f.error);
-            }
-            guard.forget(&meta_tmp);
-            if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
-                remove_staged(&meta_tmp).await;
-                // Only roll the manifest back when `meta.json` genuinely did
-                // not publish. If its rename landed and only the durability
-                // step failed, readers already see the new metadata —
-                // restoring the old manifest would pair it with new metadata
-                // and manufacture the mixed record this rollback exists to
-                // prevent (issue #1828 review, tenth round).
-                if f.published {
-                    tracing::warn!(
-                        path = %bundle.meta_json().display(),
-                        error = %f.error,
-                        "[store] meta.json was renamed into place but its directory sync failed; \
-                         leaving both new files published rather than rolling the manifest back \
-                         onto newer metadata"
-                    );
-                    return Err(f.error);
-                }
-                if let Some(previous) = previous_toml {
-                    // Best-effort: the caller is already being told the save
-                    // failed, so a failed rollback must not mask the original
-                    // error — but it must be loud, because it is the one case
-                    // that leaves the record genuinely mixed.
-                    match stage_atomic_bytes(&bundle.company_toml(), &previous).await {
-                        Ok(rollback_tmp) => {
-                            // Ownership passes straight to the commit below;
-                            // never guarded, for the same reason as above.
-                            if let Err(rollback_failure) =
-                                commit_staged(&bundle.company_toml(), rollback_tmp.clone()).await
-                            {
-                                let rollback_err = rollback_failure.error;
-                                remove_staged(&rollback_tmp).await;
-                                tracing::error!(
-                                    path = %bundle.company_toml().display(),
-                                    error = %rollback_err,
-                                    "[store] could not restore the previous manifest after a \
-                                     failed meta.json commit — the bundle is left with the new \
-                                     manifest and the old meta.json"
-                                );
-                            }
-                        }
-                        Err(rollback_err) => {
-                            tracing::error!(
-                                path = %bundle.company_toml().display(),
-                                error = %rollback_err,
-                                "[store] could not stage the previous manifest to roll back after \
-                                 a failed meta.json commit — the bundle is left with the new \
-                                 manifest and the old meta.json"
-                            );
-                        }
-                    }
-                }
-                return Err(f.error);
-            }
-        } else {
-            guard.forget(&meta_tmp);
-            if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
-                remove_staged(&meta_tmp).await;
-                remove_staged(&toml_tmp).await;
-                return Err(f.error);
-            }
-            guard.forget(&toml_tmp);
-            if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
-                remove_staged(&toml_tmp).await;
-                return Err(f.error);
-            }
-        }
-        // Both files are committed: the renames moved each temp away, so the
-        // guard has nothing left to reclaim.
-        guard.disarm();
-        Ok(())
+
+        // Issue #1828 review, twelfth round follow-up (finding on
+        // 3878400729): everything from here through the end of
+        // `commit_bundle_writes` must run to completion as one unit even if
+        // this `save` future is dropped mid-flight — a client disconnect or
+        // a request timeout cancels the *caller*, not the process, and
+        // `commit_staged`'s rename is deliberately uncancellable (sixth /
+        // eleventh rounds) so it keeps running regardless. `guard` used to
+        // live in this frame: cancelling while the *first* commit below was
+        // in flight dropped `guard` synchronously, reclaiming the *other*,
+        // not-yet-committed temp file — while the in-flight rename could
+        // still land moments later, publishing one file against the
+        // other's now-deleted staging. Detaching the whole decision into an
+        // uncancellable task closes that window the same way
+        // `stage_atomic_bytes` already closes it for staging: `save` can be
+        // cancelled freely, but the unit it is waiting on cannot be.
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+        let commit_bundle = bundle.clone();
+        tokio::task::spawn(async move {
+            let result = commit_bundle_writes(
+                commit_bundle,
+                updating_existing_bundle,
+                meta_tmp,
+                toml_tmp,
+                guard,
+            )
+            .await;
+            let _ = commit_tx.send(result);
+        });
+        commit_rx
+            .await
+            .map_err(|_| OpenCompanyError::Store("commit task dropped before completing".into()))?
     }
 
     async fn list(&self) -> Result<Vec<CompanySummary>> {
@@ -3944,6 +4040,115 @@ mod test {
             manifest.contains("After") && !manifest.contains("Before"),
             "meta.json was already published, so the manifest must NOT be \
              rolled back onto it — found {manifest}"
+        );
+    }
+
+    /// **Issue #1828 review, twelfth round follow-up** (finding on
+    /// 3878400729): before this round, `guard` still watched `meta_tmp`
+    /// while the *first* commit (`company.toml`, update path) was in
+    /// flight. `commit_staged`'s rename is deliberately uncancellable
+    /// (sixth/eleventh rounds), so cancelling `save` there dropped `guard`
+    /// synchronously — reclaiming `meta_tmp` — while the detached rename
+    /// could still land moments later, publishing the new manifest against
+    /// metadata that never got a chance to commit.
+    ///
+    /// `stall_probe::arm_commit` parks `commit_staged`'s blocking closure
+    /// just before the rename — so it is genuinely about to run, not merely
+    /// staged — giving the test a deterministic window to abort while it is
+    /// parked, then release it. The manifest and metadata must land
+    /// together or not at all.
+    #[tokio::test]
+    async fn cancelling_a_save_during_the_first_commit_does_not_orphan_the_second() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = |name: &str, lifecycle: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: {
+                let mut m = sample_manifest();
+                m.company.name = name.to_string();
+                m
+            },
+            ledger: Vec::new(),
+            lifecycle: lifecycle.to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        store
+            .save(&record("Before", "running"))
+            .await
+            .expect("first publish");
+
+        // The update path commits company.toml first — park that rename in
+        // flight, then abort the save while it is held there.
+        let release = stall_probe::arm_commit(&bundle.company_toml());
+        let after = record("After", "paused");
+        let reader = FsCompanyStore::new(&root);
+        let handle = tokio::spawn(async move { store.save(&after).await });
+        stall_probe::wait_blocked_commit().await;
+        handle.abort();
+        let joined = handle.await;
+        assert!(
+            joined.as_ref().is_err_and(|e| e.is_cancelled()),
+            "the save task must actually have been cancelled for this test \
+             to mean anything, got {joined:?}"
+        );
+        release.send(()).expect("stall gate still open");
+
+        // The detached commit unit keeps running after cancellation — give
+        // it a moment to finish landing (or fully bailing on) both files.
+        let bundle_dir = bundle.company_toml().parent().unwrap().to_path_buf();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let orphans = std::fs::read_dir(&bundle_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                    .count();
+                if orphans == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "a cancelled save must not strand a staged temp in {}",
+            bundle_dir.display()
+        );
+
+        let loaded = reader
+            .load(&id)
+            .await
+            .expect("load must not error")
+            .expect("the bundle must remain loadable after a cancelled update");
+        let manifest_updated = loaded.manifest.company.name == "After";
+        let meta_updated = loaded.lifecycle == "paused";
+        assert_eq!(
+            manifest_updated, meta_updated,
+            "the manifest and metadata must land together or not at all after a \
+             cancelled save (manifest updated = {manifest_updated}, metadata updated \
+             = {meta_updated})"
         );
     }
 
