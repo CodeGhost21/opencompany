@@ -8782,6 +8782,7 @@ members = ["eng1", "eng2"]
         );
         let pool = Arc::new(HarnessPool::new());
         let brain = HarnessBrain::new(pool.clone(), (*base.deps).clone(), record());
+        pool.ensure(&record(), &brain.deps).await.expect("ensure");
 
         brain
             .run_cycle(
