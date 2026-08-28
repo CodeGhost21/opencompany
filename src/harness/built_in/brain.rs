@@ -8755,6 +8755,57 @@ members = ["eng1", "eng2"]
         );
     }
 
+    /// A threaded approval continuation must preserve the approval's thread root
+    /// when it re-dispatches the granted call. The bound agent's observable
+    /// context proves the target is threaded rather than channel-only.
+    #[tokio::test]
+    async fn an_approved_threaded_grant_redispatches_in_its_origin_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let root = crate::ports::types::EventSeq::new(7);
+        requests.grants().grant(crate::runtime::grants::GrantedCall {
+            approval_id: ApprovalId::new("appr-threaded"),
+            agent: "ceo".into(),
+            tool: "workspace_write".into(),
+            args: serde_json::json!({}),
+            at_millis: now_millis(),
+            origin_thread: Some("general".into()),
+            origin_parent: Some(root),
+            origin_task: None,
+        });
+        let brain = brain_with_queue_and_events(
+            dir.path(),
+            requests,
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf())),
+        );
+
+        brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved(
+                    "appr-threaded",
+                    Verdict::Approve,
+                )]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let agent = brain
+            .pool
+            .agents
+            .read()
+            .await
+            .get(&CompanyId::new("acme"))
+            .and_then(|roster| roster.iter().find(|agent| agent.agent_id == "ceo"))
+            .cloned()
+            .expect("the approved turn keeps the agent resident");
+        assert_eq!(
+            *agent.bound_chat.lock().await,
+            Some(("general".into(), Some(root))),
+            "approval resume must bind to its origin thread, not the channel"
+        );
+    }
+
     /// No continuation reply was journaled by the brain itself (issue #469).
     async fn no_replies_journaled(log: &Arc<dyn crate::ports::EventLog>) -> bool {
         log.read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
