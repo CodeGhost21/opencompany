@@ -356,6 +356,25 @@ describe("resolving a host thread to the general channel", () => {
   });
 
   /**
+   * A second, independent lookup in the same file as the one above: resolving
+   * the *channel* an approval's thread renders in (`ApprovalMeta`'s "Asked in"
+   * link), not resolving the *member* a DM thread addresses (`originOf`). Both
+   * have to fold General spellings the same way `channelForThread` does — a
+   * bare `chatChannelByThread[a.thread]` index misses any casing other than
+   * the map's own literal keys, which is exactly the gap `channelForThread`
+   * exists to close for every other thread-to-channel lookup in the shell
+   * (issue #1781 review, Codex P2).
+   */
+  it("resolves the approval-meta channel link through channelForThread, not a bare index", () => {
+    const card = readFileSync(
+      new URL("../../src/components/approval-card.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(card).toContain("channelForThread(chatChannelByThread, a.thread)");
+    expect(card).not.toContain("chatChannelByThread?.[a.thread]");
+  });
+
+  /**
    * The rule itself, rather than the call sites that apply it.
    */
   it("addresses only the General-spelling teammate prefixed", () => {

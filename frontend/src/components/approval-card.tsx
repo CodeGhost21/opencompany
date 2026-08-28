@@ -55,7 +55,13 @@ import {
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { workflowHref } from "@/lib/task-output";
-import { channelIdForThread, deskFromDto, dmChannelId, memberForThread } from "@/views/chat/model";
+import {
+  channelForThread,
+  channelIdForThread,
+  deskFromDto,
+  dmChannelId,
+  memberForThread,
+} from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -251,7 +257,14 @@ export function ApprovalMeta({
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;
-  const conversationChannelId = a.thread ? (chatChannelByThread?.[a.thread] ?? null) : null;
+  // Resolved through `channelForThread`, not a bare `map[key]` index: the
+  // host compares General spellings case-insensitively and echoes back
+  // whichever one it was addressed with, so an approval raised in `#general`
+  // can carry a thread id the map's own literal keys miss (issue #1781
+  // review, Codex P2). A bare index breaks the "Asked in" link for exactly
+  // that case.
+  const conversationChannelId =
+    a.thread && chatChannelByThread ? channelForThread(chatChannelByThread, a.thread) : null;
   const workflowId = workflowIdForApproval(a);
   const workflowRunHref =
     workflowId && a.workflow_run_id ? workflowHref(workflowId, a.workflow_run_id) : null;
