@@ -32,6 +32,26 @@ const POLL_MS = 5000;
  */
 const ACTIVATION_READ_RETRY_MS = 3000;
 
+/**
+ * How many consecutive non-terminal `getActivation` failures before the hook
+ * reports `stuck`, and the shell stops showing a bare loader.
+ *
+ * `retrying` alone cannot carry this: it flips true on the very first
+ * failure, which is routine (a proxy blip, a cold host still scanning the
+ * journal) and resolves on the next attempt. Holding the shell for that is
+ * correct. What is not correct is holding it forever — a durable backend
+ * error (issue #1875 review: a malformed event that fails the whole-journal
+ * scan on every read) leaves `checked` false permanently, and the pending
+ * branch renders only `RouteLoading`, so the operator is locked out of the
+ * entire console with the "skip for now" escape sitting inside a gate that
+ * is never mounted.
+ *
+ * Three failures is ~9s of retries at `ACTIVATION_READ_RETRY_MS` — long
+ * enough that a transient blip never shows the operator an error, short
+ * enough that a real outage does not read as a hang.
+ */
+const STUCK_AFTER_FAILURES = 3;
+
 export interface ActivationGate {
   /** Whether the first read has landed — before this, render nothing blocking. */
   checked: boolean;
@@ -48,6 +68,12 @@ export interface ActivationGate {
    * the caller.
    */
   retrying: boolean;
+  /**
+   * True once `STUCK_AFTER_FAILURES` consecutive reads have failed without
+   * settling. The caller must offer a way out at this point rather than
+   * keeping the operator on a loader — see `STUCK_AFTER_FAILURES`.
+   */
+  stuck: boolean;
   /** Re-reads the funnel immediately — called after an in-gate action. */
   refresh: () => Promise<void>;
 }
@@ -68,6 +94,8 @@ export function useActivationGate(
   const [checked, setChecked] = useState(false);
   const [status, setStatus] = useState<ActivationStatus | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [stuck, setStuck] = useState(false);
+  const failures = useRef(0);
   const generation = useRef(0);
   /**
    * Set once a read reports the latch. `isActivated` is monotonic on the host
@@ -105,6 +133,8 @@ export function useActivationGate(
       setStatus(next);
       setChecked(true);
       setRetrying(false);
+      failures.current = 0;
+      setStuck(false);
       if (next.isActivated) activated.current = true;
     } catch (err) {
       if (gen !== generation.current) return;
@@ -121,6 +151,8 @@ export function useActivationGate(
         terminal.current = true;
         setChecked(true);
         setRetrying(false);
+        failures.current = 0;
+        setStuck(false);
         return;
       }
       // A transient failure (network error, 5xx) — not an answer, so do not
@@ -132,6 +164,8 @@ export function useActivationGate(
       // length" — `checked` alone reads identically for both, and the two
       // need different renders (see `shouldHoldShellPending`).
       setRetrying(true);
+      failures.current += 1;
+      if (failures.current >= STUCK_AFTER_FAILURES) setStuck(true);
       retryTimer.current = setTimeout(() => {
         if (gen !== generation.current) return;
         void load();
@@ -146,6 +180,8 @@ export function useActivationGate(
     setChecked(false);
     setStatus(null);
     setRetrying(false);
+    failures.current = 0;
+    setStuck(false);
     void load();
     const stopPolling = startVisiblePolling(() => void load(), POLL_MS);
     return () => {
@@ -154,5 +190,5 @@ export function useActivationGate(
     };
   }, [enabled, load]);
 
-  return { checked, status, retrying, refresh: load };
+  return { checked, status, retrying, stuck, refresh: load };
 }

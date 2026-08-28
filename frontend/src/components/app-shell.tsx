@@ -2860,6 +2860,39 @@ export function AppShell({
       retrying: activationGate.retrying,
     })
   ) {
+    // A durable read failure must not read as a hang. `stuck` means three
+    // consecutive non-terminal `getActivation` failures (see
+    // `STUCK_AFTER_FAILURES`) — a malformed event failing the host's
+    // whole-journal scan on every read, say. `checked` never settles, so the
+    // hold above is permanent, and the "skip for now" escape lives inside
+    // `OnboardingGate`, which this branch never mounts: the operator would be
+    // locked out of the whole console by a backend fault with no way forward
+    // (PR #1875 review finding). Offer the same escape here instead of a
+    // loader that never resolves. The polling continues underneath, so a
+    // recovered backend still settles the gate on its own.
+    if (activationGate.stuck) {
+      return (
+        <ConsoleProvider client={client} company={company}>
+          {setupController}
+          <div className="flex min-h-svh items-center justify-center p-6">
+            <div className="max-w-md space-y-3 text-center">
+              <h1 className="text-lg font-medium">We can’t check your setup right now</h1>
+              <p className="text-sm text-muted-foreground">
+                The console keeps failing to read this company’s setup status. It will keep
+                retrying, but you don’t have to wait.
+              </p>
+              <button
+                type="button"
+                onClick={skipGate}
+                className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Continue to the console
+              </button>
+            </div>
+          </div>
+        </ConsoleProvider>
+      );
+    }
     return (
       <ConsoleProvider client={client} company={company}>
         {setupController}
