@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use opencompany::company::Schedule;
+use opencompany::runtime::lifecycle_scheduler::load_or_create_cutoff_millis;
 use opencompany::runtime::{
     CompanyScheduler, LifecycleScheduler, MaintenanceTicker, SystemClock, WorkflowScheduler,
 };
@@ -721,9 +722,12 @@ fn spawn_maintenance_ticker(
 /// resolved by [`connections_runtime`] before this is called — `None` in the
 /// default build (no `smtp` feature) or when `OPENCOMPANY_MAIL_*` is unset,
 /// which the scheduler treats as "degrade to in-app only", never a reason to
-/// skip spawning. `cutoff_millis` is stamped as `now_millis()` here, at
-/// boot — a deploy restarts the process, so this is the "signed up after
-/// deploy" instant issue #1845 scopes the nudge to.
+/// skip spawning. `cutoff_millis` comes from
+/// [`load_or_create_cutoff_millis`] against `state.home()` — pinned the
+/// first time this ever runs on this data root, not re-stamped on every
+/// boot, so a restart does not move the "signed up after deploy" instant
+/// issue #1845 scopes the nudge to. See that function's docs for why a
+/// re-stamped cutoff would permanently disqualify eligible signups.
 fn spawn_lifecycle_scheduler(
     state: &AppState,
     shutdown: &Arc<Notify>,
@@ -735,7 +739,7 @@ fn spawn_lifecycle_scheduler(
         connections.mail.clone(),
         connections.mail_credentials.clone(),
         state.config().host_base_url(),
-        opencompany::ports::now_millis(),
+        load_or_create_cutoff_millis(state.home()),
     )
     .spawn(shutdown.clone())
 }

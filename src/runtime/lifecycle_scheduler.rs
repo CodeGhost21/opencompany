@@ -44,11 +44,14 @@
 //! saved a workflow through one of those unattributed paths, and there is no
 //! way to tell that user apart from one who truly never saved anything — so
 //! this scheduler never nudges them at all, rather than risk a false-positive
-//! nag. [`Self::cutoff_millis`] is stamped once, at construction — boot time
-//! in production, since a deploy restarts the process — and only users
-//! created at or after it are ever considered. See
-//! [`crate::company::week1_nudge`]'s module docs for the same gap from the
-//! query's side.
+//! nag. [`Self::cutoff_millis`] is stamped once — the first time
+//! [`load_or_create_cutoff_millis`] ever runs against a given data root, not
+//! re-stamped on every boot — and only users created at or after it are ever
+//! considered. It has to be pinned rather than re-derived from "now" at each
+//! boot: a deploy restarts the process, and re-stamping would move the
+//! cutoff forward on every restart, permanently disqualifying anyone who
+//! signed up in between. See [`crate::company::week1_nudge`]'s module docs
+//! for the same attribution gap from the query's side.
 //!
 //! # Email is primary, in-app is the substrate that always lands
 //!
@@ -99,6 +102,50 @@ const LOOKBACK_MILLIS: u64 = 14 * 24 * 60 * 60 * 1000;
 /// per-minute matching the cron schedulers do.
 const TICK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The file under the host's data root that pins the deploy cutoff.
+const CUTOFF_FILE: &str = "week1-nudge-cutoff";
+
+/// Reads the deploy cutoff for `home`, minting and persisting one on first
+/// use.
+///
+/// The module docs' "deploy cutoff" section explains why a cutoff exists;
+/// this is why it now survives a restart. Before this, the production caller
+/// passed `now_millis()` straight into [`LifecycleScheduler::new`] on every
+/// boot, so a restart moved the cutoff forward to that boot's instant —  and
+/// [`LifecycleScheduler::tick`] treats "signed up before the cutoff" as
+/// unanswerable and never nudges that user again, for the rest of their
+/// account's life. A deploy restarting mid-week for an already-eligible
+/// signup therefore permanently disqualified them. Pinning the value the
+/// first time this scheduler ever runs against a given `home`, the same way
+/// [`crate::app::instance::load_or_create`] pins the host's instance id,
+/// makes every later boot reuse it instead of moving the goalposts.
+///
+/// Never fails: an unwritable `home` mints a fresh value for this process and
+/// logs the degradation rather than aborting boot over a nudge timestamp —
+/// the same trade-off `instance::load_or_create` makes for the same reason.
+pub fn load_or_create_cutoff_millis(home: &std::path::Path) -> u64 {
+    let path = home.join(CUTOFF_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if let Ok(parsed) = existing.trim().parse::<u64>() {
+            return parsed;
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "week1-nudge-cutoff file is not a well-formed timestamp; minting a replacement"
+        );
+    }
+    let minted = now_millis();
+    if let Err(error) = std::fs::write(&path, minted.to_string()) {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "could not persist the week-1 nudge cutoff; every restart before this is fixed \
+             will move the cutoff forward and can permanently exclude eligible signups"
+        );
+    }
+    minted
+}
+
 /// The [`Subject::id`] every week-1 nudge notification carries.
 ///
 /// Not a real workflow id — there is no workflow yet, which is the entire
@@ -133,9 +180,12 @@ pub struct LifecycleScheduler {
 
 impl LifecycleScheduler {
     /// Builds a scheduler over every company in `registry`, driven by
-    /// `clock`. `cutoff_millis` is normally `clock.now_millis()` at
-    /// construction time (the production caller's boot instant); tests pass
-    /// a fixed value so a seeded user can be placed on either side of it.
+    /// `clock`. `cutoff_millis` is normally
+    /// [`load_or_create_cutoff_millis`] read once at process boot — a value
+    /// pinned to the host's data root the first time this scheduler ever
+    /// runs, not `clock.now_millis()` recomputed on every boot (see that
+    /// function's docs for why); tests pass a fixed value so a seeded user
+    /// can be placed on either side of it.
     pub fn new(
         registry: CompanyRegistry,
         clock: Arc<dyn Clock>,
@@ -511,6 +561,41 @@ mod test {
             cutoff_millis,
         );
         (scheduler, rt, id)
+    }
+
+    #[test]
+    fn cutoff_survives_a_simulated_restart() {
+        // Before the fix, the production caller passed `now_millis()`
+        // straight into `LifecycleScheduler::new` on every boot, so a
+        // restart moved the cutoff forward. `load_or_create_cutoff_millis`
+        // is the fix: two "boots" against the same home must agree.
+        let home = tmp_home();
+        let first_boot = load_or_create_cutoff_millis(home.path());
+        // A real restart would also have `now_millis()` tick forward, but
+        // the bug this guards is exactly that a *later* value would win if
+        // re-minted — so proving equality (not merely "close") is the point.
+        let second_boot = load_or_create_cutoff_millis(home.path());
+        assert_eq!(
+            first_boot, second_boot,
+            "the cutoff must be pinned on first use and reused on every later boot, \
+             not re-derived from `now` each time"
+        );
+    }
+
+    #[test]
+    fn cutoff_persists_to_disk_and_survives_a_fresh_process_view() {
+        // A stronger version of the above: read the persisted value back
+        // with a completely independent call (as a real second process
+        // would), not just a second in-process call.
+        let home = tmp_home();
+        let minted = load_or_create_cutoff_millis(home.path());
+        let path = home.path().join("week1-nudge-cutoff");
+        let on_disk: u64 = std::fs::read_to_string(&path)
+            .expect("cutoff file must exist after first use")
+            .trim()
+            .parse()
+            .expect("cutoff file must hold a plain integer");
+        assert_eq!(on_disk, minted);
     }
 
     #[tokio::test]
