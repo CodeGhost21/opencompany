@@ -2268,10 +2268,7 @@ async fn accept_chat_turn(
     runtime.ensure_running().await?;
     runtime.ensure_accepting().map_err(ApiError)?;
 
-    // Issue #1682: resolve the client's attachment ids to durable references
-    // before the journal write, so a bad reference refuses the send outright —
-    // on the same terms a malformed `parent` does — rather than journaling a
-    // message that points at a file this company does not have.
+    runtime.ensure_desk_writable(desk).await.map_err(ApiError)?;
     let attachments = resolve_attachments(runtime, id, &message.attachments).await?;
 
     let message_event = CompanyEvent::OperatorMessage {
