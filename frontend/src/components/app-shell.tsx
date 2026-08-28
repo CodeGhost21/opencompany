@@ -45,7 +45,6 @@ import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
-import { RouteLoading } from "@/components/route-loading";
 import {
   RESTING_ROW,
   SidebarCollapseButton,
@@ -68,13 +67,7 @@ import {
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
-import {
-  type AgentReplyEvent,
-  budgetProximityExpiresAt,
-  type CompanyStreamEvent,
-  isBudgetProximityExpired,
-  useEvents,
-} from "@/hooks/use-events";
+import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import {
   mentionCountsByChannel,
@@ -105,7 +98,7 @@ import {
   mergeHistoryInOrder,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
-import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import { defaultDesks, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
@@ -119,12 +112,11 @@ import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
 import {
-  channelForThread,
   channelIdForThread,
   deskFromDto,
   dmChannelId,
-  dmThreadId,
   HISTORY_UNSTARTED,
+  isOperatorChannelDto,
   type DecidedApproval,
   type HistoryHydration,
   type HistoryStatus,
@@ -162,30 +154,6 @@ const WorkspaceView = lazy(() =>
 const FinanceSection = lazy(() =>
   import("@/views/finance/FinanceSection").then((m) => ({ default: m.FinanceSection })),
 );
-
-/**
- * The `h1` a cold visit to `#/finances/<sub>` announces before the chunk lands.
- *
- * On a direct visit — a bookmark, a pasted link — this boundary *is* the whole
- * page for as long as the chunk takes, so its heading is what a screen reader
- * announces. A single "Finances" for every subpage told someone who had opened
- * `#/finances/wallet` that they were somewhere else, and it corrected itself
- * only once the chunk arrived, which is exactly when they no longer needed it.
- *
- * Spelled out here rather than imported from `FinanceSection`: a static import
- * of anything in that module pulls the chunk eagerly and there is no lazy
- * boundary left to name. `the finance fallback names every subpage` holds these
- * to `FINANCE_PAGES`, which a test may import freely.
- */
-const FINANCE_FALLBACK_TITLES: Readonly<Record<string, string>> = {
-  invoicing: "Invoicing",
-  wallet: "Wallet",
-};
-
-/** The fallback heading for `#/finances/<sub>`, defaulting to the section. */
-export function financeFallbackTitle(sub: string | null): string {
-  return (sub && FINANCE_FALLBACK_TITLES[sub]) || "Finances";
-}
 // Hosts a sandboxed iframe and the postMessage bridge — load on demand, same
 // as the other heavier, less-visited surfaces.
 const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
@@ -431,31 +399,8 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
-  // The company's main line has a channel of its own now — the built-in
-  // `#general` (issue #1743) — so it maps to itself, under every spelling the
-  // host journals it under (`""`, `main`, `General`, `general`).
-  //
-  // The main line used to be seeded with the first desk's id instead: with no
-  // `#general` channel to land in, it was parked on whichever desk sorted
-  // first, so it would still be somewhere the operator could find it. That is
-  // now actively wrong — an unaddressed message and its reply were rendered in
-  // `#engineering`, complete with an unread badge, while the host's own
-  // history for that desk was empty. Verified in a browser before and after.
-  //
-  // Resolved through `channelIdForThread` rather than answered here, so there
-  // is one rule and not two: a blueprint desk grandfathered under a General id
-  // owns the line in its own company, and `buildChannels` renders no built-in
-  // channel beside it — pointing these spellings at a `main` nothing renders
-  // parks live frames and their unread badges where they cannot be opened.
-  for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) {
-    const channelId = channelIdForThread(spelling, desks, members);
-    if (channelId) map[spelling] = channelId;
-  }
-  // `dmThreadId`, not `m.id`: a teammate whose id is a General spelling is
-  // addressed on `dm:<id>`, and the host emits its live frames under that key.
-  // Seeded bare, `channelForThread` could place neither that DM's reply nor its
-  // working indicator anywhere at all (issue #1743).
-  for (const threadId of [...desks.map((d) => d.id), ...members.map(dmThreadId)]) {
+  if (desks[0]) map[MAIN_THREAD_ID] = desks[0].id;
+  for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
   }
@@ -1118,9 +1063,7 @@ export function AppShell({
         else channelsByThread.set(threadId, [{ channelId }]);
       }
       // Every resolved thread gets its own fetch, even when nothing renders as
-      // a channel — a workflow run is a thread with no Chat channel. (The main
-      // line used to be the example here; since issue #1743 it has `#general`.)
-      // And every
+      // a channel — the main line is a thread with no Chat channel. And every
       // channel's backing thread is in `threadIds`, so the union is the full
       // set, each exactly once (issue #1690).
       [...new Set([...threadIds, ...channelsByThread.keys()])].forEach((threadId) =>
@@ -1128,16 +1071,29 @@ export function AppShell({
       );
     };
 
-    client
-      .listDesks(company)
-      .then(async (desks) => {
+    Promise.all([
+      client.listDesks(company).catch(() => null),
+      // The always-present Operator feed's identity (issue #1757 rework) —
+      // fetched alongside desks, not derived from them, since it is its own
+      // surface now. `null` on any failure (offline, or a host that predates
+      // the route) rather than sinking the whole pass: a company can still
+      // rehydrate its real desks/DMs without the pinned Operator row.
+      client.getOperatorChannel(company).catch(() => null),
+    ])
+      .then(async ([desks, operatorChannelRaw]) => {
+        // See `isOperatorChannelDto`'s doc comment — a client stub that
+        // resolves every unlisted method to `[]` would otherwise satisfy the
+        // `Promise.all` type and reach the field reads below.
+        const operatorChannel = isOperatorChannelDto(operatorChannelRaw)
+          ? operatorChannelRaw
+          : null;
         if (cancelled || requestCompany !== company) return;
         // Issue #151 §3.3: desks first, then one DM thread per roster teammate.
         // The roster is fetched separately and tolerated as optional — a host
         // that 404s `/team` keeps its desks rather than losing the whole list.
         const team = await client.listTeam(company).catch(() => []);
         if (cancelled) return;
-        const deskThreads = threadsFromDesks(desks);
+        const deskThreads = desks === null ? defaultThreads() : threadsFromDesks(desks);
         const resolved = [
           ...deskThreads,
           ...agentDmThreads(
@@ -1152,51 +1108,29 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        const chatDesks = desks.length ? desks.map(deskFromDto) : defaultDesks();
+        const chatDesks =
+          desks === null ? defaultDesks() : desks.length ? desks.map(deskFromDto) : defaultDesks();
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
-        // The channel `ChatView` lands on when the hash names none, which since
-        // issue #1743 is the built-in `#general` rather than the first desk —
-        // the two must agree, or a line with nowhere else to go lands in a
-        // channel the operator is not looking at. Resolved rather than
-        // hard-coded, for the reason `generalChannelId` gives: a grandfathered
-        // blueprint desk owns the line in its own company, and `main` is then
-        // not a channel at all.
-        setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
-        const threadIds = resolved.map((t) => t.id);
+        setFirstDeskChannelId(chatDesks[0]?.id ?? null);
+        // Fold the Operator feed's id into the same rehydration pass, keyed on
+        // its own id both as channel and thread (its channel id *is* its
+        // thread id — `chat/history?desk=<id>` reads it through the ordinary
+        // path). Without this, `ChatView`'s pinned row would sit on a channel
+        // id `historyReady` never sees a status for until `discovered` alone
+        // resolves it, and `transcripts[operatorChannel.id]` would never fill
+        // in — the spinner-forever failure mode this pass exists to avoid.
+        const threadIds = [
+          ...resolved.map((t) => t.id),
+          ...(operatorChannel ? [operatorChannel.id] : []),
+        ];
         const channels = [
-          // `#general` is not in the desk list (it is not a desk), so its
-          // history has to be named here or nothing would rehydrate it on
-          // reload — the one channel every company has would come back empty.
-          {
-            channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,
-            threadId: MAIN_THREAD_ID,
-          },
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-          // A DM's history is fetched under the teammate's **own id** — but
-          // that id is not always this DM's address. A manifest may declare a
-          // teammate whose id is a General spelling (`mint_agent_id` reserves
-          // `main` and `General`, but a blueprint is not something this console
-          // overrules), and `GET chat/history?desk=main` then returns the
-          // *folded General conversation*, not that teammate's transcript:
-          // `is_general_chat` has folded `""`, `main`, `General` and `general`
-          // into one conversation since issue #65. Naming `dm:<id>` as its
-          // channel therefore poured the company-wide line into that DM on
-          // every reload, and — before the resolver below was reordered — left
-          // `#general` itself with no hydration target at all.
-          //
-          // Resolved through `channelIdForThread` so the one rule that decides
-          // where a thread renders decides it here too (issue #1743). For every
-          // ordinary teammate that is exactly `dm:<id>`, unchanged.
-          ...roster.map((m) => ({
-            channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
-            // The address the DM is actually written under. Bare, this fetched
-            // the folded General history for a teammate whose id is a General
-            // spelling, so its own transcript could never be recovered after a
-            // reload (issue #1743).
-            threadId: dmThreadId(m),
-          })),
+          ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+          ...(operatorChannel
+            ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
+            : []),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         // SSE remains the fast path. This catches a persisted channel message
@@ -1209,27 +1143,17 @@ export function AppShell({
         setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
-        // Host without `/desks`, or offline — keep the static default
-        // threads, but the operator/General line still deserves a
-        // rehydration attempt (it's the one every deployment has).
+        // Last-resort safety net: `listDesks`/`getOperatorChannel` already
+        // degrade to `null` on their own failure above, so this only fires on
+        // something unexpected inside the `.then` (e.g. a state setter
+        // throwing) — keep the static default threads so the console still
+        // renders something rather than getting stuck.
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
         setChatChannelByThread(channelMap(fallbackDesks, []));
-        // Exactly what the success path above does, and for the same reason:
-        // the landing channel is `#general`, always. This used to read
-        // `fallbackDesks[0]?.id`, which agreed only by accident — the fallback
-        // set's first row happened to be a fabricated `main` desk. That row is
-        // gone (it made a console-invented desk indistinguishable from a
-        // blueprint one), so the rule is named here rather than inferred from
-        // whichever desk sorts first.
-        setFirstDeskChannelId(MAIN_THREAD_ID);
+        setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
         const threadIds = defaultThreads().map((t) => t.id);
-        const channels = [
-          // `#general` is in no desk list, here as above — without naming it,
-          // the one channel every company has would not rehydrate on reload.
-          { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
-          ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-        ];
+        const channels = fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id }));
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         rehydrateAll();
         disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);
@@ -1376,7 +1300,7 @@ export function AppShell({
               return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
             }),
           );
-          const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
+          const channelId = chatChannelByThreadRef.current[threadId];
           // The thread settled before the desks/roster effect populated its
           // channel id — on a cold load, or the moment after a company switch
           // (issue #1701). The `threads` fold above still ran; park the id so
@@ -1759,7 +1683,7 @@ export function AppShell({
    */
   const onThreadViewed = useCallback(
     (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
-      const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
+      const channelId = chatChannelByThreadRef.current[threadId];
       if (!channelId) return;
       onChannelViewed(
         channelId,
@@ -1827,10 +1751,7 @@ export function AppShell({
    * next — #368's bug, re-introduced one surface over.
    */
   const noteInChannel = (threadId: string | null | undefined, line: string) => {
-    // Through `channelForThread`, not a bare index: the host accepts any casing
-    // of a General spelling and echoes back the one the caller used, so a map
-    // of four literals misses `MAIN` from an API client (issue #1743).
-    const target = threadId ? (channelForThread(chatChannelByThread, threadId) ?? undefined) : undefined;
+    const target = threadId ? chatChannelByThread[threadId] : undefined;
     if (!target) {
       noteSystem(line);
       return;
@@ -1887,11 +1808,7 @@ export function AppShell({
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op, the
       // same as the thread store above: better silent than in the wrong place.
-      // `channelForThread`, for the reason `noteInChannel` gives: the map holds
-      // four literal General spellings and the host echoes whatever casing the
-      // caller addressed, so a bare index drops the live reply and it appears
-      // only when polling recovers the durable history (issue #1743).
-      const channelId = channelForThread(chatChannelByThread, event.chatId);
+      const channelId = chatChannelByThread[event.chatId];
       if (!channelId) return;
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
@@ -2190,67 +2107,6 @@ export function AppShell({
   // the state they feed has to live where that stream is read.
   const presence = usePresence(client, company);
   const typing = useTyping(client, company);
-  /**
-   * The coarse "near your credit limit" warning (issue #1846), off the live
-   * `budget_proximity` frame. Shell-owned for the same reason presence/typing
-   * are: the SSE subscription lives here, and the banner must outlive a
-   * channel switch (the warning is about the company, not one conversation).
-   * `null` once dismissed or once a fresh dispatch has not re-raised it.
-   *
-   * "Outlive a channel switch" stops at the company boundary, though — see
-   * the reset effect right below, the same shape `workflowRunEvents` and
-   * `openTurns` already use for their own company-scoped state.
-   */
-  const [budgetProximity, setBudgetProximity] = useState<{
-    message: string;
-    atMillis: number;
-    // The frame's own `agentId` (issue #1846 review, Codex #3869601278):
-    // present for one teammate's daily cap, absent for the company-wide
-    // ceiling. Carried through to state (not just read at arrival) because
-    // the expiry effect below needs it too, to pick the right boundary —
-    // see `isBudgetProximityExpired`'s doc.
-    agentId?: string;
-  } | null>(null);
-  // Issue #1846 review (Codex #3864988188): company-scoped, and reset on
-  // company change for the same reason `workflowRunEvents`/`openTurns` are
-  // (see their own reset effects above) — this state has no company id on
-  // it, so switching without clearing left company A's warning rendered
-  // under company B until B dismissed it or emitted its own.
-  useEffect(() => {
-    setBudgetProximity((prev) => (prev === null ? prev : null));
-  }, [client, company]);
-  // Issue #1846 review (Codex #3866418899, refined by #3868962376 /
-  // #3869601278): bounded self-expiry, since the backend only ever
-  // publishes a `budget_proximity` frame while usage is at least 90%
-  // (`is_approaching_budget_ceiling`'s callers in `harness/built_in/mod.rs`)
-  // and never a "cleared" counterpart. Without this, a daily agent cap
-  // resetting at 00:00 UTC, a plan period rolling over, or an operator
-  // raising the cap all leave usage back below that threshold with nothing
-  // on the wire to say so, and the banner claimed the previous period's
-  // status forever.
-  //
-  // The boundary itself depends on `agentId` — see
-  // `isBudgetProximityExpired`/`budgetProximityExpiresAt`'s docs: a per-agent
-  // DAILY warning is anchored to the next UTC midnight (that reset's actual
-  // instant), but the COMPANY-WIDE warning has no such fixed boundary the
-  // console can compute, so it keeps the flat 24h ceiling instead — anchoring
-  // IT to midnight too would clear a still-valid warning hours or days before
-  // its own (not-necessarily-UTC-day-aligned) plan period actually ends. A
-  // dispatch that is STILL near the cap re-publishes its own frame well
-  // inside the window, which reaches this effect as a new `budgetProximity`
-  // value and re-arms the timer, so a genuinely ongoing warning never
-  // flickers off mid-window.
-  useEffect(() => {
-    if (budgetProximity === null) return;
-    if (isBudgetProximityExpired(budgetProximity.atMillis, Date.now(), budgetProximity.agentId)) {
-      setBudgetProximity(null);
-      return;
-    }
-    const remainingMs =
-      budgetProximityExpiresAt(budgetProximity.atMillis, budgetProximity.agentId) - Date.now();
-    const timer = setTimeout(() => setBudgetProximity(null), Math.max(remainingMs, 0));
-    return () => clearTimeout(timer);
-  }, [budgetProximity]);
   /**
    * The company's people, id → label.
    *
@@ -2563,14 +2419,6 @@ export function AppShell({
       },
       [typing],
     ),
-    onBudgetProximityEvent: useCallback((event: CompanyStreamEvent) => {
-      if (event.type !== "budget_proximity") return;
-      setBudgetProximity({
-        message: event.message,
-        atMillis: event.atMillis,
-        agentId: event.agentId,
-      });
-    }, []),
     onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
       // Both halves. The tick refreshes the durable history; the frames drive
       // the live canvas. Progress frames are far more frequent than outcomes,
@@ -2825,8 +2673,6 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
-              budgetProximity={budgetProximity}
-              onDismissBudgetProximity={() => setBudgetProximity(null)}
             />
           )}
           {view === "conversation" && (
@@ -2973,7 +2819,13 @@ export function AppShell({
             />
           )}
           {view === "workspace" && (
-            <Suspense fallback={<RouteLoading title="Workspace" label="Loading workspace…" />}>
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                  Loading workspace…
+                </div>
+              }
+            >
               <WorkspaceView
                 client={client}
                 company={company}
@@ -3015,16 +2867,9 @@ export function AppShell({
           {view === "observatory" && (
           <Suspense
             fallback={
-              <RouteLoading
-                // `ObservatoryView` titles itself `runId ? "Run" : "Observatory"`,
-                // and on a cold direct visit to `#/observatory/<runId>` this
-                // boundary is the whole page — so announcing "Observatory" told
-                // someone who had bookmarked a run they were on the index, and
-                // corrected itself only once the chunk landed. Same rule, same
-                // `sub`, as the finance boundary above.
-                title={sub ? "Run" : "Observatory"}
-                label={sub ? "Loading run…" : "Loading observatory…"}
-              />
+              <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
+                Loading observatory…
+              </div>
             }
           >
             <ObservatoryView
@@ -3042,7 +2887,13 @@ export function AppShell({
           </Suspense>
         )}
         {view === "workflows" && (
-            <Suspense fallback={<RouteLoading title="Workflows" label="Loading canvas…" />}>
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                  Loading canvas…
+                </div>
+              }
+            >
               <WorkflowsView
                 client={client}
                 company={company}
@@ -3082,17 +2933,22 @@ export function AppShell({
             </Suspense>
           )}
           {view === "pages" && (
-            <Suspense fallback={<RouteLoading title="Pages" label="Loading pages…" />}>
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                  Loading pages…
+                </div>
+              }
+            >
               <PagesView client={client} company={company} />
             </Suspense>
           )}
           {view === "finances" && (
             <Suspense
               fallback={
-                <RouteLoading
-                  title={financeFallbackTitle(sub)}
-                  label={`Loading ${financeFallbackTitle(sub).toLowerCase()}…`}
-                />
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                  Loading finances…
+                </div>
               }
             >
               <FinanceSection
