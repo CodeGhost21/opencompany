@@ -912,7 +912,16 @@ export function taskStatusesById(
   return statuses;
 }
 
-/** The steer body. `redirect` requires `instruction`; `cancel` requires `confirm`. */
+export function listTaskApprovals(
+  client: OpenCompanyClient,
+  company: string | null,
+  taskId: string,
+): Promise<import("@/api/types").ApprovalSummary[]> {
+  return client.get<import("@/api/types").ApprovalSummary[]>(
+    `${client.scopeFor(company)}/tasks/${encodeURIComponent(taskId)}/approvals`,
+  );
+}
+
 export interface SteerInput {
   action: SteerAction;
   instruction?: string;
