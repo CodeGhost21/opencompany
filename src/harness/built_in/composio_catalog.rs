@@ -747,14 +747,17 @@ pub fn composio_brief(toolkits: &[String]) -> String {
         .filter(|toolkit| !toolkit.is_empty())
         .collect();
 
-    // Only claim GitHub is reachable through Composio when it actually is:
-    // open mode (no allowlist restriction) or GitHub named among the connected
-    // toolkits. A non-empty allowlist that excludes GitHub (e.g. `["slack"]`)
-    // must not tell the agent it can reach GitHub through Composio — the live
-    // tools enforce the allowlist and would reject the authorization/execution,
-    // routing a GitHub task toward a capability the agent does not hold (PR
-    // #1780 review, round 6).
-    let github_reachable = named.is_empty() || named.iter().any(|toolkit| toolkit == "github");
+    // Only claim GitHub is reachable through Composio when it is actually named
+    // among the connected toolkits. An empty allowlist is open mode — the
+    // CLIENT applies no restriction, but that says nothing about what is
+    // actually connected; the backend's own server-enforced allowlist still
+    // decides (see `TenantComposio::toolkits`'s doc comment). Treating "no
+    // client-side restriction" as "GitHub is connected" promised a capability
+    // before `composio_list_connections` had confirmed it, the same failure a
+    // non-empty allowlist that excludes GitHub (e.g. `["slack"]`) already
+    // guards against — the live tools enforce the allowlist and would reject
+    // the authorization/execution either way (PR #1780 review, rounds 6-7).
+    let github_reachable = named.iter().any(|toolkit| toolkit == "github");
 
     let mut brief = String::from(if github_reachable {
         "\n\n## Connected integrations (GitHub and other SaaS)\n\
@@ -1558,6 +1561,27 @@ mod tests {
             "open mode must not claim a specific connected set: {brief}"
         );
         // The routing rule and grounding still hold with no allowlist.
+        assert!(brief.contains("composio_execute"), "{brief}");
+        assert!(brief.contains("http_request"), "{brief}");
+    }
+
+    /// PR #1780 review (round 7): an empty allowlist means the CLIENT applies
+    /// no restriction — the backend's own server-enforced allowlist still
+    /// decides what is actually connected (see `TenantComposio::toolkits`'s
+    /// doc comment). It is not proof that GitHub, specifically, is connected.
+    /// Naming GitHub in the "GitHub and other SaaS" heading before
+    /// `composio_list_connections` has run promises a capability the agent may
+    /// not hold — the same class of bug requirement #3 (the discovery-pointer
+    /// test above) already guards against for the "Connected toolkits for
+    /// this company:" line.
+    #[test]
+    fn the_composio_brief_open_mode_does_not_name_github_before_discovery() {
+        let brief = composio_brief(&[]);
+        assert!(
+            !brief.to_lowercase().contains("github"),
+            "open mode must not claim GitHub is reachable before discovery: {brief}"
+        );
+        // The routing rule and grounding still hold generically.
         assert!(brief.contains("composio_execute"), "{brief}");
         assert!(brief.contains("http_request"), "{brief}");
     }
