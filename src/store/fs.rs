@@ -1903,9 +1903,38 @@ impl CompanyStore for FsCompanyStore {
         // uncancellable task closes that window the same way
         // `stage_atomic_bytes` already closes it for staging: `save` can be
         // cancelled freely, but the unit it is waiting on cannot be.
+        //
+        // Detaching alone reopens a *different* hole (issue #1828 review,
+        // finding on 3878896036): `company_write_lock` — the per-company
+        // serialization every load-mutate-save caller (policy, team,
+        // workflow, …) relies on — is held on the *caller's* frame, not on
+        // this detached task. Cancel the caller while it is awaiting
+        // `commit_rx` below and that guard drops immediately, even though
+        // the commit it was meant to be guarding is still renaming files in
+        // the background. A fresh caller can then acquire the now-free
+        // `company_write_lock` and start its own save for the same bundle
+        // while the orphaned commit is still in flight — nothing stops the
+        // two detached commits from interleaving their renames, so the
+        // newer save's files can be overwritten by the older, cancelled one
+        // landing last.
+        //
+        // `commit_lock` closes that at the layer that actually owns the
+        // race: a second, internal lock keyed on the bundle directory (so
+        // both files' commits share one unit, same as `guard` above),
+        // acquired here — before the caller's own lock can be dropped out
+        // from under this call — and moved into the detached task so it
+        // stays held for the commit's entire lifetime regardless of what
+        // happens to the caller. Same ownership-transfer shape
+        // `StagedGuard`/`forget` already uses for the staged temp files. No
+        // `.await` sits between acquiring it and the `spawn` below, so a
+        // caller cancelled in that gap either never acquired the lock
+        // (nothing to release) or has already handed it to the spawned task
+        // (nothing left on this frame to drop either way).
+        let commit_lock = path_lock(bundle.dir()).lock_owned().await;
         let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
         let commit_bundle = bundle.clone();
         tokio::task::spawn(async move {
+            let _commit_lock = commit_lock;
             let result = commit_bundle_writes(
                 commit_bundle,
                 updating_existing_bundle,
@@ -4341,6 +4370,144 @@ mod test {
             "the manifest and metadata must land together or not at all after a \
              cancelled save (manifest updated = {manifest_updated}, metadata updated \
              = {meta_updated})"
+        );
+    }
+
+    /// **Issue #1828 review, finding on 3878896036**: `company_write_lock` —
+    /// the per-company serialization every load-mutate-save caller relies on
+    /// — lives on the *caller's* frame, not on the detached commit task the
+    /// twelfth round introduced. Cancel a caller while it awaits `commit_rx`
+    /// and that guard drops immediately even though the commit it was
+    /// guarding is still renaming files in the background; nothing used to
+    /// stop a fresh caller from acquiring the now-free lock and starting its
+    /// own save for the same bundle while the orphaned commit was still in
+    /// flight.
+    ///
+    /// Reuses `stall_probe::arm_commit` to park the cancelled call's first
+    /// rename in flight, aborts its caller, then proves a concurrent second
+    /// save for the same bundle cannot complete while that orphaned commit
+    /// is still parked — and that once it is released, the second save's
+    /// content is what survives, not a mix with (or an overwrite by) the
+    /// cancelled one.
+    #[tokio::test]
+    async fn abort_then_concurrent_update_does_not_race_the_orphaned_commit() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = |name: &str, lifecycle: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: {
+                let mut m = sample_manifest();
+                m.company.name = name.to_string();
+                m
+            },
+            ledger: Vec::new(),
+            lifecycle: lifecycle.to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        store
+            .save(&record("Before", "running"))
+            .await
+            .expect("first publish");
+
+        // Park the stale call's first commit (company.toml, update path) in
+        // flight, then abort its caller while it is held there — the same
+        // setup as the sibling test above, but this time a second, live
+        // caller shows up while the first is still orphaned mid-commit.
+        let release = stall_probe::arm_commit(&bundle.company_toml());
+        let stale = record("Stale", "paused");
+        let stale_store = FsCompanyStore::new(&root);
+        let stale_handle = tokio::spawn(async move { stale_store.save(&stale).await });
+        stall_probe::wait_blocked_commit().await;
+        stale_handle.abort();
+        let joined = stale_handle.await;
+        assert!(
+            joined.as_ref().is_err_and(|e| e.is_cancelled()),
+            "the stale save's caller must actually have been cancelled for this \
+             test to mean anything, got {joined:?}"
+        );
+
+        // The stale call's detached commit is still parked on the rename it
+        // acquired `commit_lock` for. A fresh caller's own save must not be
+        // able to start committing until that lock is released, even though
+        // `company_write_lock` (held by whatever calls `save` in production)
+        // was already dropped when the stale caller was aborted above.
+        let fresh_store = FsCompanyStore::new(&root);
+        let fresh = record("Fresh", "archived");
+        let mut fresh_handle = tokio::spawn(async move { fresh_store.save(&fresh).await });
+        let raced_ahead =
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut fresh_handle).await;
+        assert!(
+            raced_ahead.is_err(),
+            "a concurrent save must not complete while an orphaned commit for \
+             the same bundle is still in flight — got {raced_ahead:?}"
+        );
+
+        // Release the stale commit and let it settle, then the fresh save
+        // must be free to finish.
+        release.send(()).expect("stall gate still open");
+        let bundle_dir = bundle.company_toml().parent().unwrap().to_path_buf();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let orphans = std::fs::read_dir(&bundle_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                    .count();
+                if orphans == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "the stale, orphaned commit must not strand a staged temp in {}",
+            bundle_dir.display()
+        );
+
+        let joined_fresh = tokio::time::timeout(std::time::Duration::from_secs(5), fresh_handle)
+            .await
+            .expect("the fresh save must complete once the orphaned commit clears")
+            .expect("the fresh save's task must not panic");
+        joined_fresh.expect("the fresh save must succeed");
+
+        let reader = FsCompanyStore::new(&root);
+        let loaded = reader
+            .load(&id)
+            .await
+            .expect("load must not error")
+            .expect("the bundle must remain loadable");
+        assert_eq!(
+            loaded.manifest.company.name, "Fresh",
+            "the live, awaited save must win — not the cancelled one whose \
+             detached commit was merely still in flight"
+        );
+        assert_eq!(
+            loaded.lifecycle, "archived",
+            "the live, awaited save must win — not the cancelled one whose \
+             detached commit was merely still in flight"
         );
     }
 
