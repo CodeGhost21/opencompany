@@ -889,17 +889,37 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         .pointer("/choices/0/message/tool_calls")
         .and_then(|v| v.as_array())
         .map(std::vec::Vec::len);
-    // A tool call was genuinely requested (the raw payload carries one,
-    // whether or not `parse_tool_calls` accepted it) but not every entry
-    // survived parsing — either none did, or some did and some were
-    // silently dropped. This must error even when `content` is nonempty:
-    // array-shaped content can carry a text preamble alongside the
-    // malformed call, which would otherwise pass the empty-turn check below
-    // and let the harness silently return the preamble as if it were the
-    // whole answer — the same class of substitution the reasoning-fallback
-    // guard above exists to prevent, just via the *content* channel instead
-    // of `reasoning` (CodeRabbit review on #1779, comment 3872084060).
-    if raw_tool_call_requested
+    // `finish_reason` can assert an action was requested (`tool_calls`, or
+    // the legacy `function_call` value) even when there is no raw call body
+    // for `raw_tool_call_requested` above to find at all — it only reads
+    // "requested" off a *present, nonempty* `tool_calls` array or a present
+    // legacy `function_call` field, so a missing field or an explicit empty
+    // `tool_calls: []` both read as "nothing requested" to it. When
+    // `content` is also empty this self-corrects anyway, via the
+    // content-and-tool_calls-both-empty catch-all below. But array-shaped
+    // `content` can carry a genuinely nonempty text preamble on its own —
+    // no `reasoning` fallback involved — which makes that catch-all a
+    // no-op too, so the response would return successfully with just the
+    // preamble and no tool call, silently dropping the action the finish
+    // reason itself declared (CodeRabbit review on #1779, comment
+    // 3877608728).
+    let finish_reason_declares_action = matches!(
+        finish_reason.as_deref(),
+        Some("tool_calls") | Some("function_call")
+    );
+    // A tool call was genuinely requested — either the raw payload carries
+    // one (whether or not `parse_tool_calls` accepted it), or the finish
+    // reason alone asserts one — but not every entry survived parsing:
+    // either none did, or some did and some were silently dropped. This
+    // must error even when `content` is nonempty: array-shaped content can
+    // carry a text preamble alongside the malformed (or entirely missing)
+    // call, which would otherwise pass the empty-turn check below and let
+    // the harness silently return the preamble as if it were the whole
+    // answer — the same class of substitution the reasoning-fallback guard
+    // above exists to prevent, just via the *content* channel instead of
+    // `reasoning` (CodeRabbit review on #1779, comments 3872084060 and
+    // 3877608728).
+    if (raw_tool_call_requested || finish_reason_declares_action)
         && (tool_calls.is_empty() || raw_tool_call_count.is_some_and(|n| n != tool_calls.len()))
     {
         let detail = finish_reason
@@ -2824,6 +2844,72 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Same gap again, but via the *content* channel instead of `reasoning`:
+    /// array-shaped `content` carrying a nonempty text preamble ("Let me
+    /// check that…") makes `content` nonempty on its own, with no reasoning
+    /// fallback involved at all. `raw_tool_call_requested` reads a present
+    /// but empty `tool_calls: []` array the same as an absent field (both
+    /// "nothing requested"), so the explicit raw-payload guard never fires;
+    /// and because `content` is already nonempty, the final
+    /// content-and-tool_calls-both-empty catch-all below never fires either.
+    /// The response would be returned successfully with the preamble as the
+    /// full text and no tool call — silently dropping the action the
+    /// `finish_reason` itself asserts was requested (CodeRabbit review on
+    /// #1779, comment 3877608728).
+    #[test]
+    fn tool_calls_finish_reason_with_empty_array_beside_content_preamble_errors_instead_of_dropping_action()
+     {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Let me check that for you." }
+                    ],
+                    "tool_calls": []
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a tool_calls finish reason with an empty call array must not let a content \
+             preamble stand in for the requested action",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Legacy sibling of the above: `finish_reason: "function_call"` with no
+    /// `message.function_call` field at all, beside a nonempty array-shaped
+    /// `content` preamble.
+    #[test]
+    fn function_call_finish_reason_with_missing_call_body_beside_content_preamble_errors_instead_of_dropping_action()
+     {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "function_call",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Let me check that for you." }
+                    ]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a function_call finish reason with no call body must not let a content preamble \
+             stand in for the requested action",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("function_call"),
             "error must name finish_reason for diagnosis, got: {msg}"
         );
     }
