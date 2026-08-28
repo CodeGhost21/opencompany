@@ -1563,12 +1563,7 @@ impl HarnessBrain {
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
-        let relay = lifecycle::relay_reply(
-            &card,
-            &responder,
-            &self.orchestrator(),
-            origin,
-        );
+        let relay = lifecycle::relay_reply(&card, &responder, &self.orchestrator(), origin);
         self.journal_task_outcome(&card, &responder, result_text, artifact_ids)
             .await;
         Ok(Some(relay))
@@ -1613,12 +1608,7 @@ impl HarnessBrain {
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
-        let relay = lifecycle::relay_reply(
-            &card,
-            &orchestrator,
-            &orchestrator,
-            origin,
-        );
+        let relay = lifecycle::relay_reply(&card, &orchestrator, &orchestrator, origin);
         self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
             .await;
         Ok(Some(relay))
