@@ -36,7 +36,7 @@ use crate::ports::tasks::{
     COLUMN_PLANNING, COLUMN_TODO, TaskOutput, TaskOutputAction, TaskOutputSource,
     TaskOutputWorkflow,
 };
-use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
+use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
 use crate::runtime::cycle::{BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, assignment_matches};
@@ -51,15 +51,56 @@ use crate::runtime::cycle::{BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, assignment
 /// turn ([`run_steered_background`](RunTurn::run_steered_background)). The impl
 /// re-attaches whatever dependencies the concrete runtime needs; the runner only
 /// ever sees a [`TurnOutcome`].
+/// Which conversation a chat turn belongs to: the channel, and the thread
+/// within it (#1890).
+///
+/// One argument rather than two loose `Option`s beside each other. A bare
+/// `Option<EventSeq>` next to a bare `Option<&str>` is exactly the shape
+/// [`ChatTurn`](crate::server::operator) already documents as the hazard — a
+/// mis-ordered pair that compiles and then answers into the wrong
+/// conversation — and there is nothing in either type to catch it.
+///
+/// A `None` `thread_root` is not "no thread". It is the channel-level
+/// conversation: the one every unparented line hangs in, which is every line
+/// in a company that has never opened a thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChatTarget<'a> {
+    /// The desk / channel the turn is addressed to; `None` is unaddressed and
+    /// folds to the General desk downstream.
+    pub chat_id: Option<&'a str>,
+    /// The root message this turn's thread hangs off; `None` is the channel
+    /// itself.
+    pub thread_root: Option<EventSeq>,
+}
+
+impl<'a> ChatTarget<'a> {
+    /// A turn posted straight into a channel — the shape every caller had
+    /// before threads were part of the key.
+    pub fn channel(chat_id: Option<&'a str>) -> Self {
+        Self {
+            chat_id,
+            thread_root: None,
+        }
+    }
+
+    /// A turn inside `chat_id`, in the thread rooted at `thread_root`.
+    pub fn in_thread(chat_id: Option<&'a str>, thread_root: Option<EventSeq>) -> Self {
+        Self {
+            chat_id,
+            thread_root,
+        }
+    }
+}
+
 #[async_trait]
 pub trait RunTurn: Send + Sync {
-    /// A streamed turn on `agent_id` answering `message` in `chat_id`.
+    /// A streamed turn on `agent_id` answering `message` in `chat`.
     async fn run(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome>;
 
     /// A streamed, operator-steerable turn (pause / cancel / redirect).
@@ -74,7 +115,7 @@ pub trait RunTurn: Send + Sync {
         agent_id: &str,
         message: &str,
         control: &SteerControl,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome>;
 
@@ -120,7 +161,8 @@ pub trait RunTurn: Send + Sync {
         // and an engine with no step stream has nothing to feed it anyway. The
         // streaming harness overrides this and does record.
         let _ = run_sink;
-        self.run(company, agent_id, message, None).await
+        self.run(company, agent_id, message, ChatTarget::default())
+            .await
     }
 
     /// Like [`run_background`](Self::run_background) but streams the node's live
@@ -357,7 +399,7 @@ impl RunTurn for NoTurn {
         _company: &CompanyId,
         _agent_id: &str,
         _message: &str,
-        _chat_id: Option<&str>,
+        _chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome> {
         Err(no_turn_error())
     }
@@ -368,7 +410,7 @@ impl RunTurn for NoTurn {
         _agent_id: &str,
         _message: &str,
         _control: &SteerControl,
-        _chat_id: Option<&str>,
+        _chat: ChatTarget<'_>,
         _run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         Err(no_turn_error())
@@ -680,6 +722,19 @@ pub(crate) struct DelegationRunner<'a> {
     /// worse than before this fix, for the paths that have not been taught to
     /// carry a re-issue text.
     reissue_message: Option<String>,
+    /// The thread this turn belongs to, when it belongs to one (#1890).
+    ///
+    /// A builder for the same reason [`requested`](Self::requested) and
+    /// [`also_mentioned`](Self::also_mentioned) are, and the argument their docs
+    /// already make applies here with more force: optional context about the
+    /// turn, absent on every path that is not an operator message in a thread,
+    /// and threading it as an argument made well over a hundred call sites
+    /// restate "no thread" to say nothing — with `main` adding more of them
+    /// while the change was in review, so every rebase re-broke the branch.
+    ///
+    /// The channel stays an argument, because every caller has one and it
+    /// selects *who answers*. The thread only narrows *what they remember*.
+    thread_root: Option<EventSeq>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -738,6 +793,7 @@ impl<'a> DelegationRunner<'a> {
             requested_intent: None,
             also_mentioned: Vec::new(),
             reissue_message: None,
+            thread_root: None,
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -789,6 +845,7 @@ impl<'a> DelegationRunner<'a> {
             requested_intent: None,
             also_mentioned: Vec::new(),
             reissue_message: None,
+            thread_root: None,
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -1001,6 +1058,24 @@ impl<'a> DelegationRunner<'a> {
     /// context about the turn, absent on every path that is not an operator
     /// message, and threading it as an argument would make a dozen test call
     /// sites restate an empty vector to say nothing.
+    /// The conversation a turn in `chat_id` belongs to: that channel, plus
+    /// whatever thread [`in_thread`](Self::in_thread) bound this runner to.
+    ///
+    /// The single place the two halves are rejoined, so a caller cannot pair a
+    /// channel with the wrong thread by getting the argument order wrong — the
+    /// hazard `ChatTarget`'s own docs name.
+    fn target(&self, chat_id: Option<&'a str>) -> ChatTarget<'a> {
+        ChatTarget::in_thread(chat_id, self.thread_root)
+    }
+
+    /// Binds this turn to the thread rooted at `root` (#1890) — `None` is the
+    /// channel-level conversation, which is what every non-threaded path wants
+    /// and therefore never has to say.
+    pub(crate) fn in_thread(mut self, root: Option<EventSeq>) -> Self {
+        self.thread_root = root;
+        self
+    }
+
     pub(crate) fn also_mentioned(mut self, agents: Vec<String>) -> Self {
         self.also_mentioned = agents;
         self
@@ -1367,7 +1442,8 @@ impl<'a> DelegationRunner<'a> {
                 || (chatter && is_pure_small_talk(operator_words(message))));
         let outcome = with_chat_only_hint(
             chat_only,
-            self.run_turn.run(self.company, responder, message, chat_id),
+            self.run_turn
+                .run(self.company, responder, message, self.target(chat_id)),
         )
         .await?;
         let parked = self.approvals_queued().saturating_sub(approvals_before);
@@ -1484,7 +1560,7 @@ impl<'a> DelegationRunner<'a> {
             self.queue.clear();
             let relay = self
                 .run_turn
-                .run(self.company, responder, &relay_prompt, chat_id)
+                .run(self.company, responder, &relay_prompt, self.target(chat_id))
                 .await?;
             // The relay turn may only relay — a second hand-off from here is the
             // re-delegation loop this drain exists to stop, and it is dropped.
@@ -2104,7 +2180,7 @@ impl<'a> DelegationRunner<'a> {
                 &member,
                 &instruction,
                 &control,
-                chat_id,
+                self.target(chat_id),
                 // Issue #242: when this drain is running inside a
                 // dispatched card, the delegate's turn is part of that
                 // card's attempt — its steps and its spend belong to the
@@ -4260,7 +4336,7 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             _company: &CompanyId,
             agent_id: &str,
             message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: ChatTarget<'_>,
         ) -> Result<TurnOutcome> {
             Ok(self.next(agent_id, message, None).await)
         }
@@ -4271,7 +4347,7 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             agent_id: &str,
             message: &str,
             control: &SteerControl,
-            _chat_id: Option<&str>,
+            _chat_id: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             Ok(self.next(agent_id, message, Some(control)).await)

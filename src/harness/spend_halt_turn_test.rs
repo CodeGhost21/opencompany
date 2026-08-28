@@ -433,7 +433,13 @@ async fn a_turn_halted_for_spend_reports_the_halt_and_its_figures() {
     pool.ensure(&rec, &deps).await.expect("pool ensures");
 
     let outcome = pool
-        .run(&rec.id, AGENT, "Write a short feature spec.", &deps, None)
+        .run(
+            &rec.id,
+            AGENT,
+            "Write a short feature spec.",
+            &deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
         .await
         .expect("a spend halt is a stop, not an error — the turn must return Ok");
 
@@ -484,7 +490,13 @@ async fn a_turn_that_finishes_inside_its_budget_reports_no_halt() {
     pool.ensure(&rec, &deps).await.expect("pool ensures");
 
     let outcome = pool
-        .run(&rec.id, AGENT, "Write a short feature spec.", &deps, None)
+        .run(
+            &rec.id,
+            AGENT,
+            "Write a short feature spec.",
+            &deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
         .await
         .expect("turn runs");
 
@@ -521,7 +533,13 @@ async fn a_teammate_with_no_declared_budget_can_never_report_a_halt() {
     pool.ensure(&rec, &deps).await.expect("pool ensures");
 
     let outcome = pool
-        .run(&rec.id, AGENT, "Write a short feature spec.", &deps, None)
+        .run(
+            &rec.id,
+            AGENT,
+            "Write a short feature spec.",
+            &deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
         .await
         .expect("turn runs");
 
