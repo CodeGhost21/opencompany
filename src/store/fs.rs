@@ -786,6 +786,10 @@ struct Meta {
     /// [`crate::ports::types::CompanyRecord::activation_completed_at`].
     #[serde(default)]
     activation_completed_at: Option<u64>,
+    /// Epoch-millis this record was first created. See
+    /// [`crate::ports::types::CompanyRecord::created_at_millis`].
+    #[serde(default)]
+    created_at_millis: Option<u64>,
 }
 
 impl Default for Meta {
@@ -812,6 +816,7 @@ impl Default for Meta {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 }
@@ -916,6 +921,7 @@ impl CompanyStore for FsCompanyStore {
             setup: meta.setup,
             name_confirmed: meta.name_confirmed,
             activation_completed_at: meta.activation_completed_at,
+            created_at_millis: meta.created_at_millis,
         }))
     }
 
@@ -945,6 +951,7 @@ impl CompanyStore for FsCompanyStore {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            created_at_millis: record.created_at_millis,
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
         Ok(())
@@ -2675,6 +2682,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         store.save(&record).await.unwrap();
 
@@ -2738,6 +2746,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -2802,6 +2811,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();

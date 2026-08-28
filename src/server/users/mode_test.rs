@@ -122,6 +122,7 @@ async fn state_in_mode_on(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();

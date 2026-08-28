@@ -5647,6 +5647,7 @@ description = "Builds the product."
             template_provenance: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -9112,6 +9113,7 @@ description = "Sets direction."
             template_provenance: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 

@@ -1035,6 +1035,7 @@ members = ["counsel"]
             template_provenance: None,
             setup: None,
             activation_completed_at: None,
+            created_at_millis: None,
             name_confirmed: false,
             overlay_tool_grants: Default::default(),
         }

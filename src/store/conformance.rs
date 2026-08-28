@@ -348,6 +348,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         setup: Some(sample_setup_answers()),
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     }
 }
 

@@ -4674,6 +4674,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -4758,6 +4759,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -5084,6 +5086,7 @@ mod tests {
                     setup: Default::default(),
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -5307,6 +5310,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -6115,6 +6119,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -6442,6 +6447,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -8142,6 +8148,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -9697,6 +9704,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -10000,6 +10008,7 @@ label = "ok"
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -10697,6 +10706,7 @@ label = "ok"
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();

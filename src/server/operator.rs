@@ -3941,6 +3941,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4042,6 +4043,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4270,6 +4272,7 @@ mode = "full"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4379,6 +4382,7 @@ mode = "full"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4420,6 +4424,7 @@ mode = "full"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4954,6 +4959,7 @@ mode = "full"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -5101,6 +5107,7 @@ mode = "full"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();

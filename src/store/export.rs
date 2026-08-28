@@ -463,6 +463,7 @@ impl BundleContents {
                 setup: self.setup.clone(),
                 name_confirmed: self.name_confirmed,
                 activation_completed_at: self.activation_completed_at,
+                created_at_millis: None,
             })
             .await?;
         for entry in &self.ledger {
@@ -1052,6 +1053,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -1366,6 +1368,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1452,6 +1455,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1589,6 +1593,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1686,6 +1691,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -1823,6 +1829,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2044,6 +2051,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2208,6 +2216,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2306,6 +2315,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -2397,6 +2407,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();

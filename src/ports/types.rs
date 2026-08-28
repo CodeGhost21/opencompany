@@ -3923,6 +3923,10 @@ pub struct OverlayBlob {
     /// [`CompanyRecord::activation_completed_at`].
     #[serde(default)]
     pub activation_completed_at: Option<u64>,
+    /// Epoch-millis this record was first created. See
+    /// [`CompanyRecord::created_at_millis`].
+    #[serde(default)]
+    pub created_at_millis: Option<u64>,
 }
 
 impl OverlayBlob {
@@ -3945,6 +3949,7 @@ impl OverlayBlob {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            created_at_millis: record.created_at_millis,
         }
     }
 
@@ -3983,6 +3988,11 @@ impl OverlayBlob {
                     // what supplies the right answer for an existing company.
                     name_confirmed: false,
                     activation_completed_at: None,
+                    // A legacy bare-array row predates this field by an even
+                    // longer way — `None` is exactly right, not a gap: it is
+                    // what marks the record eligible for the grandfather
+                    // back-fill above in the first place.
+                    created_at_millis: None,
                 })
                 .map_err(|_| original),
         }
@@ -4231,6 +4241,24 @@ pub struct CompanyRecord {
     /// onboarding flow it has no memory of starting.
     #[serde(default)]
     pub activation_completed_at: Option<u64>,
+    /// Epoch-millis this record was first created, stamped once by
+    /// `RuntimeBuilder::build` the first time it sees a given company id
+    /// (`existing: None`) and carried forward untouched on every later
+    /// rebuild — never backdated, never refreshed.
+    ///
+    /// `None` for every record written before this field existed, which is
+    /// exactly the discriminator [`Self::activation_completed_at`]'s own
+    /// `running`-lifecycle back-fill was missing: that migration cannot tell
+    /// "predates activation tracking, has plainly been operating for a
+    /// while" apart from "created moments ago and just restarted before
+    /// finishing onboarding" — `lifecycle` is `running` from the very first
+    /// save in both cases. A record stamped with a real timestamp here proves
+    /// it was created under code that already knew how to gate activation, so
+    /// the migration only grandfathers a record where this is still `None`.
+    /// `#[serde(default)]` is the same backward-compat fallback the two
+    /// fields above use.
+    #[serde(default)]
+    pub created_at_millis: Option<u64>,
 }
 
 /// What a teammate key an operator or a model typed resolves to on a company's
@@ -5241,6 +5269,7 @@ mod test {
             setup: Some(answers.clone()),
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
@@ -6522,6 +6551,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 

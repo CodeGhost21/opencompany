@@ -3453,6 +3453,7 @@ members = ["writer"]
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         let hi = |chat: Option<&str>| CompanyEvent::OperatorMessage {
             text: "hi".into(),

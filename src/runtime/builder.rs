@@ -2539,6 +2539,17 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.lifecycle.clone())
             .unwrap_or_else(|| "running".to_string());
+        // Stamped once, the first time this id is ever built (`existing:
+        // None`), and carried forward untouched on every later rebuild —
+        // never backdated, never refreshed. See
+        // `CompanyRecord::created_at_millis`'s own docs for why this exists:
+        // it is the signal the activation back-fill below needs to tell a
+        // genuine pre-#1843 legacy company apart from one created under code
+        // that already knows how to gate activation.
+        let created_at_millis = existing
+            .as_ref()
+            .and_then(|r| r.created_at_millis)
+            .or_else(|| existing.is_none().then(crate::ports::now_millis));
         // Existing overlay teammates are carried across the rebuild verbatim —
         // except when the upgraded manifest newly confers a BYO real-money
         // namespace (issue #788): an empty `tools` line would silently hand it
@@ -2626,6 +2637,7 @@ impl RuntimeBuilder {
             // computed further down have nothing to feed here.
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         let mut desk_ids = Vec::new();
         let candidates = desk_record
@@ -2781,9 +2793,27 @@ impl RuntimeBuilder {
             Some(r) if r.activation_completed_at.is_some() => {
                 (r.name_confirmed, r.activation_completed_at)
             }
-            // Running and unlatched: the grandfather case this migration
-            // exists for.
-            Some(r) if r.lifecycle == "running" => (true, Some(crate::ports::now_millis())),
+            // Running, unlatched, AND `created_at_millis` absent: a genuine
+            // pre-#1843 legacy record — `lifecycle` has been `"running"`
+            // since the very first save for every company this codebase has
+            // ever created, so on its own it cannot tell "has plainly been
+            // operating for months" apart from "was created moments ago and
+            // just restarted before finishing onboarding". The record's own
+            // creation timestamp can: only a record predating this field's
+            // introduction has it missing. This is the grandfather case the
+            // migration exists for.
+            Some(r) if r.lifecycle == "running" && r.created_at_millis.is_none() => {
+                (true, Some(crate::ports::now_millis()))
+            }
+            // Running, unlatched, but WITH a `created_at_millis`: this record
+            // was created under a build that already knows how to gate
+            // activation, so its lack of a latch means exactly what it says —
+            // onboarding has not finished — not "predates the feature".
+            // Grandfathering it here would permanently un-gate a brand-new
+            // company the moment it restarts mid-onboarding (issue #1845
+            // review). Left exactly as recorded, same as the paused/archived
+            // arm below.
+            Some(r) if r.lifecycle == "running" => (r.name_confirmed, r.activation_completed_at),
             // Existing but not running (paused/archived): left exactly as
             // recorded rather than migrated, so pausing a company before this
             // field existed cannot retroactively "activate" it via this path —
@@ -3393,6 +3423,7 @@ impl RuntimeBuilder {
                                 setup: setup.clone(),
                                 name_confirmed,
                                 activation_completed_at,
+                                created_at_millis,
                             };
                             // The company's other declared harnesses, each on
                             // its own pool and its own provider. Empty unless
@@ -3656,6 +3687,7 @@ impl RuntimeBuilder {
                 setup,
                 name_confirmed,
                 activation_completed_at,
+                created_at_millis,
             })
             .await?;
 
@@ -7712,6 +7744,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -7752,6 +7785,49 @@ needs_reason = true
         let record = runtime.store().load(&id).await.unwrap().unwrap();
         assert!(!record.name_confirmed);
         assert!(record.activation_completed_at.is_none());
+    }
+
+    /// PR #1878 review: a brand-new company that restarts (a fresh `build()`
+    /// call against its own just-saved record) before completing onboarding
+    /// must stay gated, not get grandfathered as activated. Before this fix,
+    /// `lifecycle == "running"` alone triggered the grandfather migration on
+    /// the SECOND build, since `lifecycle` has been `"running"` since the
+    /// very first save for every company ever created here — indistinguishable
+    /// from a genuine pre-#1843 legacy company on that signal alone.
+    #[tokio::test]
+    async fn a_restart_before_onboarding_completes_does_not_backfill_activation() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-restart-no-backfill-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        // First boot: a genuinely new company. Ungated, per the test above.
+        RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Simulated restart: the process comes back up and rebuilds the same
+        // company from the record it just saved, with onboarding still
+        // untouched (no PATCH to confirm the name, no activation event).
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let record = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            !record.name_confirmed,
+            "a restart before onboarding must not grandfather the name-confirm step"
+        );
+        assert!(
+            record.activation_completed_at.is_none(),
+            "a restart before onboarding must not grandfather activation"
+        );
     }
 
     /// Issue #208: an enabled id with no surviving graph body — a seed entry
@@ -7988,6 +8064,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -8166,6 +8243,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -8564,6 +8642,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -8689,6 +8768,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -8836,6 +8916,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -8943,6 +9024,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();

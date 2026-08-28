@@ -3973,6 +3973,7 @@ description = "Runs Acme."
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -4375,6 +4376,7 @@ description = "Builds it."
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -6556,6 +6558,7 @@ members = ["engineer"]
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 
@@ -7247,6 +7250,7 @@ name = "Design"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(
@@ -7321,6 +7325,7 @@ members = ["eng1", "eng2"]
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(
@@ -7388,6 +7393,7 @@ members = ["eng1", "eng2"]
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -11048,6 +11054,7 @@ agent = "claude"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         let brain = brain_over_mock_with(dir.path(), record);
