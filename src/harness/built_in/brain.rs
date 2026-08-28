@@ -1615,6 +1615,28 @@ impl HarnessBrain {
             crate::runtime::advance::bounced_reason(&card.column, RunStatus::Failed, &text);
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
+        // Issue #1865 (CodeRabbit review, PR #1883 review comment 3878668326):
+        // `settle` above always lands a refusal on `todo` (its only
+        // `TaskRunEnd::Failed` case), exactly the shape
+        // `advance::notify_dispatch_failed` files for —
+        // `CompanyRuntime::abandon_run`, the cycle's terminality backstop, the
+        // boot reaper's card sweep, and `workflow_build`'s `settle_to_todo`
+        // all raise it once their bounce lands. This was the one settle path
+        // that computed the bounce chip (above) but never filed the
+        // notification: a board-created card has no `origin_chat_id`, so the
+        // relay below has nowhere to send, and `settle_run_end` just made the
+        // attempt terminal, so the cycle's own backstop never sees it either
+        // — leaving a refusal on a board card visible only to someone already
+        // looking at that card.
+        if let Some(notifications) = self.deps.notifications.as_deref() {
+            crate::runtime::advance::notify_dispatch_failed(
+                notifications,
+                &self.record().id,
+                &card.id,
+                &text,
+            )
+            .await;
+        }
         // A refusal is a real, terminal attempt — one that spent nothing. It
         // settles like any other ending (#242), so the card's run history shows
         // "this was tried and refused, and why" rather than a gap.
@@ -4398,9 +4420,20 @@ description = "Builds it."
     /// A brain wired to a real task store (shared handle returned for seeding /
     /// asserting), over the offline mock provider.
     fn brain_with_tasks(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+        brain_with_tasks_notified(dir, false)
+    }
+
+    /// Same as [`brain_with_tasks`], but also wires the task store as the
+    /// notification store (issue #1865, PR #1883 review comment 3878668326):
+    /// [`FsOps`] implements both, so a test can seed a card, drive a cycle,
+    /// and then read back any `dispatch_failed` row a refusal filed.
+    fn brain_with_tasks_notified(
+        dir: &std::path::Path,
+        notify: bool,
+    ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
-            notifications: None,
+            notifications: if notify { Some(tasks.clone()) } else { None },
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -6364,6 +6397,62 @@ members = ["engineer"]
         assert!(
             !note.contains("mock: "),
             "no turn may run for an assignee nobody answers to: {note:?}"
+        );
+    }
+
+    /// Issue #1865 (CodeRabbit review, PR #1883 review comment 3878668326): a
+    /// board-created card (no `origin_chat_id`, exactly [`card`]'s shape) with
+    /// an off-roster assignee bounces to `todo` and gets the bounce chip
+    /// (c6c3a3083), but before this fix filed no `dispatch_failed`
+    /// notification — the relay `refuse_dispatch` falls back to only fires
+    /// when an `origin_chat_id` exists, and `settle_run_end` makes the
+    /// attempt terminal before the cycle's own backstop notifier ever sees
+    /// it. That left the refusal visible only to someone already looking at
+    /// the board, unlike every other bounced-dispatch path
+    /// (`CompanyRuntime::abandon_run`, the cycle's terminality backstop, the
+    /// boot reaper's card sweep, and `workflow_build`'s `settle_to_todo`),
+    /// which all raise this same notification.
+    #[tokio::test]
+    async fn a_refused_dispatch_with_no_origin_chat_files_a_dispatch_failed_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks_notified(dir.path(), true);
+        tasks
+            .upsert(&CompanyId::new("acme"), &card("t1", "Shane"))
+            .await
+            .unwrap();
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t1".into(),
+                    run_id: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let refused = only_card(&tasks).await;
+        assert_eq!(refused.column, COLUMN_TODO);
+        assert!(
+            refused.origin_chat_id.is_none(),
+            "this is exactly the board-created shape with no relay target: {refused:?}"
+        );
+
+        let notes = crate::ports::notifications::NotificationStore::list(
+            tasks.as_ref(),
+            &CompanyId::new("acme"),
+            "anyone",
+        )
+        .await
+        .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "dispatch_failed"
+                    && n.notification.subject.id == "t1"),
+            "a board card refused with no origin chat must still file a \
+             dispatch_failed notification, got {notes:?}"
         );
     }
 
