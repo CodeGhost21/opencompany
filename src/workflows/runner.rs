@@ -958,6 +958,17 @@ async fn run_workflow_inner(
         {
             notices.push(run_output_persist_failed_notice());
         }
+        // Issue #1865 (PR #1883 review): the third sibling reclassification —
+        // `94c8e0507` closed this gap on the genuine-failure/blocked `Err` arm
+        // above, but a clean node-boundary cancel is its own early return with
+        // its own `nodes`, reached without ever passing through that arm or the
+        // clean-finish arm at the bottom of this function. A node that only
+        // truncated at the iteration cap (or paused for budget) before an
+        // operator cancelled a later/parallel node kept its `Ok` row here too,
+        // even though its own attempt already settled `Failed` — the same
+        // disagreement, a third exit.
+        let mut nodes = nodes;
+        reclassify_capped_nodes(&mut nodes, &capped.take());
         return Ok(WorkflowRun {
             output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
             pending_approvals: Vec::new(),
@@ -2562,6 +2573,194 @@ to = "done"
     #[tokio::test]
     async fn a_capped_node_is_reclassified_even_when_a_later_node_blocks_the_run() {
         assert_capped_sibling_reclassified_before_early_return(true).await;
+    }
+
+    /// A turn double for `start -> capped_work -> gated_work -> done`:
+    /// `capped_work` always truncates at the iteration cap like
+    /// `CappedThenSettlingTurn`'s node of the same name, and `gated_work`
+    /// announces arrival on `entered` and then blocks on `release` — the same
+    /// hold-and-release shape [`GatedProvider`] uses for the clean-cancel
+    /// keystone test, just at the `RunTurn` layer instead of `ChatModel`, so
+    /// this test does not need a `HarnessPool`.
+    struct CappedThenGatedTurn {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl CappedThenGatedTurn {
+        async fn execute(&self, agent_id: &str) -> Result<crate::harness::TurnOutcome> {
+            if agent_id == "capped_agent" {
+                return Ok(crate::harness::TurnOutcome {
+                    reply: "partial answer, still going".to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: true,
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                });
+            }
+            // `gated_agent`: announce arrival, then wait to be released. The
+            // test cancels and releases in that order, so the token is already
+            // flipped by the time this turn resolves and the engine winds down
+            // at the next boundary instead of starting `done`.
+            self.entered.notify_waiters();
+            self.release.notified().await;
+            Ok(crate::harness::TurnOutcome {
+                reply: "acknowledged".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for CappedThenGatedTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+    }
+
+    fn capped_then_gated_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "capped_then_gated"
+name = "Capped then gated"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "capped_work"
+kind = "agent"
+name = "Capped work"
+summary = "Loop until the iteration cap."
+agent = "capped_agent"
+[[node]]
+id = "gated_work"
+kind = "agent"
+name = "Gated work"
+summary = "Hold until released, after the operator cancels."
+agent = "gated_agent"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "capped_work"
+[[edge]]
+from = "capped_work"
+to = "gated_work"
+[[edge]]
+from = "gated_work"
+to = "done"
+"#,
+        )
+        .expect("capped-then-gated graph parses")
+    }
+
+    /// PR #1883 review (Codex #3878277996): the clean node-boundary cancel arm
+    /// (`if outcome.cancelled` in `run_workflow_inner`) is a THIRD early return
+    /// that built its `WorkflowRun` straight from the collector's raw `nodes`,
+    /// never calling `reclassify_capped_nodes` — distinct from the
+    /// genuine-failure/blocked `Err` arm `94c8e0507` already fixed, and from
+    /// the clean-finish arm the original unit tests covered. A node upstream of
+    /// where the operator cancels, which itself only truncated at the
+    /// iteration cap, kept its `Ok` row on a stopped run even though its own
+    /// attempt already settled `Failed`.
+    #[tokio::test]
+    async fn a_capped_node_is_reclassified_when_the_run_is_cleanly_cancelled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let turn = Arc::new(CappedThenGatedTurn {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let ctx = WorkflowRunContext::new(false);
+        let cancel = ctx.cancel.clone();
+        let reached_gated = entered.notified();
+        let graph = capped_then_gated_graph();
+
+        let mut run = Box::pin(run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &graph,
+            serde_json::json!({ "request": "go" }),
+            &ctx,
+        ));
+        tokio::select! {
+            _ = &mut run => panic!("the run finished before the gated node was reached"),
+            () = reached_gated => {}
+        }
+
+        // Stop the run, THEN let the gated node complete — the token is
+        // already flipped by the time `gated_work` resolves, so the engine
+        // winds down at the boundary before `done` runs.
+        cancel.cancel();
+        release.notify_one();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(30), run)
+            .await
+            .expect("the cleanly cancelled run never returned")
+            .expect("a cancelled run is Ok, not Err");
+
+        assert!(run.cancelled, "the run must report that it was stopped");
+        assert!(
+            !run.nodes.iter().any(|n| n.node_id == "done"),
+            "the node past the cancel boundary must never run: {:?}",
+            run.nodes
+        );
+        let capped_row = run
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "capped_work")
+            .expect("the capped node's row must be in the cancelled run");
+        assert_eq!(
+            capped_row.status,
+            WorkflowNodeStatus::Error,
+            "a capped sibling's row must be reclassified Error on the clean-cancel arm too, not \
+             only the genuine-failure/blocked early returns and the clean-finish arm — \
+             {:?}",
+            run.nodes
+        );
     }
 
     #[async_trait]
