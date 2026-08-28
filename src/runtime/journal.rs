@@ -1019,11 +1019,28 @@ struct State {
     /// survive a restart exactly as if nothing had been dispatched, and without
     /// this set `reconcile_stranded_blocked_nodes` cannot tell that apart from
     /// the genuine stranded case — it would re-spawn a continuation that
-    /// already ran. Removed by the same paired
-    /// [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased) once it does
-    /// land, so a turn never lingers here past the continuation it describes,
-    /// matching [`blocked_node_approvals`](Self::blocked_node_approvals)'s own
-    /// shape.
+    /// already ran.
+    ///
+    /// # Deliberately *not* retired by `BlockedNodeReleased` (finding `3877914597`)
+    ///
+    /// Unlike [`blocked_node_approvals`](Self::blocked_node_approvals), a turn
+    /// entered here is permanent for the life of the process and every future
+    /// replay — the same shape [`executed`](Self::executed) already uses, for
+    /// the same reason. A workflow-gate blocked-node card's own
+    /// [`ApprovalParked`](JournalRecord::ApprovalParked) is `Durability::Host`,
+    /// but [`ApprovalResolved`](JournalRecord::ApprovalResolved) is always
+    /// `Durability::Process`: a host crash can lose only the resolution and
+    /// leave that card durably reopened as a "ghost" *after* its continuation
+    /// already ran to completion and its own `BlockedNodeReleased` already
+    /// landed. `resume_blocked_agent_node`'s guard against a ghost decision
+    /// (issue #1825, finding `3877718169`) reads only this set, so a version
+    /// that cleared the turn out of it on release (as this one used to) made
+    /// that guard read `false` for exactly the case it exists to catch — the
+    /// ghost then fell through to the "no stash on this host" branch, which
+    /// tells the operator to re-run the workflow by hand, manually repeating
+    /// the very side effect the guard exists to prevent automatically. One
+    /// leaked turn key per completed blocked node is the accepted cost of
+    /// closing that, the same trade `executed` already makes.
     blocked_node_dispatched: HashSet<String>,
 }
 
@@ -1371,7 +1388,11 @@ impl RuntimeJournal {
             JournalRecord::BlockedNodeReleased { turn } => {
                 state.blocked_stashes.remove(&turn);
                 state.blocked_node_approvals.remove(&turn);
-                state.blocked_node_dispatched.remove(&turn);
+                // `blocked_node_dispatched` is deliberately NOT retired here —
+                // see that field's own doc comment (finding `3877914597`). A
+                // ghost decision can still reach this turn after this very
+                // release replays, and the guard it feeds needs the tombstone
+                // to still be standing when it does.
             }
             JournalRecord::BlockedNodeApproved { turn } => {
                 state.blocked_node_approvals.insert(turn);
@@ -1813,20 +1834,25 @@ impl RuntimeJournal {
     /// Retires a blocked-node stash once its run has re-dispatched (or its block
     /// was wholly refused), so a later boot does not rehydrate it (issue #1816).
     ///
-    /// Also retires the turn from `blocked_node_approvals` and
-    /// `blocked_node_dispatched`, mirroring what replaying this same record
-    /// does in [`replay`](Self::replay) — the doc-stated invariant on both
-    /// fields is that a turn never lingers there past the continuation it
-    /// describes. Without this, a live release left the turn banked in those
-    /// sets for the rest of the process's life: a long-running tenant would
-    /// accumulate one stale key per completed block, invisible until the next
-    /// full reload replayed the same record correctly.
+    /// Also retires the turn from `blocked_node_approvals`, mirroring what
+    /// replaying this same record does in [`replay`](Self::replay) — the
+    /// doc-stated invariant on that field is that a turn never lingers there
+    /// past the continuation it describes. Without this, a live release left
+    /// the turn banked in that set for the rest of the process's life: a
+    /// long-running tenant would accumulate one stale key per completed
+    /// block, invisible until the next full reload replayed the same record
+    /// correctly.
+    ///
+    /// `blocked_node_dispatched` is the one exception — deliberately left
+    /// standing here, matching [`replay`](Self::replay)'s own fold. See that
+    /// field's doc comment (finding `3877914597`) for why a live release
+    /// clearing its own dispatch tombstone reopens the exact ghost-redispatch
+    /// gap issue #1825 exists to close.
     pub async fn record_blocked_node_released(&self, turn: &str) -> Result<()> {
         {
             let mut state = self.state.lock().expect("journal state poisoned");
             state.blocked_stashes.remove(turn);
             state.blocked_node_approvals.remove(turn);
-            state.blocked_node_dispatched.remove(turn);
         }
         self.append(&JournalRecord::BlockedNodeReleased {
             turn: turn.to_string(),
@@ -4295,7 +4321,7 @@ mod test {
     /// pinned separately below (issue #1145) — deliberately not by loosening
     /// this list, which is the assertion that would have stopped noticing.
     #[test]
-    fn host_durable_kinds_are_exactly_the_three_that_could_repeat_an_action() {
+    fn host_durable_kinds_are_exactly_the_seven_that_could_repeat_an_action() {
         let all = every_record_kind();
         let tags: HashSet<String> = all.iter().map(record_tag).collect();
         assert_eq!(
@@ -4593,6 +4619,67 @@ mod test {
             "a released turn must not linger in the live approval set — it \
              must be retired the moment release lands, not only on the next \
              reload's replay"
+        );
+    }
+
+    /// The mirror image of the test above: unlike `blocked_node_approvals`,
+    /// a live release must **not** retire the turn from
+    /// `blocked_node_dispatched` (finding `3877914597`).
+    ///
+    /// `resume_blocked_agent_node`'s guard against a ghost decision (issue
+    /// #1825, finding `3877718169`) reads only this set to tell "already
+    /// dispatched" apart from "genuinely nothing left on this host". A ghost
+    /// `ApprovalResolved` can reach that guard *after* the turn's own
+    /// continuation already ran to completion and its `BlockedNodeReleased`
+    /// already landed — a host crash loses only the process-durable
+    /// resolution while the host-durable park, approve, and dispatch facts
+    /// all survive. If release cleared this set too (as it used to, mirroring
+    /// `blocked_node_approvals` above), the guard would read `false` for
+    /// exactly that case and the ghost would fall through into the "no stash
+    /// on this host" branch, which tells the operator to re-run the workflow
+    /// by hand — manually repeating the tool call the continuation already
+    /// ran once. Proven live and across a reload, since the guard's only
+    /// caller reads a freshly-replayed journal at boot.
+    #[tokio::test]
+    async fn release_does_not_retire_the_turn_from_blocked_node_dispatched_live() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        journal
+            .record_blocked_node_stashed("turn-1", "wf-1", &serde_json::json!({}))
+            .await
+            .unwrap();
+        journal
+            .record_blocked_node_approved("turn-1")
+            .await
+            .unwrap();
+        journal
+            .record_blocked_node_dispatched("turn-1")
+            .await
+            .unwrap();
+        assert!(journal.is_blocked_node_dispatched("turn-1"));
+
+        journal
+            .record_blocked_node_released("turn-1")
+            .await
+            .unwrap();
+        assert!(
+            journal.is_blocked_node_dispatched("turn-1"),
+            "the dispatch tombstone must survive its own turn's release — a \
+             ghost decision reaching this turn after release is exactly the \
+             case issue #1825's guard exists to catch, and the guard reads \
+             this set"
+        );
+
+        // A fresh reload's replay must fold the same record the same way.
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert!(
+            reloaded.is_blocked_node_dispatched("turn-1"),
+            "replay must agree with the live path — the boot-time \
+             reconciler and the live resume guard cannot disagree about \
+             whether a turn was already dispatched"
         );
     }
 
