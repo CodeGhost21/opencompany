@@ -2376,6 +2376,7 @@ mod tests {
                 "message": {
                     "role": "assistant",
                     "content": null,
+                    "reasoning": "",
                     "reasoning_content": [
                         { "type": "text", "text": "The answer is " },
                         { "type": "text", "text": "42." }
