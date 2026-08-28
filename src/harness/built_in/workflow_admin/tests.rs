@@ -333,10 +333,10 @@ fn graph_args(id: &str, name: &str, worker_name: &str) -> Value {
     })
 }
 
-/// A graph with an owning desk set (issue #1862 prerequisite). Only an
-/// operator or the workflow-proposal apply path can author `owner_desk` — the
-/// agent tool schema has no field for it — so tests put it on the record
-/// directly, the same reason `SCHEDULED_TOML` does.
+/// A graph with an owning desk already set (issue #1862 prerequisite). Tests
+/// put it on the record directly rather than via a tool call so a fixture can
+/// start from "already owned" without depending on `UpdateWorkflowTool`'s own
+/// desk handling — the same reason `SCHEDULED_TOML` does.
 const OWNED_TOML: &str = r#"
 id = "owned"
 name = "Owned flow"
@@ -749,14 +749,18 @@ async fn an_update_will_not_silently_drop_a_nodes_approval_gate() {
 }
 
 /// **Regression, issue #1882 review.** `owner_desk` must survive an
-/// agent-tool update that never mentions it. `UpdateWorkflowTool` parses
-/// `CreateWorkflowArgs`, whose `TryFrom` always writes `owner_desk: None` —
-/// an agent-authored draft carries no owner, the same reason `schedule` /
-/// `on_error` / `retry` / `repeatable` are not carried either. Before the
-/// fix, ANY full-replacement update through this tool cleared whatever desk
-/// was already on the workflow. The args schema has no field for
-/// `owner_desk` at all, so there is nothing for the model to echo back — the
-/// preserve has to happen server-side, which is what this pins.
+/// agent-tool update that never mentions it. `ownerDesk` IS on the schema
+/// (`create_workflow_parameters_schema`) so a caller can supply it — but an
+/// agent that builds a full-replacement edit the way `read_workflow`'s own
+/// projection encourages (the fields it returned, not a value it never
+/// surfaced) naturally omits a field it was never shown, `RawWorkflow::
+/// try_from` then leaves `owner_desk: None` on the draft. Before the fix, ANY
+/// full-replacement update through this tool cleared whatever desk was
+/// already on the workflow whenever the caller's edit omitted it — the
+/// preserve has to happen server-side for that omitted-field case, which is
+/// what this pins. The sibling case — the caller DOES supply a different
+/// `ownerDesk` and that reassignment must actually apply — is pinned by
+/// `an_update_applies_a_newly_supplied_owner_desk` below.
 #[tokio::test]
 async fn an_update_preserves_the_workflows_owner_desk() {
     let fx = Fixture::new();
@@ -772,7 +776,8 @@ async fn an_update_preserves_the_workflows_owner_desk() {
         .to_string();
 
     // A full-replacement edit built the way an agent naturally would — the
-    // args schema simply has no `owner_desk` field to carry one in.
+    // edit omits `ownerDesk` entirely, the same as an agent that never read
+    // (or does not care about) the desk assignment.
     let mut graph = graph_args("owned", "Owned flow", "Worker");
     graph["expected_version"] = json!(version);
     let updated = UpdateWorkflowTool::new(fx.admin())
@@ -789,6 +794,64 @@ async fn an_update_preserves_the_workflows_owner_desk() {
         reloaded.owner_desk.as_deref(),
         Some("engineering"),
         "an agent update must not clear a desk it was never shown"
+    );
+}
+
+/// **Regression, PR #1882 review (bot finding on `workflow_admin.rs:707`).**
+/// When the agent DOES supply an `ownerDesk` on a full-replacement update —
+/// possible since `ownerDesk` was added to `create_workflow_parameters_schema`
+/// / `CreateWorkflowArgs` (issue #1862 prerequisite) — that value must reach
+/// storage. Before the fix, the tool ran `draft.owner_desk =
+/// raw.owner_desk.clone()` unconditionally after `RawWorkflow::try_from` had
+/// already resolved and normalized whatever the caller sent, so a caller
+/// reassigning a workflow to a different desk saw `update_workflow` report
+/// success while the desk silently stayed on the old value — the stale
+/// "the schema has no field for it" reasoning in the comment above this test
+/// no longer held once that field existed.
+#[tokio::test]
+async fn an_update_applies_a_newly_supplied_owner_desk() {
+    let fx = Fixture::new();
+    // Give the record two real desks so a reassignment resolves: the stored
+    // "engineering" and a distinct target "sales".
+    {
+        let mut record = fx.store.load(&fx.company).await.unwrap().unwrap();
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n\
+             [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"assistant\"]\n\
+             [[group_chat]]\nid = \"sales\"\nname = \"Sales\"\nmembers = [\"assistant\"]\n",
+        )
+        .expect("valid manifest");
+        fx.store.save(&record).await.unwrap();
+    }
+    fx.put_overlay("owned", OWNED_TOML).await;
+
+    let read = ReadWorkflowTool::new(fx.admin())
+        .execute(json!({ "id": "owned" }))
+        .await
+        .unwrap();
+    let version = data(&read)["version"]
+        .as_str()
+        .expect("a version token")
+        .to_string();
+
+    // A full-replacement edit that explicitly reassigns the desk.
+    let mut graph = graph_args("owned", "Owned flow", "Worker");
+    graph["ownerDesk"] = json!("sales");
+    graph["expected_version"] = json!(version);
+    let updated = UpdateWorkflowTool::new(fx.admin())
+        .execute(graph)
+        .await
+        .unwrap();
+    assert!(!updated.is_error, "{}", err_text(&updated));
+
+    let reloaded =
+        crate::company::load_workflow_union(Some(fx.source_dir()), &fx.overlays().await, "owned")
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        reloaded.owner_desk.as_deref(),
+        Some("sales"),
+        "an agent explicitly reassigning ownerDesk must have that value applied, not silently discarded for the stored one"
     );
 }
 

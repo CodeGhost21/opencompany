@@ -696,15 +696,22 @@ impl Tool for UpdateWorkflowTool {
         if let Some(stored) = overlay_body(&overlays, &wid)
             && let Ok(raw) = raw_workflow_from_toml(stored)
         {
-            // Issue #1882 review: this tool's schema never exposes
-            // `owner_desk` to the model (an agent-authored draft carries
-            // none — see `TryFrom<CreateWorkflowArgs>` above), so a
-            // full-replacement update has to carry the STORED value forward
-            // itself. Without this, an agent editing an unrelated node on an
-            // owner-assigned workflow would silently clear the desk an
-            // operator (or the workflow-proposal apply path) had already
-            // set.
-            draft.owner_desk = raw.owner_desk.clone();
+            // Issue #1882 review (PR #1882 bot finding): `ownerDesk` is now on
+            // this tool's schema (`create_workflow_parameters_schema`) and
+            // `RawWorkflow::try_from(CreateWorkflowArgs)` already resolves and
+            // normalizes whatever the caller sent, so only fall back to the
+            // STORED value when the caller left `owner_desk` unset. An
+            // unconditional overwrite here used to be correct — the schema had
+            // no such field — but had gone stale into a bug: it silently
+            // discarded a desk the caller explicitly supplied, reporting
+            // success while the reassignment never took. Falling back only on
+            // `None` still protects the original case this guarded: an agent
+            // editing an unrelated node on an owner-assigned workflow, without
+            // ever mentioning `ownerDesk`, must not clear the desk an operator
+            // (or the workflow-proposal apply path) had already set.
+            if draft.owner_desk.is_none() {
+                draft.owner_desk = raw.owner_desk.clone();
+            }
             let projection = project_workflow_spec(&raw);
             if let Some(message) = refuse_scheduled(&wid, &projection, "change") {
                 tracing::debug!(company = %self.admin.company, workflow = %wid, "update_workflow: refused scheduled target");
