@@ -2630,7 +2630,7 @@ to = "done"
             _company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(agent_id).await
         }
@@ -2641,7 +2641,7 @@ to = "done"
             agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(agent_id).await
@@ -2817,7 +2817,7 @@ to = "done"
             _company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(agent_id).await
         }
@@ -2828,7 +2828,7 @@ to = "done"
             agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(agent_id).await
