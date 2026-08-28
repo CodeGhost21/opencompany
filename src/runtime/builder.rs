@@ -4027,6 +4027,7 @@ async fn seed_workspace(
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);

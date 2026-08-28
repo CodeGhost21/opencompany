@@ -3700,9 +3700,26 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
                 }
             }
         }
-        // Adoption commits nothing: the transaction is dropped, which rolls back
-        // a reservation that never wrote.
-        if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+        // Adoption stamps the lease flag (issue #1839) and commits it. The write
+        // rides `node_json` via serde, inside the immediate transaction this
+        // method already holds, so the flag lands atomically against a
+        // concurrent `delete_if_empty` and Race 1 is closed on this backend.
+        // Authorship is untouched — only `adopted` changes.
+        if let Some(mut existing) = existing_folder_claim(nodes.values(), parent, name)? {
+            if !existing.adopted {
+                existing.adopted = true;
+                tx.execute(
+                    "UPDATE workspace_nodes SET node_json = ?3 \
+                     WHERE company_id = ?1 AND id = ?2",
+                    params![
+                        company.as_ref(),
+                        existing.id,
+                        serde_json::to_string(&existing)?
+                    ],
+                )
+                .map_err(sql_err)?;
+                tx.commit().map_err(sql_err)?;
+            }
             return Ok(FolderClaim::Adopted(existing));
         }
         let node = new_folder(name, parent, origin);
@@ -4024,33 +4041,34 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_err)?;
-        let exists: Option<i64> = tx
-            .query_row(
-                "SELECT 1 FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
-                params![company.as_ref(), id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_err)?;
-        if exists.is_none() {
+        // `parent_id` and `adopted` live inside `node_json`, not as their own
+        // columns (see the `workspace_nodes` table def), so both the existence
+        // check and the has-child check go through the same deserializing
+        // helper the rest of this backend's workspace methods use — a raw SQL
+        // `WHERE parent_id = ?` against this table is a "no such column" error,
+        // not a narrowing filter.
+        let nodes = self.workspace_nodes(&tx, company)?;
+        let Some(node) = nodes.get(id) else {
+            return Ok(false);
+        };
+        // An adopted folder has a second writer whose create has not landed yet
+        // (issue #1839). The flag-read here and the flag-write in
+        // `adopt_or_create_folder` both happen under an IMMEDIATE transaction on
+        // this same table, so they serialize: once an adoption has stamped
+        // `adopted`, this refuses — closing the race on this backend rather than
+        // narrowing it, matching `FsOps`'s guard.
+        if node.adopted {
             return Ok(false);
         }
-        let has_child: Option<i64> = tx
-            .query_row(
-                "SELECT 1 FROM workspace_nodes WHERE company_id = ?1 AND parent_id = ?2 LIMIT 1",
-                params![company.as_ref(), id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_err)?;
-        if has_child.is_some() {
+        if nodes.values().any(|n| n.parent_id.as_deref() == Some(id)) {
             return Ok(false);
         }
+        // Single document, non-recursive — the reads above, taken under this
+        // same IMMEDIATE transaction, already proved `id` exists, is unadopted
+        // and is childless, so a plain delete-by-key is enough.
         let removed = tx
             .execute(
-                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2 AND NOT EXISTS (\
-                     SELECT 1 FROM workspace_nodes AS child \
-                     WHERE child.company_id = ?1 AND child.parent_id = ?2)",
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
                 params![company.as_ref(), id],
             )
             .map_err(sql_err)?;
@@ -4750,6 +4768,16 @@ mod test {
         conformance::assert_workspace_sibling_names(store()).await;
     }
 
+    /// Issue #1839: the adoption lease — a second claim marks the folder, and
+    /// `delete_if_empty` refuses it while a minted-unadopted twin still deletes.
+    /// SQLite inherits the trait-default `delete_if_empty`, so this pins that the
+    /// flag it persists in `node_json` under the adopt transaction is the flag
+    /// the default reads back.
+    #[tokio::test]
+    async fn conformance_workspace_adoption_lease() {
+        conformance::assert_workspace_adoption_lease(store()).await;
+    }
+
     /// **The race issue #894 is actually about**, and the reason the guard is an
     /// `IMMEDIATE` transaction rather than a check in `create`'s caller.
     ///
@@ -4790,6 +4818,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         let gate = Arc::new(tokio::sync::Barrier::new(2));
@@ -4884,6 +4913,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         WorkspaceStore::create(

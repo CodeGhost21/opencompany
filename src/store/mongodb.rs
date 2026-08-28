@@ -3927,7 +3927,23 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                     }
                 }
             }
-            if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+            if let Some(mut existing) = existing_folder_claim(nodes.values(), parent, name)? {
+                // Stamp the adoption lease (issue #1839) via a `$set` on the
+                // node document. This backend has no per-company lock, so the
+                // flag narrows Race 1 to #1801's documented residual window
+                // rather than closing it — a `delete_if_empty` racing this
+                // `$set` can still miss it, and the loser's bounded retry above
+                // re-mints if it does. Authorship is untouched.
+                if !existing.adopted {
+                    existing.adopted = true;
+                    self.collection("workspace_nodes")
+                        .update_one(
+                            doc! {"company_id": company.as_ref(), "node_id": &existing.id},
+                            doc! {"$set": {"node_json": serde_json::to_string(&existing)?}},
+                        )
+                        .await
+                        .map_err(mongo_err)?;
+                }
                 return Ok(FolderClaim::Adopted(existing));
             }
             let node = new_folder(name, parent, origin.clone());
@@ -4459,7 +4475,16 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
     /// `delete_one`, instead of the whole of a caller's request.
     async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let nodes = self.workspace_nodes(company).await?;
-        if !nodes.contains_key(id) {
+        let Some(node) = nodes.get(id) else {
+            return Ok(false);
+        };
+        // An adopted folder has a second writer (issue #1839). This backend has
+        // no per-company lock, so the flag only narrows Race 1 to #1801's
+        // documented residual window rather than closing it: an adoption that
+        // has not yet committed its `$set` is invisible here, and the loser's
+        // bounded retry re-mints if it still loses. What the flag does close is
+        // the common case where the adoption *has* landed.
+        if node.adopted {
             return Ok(false);
         }
         if nodes
@@ -5116,6 +5141,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         };
         crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &node, b"live-bytes")
             .await
@@ -5238,6 +5264,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         };
         rebooted
             .collection("workspace_nodes")
@@ -5298,6 +5325,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         };
         crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &first, b"first")
             .await
@@ -5382,6 +5410,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         let racer_a = {
@@ -6180,6 +6209,17 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// Issue #1839: the adoption lease, on the backend that can only *narrow*
+    /// Race 1 — the `$set` an adoption writes is what a later `delete_if_empty`
+    /// reads, so the sequential contract (mark, then refuse) still holds even
+    /// though a truly concurrent delete can still miss an in-flight `$set`.
+    #[tokio::test]
+    async fn conformance_workspace_adoption_lease() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_adoption_lease(s.clone()).await;
+        drop_db(&s).await;
+    }
+
     /// Issue #887's no-torn-read contract, on the other backend hosted tenants
     /// run. A document replace is atomic, so this passed before the `fs` fix
     /// and passes after — the contract is the port's, not one backend's.
@@ -6217,6 +6257,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         for (id, name, kind, parent, body) in [

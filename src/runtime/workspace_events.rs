@@ -428,6 +428,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         }
     }
 

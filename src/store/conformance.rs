@@ -4048,6 +4048,7 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
 
     assert!(ws.is_empty(&alpha).await.unwrap());
@@ -4220,6 +4221,7 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
         // about them through to storage.
         size: Some(999_999),
         sha256: Some("not-a-real-digest".to_string()),
+        adopted: false,
     };
 
     // A payload that is emphatically not text: a lone continuation byte, an
@@ -4327,6 +4329,7 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
             ..node("note", "brief.md", None, None)
         },
         Some("# Brief"),
@@ -4473,6 +4476,7 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
         ..node("swap-old", "report.md", None, None)
     };
     ws.create(&alpha, &old, Some("# old")).await.unwrap();
@@ -4733,6 +4737,7 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     ws.create(&alpha, &note, Some("body")).await.unwrap();
     let refused = ws
@@ -4869,6 +4874,113 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
     assert_eq!(&after.node().id, &ids[0]);
 }
 
+/// The adoption lease every backend must honour (issue #1839).
+///
+/// #1801 gave the tree an empty-folder rollback: a folder one caller minted, then
+/// failed to write beneath, is removed by
+/// [`delete_if_empty`](WorkspaceStore::delete_if_empty). But a folder one caller
+/// mints, a second caller can *adopt* — and the adopter has a legitimate reason
+/// to write into it that the minter's rollback must not sweep away. The lease is
+/// how the store records that second writer:
+///
+/// * an [`adopt_or_create_folder`](WorkspaceStore::adopt_or_create_folder) that
+///   **adopts** stamps [`WorkspaceNode::adopted`], durably, before it returns;
+/// * `delete_if_empty` refuses a folder carrying the flag even while it is still
+///   childless — that is the whole point, since the adopter's write has not
+///   landed yet.
+///
+/// A freshly minted folder does **not** carry it, so the rollback #1801 exists
+/// for still works: a minted-unadopted-empty folder is deleted. This is what
+/// keeps "swept a genuine leak" and "kept a folder someone else is writing into"
+/// on opposite sides of one bit.
+pub async fn assert_workspace_adoption_lease(ws: Arc<dyn WorkspaceStore>) {
+    use crate::ports::workspace::FolderClaim;
+
+    let alpha = CompanyId::new("alpha");
+    let origin = WorkspaceOrigin::Agent {
+        id: "cmo".to_string(),
+    };
+
+    // -- A minted, unadopted folder is not leased --------------------------
+    let minted = ws
+        .adopt_or_create_folder(&alpha, None, "task-A", origin.clone())
+        .await
+        .expect("a free name is claimable");
+    assert!(minted.was_created(), "the name was free");
+    assert!(
+        !minted.node().adopted,
+        "a freshly minted folder carries no adoption lease"
+    );
+    let minted_id = minted.node().id.clone();
+
+    // -- A second claim adopts it, and stamps the lease durably ------------
+    let adopted = ws
+        .adopt_or_create_folder(&alpha, None, "task-A", origin.clone())
+        .await
+        .expect("an existing folder is adopted");
+    assert!(!adopted.was_created(), "the folder was already there");
+    assert!(
+        matches!(adopted, FolderClaim::Adopted(_)),
+        "a second claimer adopts rather than mints"
+    );
+    assert!(
+        adopted.node().adopted,
+        "adoption stamps the lease on the returned node"
+    );
+    assert_eq!(adopted.node().id, minted_id, "and it is the same folder");
+    // The flag is persisted, not only present on the returned value — a fresh
+    // read (the path `delete_if_empty` and the rollback take) must see it.
+    let seen = ws
+        .tree(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.id == minted_id)
+        .expect("the folder is in the tree");
+    assert!(
+        seen.adopted,
+        "the lease survives a round trip through the store"
+    );
+
+    // -- delete_if_empty refuses the adopted-empty folder ------------------
+    assert!(
+        !ws.delete_if_empty(&alpha, &minted_id)
+            .await
+            .expect("delete_if_empty must not error on an adopted folder"),
+        "an adopted folder is refused while still childless — its writer has not landed"
+    );
+    assert!(
+        ws.tree(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.id == minted_id),
+        "and it must still be standing"
+    );
+
+    // -- but a minted, never-adopted empty folder still deletes ------------
+    let leak = ws
+        .adopt_or_create_folder(&alpha, None, "task-B", origin)
+        .await
+        .expect("a second free name is claimable");
+    assert!(leak.was_created());
+    let leak_id = leak.node().id.clone();
+    assert!(
+        ws.delete_if_empty(&alpha, &leak_id)
+            .await
+            .expect("delete_if_empty on an unadopted empty folder"),
+        "a minted, unadopted, empty folder is the #1801 leak and must still be swept"
+    );
+    assert!(
+        !ws.tree(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.id == leak_id),
+        "and it must be gone"
+    );
+}
+
 /// Asserts that a reader concurrent with a writer on the SAME node never errors
 /// and never observes a partial body (issue #887).
 ///
@@ -4930,6 +5042,7 @@ pub async fn assert_workspace_sibling_names(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
 
     // A folder to hold the contended name, plus the root as a second scope.
@@ -5051,6 +5164,7 @@ pub async fn assert_workspace_read_never_tears(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     ws.create(&company, &node, Some(&whole_a))
         .await
@@ -5144,6 +5258,7 @@ fn folder_node(id: &str, name: &str) -> WorkspaceNode {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     }
 }
 
