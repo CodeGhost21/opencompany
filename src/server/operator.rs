@@ -633,9 +633,39 @@ async fn create_desk(
     // desk list, and every message to it would be refused by the read-only
     // guard in `chat_and_emit`, which treats any `chat_id == OPERATOR_CHANNEL`
     // as the system feed regardless of where it came from.
-    if id == crate::runtime::OPERATOR_CHANNEL {
+    //
+    // The **display name** is reserved for the same reason the General
+    // display name is, above, and not a weaker one (PR #1781 review,
+    // CodeRabbit P2 follow-up to `316bc9229`): `CompanyRecord::resolve_desk_id`
+    // matches an overlay desk by id *or* case-insensitive name, so
+    // `{"id": "ops", "name": "Operator"}` resolves a `?desk=Operator` selector
+    // to this desk exactly as thoroughly as claiming the literal id would —
+    // but `ensure_desk_writable` (`company/runtime.rs`) checks the *raw*
+    // selector string against `OPERATOR_CHANNEL` before any such resolution
+    // runs, so a write addressed to `Operator` is refused as the read-only
+    // system feed regardless, while a write addressed to the desk's real id
+    // (`ops`) sails straight through. That mismatch — reachable by name for
+    // reads, refused by name for writes, wide open under the real id either
+    // way — is a desk this host can never address consistently; refused at
+    // creation like the General case above, for the same reason: no manifest
+    // can reach this API path, so no existing company loses a desk. The
+    // fallback address (`OPERATOR_CHANNEL_COLLISION_FALLBACK`, "operator-feed")
+    // is reserved by name for the identical reason `316bc9229` reserved it on
+    // the manifest side — `resolve_desk` folds a `?desk=` selector against it
+    // the same way — but not by id: `is_valid_desk_id` above already rejects
+    // any hyphen, so no `id` can ever equal the hyphenated fallback constant.
+    if id == crate::runtime::OPERATOR_CHANNEL
+        || name.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL)
+    {
         return Err(ApiError(OpenCompanyError::Conflict(
             "the id \"operator\" is reserved for the built-in Operator channel — choose a different id"
+                .to_string(),
+        )));
+    }
+    if name.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            "the name \"operator-feed\" is reserved for the built-in Operator channel's \
+             fallback feed — choose a different name"
                 .to_string(),
         )));
     }
@@ -5777,6 +5807,17 @@ mode = "full"
                 StatusCode::CONFLICT,
             ),
             (r#"{"name":"operator"}"#, StatusCode::CONFLICT),
+            // PR #1781 review (CodeRabbit P2 follow-up to `316bc9229`): the id
+            // guard alone lets a display-name collision through — `{"id":
+            // "ops", "name": "Operator"}` never touches the reserved id, but
+            // `resolve_desk_id` would still fold a `?desk=Operator` selector
+            // onto this desk exactly as it would onto one literally named
+            // `operator`. Same shape for the collision-fallback display name.
+            (r#"{"name":"Operator","id":"ops"}"#, StatusCode::CONFLICT),
+            (
+                r#"{"name":"operator-feed","id":"ops2"}"#,
+                StatusCode::CONFLICT,
+            ),
             // Issue #1743 / PR #1781 review: a desk claiming a General
             // spelling — by id or by display name — would shadow the
             // built-in `#general` channel exactly as an `operator`-id desk
