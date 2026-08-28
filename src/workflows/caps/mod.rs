@@ -1381,6 +1381,101 @@ impl HarnessAgentRunner {
     /// No differencing is needed to know which requests are "ours": the bucket
     /// is already run-scoped ([`ApprovalScope::Run`], issue #439), so everything
     /// the drain returns was queued by this run's own turn.
+    /// Parks a **host-classified** blocker for a node that failed on something
+    /// a person can answer (issue #1861), returning the approval id.
+    ///
+    /// `None` means "not a blocker" and the caller settles the node `Failed`
+    /// exactly as before — the error was not one the classifier is willing to
+    /// name, or it was transient, or this runtime has no approvals queue wired.
+    /// Every one of those keeps today's behaviour, which is the conservative
+    /// direction: a missed question surfaces through issue #1865's honest
+    /// verdicts, while a false one holds a run open on a question nobody can
+    /// answer until the TTL expires it.
+    ///
+    /// # Why the turn key is `None`
+    ///
+    /// The gated-call path above passes `Some(node_turn)` so that deciding the
+    /// last of a node's calls re-dispatches the run (#899). Deliberately not
+    /// here, and not only because carrying an answer back is #1863's: approving
+    /// a blocker is not the same act as *fixing* what it named. Saying "yes, I
+    /// have seen that the model id is wrong" does not make the model id right,
+    /// so a re-dispatch on approve would re-run the node into the identical
+    /// failure and park the identical question. The gated-call case does not
+    /// have that problem — approving there mints the grant that makes the
+    /// retry succeed.
+    async fn park_node_blocker(&self, node_id: Option<&str>, message: &str) -> Option<String> {
+        let class = crate::harness::built_in::blockers::classify_blocker_message(message)?;
+        if !class.kind.parks() {
+            return None;
+        }
+        let parking = self
+            .deps
+            .delivery
+            .as_ref()
+            .and_then(|delivery| delivery.parking.as_ref())?;
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: class.kind,
+            source: class.source,
+            // The one case an approval's own task link cannot express — see
+            // `BlockerPayload::step`. #1864's node-level restart needs to know
+            // which node inside which run stopped, and a workflow run has no
+            // card behind it to name instead.
+            step: Some(crate::ports::blockers::BlockerStep::Node {
+                run_id: self.run_id.clone(),
+                node_id: node_id.unwrap_or_default().to_string(),
+            }),
+            reason: message.to_string(),
+            needed: class.needed.to_string(),
+        };
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+            agent: None,
+            run_id: Some(self.run_id.clone()),
+        };
+        match parking
+            .park_and_journal(
+                &self.company,
+                effect,
+                // A workflow run has no board card behind it and no
+                // conversation to raise the question in — the same delivery
+                // precedent the gated-call park follows (#333, #379).
+                crate::runtime::journal::TaskLink::Unlinked,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(approval_id) => {
+                tracing::info!(
+                    company = %self.company,
+                    run_id = %self.run_id,
+                    node = node_id.unwrap_or("-"),
+                    approval_id = %approval_id,
+                    kind = class.kind.as_str(),
+                    "workflow agent node: parked a blocker for the operator instead of failing"
+                );
+                Some(approval_id.to_string())
+            }
+            Err(err) => {
+                // Loud, and then the node settles `Failed` as it did before:
+                // holding a run open on a question that reached nobody would be
+                // strictly worse than the failure it replaced.
+                tracing::error!(
+                    company = %self.company,
+                    run_id = %self.run_id,
+                    error = %err,
+                    "workflow agent node: could not park a blocker; the node fails instead"
+                );
+                None
+            }
+        }
+    }
+
     async fn park_gated_calls(&self, node_id: Option<&str>, node_turn: &str) -> ParkedCalls {
         let mut summary = ParkedCalls::default();
         let mut rows: Vec<crate::ports::WorkflowRunApprovalRow> = Vec::new();
@@ -1799,6 +1894,39 @@ impl HarnessAgentRunner {
                 let raw = e.to_string();
                 let reported = upstream::context_overflow_advice(&raw).unwrap_or(raw);
                 let message = format!("harness agent '{agent_ref}': {reported}");
+                // Issue #1861: the same question the task path asks. A node
+                // that died on a rejected model id or a dead integration is
+                // answerable by a person, and the #881 machinery below already
+                // knows how to hold a node open for one — it just had no way in
+                // except an agent's own blocked tool call. This is that way in.
+                //
+                // Only the park differs from #881's; everything after it is
+                // shared, so a host-classified blocker and an agent-declared
+                // one reach the operator as one shape.
+                if let Some(approval_id) =
+                    self.park_node_blocker(node_id.as_deref(), &message).await
+                {
+                    self.blocks.push(crate::ports::WorkflowBlockedNode {
+                        node_id: node_id.clone().unwrap_or_else(|| agent_ref.to_string()),
+                        // No tools: nothing the agent called was gated. What
+                        // stopped this node is the node itself.
+                        tools: Vec::new(),
+                        approval_ids: vec![approval_id],
+                        unparkable: 0,
+                        stranded: 0,
+                    });
+                    // `Blocked`, where #881's sibling says `WaitingApproval`:
+                    // both hold the node open for a person, but one is a
+                    // decision about a call that is ready to run and this is a
+                    // question with nothing behind it yet.
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Blocked,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
                 self.settle_attempt(
                     run_sink.as_ref(),
                     crate::ports::RunStatus::Failed,
@@ -4088,5 +4216,175 @@ mod tests {
                 "Running -> Running is not a legal transition"
             );
         }
+    }
+
+    // ── Issue #1861: a node blocked on something a person can answer ────────
+
+    /// A turn double that fails with an arbitrary message, so the classifier
+    /// sees a real error chain rather than a hand-built string.
+    struct FailingTurn(String);
+
+    #[async_trait]
+    impl RunTurn for FailingTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Err(crate::error::OpenCompanyError::Harness(self.0.clone()))
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            self.run(company, agent_id, message, chat_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            self.run(company, agent_id, message, None).await
+        }
+    }
+
+    async fn run_failing_node(
+        dir: &std::path::Path,
+        error: &str,
+    ) -> (RunBlocks, Arc<crate::runtime::journal::RuntimeJournal>) {
+        let (deps, journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir);
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1861"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1861"));
+        let blocks = RunBlocks::default();
+        let runner = HarnessAgentRunner::new(
+            Arc::new(FailingTurn(error.to_string())),
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1861".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            blocks.clone(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+        let outcome = runner
+            .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+            .await;
+        assert!(outcome.is_err(), "a failed node must not advance the graph");
+        (blocks, journal)
+    }
+
+    /// The workflow half of #1861. A node that died on a model id the provider
+    /// rejects is answerable, so it reaches the operator as a parked question
+    /// and the node holds open — through the same #881 machinery an agent's own
+    /// blocked tool call already uses, which is what makes the two arrive as
+    /// one shape.
+    #[tokio::test]
+    async fn a_node_that_fails_on_a_rejected_model_parks_a_blocker() {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1861-")
+            .tempdir()
+            .expect("tempdir");
+        let (blocks, journal) = run_failing_node(
+            dir.path(),
+            "the model `gpt-nonexistent` does not exist or you do not have access to it",
+        )
+        .await;
+
+        let blocked = blocks.take();
+        assert_eq!(blocked.len(), 1, "the node is held open, not failed");
+        assert_eq!(blocked[0].node_id, "gather");
+        assert!(
+            blocked[0].tools.is_empty(),
+            "nothing the agent called was gated; the node itself stopped"
+        );
+        assert_eq!(
+            blocked[0].approval_ids.len(),
+            1,
+            "the block must name the approval it is decidable through"
+        );
+
+        let parked = journal
+            .pending()
+            .into_iter()
+            .find(|p| p.effect.kind.starts_with("blocker."))
+            .expect("a blocker is parked");
+        assert_eq!(parked.effect.kind, "blocker.infrastructure");
+        assert_eq!(parked.effect.run_id.as_deref(), Some("run-1861"));
+
+        let payload: BlockerPayload =
+            serde_json::from_value(parked.effect.payload.clone()).expect("payload round-trips");
+        assert_eq!(payload.kind, BlockerKind::Infrastructure);
+        assert_eq!(payload.source, BlockerSource::Provider);
+        assert_eq!(
+            payload.step,
+            Some(BlockerStep::Node {
+                run_id: "run-1861".to_string(),
+                node_id: "gather".to_string()
+            }),
+            "a run has no card to name instead, and #1864 restarts the node"
+        );
+    }
+
+    /// The conservative default holds here too: an error the classifier does
+    /// not recognise fails the node exactly as it did before, and holds nothing
+    /// open on a question nobody was asked.
+    #[tokio::test]
+    async fn an_unrecognised_node_failure_still_fails_and_parks_nothing() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1861b-")
+            .tempdir()
+            .expect("tempdir");
+        let (blocks, journal) = run_failing_node(dir.path(), "index out of bounds").await;
+
+        assert!(
+            blocks.take().is_empty(),
+            "an unrecognised failure is a failure, and the node must settle as one"
+        );
+        assert!(
+            journal
+                .pending()
+                .into_iter()
+                .all(|p| !p.effect.kind.starts_with("blocker.")),
+            "nothing was parked"
+        );
+    }
+
+    /// A transient stop is recognised precisely so it does **not** hold the run
+    /// open: a rate limit resolves itself and asking about it wastes the ask.
+    #[tokio::test]
+    async fn a_transient_node_failure_does_not_hold_the_run_open() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1861c-")
+            .tempdir()
+            .expect("tempdir");
+        let (blocks, _journal) = run_failing_node(
+            dir.path(),
+            "hosted inference returned 429: rate limit exceeded",
+        )
+        .await;
+        assert!(blocks.take().is_empty());
     }
 }
