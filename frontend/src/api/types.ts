@@ -1115,12 +1115,15 @@ export interface AgentDetailDto {
  *
  * The distinction is the point: `requested` is what the agent's own `tools`
  * line asks for, `companyAllow` is the ceiling it is intersected with, and
- * `effective` is what the agent actually holds. An **empty `requested` means
- * the company's standard grant**, not "no tools", so a surface that renders the
- * request alone reports the opposite of the truth for exactly those agents.
+ * `effective` is what the agent actually holds. Since issue #1804 `requested`
+ * is three-state: **`null` means the company's standard grant** (the agent
+ * lists no tools of its own and inherits `[tools].allow`), an **empty array
+ * `[]` is a deliberate deny-all** (holds nothing), and a **non-empty array
+ * narrows**. A surface that treats `null` and `[]` alike reports the opposite
+ * of the truth for exactly those agents.
  */
 export interface AgentToolsDto {
-  requested: string[];
+  requested: string[] | null;
   companyAllow: string[];
   /**
    * The ceiling contributed by the desks this agent sits on — the union of
