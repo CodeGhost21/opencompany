@@ -1871,18 +1871,29 @@ mod tests {
     /// The same guard covers every entry in `RESERVED_AGENT_IDS`, not just
     /// `system` — `operator`, `agents`, and `desks` are equally live manifest
     /// agent ids until this check runs.
+    ///
+    /// Lowercased before use: the reserved-id arm compares
+    /// `eq_ignore_ascii_case` on purpose (`RESERVED_AGENT_IDS`'s own doc),
+    /// because one entry — `DEFAULT_DESK`, `"General"` — is a prosumer display
+    /// string, not a slug. Every manifest agent id must already be snake_case
+    /// (checked one arm above this one), so submitting `"General"` verbatim
+    /// never reaches the reserved-id arm at all — it is rejected first, and
+    /// correctly, as an invalid id format. Lowercasing exercises the guard
+    /// through the one shape a manifest id can actually take, for every
+    /// reserved value including that one.
     #[test]
     fn rejects_every_reserved_id_as_a_manifest_agent_id() {
         for reserved in crate::ports::types::RESERVED_AGENT_IDS {
+            let candidate = reserved.to_ascii_lowercase();
             let manifest = parse(&format!(
-                "[company]\nname = \"X\"\n[[agent]]\nid = \"{reserved}\"\nrole = \"whatever\"\n"
+                "[company]\nname = \"X\"\n[[agent]]\nid = \"{candidate}\"\nrole = \"whatever\"\n"
             ));
             let problems = manifest.validate();
             assert!(
                 problems
                     .iter()
-                    .any(|p| p.contains("reserved") && p.contains(reserved)),
-                "id {reserved:?} should have been rejected: {problems:?}"
+                    .any(|p| p.contains("reserved") && p.to_ascii_lowercase().contains(&candidate)),
+                "id {candidate:?} (reserved: {reserved:?}) should have been rejected: {problems:?}"
             );
         }
     }
