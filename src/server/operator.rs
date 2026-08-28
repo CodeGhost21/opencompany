@@ -33,9 +33,9 @@ use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, OutboundMessage,
-    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent, TurnStep,
-    Verdict,
+    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, CompanyRecord, EventSeq,
+    OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent,
+    TurnStep, Verdict,
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
@@ -300,6 +300,40 @@ async fn operator_channel(
     }))
 }
 
+/// Whether `desk_id` names the built-in `#general` channel rather than a desk
+/// (issue #1743; restored PR #1781 review, CodeRabbit P2 — see below).
+///
+/// `#general` is the company-wide conversation this host has always folded
+/// every General spelling into — `general`, `General`, `main`, and the empty
+/// string all name it, which is exactly what
+/// [`is_general_chat`](crate::server::chat_history::is_general_chat) decides.
+/// It is deliberately **not** a desk: it has no lead, no hierarchy, and its
+/// membership is the whole roster derived at read time, so there is nothing
+/// for a desk mutation to change.
+///
+/// Guarded on **manifest** desks only, not `desk_exists` (id in manifest *or*
+/// overlay) as this predicate's original `da98130c1` shape checked: a company
+/// whose blueprint really does declare a `[[group_chat]]` with one of those
+/// ids keeps behaving exactly as it did, but an *overlay* desk can only ever
+/// hold a reserved id by predating the id/name guards `create_desk` has
+/// carried since `da98130c1` and `16dcce235` — the exact grandfathered shape
+/// `list_desks` and [`CompanyRecord::resolve_desk_id`] already keep out of the
+/// desk list and out of routing (`0c07873db`). Treating it as a real,
+/// mutable desk here would contradict that: every other surface already
+/// agrees it shadows General, not that it is a desk.
+///
+/// That read/list-side exclusion (`0c07873db`) is where the gap actually
+/// starts: this mutation-side guard (originally `da98130c1`) was dropped by
+/// an unrelated refactor (`3cbdb7a5f`) and never restored alongside it — a
+/// direct `POST`/`DELETE`/`PUT` to `.../desks/{id}` could still staff,
+/// reorder, or delete a desk no read surface exposes, and a write against a
+/// bare General spelling with no legacy overlay row regressed from this 409
+/// to a misleading 404.
+fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
+    crate::server::chat_history::is_general_chat(Some(desk_id))
+        && !record.manifest.group_chats.iter().any(|c| c.id == desk_id)
+}
+
 /// The path of a desk sub-resource (`desk_id`).
 #[derive(Debug, Deserialize)]
 struct DeskPath {
@@ -350,6 +384,15 @@ async fn add_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743; restored PR #1781 review,
+    // CodeRabbit P2 — see `is_general_channel`'s own doc).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). A manifest-only check meant a desk
     // created in the console could be reordered and deleted but never staffed
@@ -407,6 +450,15 @@ async fn set_desk_order(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743; restored PR #1781 review,
+    // CodeRabbit P2 — see `is_general_channel`'s own doc).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). `desk_exists` covers both (the same
     // check `effective_desk_members` uses), so an operator-created desk can be
@@ -463,6 +515,15 @@ async fn remove_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743; restored PR #1781 review,
+    // CodeRabbit P2 — see `is_general_channel`'s own doc).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // First validate that the desk exists at all — otherwise a caller supplying
     // an unknown desk_id gets a desk-scoped 404 rather than a confusing
     // member-scoped one (Greptile feedback). Existence spans both blueprint and
@@ -745,6 +806,15 @@ async fn delete_desk(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
 
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743; restored PR #1781 review,
+    // CodeRabbit P2 — see `is_general_channel`'s own doc).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // A manifest desk belongs to the blueprint — never deletable at runtime.
     if record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
@@ -5404,6 +5474,156 @@ mode = "full"
         // The manifest desk and a non-shadowing overlay desk are unaffected —
         // this narrows one id, it does not hide desks generally.
         assert!(ids.contains(&"studio"), "unrelated desk dropped: {ids:?}");
+    }
+
+    /// Every desk mutation aimed at a bare General spelling — no legacy
+    /// overlay row at all — is refused with a reason, under **every** spelling
+    /// the host folds into the General conversation (issue #1743; restored PR
+    /// #1781 review, CodeRabbit P2).
+    ///
+    /// This is the `is_general_channel` guard originally added by `da98130c1`
+    /// and its own regression test; an unrelated refactor (`3cbdb7a5f`) deleted
+    /// the guard, the four call sites, and this test together, and only the
+    /// read-side projection filter (`list_desks`/`resolve_desk_id`) was ever
+    /// restored (`0c07873db`) — this proves the write side is closed again.
+    ///
+    /// The point of the assertion is the pair: a `409` **and** the sentence.
+    /// Before this guard, each of these was a bare `404`/`CompanyNotFound` —
+    /// "there is no such desk" — which is a different and wrong claim.
+    /// `#general` is not missing; it is reserved, and the caller needs to be
+    /// told which.
+    #[tokio::test]
+    async fn every_desk_mutation_aimed_at_a_bare_general_spelling_is_refused_with_a_reason() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for spelling in ["general", "General", "GENERAL", "main", "Main"] {
+            let cases: [(&str, String, &str); 4] = [
+                ("DELETE", format!("/api/v1/company/desks/{spelling}"), ""),
+                (
+                    "POST",
+                    format!("/api/v1/company/desks/{spelling}/members"),
+                    r#"{"agent_id":"eng"}"#,
+                ),
+                (
+                    "DELETE",
+                    format!("/api/v1/company/desks/{spelling}/members/ceo"),
+                    "",
+                ),
+                (
+                    "PUT",
+                    format!("/api/v1/company/desks/{spelling}/order"),
+                    r#"{"ordered_member_ids":["ceo"]}"#,
+                ),
+            ];
+            for (method, uri, body) in cases {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("cookie", &cookie)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::CONFLICT,
+                    "{method} {uri} must be refused, not answered 404"
+                );
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(
+                    text.contains("company-wide channel"),
+                    "{method} {uri} must say why: got {text}"
+                );
+            }
+        }
+    }
+
+    /// Sibling to [`list_desks_hides_an_overlay_desk_shadowing_general`]: the
+    /// same grandfathered overlay desk at the reserved `general` id — which
+    /// that test proves is hidden from `GET .../desks` and unroutable through
+    /// [`CompanyRecord::resolve_desk_id`] — must also be unreachable through
+    /// every desk *mutation* (issue #1781 review, CodeRabbit P2). Before this
+    /// guard was restored, `desk_exists("general")` was `true` for exactly this
+    /// desk (it really is in `overlay_desks`), so `add_desk_member`,
+    /// `remove_desk_member`, `set_desk_order`, and `delete_desk` — which
+    /// checked only `desk_exists` — would staff, reorder, or delete a desk no
+    /// read surface exposes at all.
+    ///
+    /// Seeded directly on the stored record, the same way the read-side sibling
+    /// test is: `POST .../desks` has refused this id since issue #1743, so the
+    /// only way this shape exists is data that predates that guard.
+    #[tokio::test]
+    async fn desk_mutations_refuse_a_grandfathered_overlay_desk_shadowing_general() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut record = runtime.store().load(&id).await.unwrap().unwrap();
+        record.overlay_desks.push(OverlayDesk {
+            id: "general".to_string(),
+            name: "General".to_string(),
+            description: None,
+            members: vec!["ceo".to_string()],
+            responder: ResponderMode::Lead,
+        });
+        runtime.store().save(&record).await.unwrap();
+
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let cases: [(&str, &str, &str); 4] = [
+            ("DELETE", "/api/v1/company/desks/general", ""),
+            (
+                "POST",
+                "/api/v1/company/desks/general/members",
+                r#"{"agent_id":"eng"}"#,
+            ),
+            ("DELETE", "/api/v1/company/desks/general/members/ceo", ""),
+            (
+                "PUT",
+                "/api/v1/company/desks/general/order",
+                r#"{"ordered_member_ids":["ceo"]}"#,
+            ),
+        ];
+        for (method, uri, body) in cases {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{method} {uri} must be refused even though the desk really \
+                 exists in the overlay — desk_exists alone is not enough"
+            );
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains("company-wide channel"),
+                "{method} {uri} must say why: got {text}"
+            );
+        }
     }
 
     /// Removing an overlay member drops it from the merged view; a manifest
