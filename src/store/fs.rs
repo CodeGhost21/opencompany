@@ -502,6 +502,29 @@ pub(crate) mod fault_probe {
             .remove(&key(path))
     }
 
+    static FAIL_NEXT_DIR_SYNC: LazyLock<Mutex<HashSet<PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    /// Arms a one-shot failure for the parent-directory fsync that follows a
+    /// successful rename in [`commit_staged`] (issue #1828 review, tenth
+    /// round). Unlike [`fail_next_commit`], which fails before the rename,
+    /// this reaches the state where the destination is *already replaced* on
+    /// disk and only the durability step failed.
+    pub(crate) fn fail_next_dir_sync(path: &Path) {
+        FAIL_NEXT_DIR_SYNC
+            .lock()
+            .expect("fault-probe poisoned")
+            .insert(key(path));
+    }
+
+    /// Consumes the armed post-rename dir-sync failure for `path`, if any.
+    pub(crate) fn should_fail_dir_sync(path: &Path) -> bool {
+        FAIL_NEXT_DIR_SYNC
+            .lock()
+            .expect("fault-probe poisoned")
+            .remove(&key(path))
+    }
+
     static FAIL_NEXT_COMMIT: LazyLock<Mutex<HashSet<PathBuf>>> =
         LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -841,7 +864,7 @@ pub(crate) async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 /// now.
 pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = stage_atomic_bytes(path, bytes).await?;
-    commit_staged(path, tmp).await
+    commit_staged(path, tmp).await.map_err(|f| f.error)
 }
 
 /// The write-and-fsync half of [`write_atomic_bytes`], split out so a caller
@@ -984,27 +1007,76 @@ async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
 /// file previously staged by [`stage_atomic_bytes`] over `path`, then
 /// flushes the parent directory. See that function's doc comment for why
 /// the two are split.
-async fn commit_staged(path: &Path, tmp: PathBuf) -> Result<()> {
+/// Why a commit failed — and, crucially, whether the rename already landed.
+///
+/// `rename` and the parent-directory fsync are separate steps, so a plain
+/// `Err` conflates two very different states: nothing was published, versus
+/// the destination is already replaced and only its durability step failed
+/// (issue #1828 review, tenth round). Callers that compensate on failure —
+/// rolling a sibling file back, or treating a bundle as never created — need
+/// to tell them apart, because compensating for a publish that *did* happen
+/// is how a half-updated record is made.
+#[derive(Debug)]
+struct CommitFailure {
+    /// `true` when the rename succeeded and only `sync_parent_dir` failed:
+    /// readers already see the new contents, they are just not yet durable
+    /// against a host crash.
+    published: bool,
+    error: OpenCompanyError,
+}
+
+async fn commit_staged(path: &Path, tmp: PathBuf) -> std::result::Result<(), CommitFailure> {
     #[cfg(test)]
     if fault_probe::should_fail_commit(path) {
-        return Err(io_err(
-            path,
-            std::io::Error::other("injected test failure (fault_probe commit)"),
-        ));
+        return Err(CommitFailure {
+            published: false,
+            error: io_err(
+                path,
+                std::io::Error::other("injected test failure (fault_probe commit)"),
+            ),
+        });
     }
     let owned_path = path.to_path_buf();
 
     // One `spawn_blocking` for the rename-then-sync pair rather than two
     // `tokio::fs` calls, mirroring `stage_atomic_bytes` above.
-    tokio::task::spawn_blocking(move || {
-        std::fs::rename(&tmp, &owned_path).map_err(|e| io_err(&owned_path, e))?;
+    let joined = tokio::task::spawn_blocking(move || {
+        std::fs::rename(&tmp, &owned_path).map_err(|e| CommitFailure {
+            published: false,
+            error: io_err(&owned_path, e),
+        })?;
+        // Test-only: see `fault_probe::fail_next_dir_sync`. Reaches the state
+        // the plain fault probe cannot — rename landed, durability step did
+        // not.
+        #[cfg(test)]
+        if fault_probe::should_fail_dir_sync(&owned_path) {
+            return Err(CommitFailure {
+                published: true,
+                error: io_err(
+                    &owned_path,
+                    std::io::Error::other("injected test failure (fault_probe dir sync)"),
+                ),
+            });
+        }
         // Unconditional: the rename changed this directory whether or not the
         // destination already existed.
-        sync_parent_dir(&owned_path)?;
-        Ok::<_, OpenCompanyError>(())
+        sync_parent_dir(&owned_path).map_err(|error| CommitFailure {
+            published: true,
+            error,
+        })?;
+        Ok::<_, CommitFailure>(())
     })
-    .await
-    .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+    .await;
+    match joined {
+        Ok(result) => result,
+        Err(e) => Err(CommitFailure {
+            // The join itself failed, so whether the rename ran is unknown;
+            // the conservative answer for a caller deciding whether to
+            // compensate is "assume it may have landed".
+            published: true,
+            error: OpenCompanyError::Store(format!("spawn_blocking failed: {e}")),
+        }),
+    }
 }
 
 /// Best-effort cleanup of a temp file previously returned by
@@ -1542,13 +1614,29 @@ impl CompanyStore for FsCompanyStore {
                     return Err(io_err(&bundle.company_toml(), e));
                 }
             };
-            if let Err(e) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
+            if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
                 remove_staged(&toml_tmp).await;
                 remove_staged(&meta_tmp).await;
-                return Err(e);
+                return Err(f.error);
             }
-            if let Err(e) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
+            if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
                 remove_staged(&meta_tmp).await;
+                // Only roll the manifest back when `meta.json` genuinely did
+                // not publish. If its rename landed and only the durability
+                // step failed, readers already see the new metadata —
+                // restoring the old manifest would pair it with new metadata
+                // and manufacture the mixed record this rollback exists to
+                // prevent (issue #1828 review, tenth round).
+                if f.published {
+                    tracing::warn!(
+                        path = %bundle.meta_json().display(),
+                        error = %f.error,
+                        "[store] meta.json was renamed into place but its directory sync failed; \
+                         leaving both new files published rather than rolling the manifest back \
+                         onto newer metadata"
+                    );
+                    return Err(f.error);
+                }
                 if let Some(previous) = previous_toml {
                     // Best-effort: the caller is already being told the save
                     // failed, so a failed rollback must not mask the original
@@ -1557,9 +1645,10 @@ impl CompanyStore for FsCompanyStore {
                     match stage_atomic_bytes(&bundle.company_toml(), &previous).await {
                         Ok(rollback_tmp) => {
                             guard.watch(&rollback_tmp);
-                            if let Err(rollback_err) =
+                            if let Err(rollback_failure) =
                                 commit_staged(&bundle.company_toml(), rollback_tmp.clone()).await
                             {
+                                let rollback_err = rollback_failure.error;
                                 remove_staged(&rollback_tmp).await;
                                 tracing::error!(
                                     path = %bundle.company_toml().display(),
@@ -1581,17 +1670,17 @@ impl CompanyStore for FsCompanyStore {
                         }
                     }
                 }
-                return Err(e);
+                return Err(f.error);
             }
         } else {
-            if let Err(e) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
+            if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
                 remove_staged(&meta_tmp).await;
                 remove_staged(&toml_tmp).await;
-                return Err(e);
+                return Err(f.error);
             }
-            if let Err(e) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
+            if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
                 remove_staged(&toml_tmp).await;
-                return Err(e);
+                return Err(f.error);
             }
         }
         // Both files are committed: the renames moved each temp away, so the
@@ -3667,6 +3756,74 @@ mod test {
     /// first-time publish — the same fault as the very first round's test
     /// above, which already proves the *live* files stay safe — and, in
     /// addition to that, assert no `*.tmp-*` file is left anywhere under the
+    /// **Issue #1828 review, tenth round**: `commit_staged` returned a plain
+    /// `Err` for two very different states — the rename never happened, or
+    /// the rename landed and only `sync_parent_dir` failed. The rollback
+    /// added in the ninth round compensated identically for both, so a
+    /// post-rename sync failure on `meta.json` restored the *old* manifest
+    /// while readers already saw the *new* metadata: precisely the mixed
+    /// record the rollback exists to prevent.
+    ///
+    /// `fault_probe::fail_next_dir_sync` reaches that state, which
+    /// `fail_next_commit` cannot — it fires before the rename. The manifest
+    /// must stay as the save left it, not be rolled back.
+    #[tokio::test]
+    async fn a_post_rename_sync_failure_does_not_roll_the_manifest_back() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record_named = |name: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: {
+                let mut m = sample_manifest();
+                m.company.name = name.to_string();
+                m
+            },
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        store
+            .save(&record_named("Before"))
+            .await
+            .expect("first publish");
+
+        // Fail only the durability step of the *second* commit, after its
+        // rename has already replaced meta.json.
+        fault_probe::fail_next_dir_sync(&bundle.meta_json());
+        let err = store.save(&record_named("After")).await;
+        assert!(
+            err.is_err(),
+            "a post-rename sync failure must still be reported to the caller"
+        );
+
+        let manifest = std::fs::read_to_string(bundle.company_toml()).expect("manifest on disk");
+        assert!(
+            manifest.contains("After") && !manifest.contains("Before"),
+            "meta.json was already published, so the manifest must NOT be \
+             rolled back onto it — found {manifest}"
+        );
+    }
+
     /// **Issue #1828 review, ninth round**: on the update path the two files
     /// are published by two independent renames, `company.toml` first. If the
     /// `meta.json` commit then fails, the manifest edit is already durable
