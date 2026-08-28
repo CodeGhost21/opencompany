@@ -94,11 +94,20 @@ test.describe("onboarding gate", () => {
     await expect(gateStep(page, "workflow")).toBeVisible();
     await expect(shellNav(page)).toHaveCount(0);
 
-    // Complete the name step through the real form. The mocked PATCH above
-    // flips `activated`, so the gate's next poll (`onRefresh`, fired
-    // immediately after the write — not the 5s interval) reads `isActivated`
-    // and the shell takes over.
-    await gateStep(page, "name").getByRole("button", { name: "Name your company" }).click();
+    // Complete the name step through the real form. `OnboardingGate` opens
+    // the first incomplete step itself (`firstOpen`) — "name" here, since
+    // `INCOMPLETE.nameConfirmed` is false — so the toggle button already
+    // reads `aria-expanded="true"` and clicking it unconditionally would
+    // *close* it instead of opening it. Only click when it is not already
+    // open, so this still opens the step on its own if a future change to
+    // `firstOpen`'s ordering ever stops auto-opening it.
+    const nameToggle = gateStep(page, "name").getByRole("button", { name: "Name your company" });
+    if ((await nameToggle.getAttribute("aria-expanded")) !== "true") {
+      await nameToggle.click();
+    }
+    // The mocked PATCH above flips `activated`, so the gate's next poll
+    // (`onRefresh`, fired immediately after the write — not the 5s interval)
+    // reads `isActivated` and the shell takes over.
     await page.getByLabel("Company name").fill("Real Name");
     await page.getByRole("button", { name: "Confirm name" }).click();
 
