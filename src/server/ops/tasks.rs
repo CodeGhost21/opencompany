@@ -1339,7 +1339,28 @@ pub(crate) struct TaskDetail {
     pub(crate) waiting_since: Option<u64>,
 }
 
-/// `GET …/tasks/{task_id}` — the Task Detail screen's single read (issue #185).
+/// `GET …/tasks/{task_id}/approvals` — the authoritative pending approvals
+/// for one task, using the same attempt-aware ownership projection as detail.
+async fn task_approvals(
+    company: ScopedCompany,
+    Path(TaskPath { task_id }): Path<TaskPath>,
+) -> Result<Json<Vec<crate::runtime::types::ApprovalSummary>>, ApiError> {
+    let detail = assemble_detail(&company, &task_id).await?;
+    let pending_ids: std::collections::HashSet<_> = detail
+        .approvals
+        .iter()
+        .filter(|approval| approval.status == "pending")
+        .map(|approval| approval.id.as_str())
+        .collect();
+    let approvals = company
+        .runtime
+        .pending_approvals()
+        .into_iter()
+        .filter(|approval| pending_ids.contains(approval.id.as_ref()))
+        .collect();
+    Ok(Json(approvals))
+}
+
 ///
 /// Assembles six things the console would otherwise have to stitch client-side
 /// (and could not, for the journal-derived halves):
