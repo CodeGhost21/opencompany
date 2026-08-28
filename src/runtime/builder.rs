@@ -1657,6 +1657,49 @@ impl RuntimeBuilder {
                     problems,
                 });
             }
+        } else if let Some(record) = existing.as_ref() {
+            // Issue #1781 review (Codex P1 follow-up): `existing.is_some()`
+            // alone is true for every reboot forever, not just the one right
+            // after a reservation rule tightened — so gating strict
+            // enforcement on it alone let an operator edit `company.toml`
+            // between two `serve` restarts to *newly* declare an agent at
+            // `system`, `main`, `general`, or a desk colliding with the
+            // Operator channel, and the very next reboot excused it exactly
+            // as quietly as a collision that had been there since before the
+            // rule existed. Those are not the same case: a collision this
+            // store's own last-saved record already carried is genuinely
+            // grandfathered; one that only appears in the manifest being
+            // loaded *now* is a fresh authoring mistake wearing a restart as
+            // a disguise, and can impersonate a built-in surface
+            // (`server::operator::resolve_desk` matches by id or
+            // case-insensitive name — see `manifest.rs`'s reservation arms).
+            //
+            // `reserved_problems()` isolates exactly the messages the
+            // relaxed loader would have suppressed — nothing else, so this
+            // cannot newly block a rebooting company over an unrelated
+            // validation rule the relaxed loader already enforced on every
+            // restart. Diffing the current manifest's reserved problems
+            // against the *stored* record's own gives the narrow test: was
+            // this exact collision already present in what this store last
+            // saved, not merely "is this some restart, sometime."
+            let already_reserved: std::collections::HashSet<String> =
+                record.manifest.reserved_problems().into_iter().collect();
+            let newly_introduced: Vec<String> = self
+                .manifest
+                .reserved_problems()
+                .into_iter()
+                .filter(|problem| !already_reserved.contains(problem))
+                .collect();
+            if !newly_introduced.is_empty() {
+                return Err(crate::OpenCompanyError::ManifestInvalid {
+                    path: self
+                        .seed_dir
+                        .clone()
+                        .map(|dir| dir.join("company.toml"))
+                        .unwrap_or_else(|| PathBuf::from("company.toml")),
+                    problems: newly_introduced,
+                });
+            }
         }
 
         // Issue #1796: the namespaces an operator granted from a connect
@@ -4803,12 +4846,75 @@ mod test {
     }
 
     /// The twin of the test above, proving the fix does not regress
-    /// `b80c45e2c`'s grandfather case: a company that already has a persisted
-    /// record — i.e. `existing.is_some()`, a real restart — must still boot
-    /// even when its manifest claims the reserved `operator` agent id.
+    /// `b80c45e2c`'s grandfather case: a company whose **stored** record
+    /// already carries the reserved `operator` agent id — a collision that
+    /// predates the reservation rule, not one an operator just introduced —
+    /// must still boot.
+    ///
+    /// Seeded by writing the `CompanyRecord` straight to the store rather
+    /// than via a first `build()`, because `build()` itself enforces the
+    /// strict, unrelaxed `validate()` whenever `existing.is_none()`
+    /// (`861a8fbad`) — a bare first boot with this manifest would already be
+    /// refused by `first_boot_refuses_a_fresh_manifest_claiming_the_reserved_operator_agent_id`
+    /// above, never reaching the grandfather case this test means to prove.
+    /// Writing the record directly is exactly how a real grandfathered
+    /// company got here in production: its `company.toml` was accepted, and
+    /// its record written, before the rule existed at all.
     #[tokio::test]
     async fn a_reboot_still_grandfathers_an_already_registered_operator_agent_id() {
         let home = tmp_home("opencompany-reboot-reserved-id-");
+        let reserved: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n",
+        )
+        .expect("manifest");
+        let id = company_id_from_name("Acme");
+        FsCompanyStore::new(home.path())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: reserved.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+
+        RuntimeBuilder::new(home.path().to_path_buf(), reserved)
+            .with_id(id)
+            .build()
+            .await
+            .expect(
+                "a company whose STORED record already carries this collision must still \
+                 reboot, even though the manifest being loaded only clears the relaxed loader",
+            );
+    }
+
+    /// The twin of the test above from the other direction: a reboot whose
+    /// manifest *newly* adds a reserved-id agent — one the stored record does
+    /// not carry — must be refused exactly as a first boot would be. This is
+    /// the vulnerability Codex flagged on #1781: `existing.is_some()` used to
+    /// be the entire test, so an operator could edit `company.toml` between
+    /// two restarts to mint `operator` (or `system`/`main`/`general`) and the
+    /// very next `serve` boot excused it as if it had always been there.
+    #[tokio::test]
+    async fn a_reboot_refuses_a_newly_introduced_reserved_agent_id() {
+        let home = tmp_home("opencompany-reboot-new-reserved-id-");
         let safe: CompanyManifest =
             toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
                 .expect("manifest");
@@ -4822,13 +4928,22 @@ mod test {
              [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n",
         )
         .expect("manifest");
-        RuntimeBuilder::new(home.path().to_path_buf(), reserved)
+        let err = RuntimeBuilder::new(home.path().to_path_buf(), reserved)
             .build()
             .await
-            .expect(
-                "a company this store already has a record for must still reboot, \
-                 even with a manifest that only the relaxed loader would accept",
+            .expect_err(
+                "editing company.toml to add a reserved id between two restarts must not be \
+                 excused just because a record already existed",
             );
+        match err {
+            crate::OpenCompanyError::ManifestInvalid { problems, .. } => {
+                assert!(
+                    problems.iter().any(|p| p.contains("operator")),
+                    "expected a reserved-id problem, got: {problems:?}"
+                );
+            }
+            other => panic!("expected ManifestInvalid, got {other}"),
+        }
     }
 
     /// The mirror: switching to the base backend must drop the outgoing
@@ -7969,13 +8084,104 @@ needs_reason = true
     /// reboot. A bare `RuntimeBuilder::new(..).build()` off a freshly parsed
     /// manifest is a first boot by construction, so the reserved `operator`
     /// group-chat id below now fails strict validation before the fixture
-    /// ever reaches the collision state this test means to exercise. Seed a
-    /// persisted record with a safe manifest first — the same two-step shape
-    /// as `a_reboot_still_grandfathers_an_already_registered_operator_agent_id`
-    /// above — so the second `build()` is the reboot the relaxed loader is
-    /// meant to excuse, not a fresh authoring mistake.
+    /// ever reaches the collision state this test means to exercise.
+    ///
+    /// A follow-up review (Codex P1) found `existing.is_some()` alone too
+    /// broad — it grandfathered a collision introduced by editing
+    /// `company.toml` *between* two restarts, not just one already present
+    /// when the company was first stored. So this seeds the persisted record
+    /// **directly**, the same way
+    /// `a_reboot_still_grandfathers_an_already_registered_operator_agent_id`
+    /// (agent-id case) now does, rather than via a first `build()` on a safe
+    /// manifest followed by a second `build()` that newly introduces the
+    /// collision — that two-step shape is exactly the vulnerability, and
+    /// `a_reboot_refuses_a_newly_introduced_reserved_desk_id` below proves it
+    /// is refused now.
     #[tokio::test]
     async fn deliverable_channel_ids_dedupes_a_grandfathered_operator_desk() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            [[group_chat]]
+            id = "operator"
+            name = "Operator"
+            members = ["ceo"]
+            "#,
+        );
+        let id = company_id_from_name("Acme");
+        FsCompanyStore::new(dir.path())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+
+        let runtime = RuntimeBuilder::new(dir.path(), manifest)
+            .with_id(id)
+            .build()
+            .await
+            .expect(
+                "a company whose STORED record already carries this desk collision must still \
+                 reboot, even though the manifest being loaded only clears the relaxed loader",
+            );
+
+        // Both adapters really are present internally — this asserts the
+        // fixture reaches the collision state the fix has to survive, not just
+        // that the picker happens to look right for some other reason.
+        let operator_channels = runtime
+            .channels
+            .iter()
+            .filter(|c| c.channel_id() == "operator")
+            .count();
+        assert_eq!(
+            operator_channels, 2,
+            "fixture must actually wire both the built-in Operator channel and \
+             the grandfathered desk under the same id"
+        );
+
+        let deliverable = runtime.deliverable_channel_ids();
+        let operator_count = deliverable.iter().filter(|id| *id == "operator").count();
+        assert_eq!(
+            operator_count, 1,
+            "operator must appear exactly once in the picker's set — ordering \
+             preserved, duplicates dropped: {deliverable:?}"
+        );
+    }
+
+    /// The desk-collision sibling of
+    /// `a_reboot_refuses_a_newly_introduced_reserved_agent_id`: a reboot whose
+    /// manifest *newly* adds a desk colliding with the Operator channel's id
+    /// — one the stored record did not carry — must be refused too, not just
+    /// the agent-id case. `reserved_problems()`'s diff has to catch both
+    /// arms of `validate_with`'s reservation (agent id, desk id/name), or
+    /// this exact vulnerability survives at the desk arm even after the
+    /// agent arm is closed.
+    #[tokio::test]
+    async fn a_reboot_refuses_a_newly_introduced_reserved_desk_id() {
         let dir = tempfile::tempdir().unwrap();
         let safe = parse(
             r#"
@@ -8004,35 +8210,22 @@ needs_reason = true
             members = ["ceo"]
             "#,
         );
-        let runtime = RuntimeBuilder::new(dir.path(), manifest)
+        let err = RuntimeBuilder::new(dir.path(), manifest)
             .build()
             .await
-            .expect(
-                "a company this store already has a record for must still reboot, \
-                 even with a manifest that only the relaxed loader would accept",
+            .expect_err(
+                "editing company.toml to add a reserved desk id between two restarts must not \
+                 be excused just because a record already existed",
             );
-
-        // Both adapters really are present internally — this asserts the
-        // fixture reaches the collision state the fix has to survive, not just
-        // that the picker happens to look right for some other reason.
-        let operator_channels = runtime
-            .channels
-            .iter()
-            .filter(|c| c.channel_id() == "operator")
-            .count();
-        assert_eq!(
-            operator_channels, 2,
-            "fixture must actually wire both the built-in Operator channel and \
-             the grandfathered desk under the same id"
-        );
-
-        let deliverable = runtime.deliverable_channel_ids();
-        let operator_count = deliverable.iter().filter(|id| *id == "operator").count();
-        assert_eq!(
-            operator_count, 1,
-            "operator must appear exactly once in the picker's set — ordering \
-             preserved, duplicates dropped: {deliverable:?}"
-        );
+        match err {
+            crate::OpenCompanyError::ManifestInvalid { problems, .. } => {
+                assert!(
+                    problems.iter().any(|p| p.contains("operator")),
+                    "expected a reserved-id problem, got: {problems:?}"
+                );
+            }
+            other => panic!("expected ManifestInvalid, got {other}"),
+        }
     }
 
     /// **The invariant that would have caught #981, restored by #1757.** The

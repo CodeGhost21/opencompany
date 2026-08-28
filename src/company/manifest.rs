@@ -423,6 +423,33 @@ impl CompanyManifest {
         self.validate_with(true)
     }
 
+    /// The subset of [`validate`](Self::validate) that exists *only* because
+    /// of the [`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)/
+    /// `operator` reservation — `validate_with(true)` minus
+    /// `validate_with(false)`.
+    ///
+    /// `RuntimeBuilder::build` (issue #1781 review, Codex P1 follow-up) uses
+    /// this to tell a reserved-id/name collision the *previously stored*
+    /// manifest already carried — genuinely grandfathered, however old the
+    /// company — from one an operator just introduced by editing
+    /// `company.toml` between two `serve` restarts. `existing.is_some()`
+    /// alone is not that test: it is true for every restart forever, so
+    /// gating strict enforcement on it alone (the shape `b80c45e2c` shipped)
+    /// let a post-first-boot edit mint `system`, `main`, `general`, or an
+    /// `operator`-colliding desk on every subsequent reboot, impersonating a
+    /// built-in surface. Diffing against the stored record's own
+    /// `reserved_problems()` keeps the grandfather narrow: a collision must
+    /// already have been present in what this store last saved, not merely
+    /// possible to explain away as "some restart, sometime."
+    pub(crate) fn reserved_problems(&self) -> Vec<String> {
+        let relaxed: std::collections::HashSet<String> =
+            self.validate_with(false).into_iter().collect();
+        self.validate_with(true)
+            .into_iter()
+            .filter(|problem| !relaxed.contains(problem))
+            .collect()
+    }
+
     /// [`validate`](Self::validate), with the [`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)
     /// agent-id collision, and the matching `operator` group-chat id/name
     /// reservation, reported only when `enforce_reserved_agent_ids` is set.
