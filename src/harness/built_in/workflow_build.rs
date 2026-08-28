@@ -734,13 +734,30 @@ async fn settle_to_todo(
     // card came back indistinguishable from one that had never bounced.
     card.bounced = crate::runtime::advance::bounced_reason(COLUMN_TODO, RunStatus::Failed, &reason);
     card.updated_at_millis = now_millis();
-    if let Err(err) = runtime.tasks().upsert(runtime.id(), &card).await {
-        tracing::warn!(
-            company = %runtime.id(),
-            task = %task_id,
-            error = %err,
-            "[builder] could not return the card to To-do; it stays In Progress until the next boot"
-        );
+    match runtime.tasks().upsert(runtime.id(), &card).await {
+        Ok(()) => {
+            // Issue #1865 (CodeRabbit review, PR #1883): the same
+            // `dispatch_failed` alert every other bounced-dispatch path files —
+            // `CompanyRuntime::abandon_run`, the cycle's terminality backstop,
+            // and the boot reaper's card sweep (all three via
+            // `advance::notify_dispatch_failed`). Unlike those crash-recovery
+            // paths, and unlike `brain.rs`'s `refuse_dispatch` (which relays a
+            // reply into the card's origin chat when it has one), this pass
+            // never posts anywhere else an operator would see it — the card
+            // note and the bounce chip are both silent off the board. Without
+            // this call, a builder pass that could not even be attempted was
+            // the one bounced-dispatch path the notification feed never badges.
+            runtime.notify_dispatch_failed(task_id, &reason).await;
+        }
+        Err(err) => {
+            tracing::warn!(
+                company = %runtime.id(),
+                task = %task_id,
+                error = %err,
+                "[builder] could not return the card to To-do; it stays In Progress until the \
+                 next boot"
+            );
+        }
     }
     finish_run(runtime, run_id, RunStatus::Failed, Some(&reason), usage).await;
 }

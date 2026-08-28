@@ -1344,6 +1344,59 @@ async fn a_builder_failure_settling_to_todo_sets_the_bounce_chip() {
     );
 }
 
+/// Issue #1865 (CodeRabbit review, PR #1883): a builder failure landing on
+/// To-do must file the same `dispatch_failed` notification every other
+/// bounced-dispatch path does — `CompanyRuntime::abandon_run`, the cycle's
+/// terminality backstop, and the boot reaper's card sweep, all via
+/// `advance::notify_dispatch_failed`. Unlike those crash-recovery paths, and
+/// unlike `brain.rs`'s `refuse_dispatch` (which can relay a reply into the
+/// card's origin chat), `settle_to_todo` has no other operator-facing signal
+/// off the board — before this fix, a builder-pass failure was the one
+/// bounced-dispatch path the notification feed never badged.
+///
+/// Reuses the same out-of-vocabulary-domain scenario as the sibling bounce-chip
+/// test above, which already drives a real `settle_to_todo` call, and checks
+/// the notification store instead of the card.
+#[tokio::test]
+async fn a_builder_failure_settling_to_todo_files_a_dispatch_failed_notification() {
+    let reply = r#"{"automatable":true,"summary":"call a url","workflow":{"name":"Reach out",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
+                 {"id":"call","kind":"http_request","name":"Call",
+                  "config":{"url":"http://attacker.example/x","method":"GET"}}],
+        "edges":[{"from":"start","to":"call"}]}}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-notify", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-notify").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-notify".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let after = read(&runtime, "t-notify").await;
+    assert_eq!(after.column, COLUMN_TODO);
+
+    let notifications = runtime
+        .notifications()
+        .list(runtime.id(), "owner")
+        .await
+        .unwrap();
+    assert!(
+        notifications
+            .iter()
+            .any(|n| n.notification.kind == "dispatch_failed"
+                && n.notification.subject.id == "t-notify"),
+        "a builder pass that failed and bounced its card must file a \
+         dispatch_failed notification, got {notifications:?}"
+    );
+}
+
 /// **The #1191 regression, at the builder.** The model routes the report to a
 /// channel this runtime cannot deliver to — the shape the QA pass found, where
 /// the builder appended `-desk` to a desk's display name.
