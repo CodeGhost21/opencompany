@@ -8763,36 +8763,29 @@ members = ["eng1", "eng2"]
         let dir = tempfile::tempdir().unwrap();
         let requests = crate::harness::policy::ApprovalRequestQueue::default();
         let root = crate::ports::types::EventSeq::new(7);
-        requests.grants().grant(crate::runtime::grants::GrantedCall {
-            approval_id: ApprovalId::new("appr-threaded"),
-            agent: "ceo".into(),
-            tool: "workspace_write".into(),
-            args: serde_json::json!({}),
-            at_millis: now_millis(),
-            origin_thread: Some("general".into()),
-            origin_parent: Some(root),
-            origin_task: None,
-        });
-        let pool = Arc::new(HarnessPool::new());
-        let brain = HarnessBrain::new(
-            pool.clone(),
-            HarnessDeps {
-                ..(*brain_with_queue_and_events(
-                    dir.path(),
-                    requests,
-                    Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf())),
-                )
-                .deps)
-            },
-            record(),
+        requests
+            .grants()
+            .grant(crate::runtime::grants::GrantedCall {
+                approval_id: ApprovalId::new("appr-threaded"),
+                agent: "ceo".into(),
+                tool: "workspace_write".into(),
+                args: serde_json::json!({}),
+                at_millis: now_millis(),
+                origin_thread: Some("general".into()),
+                origin_parent: Some(root),
+                origin_task: None,
+            });
+        let base = brain_with_queue_and_events(
+            dir.path(),
+            requests,
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf())),
         );
+        let pool = Arc::new(HarnessPool::new());
+        let brain = HarnessBrain::new(pool.clone(), (*base.deps).clone(), record());
 
         brain
             .run_cycle(
-                cycle_over(vec![approval_resolved(
-                    "appr-threaded",
-                    Verdict::Approve,
-                )]),
+                cycle_over(vec![approval_resolved("appr-threaded", Verdict::Approve)]),
                 &NoopHost,
             )
             .await
