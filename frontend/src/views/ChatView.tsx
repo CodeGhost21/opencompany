@@ -311,6 +311,15 @@ interface Props {
    * one is often to open the Approvals page and come back.
    */
   failedApprovals?: Record<string, string>;
+  /**
+   * The coarse "near your credit limit" warning (issue #1846), off the live
+   * `budget_proximity` frame. Owned by the shell — it can fire mid-turn on any
+   * channel, and the shell is what outlives a channel switch. `null`/absent
+   * renders no banner.
+   */
+  budgetProximity?: { message: string; atMillis: number } | null;
+  /** Clears the banner above — the shell's own state, this view only asks. */
+  onDismissBudgetProximity?: () => void;
 }
 
 const FIRST_TEAM_BRIEF =
@@ -363,6 +372,8 @@ export function ChatView({
   decidingApprovals,
   decidedApprovals,
   failedApprovals,
+  budgetProximity,
+  onDismissBudgetProximity,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -2102,6 +2113,24 @@ export function ChatView({
               redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
               latestBudgetPauseMessageIdByAgent={budgetPauseMessageIdByAgent}
             />
+            {budgetProximity && (
+              <p
+                role="status"
+                className="flex shrink-0 items-center gap-1.5 border-t border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0 flex-1">{budgetProximity.message}</span>
+                {onDismissBudgetProximity && (
+                  <button
+                    type="button"
+                    onClick={onDismissBudgetProximity}
+                    className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-amber-500/15"
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </p>
+            )}
             {consoleOnlyMember && (
               <p
                 role="status"
