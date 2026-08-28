@@ -1001,23 +1001,35 @@ fn validate_draft_against_record(
     // silently start resolving to the NEW desk on next load, re-routing this
     // workflow's future blocker DMs to the wrong team with no edit ever made
     // to it. The id is stable for a desk's lifetime; the display name is not.
+    //
+    // Short-circuit an unchanged stored value BEFORE resolution runs at all
+    // (issue #1882 review, PR #1882 bot finding, comment 3878829353): the
+    // three arms below used to each re-derive their own "is this the same
+    // as what's on file" guard (the `None` arm, and the ambiguous-arm's now-
+    // removed `&& previous_owner_desk != Some(desk)`), but the `Some(resolved_id)`
+    // arm that persists a resolution had none — and that is exactly the
+    // grandfathering hole. A desk that owned this raw string can be deleted,
+    // and a later, unrelated desk can take that same string as its *display
+    // name* (id uniqueness is enforced, name uniqueness is not); on the next
+    // unrelated save, `resolve_desk_id` answers with the new desk and this
+    // code persisted that resolution — silently transferring ownership on an
+    // edit that never touched `owner_desk`. Checking equality once, before
+    // any of the three outcomes, means an unchanged raw value is never
+    // resolved, normalized, ambiguity-checked, or refused — it is carried
+    // forward exactly as stored, and only a genuinely NEW value reaches
+    // `resolve_desk_id` at all.
     let mut resolved_owner_desk: Option<String> = None;
     if let Some(desk) = draft.owner_desk.as_deref()
         && !desk.trim().is_empty()
+        && previous_owner_desk != Some(desk)
     {
         match record.resolve_desk_id(desk) {
             // Reject ambiguous display-name aliases (issue #1882 review, PR
             // #1882 bot finding, comment 3878620688): desk creation enforces
             // id uniqueness, not name uniqueness, so `resolve_desk_id`'s
             // alias pass can silently answer with whichever of two
-            // same-named desks it iterates to first. Grandfathered the same
-            // way an unresolvable desk is (`previous_owner_desk == Some(desk)`)
-            // — an edit untouched field must still save even if the desk it
-            // carries forward became ambiguous underneath it; a newly typed
-            // ambiguous name is still a refusal.
-            Some(_)
-                if record.desk_alias_is_ambiguous(desk) && previous_owner_desk != Some(desk) =>
-            {
+            // same-named desks it iterates to first.
+            Some(_) if record.desk_alias_is_ambiguous(desk) => {
                 problems.push(WorkflowProblem {
                     node_id: None,
                     field: Some("owner_desk".to_string()),
@@ -1031,10 +1043,6 @@ fn validate_draft_against_record(
                 if resolved_id != desk {
                     resolved_owner_desk = Some(resolved_id);
                 }
-            }
-            None if previous_owner_desk == Some(desk) => {
-                // Grandfathered: unresolvable but unchanged from what's
-                // already on file — nothing to normalize either.
             }
             None => {
                 problems.push(WorkflowProblem {
@@ -7054,6 +7062,72 @@ to = "done"
         .expect_err("a newly typed desk that resolves to nothing is still refused");
         let problems = problems_of(&err);
         assert_eq!(problems[0].field.as_deref(), Some("owner_desk"));
+    }
+
+    /// **Regression, issue #1882 review (PR #1882 bot finding, comment
+    /// 3878829353), RED-FIRST.** The grandfathering above (previous test)
+    /// only covers a stored `owner_desk` that stays UNRESOLVABLE. This
+    /// covers the sharper case the bot flagged: the desk that used to own
+    /// the stored raw string is deleted, and a *different*, later desk is
+    /// created whose display name happens to equal that same string (desk
+    /// creation enforces id uniqueness, not name uniqueness — nothing stops
+    /// this). The stored value is now newly RESOLVABLE again, just to the
+    /// wrong desk. An unrelated edit that round-trips `owner_desk` unchanged
+    /// must not let that resolution through — a PUT that never touched the
+    /// field must never reassign a workflow's owning desk.
+    #[tokio::test]
+    async fn an_unrelated_update_does_not_retarget_a_desk_id_recycled_as_a_name() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant_and_desk(),
+        )));
+        let mut created = valid_draft("wf", "WF");
+        created.owner_desk = Some("ops".to_string());
+        create_company_workflow(&company, None, &store, None, created, None, None)
+            .await
+            .expect("creates with a real desk");
+        let saved = store.load(&company).await.unwrap().unwrap();
+        let version = workflow_version(&saved.overlay_workflows[0].toml);
+
+        // The "ops" desk is deleted, and a brand-new, UNRELATED desk is
+        // created whose display name happens to be the literal string
+        // "ops" — the old desk's id, now recycled as someone else's name.
+        let mut stale_record = store.load(&company).await.unwrap().unwrap();
+        stale_record.manifest = manifest_with_assistant();
+        stale_record.overlay_desks = vec![OverlayDesk {
+            id: "sales_new".to_string(),
+            name: "ops".to_string(),
+            description: None,
+            members: vec!["assistant".to_string()],
+            responder: ResponderMode::default(),
+        }];
+        store.save(&stale_record).await.unwrap();
+
+        // An edit to a completely unrelated field, carrying the stored
+        // owner_desk forward unchanged — exactly what a console
+        // round-tripping the read does.
+        let mut edit = valid_draft("wf", "WF");
+        edit.owner_desk = Some("ops".to_string());
+        edit.description = Some("Renamed the description only.".to_string());
+        let file = update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            edit,
+            Some(&version),
+            None,
+        )
+        .await
+        .expect("an unrelated edit must save even though the stored desk was recycled");
+        assert_eq!(
+            file.owner_desk.as_deref(),
+            Some("ops"),
+            "the raw stored value must be carried forward untouched, not resolved to the \
+             unrelated desk that recycled it as a display name"
+        );
     }
 
     /// **Regression, issue #1882 review (PR #1882 bot finding).** A draft
