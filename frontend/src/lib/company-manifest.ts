@@ -310,6 +310,19 @@ export function wasArchiveOutcomeAmbiguous(err: unknown): boolean {
  * company that in fact exists, with no way back into it from this dialog
  * (codex review on #1828, PR comment 3863028397).
  *
+ * `store_error` is ambiguous for a third, distinct reason:
+ * `register_and_report_status` (`server/provision.rs`) registers the company
+ * — in the live registry AND its ownership row — BEFORE reading back its
+ * status for the response body, precisely so a transient store failure in
+ * that read-back does not unwind a company that already exists. That failure
+ * surfaces to this client as the same `store_error` code a store failure
+ * inside `RuntimeBuilder::build` does — one that ran BEFORE registration,
+ * where the company genuinely was never created. The code alone cannot tell
+ * those two apart, which is exactly the shape `network_error` already has
+ * here: treated as a definite refusal, the operator sees "couldn't create"
+ * for a company that, on the post-registration path, already exists and is
+ * live (codex review on #1828, PR comment 3878583836).
+ *
  * The caller reconciles by looking the id up with `client.status`, and MUST
  * only do that for an id this client generated itself
  * ({@link resetReplacementId}'s random suffix can't collide with a
@@ -320,7 +333,8 @@ export function wasArchiveOutcomeAmbiguous(err: unknown): boolean {
  */
 export function wasAmbiguousProvisionOutcome(err: unknown): boolean {
   return (
-    err instanceof ApiError && (err.code === "network_error" || err.code === "company_exists")
+    err instanceof ApiError &&
+    (err.code === "network_error" || err.code === "company_exists" || err.code === "store_error")
   );
 }
 

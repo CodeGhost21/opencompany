@@ -6,6 +6,7 @@ import {
   collidesWithArchived,
   describeProvisionError,
   explicitIdProblem,
+  wasAmbiguousProvisionOutcome,
 } from "@/lib/company-manifest";
 
 /**
@@ -262,5 +263,49 @@ describe("explicitIdProblem — Windows reserved device names (issue #1828 comme
   it("does not reject COM0 or LPT0, which are not reserved", () => {
     expect(explicitIdProblem("com0")).toBeNull();
     expect(explicitIdProblem("lpt0")).toBeNull();
+  });
+});
+
+/**
+ * Codex review on #1828, PR comment 3878583836: `register_and_report_status`
+ * (`server/provision.rs`) registers the company — live in the registry and
+ * owned — BEFORE reading its status back for the response, so a store
+ * failure in that read-back still leaves the company live. That failure
+ * reaches this client as `store_error`, the same code a store failure
+ * inside `RuntimeBuilder::build` produces — one that ran BEFORE
+ * registration, where the company genuinely was never created. The two are
+ * indistinguishable by code alone, which is exactly the ambiguity
+ * `network_error` already has here, so `store_error` belongs in the same
+ * reconciled set.
+ */
+describe("wasAmbiguousProvisionOutcome — store_error (issue #1828 comment 3878583836)", () => {
+  it("treats a post-registration store_error as ambiguous, worth reconciling", () => {
+    const err = new ApiError(
+      500,
+      "store_error",
+      "could not read the company's status after creating it",
+      true,
+    );
+    expect(wasAmbiguousProvisionOutcome(err)).toBe(true);
+  });
+
+  it("still treats network_error and company_exists as ambiguous", () => {
+    expect(
+      wasAmbiguousProvisionOutcome(new ApiError(0, "network_error", "network error", true)),
+    ).toBe(true);
+    expect(
+      wasAmbiguousProvisionOutcome(
+        new ApiError(409, "company_exists", "company already exists: acme", true),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat an ordinary, unambiguous refusal as worth reconciling", () => {
+    const err = new ApiError(429, "quota_exceeded", "tenant company quota of 3 reached", true);
+    expect(wasAmbiguousProvisionOutcome(err)).toBe(false);
+  });
+
+  it("does not treat a non-ApiError as ambiguous", () => {
+    expect(wasAmbiguousProvisionOutcome(new Error("boom"))).toBe(false);
   });
 });
