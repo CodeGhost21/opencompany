@@ -98,10 +98,13 @@ async function mockEmptyEvents(page: Page) {
 
 /**
  * An `/events` stream carrying one `workflow_created` frame from the moment
- * the console connects — the stand-in for this session's own create, another
- * session's, or the orchestrator's `create_workflow` tool. All three are
- * indistinguishable on the wire, which is the point: the banner does not need
- * to know which happened, only that a workflow now exists.
+ * the console connects — the stand-in for a teammate's create, or the
+ * orchestrator's `create_workflow` tool, or this session's own (all three are
+ * indistinguishable on the wire by design; see `use-events.ts`). Used to
+ * prove the frame alone must NOT clear or mark-read THIS user's nudge (PR
+ * #1878 review) — only a confirmed local create (`handleCreated`, exercised
+ * by `workflow-create-affordance.spec.ts`) or the host's own per-user feed
+ * saying so may do that.
  */
 async function mockEventsWithCreate(page: Page) {
   await page.route("**/events", (route) =>
@@ -185,11 +188,17 @@ test("Dismiss marks the nudge read and hides the banner, without creating anythi
 });
 
 /**
- * The core proof issue #1845 asks for: a `workflow_created` frame — this
- * session's own create, another session's, or the orchestrator's — clears
- * the banner, with no reload.
+ * PR #1878 review fix: a `workflow_created` frame carries no actor, so it
+ * must NOT clear or mark-read THIS user's nudge — a teammate's or the
+ * orchestrator's create used to silence a nudge for a user who has never
+ * saved a workflow themselves, exactly the false-negative the review flagged.
+ * The tick still re-asks the host's own per-user feed (`refreshNudge`), which
+ * this mock keeps answering "still unread" — proving the banner survives an
+ * anonymous frame rather than merely proving nothing crashed.
  */
-test("a workflow_created frame clears the banner and marks the nudge read", async ({ page }) => {
+test("a workflow_created frame from an unattributed source does not clear the banner", async ({
+  page,
+}) => {
   await mockNotifications(page, NUDGE_ROW);
   await mockEventsWithCreate(page);
 
@@ -197,13 +206,12 @@ test("a workflow_created frame clears the banner and marks the nudge read", asyn
   await dismissTour(page);
 
   // The frame rides the SAME connection the console opens on boot, so by the
-  // time the page has settled the clear has already happened — asserting the
-  // SETTLED state (banner gone, mark-read sent) is the property under test,
-  // not a race against when the frame arrives.
-  await expect(banner(page)).toHaveCount(0, { timeout: 20_000 });
-  await expect
-    .poll(() => marked.some((m) => m.ids?.includes(NUDGE_ROW.id)))
-    .toBe(true);
+  // time the page has settled the (non-)clear has already happened —
+  // asserting the SETTLED state is the property under test, not a race
+  // against when the frame arrives.
+  await page.waitForTimeout(2_000);
+  await expect(banner(page)).toBeVisible();
+  expect(marked.some((m) => m.ids?.includes(NUDGE_ROW.id))).toBe(false);
 });
 
 /**

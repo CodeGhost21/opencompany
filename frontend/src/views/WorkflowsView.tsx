@@ -478,18 +478,25 @@ export function WorkflowsView({
       refreshNudge();
     });
   }, [client, company, refreshNudge]);
-  // Issue #1845: `listEventTick` bumps on every `workflow_created` frame —
-  // this session's own create, another session's, or the orchestrator's. Any
-  // of those is signal enough to stop nudging: skip the tick this effect
-  // mounts with (there is nothing to clear yet), and on every later one, if a
-  // nudge is still showing, clear it the same way Dismiss does.
+  // Issue #1845 (review: PR #1878): `listEventTick` bumps on every
+  // `workflow_created` frame, and the frame is deliberately thin — no actor,
+  // by design (`use-events.ts`) — so it cannot tell "this user's own create"
+  // apart from a teammate's or the orchestrator's. Calling `clearNudge` here
+  // used to persist THIS user's dismissal off of anyone's create in the
+  // company, which could silence a nudge for someone who has never saved a
+  // workflow themselves. `handleCreated` below already calls `clearNudge`
+  // directly the moment this session's own create is confirmed, so the only
+  // job left for the tick is picking up state this user changed elsewhere —
+  // a dismissal or an attributed create from another of their own sessions —
+  // which is exactly what re-asking the host's own per-user feed answers.
+  // Skip the tick this effect mounts with (there is nothing to refresh yet).
   const nudgeListTickMounted = useRef(false);
   useEffect(() => {
     if (!nudgeListTickMounted.current) {
       nudgeListTickMounted.current = true;
       return;
     }
-    if (nudgeRef.current) clearNudge();
+    if (nudgeRef.current) refreshNudge();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on the tick, reads current nudge via ref
   }, [listEventTick]);
   const [createOpen, setCreateOpen] = useState(false);
