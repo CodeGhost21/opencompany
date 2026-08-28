@@ -1202,7 +1202,13 @@ export function ChatView({
   // (`responder_for` in `src/harness/brain.rs`), which is exactly what a DM's
   // `member.id` is, so a DM addresses that teammate the same way a desk
   // addresses its lead. It is also the id every live turn frame carries.
-  const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
+  const activeThreadId = active.system
+    ? undefined
+    : active.kind === "channel"
+      ? active.id
+      : active.member
+        ? dmChannelId(active.member)
+        : undefined;
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
   /**
    * The turn this channel is waiting on, if any (issue #983).
