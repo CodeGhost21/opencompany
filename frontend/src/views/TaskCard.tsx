@@ -162,6 +162,8 @@ export function TaskItem({
   deciding: ReadonlyMap<string, Verdict>;
   /** Decisions that did not land, keyed by approval id. */
   failed: Record<string, string>;
+  /** Whether a detached approval continuation is still running for this card. */
+  continuationInFlight?: boolean;
   /**
    * The shell's one resolve, per approval id (#1891).
    *
