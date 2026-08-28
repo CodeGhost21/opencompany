@@ -240,6 +240,8 @@ export interface Channel {
    * a channel by definition. Absent/false for every lead desk and DM.
    */
   leadless?: boolean;
+  /** Synthetic system channel; it cannot accept chat or thread replies. */
+  system?: boolean;
 }
 
 export interface ChannelSection {
