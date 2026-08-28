@@ -51,7 +51,7 @@ pub fn router() -> Router<AppState> {
         // the operator strip into a 404.
         .merge(scoped("/tasks/inflight", get(list_inflight)))
         .merge(scoped(
-            "/tasks/{task_id}/approvals",
+            "/tasks/approvals",
             get(task_approvals),
         ))
         .merge(scoped(
