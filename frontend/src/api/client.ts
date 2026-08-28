@@ -45,6 +45,7 @@ import {
   type FinancesDto,
   type GrantScope,
   type HarnessDto,
+  type BudgetPauseMarker,
   type InboxDto,
   type InboxMessageDto,
   type OperatorChannelDto,
