@@ -164,6 +164,7 @@ export function ChannelRail({
             key={section.id}
             channel={section.channels[0]}
             active={section.channels[0]?.id === activeId}
+            unread={section.channels[0] ? (unread[section.channels[0].id] ?? 0) : 0}
             onSelect={onSelect}
           />
         ) : (
@@ -188,20 +189,30 @@ export function ChannelRail({
  * The Operator feed's row (issue #1757 rework): pinned below a divider,
  * outside every collapsible section, rather than folded into the Channels
  * list `Section` renders. No add door (channel creation stays scoped to the
- * Channels section's own `onAdd`), no member count, no unread/mention
- * badges — the feed carries none of those concepts, being a single
- * read-only broadcast rather than an addressable, multi-party line.
+ * Channels section's own `onAdd`), no member count, no mention badge — the
+ * feed is a single read-only broadcast rather than an addressable,
+ * multi-party line, so nobody is ever named in it.
+ *
+ * Unread IS shown (PR #1781 review, Codex P2): a workflow report can land
+ * here while another channel is open, same as any other channel, and the
+ * collapsed rail's `CompactChannelRow` already surfaced that (it flat-maps
+ * every section, this one included, and was never taught to skip it) — this
+ * expanded row was the one place unread silently dropped, so folding the
+ * rail changed whether the pinned row could tell you something was waiting.
  */
 function PinnedOperatorRow({
   channel,
   active,
+  unread,
   onSelect,
 }: {
   channel: Channel | undefined;
   active: boolean;
+  unread: number;
   onSelect: (id: string) => void;
 }) {
   if (!channel) return null;
+  const hasUnread = unread > 0 && !active;
   return (
     <div className="mt-2 border-t px-2 pt-2">
       <button
@@ -214,10 +225,20 @@ function PinnedOperatorRow({
           active
             ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
             : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
+          hasUnread && "font-semibold text-foreground",
         )}
       >
         <ChannelIcon channel={channel} />
         <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+        {hasUnread && (
+          <span
+            data-testid="channel-unread"
+            title={UNREAD_IS_LOCAL}
+            className="shrink-0 rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
+          >
+            {unread > 99 ? "99+" : unread}
+          </span>
+        )}
       </button>
     </div>
   );
