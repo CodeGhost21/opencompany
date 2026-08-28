@@ -164,11 +164,36 @@ export function describeProvisionError(err: unknown, operatorTypedId: boolean = 
  * this suffix matching one already in use are negligible, so reconciling by
  * looking the id up is safe in a way it would not be for a purely
  * name-derived id (see {@link autoCompanyId}).
+ *
+ * `crypto.randomUUID` is a secure-context-only API — unavailable on a
+ * console served over plain HTTP (a self-hosted deployment without TLS
+ * termination in front of it) even though `crypto` itself exists there.
+ * `crypto.getRandomValues` has no such restriction — it is, per spec, the
+ * one member of `Crypto` usable from an insecure context — so it is the
+ * fallback here, ahead of `Math.random()`, which is a non-cryptographic PRNG
+ * and the wrong source for a value this function's own doc comment promises
+ * is safe against "a genuine collision with someone else's company": that
+ * promise is about resisting a chosen, not just an accidental, match, and
+ * only `getRandomValues` (or `randomUUID`) backs it (codex review on #1828,
+ * PR comment 3878667845). `Math.random()` remains the last resort for a
+ * runtime with no Web Crypto API at all.
  */
 function randomIdSuffix(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID().slice(0, 8)
-    : Math.random().toString(36).slice(2, 10);
+  // Feature-detected via `typeof …fn === "function"` rather than the `in`
+  // operator: both members are non-optional on the `Crypto` DOM type, so `"x"
+  // in crypto` narrows the negative branch to `never` and makes the second
+  // check unreachable to the type checker even though it is very much
+  // reachable at runtime, where an older or insecure-context `crypto` lacks
+  // one or both.
+  const c: Partial<Crypto> | undefined = typeof crypto !== "undefined" ? crypto : undefined;
+  if (typeof c?.randomUUID === "function") {
+    return c.randomUUID().slice(0, 8);
+  }
+  if (typeof c?.getRandomValues === "function") {
+    const bytes = c.getRandomValues(new Uint8Array(4));
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  return Math.random().toString(36).slice(2, 10);
 }
 
 /**

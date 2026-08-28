@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/api/types";
 import {
@@ -6,6 +6,7 @@ import {
   collidesWithArchived,
   describeProvisionError,
   explicitIdProblem,
+  resetReplacementId,
   wasAmbiguousProvisionOutcome,
 } from "@/lib/company-manifest";
 
@@ -307,5 +308,54 @@ describe("wasAmbiguousProvisionOutcome — store_error (issue #1828 comment 3878
 
   it("does not treat a non-ApiError as ambiguous", () => {
     expect(wasAmbiguousProvisionOutcome(new Error("boom"))).toBe(false);
+  });
+});
+
+/**
+ * Codex review on #1828, PR comment 3878667845: `crypto.randomUUID` is a
+ * secure-context-only API, so a console served over plain HTTP has `crypto`
+ * but not `crypto.randomUUID`. The id-suffix generator's old fallback for
+ * that case was `Math.random()` — a non-cryptographic PRNG — even though
+ * `crypto.getRandomValues` (the one `Crypto` member usable from an insecure
+ * context) was available the whole time. `resetReplacementId`'s own doc
+ * comment says the suffix has to resist "a genuine collision with someone
+ * else's company", not just an accidental one, which is exactly what a
+ * predictable PRNG can't back.
+ */
+describe("resetReplacementId — insecure-context randomness fallback (issue #1828 comment 3878667845)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("prefers crypto.getRandomValues over Math.random when randomUUID is unavailable", () => {
+    // Simulates a console served over plain HTTP: `crypto` exists (Node
+    // supplies it globally), but `randomUUID` does not — the same shape a
+    // browser gives it outside a secure context.
+    const bytes = Uint8Array.from([0x0a, 0x1b, 0x2c, 0x3d]);
+    const getRandomValues = vi.fn((arr: Uint8Array) => {
+      arr.set(bytes);
+      return arr;
+    });
+    vi.stubGlobal("crypto", { getRandomValues });
+
+    const mathRandom = vi.spyOn(Math, "random");
+
+    expect(resetReplacementId("acme")).toBe("acme-0a1b2c3d");
+    expect(getRandomValues).toHaveBeenCalledTimes(1);
+    expect(mathRandom).not.toHaveBeenCalled();
+
+    mathRandom.mockRestore();
+  });
+
+  it("falls back to Math.random only when no Web Crypto API exists at all", () => {
+    vi.stubGlobal("crypto", undefined);
+
+    const mathRandom = vi.spyOn(Math, "random").mockReturnValue(0.123456789);
+
+    const id = resetReplacementId("acme");
+    expect(id.startsWith("acme-")).toBe(true);
+    expect(mathRandom).toHaveBeenCalled();
+
+    mathRandom.mockRestore();
   });
 });
