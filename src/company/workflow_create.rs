@@ -213,7 +213,7 @@ pub(crate) async fn create_company_workflow(
     source_dir: Option<&Path>,
     store: &Arc<dyn CompanyStore>,
     events: Option<&Arc<dyn EventLog>>,
-    draft: RawWorkflow,
+    mut draft: RawWorkflow,
     wired_channels: Option<&[String]>,
     by: Option<Actor>,
 ) -> Result<WorkflowFile> {
@@ -238,7 +238,15 @@ pub(crate) async fn create_company_workflow(
     // names against — the same helper gates create and update identically.
     // `previous_owner_desk: None` — nothing to grandfather a bad desk against
     // on a fresh create.
-    validate_draft_against_record(&draft, &record, source_dir, wired_channels, None)?;
+    //
+    // The check may return a resolved `owner_desk` (issue #1882 review): see
+    // the normalization note on `validate_draft_against_record` for why the
+    // draft's field is overwritten with it before `render_workflow` persists.
+    if let Some(resolved) =
+        validate_draft_against_record(&draft, &record, source_dir, wired_channels, None)?
+    {
+        draft.owner_desk = Some(resolved);
+    }
 
     // Id uniqueness against every id this company already answers for: the seed
     // files, the record's overlay bodies, and the manifest-enabled ids. The
@@ -627,6 +635,10 @@ pub(crate) fn courtesy_validate_draft(
     // would accept, the same tolerated direction as the id/name-uniqueness gap
     // documented above `validate_workflow`. Never the other way around: it
     // cannot pass a desk the write would refuse.
+    //
+    // The resolved-id return (issue #1882 review) is discarded here: this
+    // draft is a caller's borrowed copy that this pre-flight never persists,
+    // so there is nothing to normalize it into.
     validate_draft_against_record(draft, record, source_dir, wired_channels, None)?;
     let toml_src = render_workflow(draft)?;
     if toml_src.len() > MAX_WORKFLOW_TOML_BYTES {
@@ -790,13 +802,23 @@ fn validate_draft_shape(draft: &RawWorkflow) -> Result<()> {
 /// the `mail_configured` / `wired_channels` precedent #1046 set in this file).
 /// `None` means the caller cannot see the deployment's wiring — the agent tool
 /// surfaces — and the `channel`-target rule is skipped rather than guessed at.
+/// Returns the canonical desk id to normalize `draft.owner_desk` to (issue
+/// #1882 review), or `None` when no normalization is needed — either the field
+/// is unset/blank, it already holds the canonical id, or it failed to resolve
+/// (grandfathered-unchanged or reported as a problem, both handled below).
+/// `draft` stays `&RawWorkflow` here: this helper is also the lockless
+/// pre-flight (`courtesy_validate_draft`), which validates a caller's copy it
+/// never persists, so a mutable draft would be the wrong shape for that
+/// caller. Only a caller that goes on to `render_workflow` the SAME draft it
+/// passed in — `create_company_workflow`, `update_company_workflow` — needs to
+/// apply the returned id back before rendering.
 fn validate_draft_against_record(
     draft: &RawWorkflow,
     record: &CompanyRecord,
     source_dir: Option<&Path>,
     wired_channels: Option<&[String]>,
     previous_owner_desk: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let roster: HashSet<&str> = record
         .manifest
         .agents
@@ -967,19 +989,43 @@ fn validate_draft_against_record(
     // the record's current stored value on update; only a desk that is both
     // unresolvable AND *different* from what was already on file is a
     // refusal — a newly typed/selected bad desk still is.
+    //
+    // Persist the resolved id, not the alias (issue #1882 review): a caller
+    // may name the desk by its case-insensitive display name rather than its
+    // id (`resolve_desk_id` accepts either), and `render_workflow` serializes
+    // whatever string sits in `draft.owner_desk` verbatim — it has no access
+    // to `record` to re-resolve at save time. Left alone, the stored graph
+    // would carry the alias forward. If that overlay desk is later deleted
+    // and a new one created reusing the same display name (desk creation
+    // enforces id uniqueness, not name uniqueness), the stored alias would
+    // silently start resolving to the NEW desk on next load, re-routing this
+    // workflow's future blocker DMs to the wrong team with no edit ever made
+    // to it. The id is stable for a desk's lifetime; the display name is not.
+    let mut resolved_owner_desk: Option<String> = None;
     if let Some(desk) = draft.owner_desk.as_deref()
         && !desk.trim().is_empty()
-        && record.resolve_desk_id(desk).is_none()
-        && previous_owner_desk != Some(desk)
     {
-        problems.push(WorkflowProblem {
-            node_id: None,
-            field: Some("owner_desk".to_string()),
-            message: format!(
-                "this workflow's owning desk `{desk}` does not match any desk on this company \
-                 — check the id or name, or clear the field."
-            ),
-        });
+        match record.resolve_desk_id(desk) {
+            Some(resolved_id) => {
+                if resolved_id != desk {
+                    resolved_owner_desk = Some(resolved_id);
+                }
+            }
+            None if previous_owner_desk == Some(desk) => {
+                // Grandfathered: unresolvable but unchanged from what's
+                // already on file — nothing to normalize either.
+            }
+            None => {
+                problems.push(WorkflowProblem {
+                    node_id: None,
+                    field: Some("owner_desk".to_string()),
+                    message: format!(
+                        "this workflow's owning desk `{desk}` does not match any desk on this company \
+                         — check the id or name, or clear the field."
+                    ),
+                });
+            }
+        }
     }
 
     if !problems.is_empty() {
@@ -1030,7 +1076,7 @@ fn validate_draft_against_record(
         }
     }
 
-    Ok(())
+    Ok(resolved_owner_desk)
 }
 
 /// Author-time `tool_call` check: the slug must be a non-empty `config.slug`
@@ -1548,7 +1594,7 @@ pub(crate) async fn update_company_workflow(
     store: &Arc<dyn CompanyStore>,
     revisions: &Arc<dyn WorkflowRevisionStore>,
     events: Option<&Arc<dyn EventLog>>,
-    draft: RawWorkflow,
+    mut draft: RawWorkflow,
     expected_version: Option<&str>,
     wired_channels: Option<&[String]>,
 ) -> Result<WorkflowFile> {
@@ -1583,13 +1629,19 @@ pub(crate) async fn update_company_workflow(
     let previous_owner_desk = parse_workflow(&record.overlay_workflows[index].toml)
         .ok()
         .and_then(|previous| previous.owner_desk);
-    validate_draft_against_record(
+    //
+    // The check may return a resolved `owner_desk` (issue #1882 review): see
+    // the normalization note on `validate_draft_against_record` for why the
+    // draft's field is overwritten with it before `render_workflow` persists.
+    if let Some(resolved) = validate_draft_against_record(
         &draft,
         &record,
         source_dir,
         wired_channels,
         previous_owner_desk.as_deref(),
-    )?;
+    )? {
+        draft.owner_desk = Some(resolved);
+    }
 
     // Display-name uniqueness, MINUS this workflow's own current name — a
     // re-save that doesn't rename must not collide with itself. Every other
@@ -6978,5 +7030,63 @@ to = "done"
         .expect_err("a newly typed desk that resolves to nothing is still refused");
         let problems = problems_of(&err);
         assert_eq!(problems[0].field.as_deref(), Some("owner_desk"));
+    }
+
+    /// **Regression, issue #1882 review (PR #1882 bot finding).** A draft
+    /// naming its owner desk by DISPLAY NAME — `resolve_desk_id` accepts
+    /// either the id or a case-insensitive name — must be normalized to the
+    /// desk's canonical id before it is persisted. `render_workflow`
+    /// serializes `owner_desk` verbatim and has no `record` to re-resolve an
+    /// alias at save time, so leaving the alias in place would mean: if this
+    /// desk is later deleted and a new one created reusing the same display
+    /// name (desk creation enforces id uniqueness, not name uniqueness), the
+    /// stored alias would silently start resolving to the NEW desk on the
+    /// next load, re-routing this workflow's future blocker DMs to the wrong
+    /// team with no edit ever made to the workflow itself.
+    #[tokio::test]
+    async fn draft_naming_owner_desk_by_display_name_is_normalized_to_its_id() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant_and_desk(),
+        )));
+        // The desk's id is "ops", its display name "Ops" (see
+        // `manifest_with_assistant_and_desk`) — supply the alias, not the id.
+        let mut draft = valid_draft("wf", "WF");
+        draft.owner_desk = Some("Ops".to_string());
+        let file = create_company_workflow(&company, None, &store, None, draft, None, None)
+            .await
+            .expect("owner_desk naming a real desk by display name is accepted");
+        assert_eq!(
+            file.owner_desk.as_deref(),
+            Some("ops"),
+            "the stored owner_desk must be the canonical id, not the display-name alias supplied"
+        );
+
+        // Same normalization on the update path, where the alias is
+        // re-typed on an otherwise-untouched edit rather than the id the
+        // create above just normalized.
+        let saved = store.load(&company).await.unwrap().unwrap();
+        let version = workflow_version(&saved.overlay_workflows[0].toml);
+        let mut edit = valid_draft("wf", "WF");
+        edit.owner_desk = Some("Ops".to_string());
+        edit.description = Some("Renamed the description only.".to_string());
+        let file2 = update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            edit,
+            Some(&version),
+            None,
+        )
+        .await
+        .expect("owner_desk re-typed as a display name alias is accepted on update");
+        assert_eq!(
+            file2.owner_desk.as_deref(),
+            Some("ops"),
+            "the update path must also normalize the alias to the canonical id"
+        );
     }
 }
