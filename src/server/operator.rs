@@ -3096,11 +3096,13 @@ async fn history_viewer(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Viewer, crate::server::Rejection> {
+) -> Result<(Viewer, bool), crate::server::Rejection> {
     let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
-        Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
-        _ => Viewer::Operator,
+        Some(actor) if actor.kind == ActorKind::User => {
+            (Viewer::User(actor.id), actor.role == UserRole::Admin)
+        }
+        _ => (Viewer::Operator, true),
     })
 }
 
