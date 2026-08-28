@@ -2800,6 +2800,20 @@ export function AppShell({
   // `Dialog` (via `SetupDialog`) portals its own content and renders nothing
   // into normal flow while closed, so mounting it alongside `RouteLoading`
   // or `OnboardingGate` costs nothing visually.
+  //
+  // Round 14: rendering it in every branch is not enough on its own — it has to
+  // sit at the *same* position in all three, or React reconciles it as a
+  // different node and unmounts it on the very transition it exists to survive.
+  // An unstaffed company's first roster result sets `setupChecked` and
+  // `setupOpen` together, which flips this render from a branch below to the
+  // ordinary shell; with the controller under a different root there, React
+  // would throw away the already-proven `unstaffed`/`open` state and issue a
+  // second `listTeam` — exposing the interactive shell while that read is in
+  // flight, and leaving the dialog shut for good if it hangs or fails. So all
+  // three outcomes root at the same `ConsoleProvider` with this as its first
+  // child. That provider is pure context and renders no DOM of its own, so
+  // wrapping the loader and the gate in it costs nothing and hands them the
+  // same ambient `(client, company)` the shell already has.
   const setupController = (
     <SetupController
       client={client}
@@ -2847,10 +2861,10 @@ export function AppShell({
     })
   ) {
     return (
-      <>
+      <ConsoleProvider client={client} company={company}>
         {setupController}
         <RouteLoading title="Console" label="Loading…" />
-      </>
+      </ConsoleProvider>
     );
   }
 
@@ -2877,7 +2891,7 @@ export function AppShell({
     activationGate.status
   ) {
     return (
-      <>
+      <ConsoleProvider client={client} company={company}>
         {setupController}
         <OnboardingGate
           client={client}
@@ -2887,34 +2901,19 @@ export function AppShell({
           onRefresh={activationGate.refresh}
           onSkip={skipGate}
         />
-      </>
+      </ConsoleProvider>
     );
   }
 
   return (
-    // PR #1875 review finding on this file's own `setupController` doc: the
-    // two branches above share a `<>` root specifically so React reconciles
-    // `setupController` against the same position across every render this
-    // component can produce while a hold is in play. This branch used to
-    // start straight at `<ConsoleProvider>` instead — a root-type change React
-    // cannot tell apart from an unrelated subtree replacing another, so
-    // landing here (an unstaffed roster's own read flips `setupChecked` and
-    // `setupOpen` both `true` in the same tick, clearing both guards above at
-    // once) tore down the already-resolved `SetupController` instance and
-    // mounted a fresh one — discarding the just-proven "unstaffed" result and
-    // re-issuing `listTeam`, with the ordinary shell already on screen while
-    // that second read was in flight. Wrapping this branch in the same `<>`
-    // `setupController` sits in keeps it at the identical position in every
-    // branch, so only the branch's *other* child is ever torn down.
-    <>
+    // The ambient `(client, company)` for the leaves that have to fetch and are
+    // drawn from too many parents to thread props to — today, the avatar tile,
+    // which fetches an uploaded face through the client because an `<img>`
+    // cannot carry a credential. See `lib/console-context.tsx` for why this is
+    // deliberately not a general escape from props.
+    <ConsoleProvider client={client} company={company}>
       {setupController}
-      {/* The ambient `(client, company)` for the leaves that have to fetch and
-          are drawn from too many parents to thread props to — today, the
-          avatar tile, which fetches an uploaded face through the client
-          because an `<img>` cannot carry a credential. See
-          `lib/console-context.tsx` for why this is deliberately not a general
-          escape from props. */}
-      <ConsoleProvider client={client} company={company}>
+
       {/* `SidebarProvider` paints the chrome layer itself — see its own note on
           why that fill lives there and not here (issue #1178). */}
       <SidebarProvider className="h-svh overflow-hidden">
@@ -3410,6 +3409,5 @@ export function AppShell({
       />
       </SidebarProvider>
     </ConsoleProvider>
-    </>
   );
 }

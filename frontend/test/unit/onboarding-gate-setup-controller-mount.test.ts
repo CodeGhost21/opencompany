@@ -5,28 +5,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
+import type { ActivationStatus } from "@/api/activation";
 import type { CompanyStatus, TeamMemberDto } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
-import type { ConnectionId, LocalScope } from "@/connections/types";
-
-/**
- * The ordinary shell branch mounts `HostSwitcher`, which reads `useHosts()` —
- * the round-13 test above never reaches that branch (it stays in the pending
- * one), so it never needed this. A minimal value: no real hosts, every
- * mutator a no-op.
- */
-const HOSTS: HostsValue = {
-  connections: [],
-  selected: null,
-  onSelect: () => {},
-  onAdd: () => {},
-  localInstances: [],
-  onEditHost: () => {},
-  onRemoveHost: () => {},
-  hub: false,
-};
+import type { Connection, ConnectionId, LocalScope } from "@/connections/types";
 
 /**
  * PR #1875 review finding, round 13.
@@ -80,20 +64,25 @@ function hang(): Promise<never> {
  * effect only calls `client.listTeam` inside `listDesks(...).then(...)`, so
  * hanging `listDesks` suppresses that unrelated call and leaves
  * `SetupController`'s own `listTeam` read as the sole caller — the signal
- * this test actually needs. `/auth/me` and `/activation` (both routed through
- * `get`) are hung too, so `shouldHoldShellPending` stays true (the pending
- * branch) for the whole test — the same state a fresh mount starts every
- * session in. Anything this large a component reaches for that is not named
- * here becomes a permanently-pending no-op via the `Proxy` below rather than
- * a hard crash; this test only cares about `SetupController`'s own read.
+ * this test actually needs. `/auth/me` and `/activation` both route through
+ * `get`, which hangs by default, so `shouldHoldShellPending` stays true (the
+ * pending branch) — the same state a fresh mount starts every session in; the
+ * round-14 case below overrides `get` to answer them and walk the shell out of
+ * that branch on purpose. Anything this large a component reaches for that is
+ * not named here becomes a permanently-pending no-op via the `Proxy` below
+ * rather than a hard crash; this test only cares about `SetupController`'s own
+ * read.
  */
-function buildClient(listTeam: ReturnType<typeof vi.fn>): OpenCompanyClient {
+function buildClient(
+  listTeam: ReturnType<typeof vi.fn>,
+  get: (path: string) => Promise<unknown> = hang,
+): OpenCompanyClient {
   const known = {
     baseUrl: "",
     scopeFor: (company: string | null) => `/api/v1/companies/${company ?? ""}`,
     listTeam,
     subscribeToEvents: () => () => {},
-    get: hang,
+    get,
     status: hang,
     approvals: hang,
     listDesks: hang,
@@ -107,36 +96,55 @@ function buildClient(listTeam: ReturnType<typeof vi.fn>): OpenCompanyClient {
 }
 
 /**
- * jsdom ships no `matchMedia`, and `useIsMobile` — which `SidebarProvider`
- * calls, reached only by the ordinary shell branch below — reaches for it
- * unguarded. Same stub `sidebar-collapse-button.test.ts` installs, always
- * reporting "not matching", the desktop case at jsdom's default 1024px
- * window.
+ * The one host this console is connected to.
+ *
+ * Only the round-14 case below needs this: reaching the ordinary shell draws
+ * the sidebar's `HostSwitcher`, and `useHosts` throws outside a provider by
+ * design (see its own doc). The pending and gate branches never render it.
  */
-function stubMatchMedia() {
-  Object.defineProperty(window, "matchMedia", {
-    configurable: true,
-    writable: true,
-    value: (query: string) => ({
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-      dispatchEvent: () => false,
-      onchange: null,
-    }),
-  });
-}
+const CONNECTION: Connection = {
+  id: SCOPE.connection,
+  defaultCompany: null,
+  label: "test",
+  baseUrl: "",
+  credential: { kind: "cookie" },
+  status: "live",
+  identity: null,
+  companies: [],
+  connector: { kind: "remote" },
+};
+
+const HOSTS: HostsValue = {
+  connections: [CONNECTION],
+  selected: SCOPE.connection,
+  onSelect: () => {},
+  onAdd: () => {},
+  localInstances: [],
+  onEditHost: () => {},
+  onRemoveHost: () => {},
+  hub: false,
+};
 
 let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  // jsdom implements no media queries at all. `useIsMobile` calls
+  // `window.matchMedia` on mount, and `SidebarProvider` — which only the
+  // ordinary shell renders — uses it, so the round-14 case below reaches it.
+  // Always desktop: the breakpoint is not what any test here is about.
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
   window.location.hash = "#/overview";
-  stubMatchMedia();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -179,29 +187,47 @@ describe("AppShell holds pending without stranding SetupController", () => {
     // the fully-resolved shell reached, so `listTeam` here was never called.
     expect(listTeam).toHaveBeenCalled();
   });
+});
 
-  /**
-   * PR #1875 review finding on `app-shell.tsx:2865` (round 13's own fix
-   * hoisted `setupController` so every branch below the two early returns
-   * could render it, but did not make those branches share a JSX root).
-   *
-   * An unstaffed roster's own read flips `setupChecked` and `setupOpen` both
-   * `true` in the same `onOpenChange` call (`SetupController`'s
-   * `onOpenChange?.(open || unstaffed)`). That satisfies
-   * `shouldHoldShellPending`'s `if (input.setupOpen) return false` and
-   * `shouldShowOnboardingGate`'s identical guard, so `AppShell` falls
-   * through both early returns into the ordinary shell branch — the one
-   * branch whose JSX root is `<ConsoleProvider>` rather than the `<>` the
-   * pending and gate branches share. React diffs `setupController` against
-   * whatever sits at that same position in the previous commit; a root-type
-   * change there is indistinguishable to React from an unrelated subtree
-   * replacing another, so it tears down the already-resolved
-   * `SetupController` instance and mounts a fresh one — discarding the
-   * proven "unstaffed" result and re-running the roster read.
-   */
-  it("keeps SetupController mounted when an unstaffed roster moves AppShell out of the pending branch", async () => {
-    const listTeam = vi.fn(async () => [] as TeamMemberDto[]);
-    const client = buildClient(listTeam);
+/**
+ * PR #1875 review finding, round 14.
+ *
+ * Round 13 (above) put `<SetupController>` in every one of `AppShell`'s three
+ * render outcomes. That is necessary but not sufficient: React reconciles by
+ * *position*, so a controller rendered under a different root in each branch is
+ * a different node in each, and the transition between them unmounts it.
+ *
+ * The transition is not hypothetical — it is the ordinary first-run sequence.
+ * The roster read that settles `setupChecked` is the same read that settles
+ * `setupOpen`, so the moment it lands `shouldHoldShellPending` stops holding
+ * and this render leaves the pending branch. Before the fix the ordinary shell
+ * mounted the controller deep inside `ConsoleProvider > SidebarProvider`, so
+ * that hand-off tore down the very component whose answer caused it: the
+ * proven `unstaffed`/`open` state was discarded, a second `listTeam` went out,
+ * the interactive shell was exposed for its whole flight, and a hang or failure
+ * on that second read left the setup dialog shut for good.
+ *
+ * `listTeam` call count across the transition is the observable form of that:
+ * a controller that stayed mounted does not read the roster twice.
+ */
+describe("AppShell keeps SetupController mounted across its branch transitions", () => {
+  it("does not re-read the roster when the shell leaves pending for the ordinary shell", async () => {
+    const listTeam = vi.fn(async () => STAFFED);
+
+    // `/activation` is deferred so this render starts in the pending branch and
+    // is walked out of it deliberately, mid-test — the real sequence, rather
+    // than a shell that was never held in the first place.
+    let landActivation!: (status: ActivationStatus) => void;
+    const activation = new Promise<ActivationStatus>((resolve) => {
+      landActivation = resolve;
+    });
+    const client = buildClient(listTeam, (path: string) => {
+      // An admin: `shouldHoldShellPending` must not take its `isAdmin === false`
+      // short circuit, so the hold is the activation read's alone.
+      if (path.endsWith("/auth/me")) return Promise.resolve({ role: "admin" });
+      if (path.endsWith("/activation")) return activation;
+      return hang();
+    });
 
     await act(async () => {
       root.render(
@@ -221,29 +247,30 @@ describe("AppShell holds pending without stranding SetupController", () => {
       );
     });
 
-    // Let the roster read this test drives resolve, and every state update
-    // and re-render it cascades into — `SetupController`'s own
-    // `checked`/`unstaffed`, then `onOpenChange` flipping AppShell's
-    // `setupChecked`/`setupOpen`, then AppShell's own re-render choosing a
-    // different return branch — settle before inspecting how many times
-    // `listTeam` actually ran. `activation` and `auth/me` are still hung
-    // (`buildClient`'s own doc), so nothing here depends on either resolving.
-    for (let flush = 0; flush < 5; flush += 1) {
-      // eslint-disable-next-line no-await-in-loop
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 0));
+    // Precondition: held pending on the deferred activation read, with the
+    // controller already mounted and its roster read done (round 13's fix).
+    expect(container.textContent).toContain("Loading");
+    expect(container.querySelector("#main-content")).toBeNull();
+    const readsWhilePending = listTeam.mock.calls.length;
+    expect(readsWhilePending).toBeGreaterThan(0);
+
+    // Land it activated: no gate, so the shell hands off straight from the
+    // pending branch to the ordinary one — the transition under test.
+    await act(async () => {
+      landActivation({
+        nameConfirmed: true,
+        integrationConnected: true,
+        workflowRunSucceeded: true,
+        isActivated: true,
       });
-    }
+    });
 
-    // Confirms the render actually reached the ordinary shell branch — the
-    // "Skip to content" link is unique to it, so this fails loudly (not
-    // silently) if some unrelated change stopped the unstaffed roster from
-    // clearing the pending/gate branches the way this test assumes.
-    expect(container.textContent).toContain("Skip to content");
+    // The hand-off actually happened (this assertion is what keeps the one
+    // below from passing vacuously on a shell that never left pending).
+    expect(container.querySelector("#main-content")).not.toBeNull();
 
-    // The bug: reaching the ordinary shell branch above should not have cost
-    // `SetupController` its already-resolved state. A second `listTeam` call
-    // means it did.
-    expect(listTeam).toHaveBeenCalledTimes(1);
+    // The fix: same position in both branches, so the controller was never
+    // torn down and never re-read the roster.
+    expect(listTeam.mock.calls.length).toBe(readsWhilePending);
   });
 });
