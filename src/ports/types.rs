@@ -4509,6 +4509,51 @@ impl CompanyRecord {
             })
     }
 
+    /// Whether `key` would resolve to more than one desk if [`resolve_desk_id`](Self::resolve_desk_id)
+    /// fell through to its display-name alias pass (issue #1882 review, PR
+    /// #1882 bot finding, comment 3878620688). Desk creation enforces id
+    /// uniqueness but not name uniqueness, so `{id: "sales_us", name:
+    /// "Sales"}` and `{id: "sales_eu", name: "Sales"}` can coexist right now
+    /// — no delete-and-recreate needed. `resolve_desk_id` is a read-mostly
+    /// routing lookup and is content to answer with whichever desk its alias
+    /// pass iterates to first in that case; a caller that PERSISTS the
+    /// resolved id (`validate_draft_against_record`) cannot make the same
+    /// call silently, because doing so commits a workflow's future blocker
+    /// DMs to a team the caller never actually named.
+    ///
+    /// An exact id match is never ambiguous — ids are unique by construction
+    /// — so this only inspects the alias pass, mirroring its manifest-before-
+    /// overlay priority and General-desk exclusions: a name that resolves
+    /// through the manifest is judged solely against other manifest desks
+    /// (the manifest tier always wins over overlay, so an overlay desk of the
+    /// same name is not a competing candidate), falling through to the
+    /// overlay tier only when the manifest has no match at all.
+    pub fn desk_alias_is_ambiguous(&self, key: &str) -> bool {
+        if self.manifest.group_chats.iter().any(|c| c.id == key)
+            || self.overlay_desks.iter().any(|d| d.id == key)
+        {
+            return false;
+        }
+        let manifest_matches = self
+            .manifest
+            .group_chats
+            .iter()
+            .filter(|c| c.name.eq_ignore_ascii_case(key))
+            .count();
+        if manifest_matches > 0 {
+            return manifest_matches > 1;
+        }
+        if crate::server::chat_history::is_general_chat(Some(key)) {
+            return false;
+        }
+        self.overlay_desks
+            .iter()
+            .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+            .filter(|d| d.name.eq_ignore_ascii_case(key))
+            .count()
+            > 1
+    }
+
     /// Whether a desk with `desk_id` exists in either the manifest or the
     /// operator-created overlay desks.
     pub fn desk_exists(&self, desk_id: &str) -> bool {

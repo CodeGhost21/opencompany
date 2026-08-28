@@ -1006,6 +1006,27 @@ fn validate_draft_against_record(
         && !desk.trim().is_empty()
     {
         match record.resolve_desk_id(desk) {
+            // Reject ambiguous display-name aliases (issue #1882 review, PR
+            // #1882 bot finding, comment 3878620688): desk creation enforces
+            // id uniqueness, not name uniqueness, so `resolve_desk_id`'s
+            // alias pass can silently answer with whichever of two
+            // same-named desks it iterates to first. Grandfathered the same
+            // way an unresolvable desk is (`previous_owner_desk == Some(desk)`)
+            // — an edit untouched field must still save even if the desk it
+            // carries forward became ambiguous underneath it; a newly typed
+            // ambiguous name is still a refusal.
+            Some(_)
+                if record.desk_alias_is_ambiguous(desk) && previous_owner_desk != Some(desk) =>
+            {
+                problems.push(WorkflowProblem {
+                    node_id: None,
+                    field: Some("owner_desk".to_string()),
+                    message: format!(
+                        "this workflow's owning desk `{desk}` names more than one desk on this \
+                         company — use the desk's id instead of its display name to disambiguate."
+                    ),
+                });
+            }
             Some(resolved_id) => {
                 if resolved_id != desk {
                     resolved_owner_desk = Some(resolved_id);
@@ -2266,7 +2287,10 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use crate::company::{CompanyManifest, RawEdge, RawNode, load_workflow_union};
-    use crate::ports::types::{CompanyRecord, CompanySummary, EventSeq, LedgerEntry, StoredEvent};
+    use crate::ports::types::{
+        CompanyRecord, CompanySummary, EventSeq, LedgerEntry, OverlayDesk, ResponderMode,
+        StoredEvent,
+    };
     use async_trait::async_trait;
     use futures::stream::{self, BoxStream};
 
@@ -7088,5 +7112,49 @@ to = "done"
             Some("ops"),
             "the update path must also normalize the alias to the canonical id"
         );
+    }
+
+    /// **Regression, issue #1882 review (PR #1882 bot finding, comment
+    /// 3878620688), RED-FIRST.** Two desks sharing the same display name are
+    /// not a future-recreation hazard like the test above — desk creation
+    /// enforces id uniqueness, not name uniqueness (see the comment above
+    /// `resolved_owner_desk` in `validate_draft_against_record`), so both can
+    /// coexist right now. `resolve_desk_id`'s alias pass answers with
+    /// whichever of the two it iterates to first; unpatched, this write
+    /// silently persists that arbitrary desk instead of refusing the
+    /// ambiguous name, which would route this workflow's future blocker DMs
+    /// to a team the caller never actually named.
+    #[tokio::test]
+    async fn draft_naming_an_ambiguous_desk_display_name_is_rejected() {
+        let company = CompanyId::new("acme");
+        let mut seed = record(&company, manifest_with_assistant());
+        seed.overlay_desks = vec![
+            OverlayDesk {
+                id: "sales_us".to_string(),
+                name: "Sales".to_string(),
+                description: None,
+                members: vec!["assistant".to_string()],
+                responder: ResponderMode::default(),
+            },
+            OverlayDesk {
+                id: "sales_eu".to_string(),
+                name: "Sales".to_string(),
+                description: None,
+                members: vec!["assistant".to_string()],
+                responder: ResponderMode::default(),
+            },
+        ];
+        let store = store_of(MemStore::seeded(seed));
+        let mut draft = valid_draft("wf", "WF");
+        draft.owner_desk = Some("Sales".to_string());
+        let err = create_company_workflow(&company, None, &store, None, draft, None, None)
+            .await
+            .expect_err(
+                "an owner_desk display name naming two desks must be refused, not silently \
+                 resolved to whichever one is iterated to first",
+            );
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].node_id, None, "graph-level, not node-scoped");
+        assert_eq!(problems[0].field.as_deref(), Some("owner_desk"));
     }
 }
