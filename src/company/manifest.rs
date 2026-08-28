@@ -582,6 +582,24 @@ impl CompanyManifest {
                 problems.push(format!(
                     "{label} is named \"Operator\", which is reserved for the built-in Operator channel — choose a different name."
                 ));
+            } else if enforce_reserved_agent_ids
+                && chat.name.eq_ignore_ascii_case(
+                    crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+                )
+            {
+                // Issue #1781 review (Codex/CodeRabbit P2 follow-up): the
+                // name reservation above only blocks "Operator", but a
+                // grandfathered collision diverts the durable feed to
+                // `OPERATOR_CHANNEL_COLLISION_FALLBACK` ("operator-feed")
+                // instead, and `server::operator::resolve_desk` folds a
+                // `?desk=` selector against a desk's name exactly the same
+                // way it folds it against "operator" — so a desk named
+                // "operator-feed" would shadow the fallback feed precisely
+                // as a desk named "Operator" would shadow the primary one.
+                // Reserved for the same reason, gated the same way.
+                problems.push(format!(
+                    "{label} is named \"operator-feed\", which is reserved for the built-in Operator channel's fallback feed — choose a different name."
+                ));
             } else if !chat_ids.insert(chat.id.as_str()) {
                 problems.push(format!(
                     "group chat `id` `{}` is used more than once — ids must be unique.",
@@ -1976,6 +1994,35 @@ mod tests {
         let problems = manifest.validate();
         assert!(
             problems.iter().any(|p| p.contains("reserved")),
+            "{problems:?}"
+        );
+    }
+
+    /// PR #1781 review follow-up: the id/name reservation above only blocks
+    /// the literal `OPERATOR_CHANNEL` name ("Operator"), but a grandfathered
+    /// collision diverts the durable feed to
+    /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` ("operator-feed") instead —
+    /// `server::operator::resolve_desk` resolves a `?desk=` selector against
+    /// `chat.name.eq_ignore_ascii_case(desk)` with no distinction between the
+    /// two addresses. A desk named `operator-feed` therefore still passes
+    /// this validation, survives `from_path_for_reload`, and then shadows
+    /// the fallback address exactly as thoroughly as a desk literally named
+    /// "Operator" would shadow the primary one: `GET
+    /// {scope}/chat/history?desk=operator-feed`, the request the console's
+    /// pinned Operator row makes once diverted, resolves to this desk instead
+    /// of the collision-fallback feed.
+    #[test]
+    fn the_operator_feed_fallback_name_is_also_reserved() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"operator-feed\"\nmembers = [\"ceo\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("reserved") && p.contains("operator-feed")),
             "{problems:?}"
         );
     }
