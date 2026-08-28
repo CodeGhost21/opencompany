@@ -319,7 +319,7 @@ impl LifecycleScheduler {
                 kind: SubjectKind::Workflow,
                 id: NUDGE_SUBJECT_ID.to_string(),
             },
-            created_at: now_millis(),
+            created_at: now,
             title: "Save your first workflow".to_string(),
             audience: Some(vec![user.id.clone()]),
             context: None,
@@ -668,6 +668,37 @@ mod test {
         assert_eq!(
             feed[0].notification.audience.as_deref(),
             Some(&["user-1".to_string()][..])
+        );
+    }
+
+    /// PR #1878 review finding: `maybe_nudge` stamps the notification's
+    /// `created_at` with the real wall clock (`crate::ports::now_millis()`)
+    /// instead of `now` — this tick's own evaluation instant, already
+    /// threaded in from `self.clock.now_millis()` for exactly this reason.
+    /// `a_silent_signup_past_day_seven_gets_nudged_once` never catches this
+    /// because its `FakeClock` happens to be parked near real wall-clock time
+    /// (`real_now() + SEVEN_DAYS`); this test parks the fake clock far from
+    /// real time instead, so a wrong-clock stamp cannot hide behind the two
+    /// values coincidentally agreeing.
+    #[tokio::test]
+    async fn notification_created_at_uses_the_injected_clock_not_the_wall_clock() {
+        let home = tmp_home();
+        let mail = RecordingMail::new();
+        // 1970-01-12 — nowhere near the real wall clock at test-run time.
+        let fake_signup: u64 = 1_000_000_000;
+        let fake_now = fake_signup + SEVEN_DAYS;
+        let (mut scheduler, rt, id) =
+            scheduler_with_mail(home.path(), manifest(), mail.clone(), 0, fake_now).await;
+        seed_user(&rt, &id, "user-1", fake_signup).await;
+
+        assert_eq!(scheduler.tick().await, 1, "one nudge dispatched");
+
+        let feed = rt.notifications().list(&id, "user-1").await.unwrap();
+        assert_eq!(feed.len(), 1);
+        assert_eq!(
+            feed[0].notification.created_at, fake_now,
+            "created_at must come from the tick's own injected-clock instant, \
+             not the real wall clock"
         );
     }
 
