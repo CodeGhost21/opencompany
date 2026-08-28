@@ -4810,7 +4810,44 @@ mod tests {
         assert_eq!(ceo.kind, NodeKind::Folder);
     }
 
-    /// The steered-for case as the brief actually tells an agent to do it:
+    /// A retry whose initial snapshot already contains the agent's home adopts
+    /// that folder instead of rejecting it before the ownership-aware path runs.
+    #[tokio::test]
+    async fn create_inside_existing_own_home_adopts_without_duplication() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
+            .await
+            .unwrap();
+        let home = crate::company::workspace_scaffold::ensure_agent_folder(
+            store.as_ref(),
+            &id,
+            TEST_AGENT,
+        )
+        .await
+        .unwrap();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({
+                "path": "agents/ceo/Retry note.md",
+                "kind": "file",
+                "content": "# Retry",
+            }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+
+        let tree = store.tree(&id).await.unwrap();
+        assert_eq!(
+            tree.iter()
+                .filter(|node| node.parent_id.as_deref() == Some(home.as_str()))
+                .count(),
+            1,
+            "the existing home must not be duplicated"
+        );
+    }
+
     /// straight to the note, with no folder call first.
     ///
     /// Since issue #551 stopped provisioning a folder per roster member, the
