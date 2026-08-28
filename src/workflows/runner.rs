@@ -784,7 +784,26 @@ async fn run_workflow_inner(
                 merge_transcripts(&Value::Object(partial_nodes), &node_transcripts),
                 &captured_artifacts,
             );
-            if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
+            // `only_blocked_nodes_errored` reads `nodes[].status == Error` to
+            // decide whether every errored row belongs to a blocked node, so it
+            // MUST run before the capped-node reclassification below: a capped
+            // node's row is still `Ok` at this point, and reclassifying first
+            // would add its fresh `Error` row to this check and misread an
+            // otherwise-clean block as a genuine failure.
+            let is_genuine_failure =
+                blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked);
+            // Issue #1865 (PR #1883 review): the sibling reclassification the
+            // clean-finish arm applies near the bottom of this function, reached
+            // here too — both branches below are early returns that used to skip
+            // straight past that sole `capped.take()` and reconciliation. A node
+            // that only truncated at the iteration cap (or paused for budget)
+            // alongside a genuinely failed or blocked sibling kept its `Ok` row
+            // forever even though its own attempt already settled `Failed`; this
+            // closes that gap for both of this arm's exits, not only the one the
+            // unit tests around `reclassify_capped_nodes` already covered.
+            let mut nodes = nodes;
+            reclassify_capped_nodes(&mut nodes, &capped.take());
+            if is_genuine_failure {
                 // A genuine failure. Persist the partial capture so the inspector
                 // shows what the nodes that ran produced.
                 if !persist_run_output(
@@ -2342,6 +2361,207 @@ to = "done"
     #[tokio::test]
     async fn a_blocked_agent_node_keeps_the_file_it_wrote_as_a_run_artifact() {
         assert_partial_run_artifact(true).await;
+    }
+
+    /// A turn double for a two-node chain: `capped_agent` always truncates at
+    /// the iteration cap (`Ok`, `hit_iteration_cap: true` — the same signal
+    /// [`reclassify_capped_nodes`] reconciles), and `tail_agent` either fails
+    /// outright or parks an approval, depending on `blocked`. The chain is
+    /// strictly sequential (`start -> capped_work -> tail_work`), so
+    /// `capped_work` always settles — and pushes into `RunCappedNodes` — before
+    /// `tail_work` runs, with no race to arrange.
+    struct CappedThenSettlingTurn {
+        approvals: crate::harness::policy::ApprovalRequestQueue,
+        blocked: bool,
+    }
+
+    impl CappedThenSettlingTurn {
+        async fn execute(&self, agent_id: &str) -> Result<crate::harness::TurnOutcome> {
+            if agent_id == "capped_agent" {
+                return Ok(crate::harness::TurnOutcome {
+                    reply: "partial answer, still going".to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: true,
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                });
+            }
+            if !self.blocked {
+                return Err(OpenCompanyError::Harness(
+                    "synthetic failure after a capped sibling already settled".to_string(),
+                ));
+            }
+            self.approvals
+                .push(crate::harness::policy::ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "synthetic approval after a capped sibling already settled".to_string(),
+                    effect: crate::ports::types::Effect {
+                        kind: "shell".to_string(),
+                        group: crate::ports::types::EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: serde_json::json!({ "command": "finish-report" }),
+                        agent: Some(agent_id.to_string()),
+                        run_id: None,
+                    },
+                });
+            Ok(crate::harness::TurnOutcome {
+                reply: "Waiting for approval.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for CappedThenSettlingTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+    }
+
+    fn capped_then_settling_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "capped_then_settling"
+name = "Capped then settling"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "capped_work"
+kind = "agent"
+name = "Capped work"
+summary = "Loop until the iteration cap."
+agent = "capped_agent"
+[[node]]
+id = "tail_work"
+kind = "agent"
+name = "Tail work"
+summary = "Fail or block, depending on the test."
+agent = "tail_agent"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "capped_work"
+[[edge]]
+from = "capped_work"
+to = "tail_work"
+[[edge]]
+from = "tail_work"
+to = "done"
+"#,
+        )
+        .expect("capped-then-settling graph parses")
+    }
+
+    /// PR #1883 review (Codex #3877606126): `reclassify_capped_nodes` is only
+    /// ever called on the clean-settle arm at the bottom of
+    /// `run_workflow_inner` — the genuine-failure and blocked early returns a
+    /// few hundred lines above it build their `nodes`/`WorkflowRun` straight
+    /// from the collector's raw rows and return before that call is ever
+    /// reached. So a node upstream of the one that fails or blocks the run,
+    /// which itself only truncated at the iteration cap, keeps its `Ok` row
+    /// forever even though its own attempt already settled `Failed` — the
+    /// exact disagreement issue #1865 exists to close, just reachable from a
+    /// different exit than the one its unit tests cover.
+    async fn assert_capped_sibling_reclassified_before_early_return(blocked: bool) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(CappedThenSettlingTurn {
+            approvals: deps.approval_requests.clone(),
+            blocked,
+        });
+        let ctx = WorkflowRunContext::new(false);
+
+        let result = run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &capped_then_settling_graph(),
+            serde_json::json!({ "request": "go" }),
+            &ctx,
+        )
+        .await;
+
+        let nodes = if blocked {
+            let run = result.expect("an approval-blocked run settles successfully");
+            assert!(
+                run.blocked_nodes.iter().any(|n| n.node_id == "tail_work"),
+                "tail_work must block: {run:?}"
+            );
+            run.nodes
+        } else {
+            let err = result.expect_err("the synthetic failure must fail the run");
+            let partial = err
+                .partial_run()
+                .expect("a genuine failure carries a partial run");
+            partial.nodes.clone()
+        };
+
+        let capped_row = nodes
+            .iter()
+            .find(|n| n.node_id == "capped_work")
+            .expect("the capped node's row must be in the partial run");
+        assert_eq!(
+            capped_row.status,
+            WorkflowNodeStatus::Error,
+            "a capped sibling's row must be reclassified Error even when the run leaves \
+             through an early return (genuine failure or block), not only on the \
+             clean-finish arm — {nodes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capped_node_is_reclassified_even_when_a_later_node_fails_the_run() {
+        assert_capped_sibling_reclassified_before_early_return(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_capped_node_is_reclassified_even_when_a_later_node_blocks_the_run() {
+        assert_capped_sibling_reclassified_before_early_return(true).await;
     }
 
     #[async_trait]
