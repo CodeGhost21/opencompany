@@ -9,7 +9,8 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ApiError, type CompanyStatus, type TeamMemberDto } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import type { ConnectionId, LocalScope } from "@/connections/types";
+import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
+import type { Connection, ConnectionId, LocalScope } from "@/connections/types";
 import { useActivationGate } from "@/onboarding/useActivationGate";
 
 /**
@@ -40,6 +41,35 @@ const STATUS: CompanyStatus = {
   name: "Acme",
   lifecycle: "running",
   pending_approvals: 0,
+};
+
+/**
+ * A `HostsProvider` value for the one test in this file that reaches the
+ * ordinary shell (`useHosts` throws outside a provider by design — see its
+ * own doc) — mirrors `onboarding-gate-setup-controller-mount.test.ts`'s
+ * `HOSTS`.
+ */
+const CONNECTION: Connection = {
+  id: SCOPE.connection,
+  defaultCompany: null,
+  label: "test",
+  baseUrl: "",
+  credential: { kind: "cookie" },
+  status: "live",
+  identity: null,
+  companies: [],
+  connector: { kind: "remote" },
+};
+
+const HOSTS: HostsValue = {
+  connections: [CONNECTION],
+  selected: SCOPE.connection,
+  onSelect: () => {},
+  onAdd: () => {},
+  localInstances: [],
+  onEditHost: () => {},
+  onRemoveHost: () => {},
+  hub: false,
 };
 
 /** Staffed, so `SetupController` closes and `setupChecked` lands true. */
@@ -575,6 +605,12 @@ describe("a hung activation read does not strand the operator either", () => {
  * `withReadTimeout` closes it the same way as the other two: `SETUP_ROSTER_
  * TIMEOUT_MS` (20s) turns the silence into an ordinary rejection, which the
  * *existing* `catch` already handles exactly like any other unreachable host.
+ *
+ * A later review round (round 19, comment 3878766538) added `readRoster`'s
+ * own single retry on a `ReadTimeoutError` — see its own doc. A read that
+ * hangs forever times out on *both* attempts, so this test now expects two
+ * `listTeam` calls and twice the wall-clock wait, not one; the retry itself
+ * is proven separately below.
  */
 describe("a hung setup-roster read does not strand the operator either", () => {
   it("times out a hung setup-roster read into the existing setupChecked gate, unblocking the shell", async () => {
@@ -652,24 +688,139 @@ describe("a hung setup-roster read does not strand the operator either", () => {
     expect(container.textContent).not.toContain("Continue to the console");
     expect(container.textContent).not.toContain("Skip for now");
 
-    // SETUP_ROSTER_TIMEOUT_MS (20s) to time out. Setup's own read has no
-    // retry loop — it settles `checked` once and is done (see
-    // `SetupController`'s `catch`) — so one timeout is all this needs.
-    for (let i = 0; i < 3; i += 1) {
+    // `readRoster`'s first attempt hits SETUP_ROSTER_TIMEOUT_MS (20s) and
+    // retries once (round 19); the mock hangs on every call, so the retry
+    // times out too, at 40s total. Five 10s ticks comfortably clears both.
+    for (let i = 0; i < 5; i += 1) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10000);
       });
     }
 
-    // The read is still only called once — SetupController does not retry —
-    // but it settled (late, as a rejection the existing `catch` already
-    // handles as "cannot tell a fresh company from a staffed one, offer
-    // nothing"), which is enough to flip `setupChecked` and release the hold.
-    // With admin true and the funnel still incomplete, `shouldShowOnboardingGate`
-    // now has everything it needs and renders the gate — including its own
+    // Two calls now — the first attempt plus the round-19 retry — and both
+    // timed out, so the second attempt's rejection is what finally settles
+    // (late, as a rejection the existing `catch` already handles as "cannot
+    // tell a fresh company from a staffed one, offer nothing"), which is
+    // enough to flip `setupChecked` and release the hold. With admin true and
+    // the funnel still incomplete, `shouldShowOnboardingGate` now has
+    // everything it needs and renders the gate — including its own
     // always-available "Skip for now" escape — instead of a loader that never
     // resolves.
-    expect(rosterCalls.count).toBe(1);
+    expect(rosterCalls.count).toBe(2);
     expect(container.textContent).toContain("Skip for now");
+  });
+});
+
+/**
+ * PR #1875 review finding, round 19 (comment 3878766538, `SetupController.
+ * tsx:223`).
+ *
+ * The round-18 fix above closes a `listTeam` read that never settles at all,
+ * but `withReadTimeout` cannot distinguish that from a read that is merely
+ * slower than `SETUP_ROSTER_TIMEOUT_MS` and would have answered correctly a
+ * moment later. Before `readRoster`'s retry, that slow-but-healthy read fell
+ * into the same `catch` as a truly unreachable host, reported "cannot tell a
+ * fresh company from a staffed one, offer nothing", and silently discarded
+ * the late, correct answer once it did arrive (`withReadTimeout`'s own doc:
+ * a promise settles once). For a genuinely unstaffed admin, that meant
+ * `unstaffed` stayed at its default `false`, `SetupController` never opened
+ * its dialog, and — because `shouldShowOnboardingGate` only holds off on
+ * `setupOpen` — the shell went straight to the activation gate instead of
+ * offering setup, with no remount to correct it.
+ *
+ * This proves the fix: a `listTeam` that hangs past `SETUP_ROSTER_TIMEOUT_MS`
+ * on its first call but answers quickly on the retry lands on the *setup*
+ * dialog with the correct, empty roster — not the activation gate reporting
+ * a false "staffed".
+ */
+describe("a setup-roster read that only looked hung gets a second chance", () => {
+  it("honors a late, correct roster answer instead of discarding it as unreachable", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const rosterCalls = { count: 0 };
+    const client = (() => {
+      const known = {
+        baseUrl: "",
+        scopeFor: (company: string | null) => `/api/v1/companies/${company ?? ""}`,
+        listTeam: vi.fn(async () => {
+          rosterCalls.count += 1;
+          // First attempt hangs past SETUP_ROSTER_TIMEOUT_MS — genuinely
+          // slow, not unreachable. `readRoster`'s retry (round 19) is the
+          // second call, and it answers promptly with the true, empty
+          // roster: the company really is unstaffed.
+          if (rosterCalls.count === 1) return hang();
+          return new Promise<TeamMemberDto[]>((resolve) => {
+            setTimeout(() => resolve([]), 500);
+          });
+        }),
+        subscribeToEvents: () => () => {},
+        get: (path: string) => {
+          if (path.includes("/auth/me")) {
+            return Promise.resolve({
+              id: "op",
+              email: "op@example.com",
+              role: "admin",
+              company: "co",
+            });
+          }
+          if (path.includes("/activation")) {
+            return Promise.resolve(INCOMPLETE_ACTIVATION);
+          }
+          return hang();
+        },
+        status: hang,
+        approvals: hang,
+        listDesks: hang,
+      };
+      return new Proxy(known, {
+        get(target, prop, receiver) {
+          if (prop in target) return Reflect.get(target, prop, receiver);
+          return hang;
+        },
+      }) as unknown as OpenCompanyClient;
+    })();
+
+    await act(async () => {
+      root.render(
+        createElement(HostsProvider, {
+          value: HOSTS,
+          children: createElement(ConnectionScopeProvider, {
+            scope: SCOPE,
+            children: createElement(AppShell, {
+              client,
+              company: null,
+              initialStatus: STATUS,
+              companies: [STATUS],
+              onSwitchCompany: () => {},
+            }),
+          }),
+        }),
+      );
+    });
+
+    expect(rosterCalls.count).toBe(1);
+    expect(container.textContent).toContain("Loading");
+
+    // SETUP_ROSTER_TIMEOUT_MS (20s): the first attempt times out and
+    // `readRoster` immediately starts the retry.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20000);
+    });
+    expect(rosterCalls.count).toBe(2);
+
+    // The retry's own 500ms delay before it resolves.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    // The late answer was honored, not discarded: the roster really is
+    // empty, so `SetupController` opens its own dialog (`data-testid=
+    // "setup-dialog"`, `SetupDialog.tsx`) rather than the activation gate
+    // reporting a false "staffed" and asking the operator to run a workflow
+    // before there is a team to have written one. `SetupDialog`'s own
+    // inference check (an unrelated read this client double leaves hanging)
+    // keeps it on its first internal screen, so this asserts the dialog
+    // mounted at all rather than which question it reached.
+    expect(document.querySelector('[data-testid="setup-dialog"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain("Skip for now");
   });
 });

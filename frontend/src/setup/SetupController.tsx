@@ -5,7 +5,7 @@ import type { TeamMemberDto } from "@/api/types";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import type { LocalScope } from "@/connections/types";
 import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
-import { withReadTimeout } from "@/lib/read-timeout";
+import { ReadTimeoutError, withReadTimeout } from "@/lib/read-timeout";
 import { SetupDialog } from "./SetupDialog";
 import {
   clearSetupRedesign,
@@ -42,8 +42,51 @@ const MODEL_SETTINGS = "#/settings/connections";
  * one settlement this read never reaches. `withReadTimeout` turns that
  * silence into an ordinary rejection at this bound, which the existing
  * `catch` below already handles exactly like any other unreachable host.
+ *
+ * That reuse has its own edge (PR #1875 review, round 19): a read that is
+ * merely slow rather than actually stuck — a cold host still building its
+ * roster index, a proxy hiccup — now times out at this bound too, and the
+ * `catch` cannot tell "genuinely unreachable" apart from "would have
+ * answered a moment later." Unlike `getActivation` (`useActivationGate.ts`),
+ * `listTeam` has no error classifier to separate a terminal answer from a
+ * transient one, so `readRoster` below gives a `ReadTimeoutError` — and only
+ * that error — a single retry before falling into the same "offer nothing"
+ * catch. A real 404/500/network failure is still immediate, matching this
+ * file's original, pre-timeout behavior for a host that plainly cannot serve
+ * the roster.
  */
 const SETUP_ROSTER_TIMEOUT_MS = 20000;
+
+/**
+ * Reads the roster once, retrying exactly once more if — and only if — the
+ * first attempt hit `SETUP_ROSTER_TIMEOUT_MS` without settling at all.
+ *
+ * `withReadTimeout` cannot tell "unreachable" from "slow": it races the same
+ * bound either way, so a host that would have answered at 21s looks
+ * identical, from here, to one that never answers. Before this retry, that
+ * meant a genuinely-slow-but-healthy read fell straight into the `catch`
+ * below and reported "cannot tell a fresh company from a staffed one, offer
+ * nothing" — worse than the pre-timeout behavior, which simply waited as
+ * long as the read took and got the right answer. A second attempt, bounded
+ * by the same timeout, gives that read one more chance before this function
+ * gives up the same way the original code always did for a definite failure.
+ *
+ * Any error that is not a `ReadTimeoutError` — a 404, a 500, a network
+ * failure — still propagates on the first attempt with no retry: those are
+ * answers, not silence, and retrying an answer this file has always trusted
+ * would risk masking a real backend fault as one more timeout.
+ */
+async function readRoster(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<TeamMemberDto[]> {
+  try {
+    return await withReadTimeout(client.listTeam(company), SETUP_ROSTER_TIMEOUT_MS);
+  } catch (err) {
+    if (!(err instanceof ReadTimeoutError)) throw err;
+    return await withReadTimeout(client.listTeam(company), SETUP_ROSTER_TIMEOUT_MS);
+  }
+}
 
 /** Whether the operator is still on the page they left setup for. */
 function onModelSettings(): boolean {
@@ -220,7 +263,7 @@ export function SetupController({
     (async () => {
       let roster: TeamMemberDto[] = [];
       try {
-        roster = await withReadTimeout(client.listTeam(company), SETUP_ROSTER_TIMEOUT_MS);
+        roster = await readRoster(client, company);
       } catch {
         // A host with no roster surface, or one we cannot reach. Offer nothing:
         // a setup flow that cannot read the team cannot tell a fresh company
