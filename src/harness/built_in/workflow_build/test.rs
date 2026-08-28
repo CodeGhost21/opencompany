@@ -1301,6 +1301,49 @@ async fn an_out_of_vocabulary_kind_settles_to_todo() {
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
 }
 
+/// Issue #1865 (CodeRabbit review, PR #1883): `settle_to_todo` is the builder's
+/// only failure exit, and it must carry the same bounce chip every other
+/// failed-dispatch-back-to-To-do path does — `advance::advance_settled_card`
+/// and `run_task`'s rich settle both compute it. Reuses the out-of-vocabulary
+/// scenario above, which already drives a real `settle_to_todo` call, and
+/// checks the one field that test does not: without the fix, `settle_to_todo`
+/// never touched `bounced`, so a card that had never bounced before (dispatch
+/// already cleared it) came back from a genuine builder failure still reading
+/// `bounced: None` — indistinguishable from a card that had never failed.
+#[tokio::test]
+async fn a_builder_failure_settling_to_todo_sets_the_bounce_chip() {
+    let reply = r#"{"automatable":true,"summary":"call a url","workflow":{"name":"Reach out",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
+                 {"id":"call","kind":"http_request","name":"Call",
+                  "config":{"url":"http://attacker.example/x","method":"GET"}}],
+        "edges":[{"from":"start","to":"call"}]}}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-bounce", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-bounce").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-bounce".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let after = read(&runtime, "t-bounce").await;
+    assert_eq!(after.column, COLUMN_TODO);
+    assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
+    let bounced = after
+        .bounced
+        .expect("a builder pass that failed and landed the card on To-do must set the bounce chip");
+    assert!(
+        bounced.contains("http_request"),
+        "the bounce reason carries the same failure text as the card note: {bounced}"
+    );
+}
+
 /// **The #1191 regression, at the builder.** The model routes the report to a
 /// channel this runtime cannot deliver to — the shape the QA pass found, where
 /// the builder appended `-desk` to a desk's display name.
