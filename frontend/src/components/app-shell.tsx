@@ -114,6 +114,7 @@ import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
+import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { OperatorOverview } from "@/views/OperatorOverview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
@@ -1108,7 +1109,16 @@ export function AppShell({
       // surface now. `null` on any failure (offline, or a host that predates
       // the route) rather than sinking the whole pass: a company can still
       // rehydrate its real desks/DMs without the pinned Operator row.
-      client.getOperatorChannel(company).catch(() => null),
+      //
+      // One retry (issue #1781 review, Codex P2): `ChatView` fetches this
+      // same identity independently for rendering the pinned row, so a
+      // single dropped request here — while `ChatView`'s own, later call
+      // succeeds — used to render the row but permanently omit its id from
+      // this pass's rehydration targets and five-second polling, since this
+      // pass had already given up. A bounded retry closes the common
+      // transient case without turning the fetch into an open-ended one; see
+      // `fetchWithOneRetry`'s doc for why it is extracted rather than inline.
+      fetchWithOneRetry(() => client.getOperatorChannel(company)),
     ])
       .then(async ([desks, operatorChannelRaw]) => {
         // See `isOperatorChannelDto`'s doc comment — a client stub that

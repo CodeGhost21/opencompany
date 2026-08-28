@@ -18,6 +18,21 @@ describe("chat channel history polling", () => {
     expect(appShell).toContain("disposeRehydratePolling?.();");
   });
 
+  /**
+   * Issue #1781 review (Codex P2): `ChatView` fetches the Operator channel's
+   * identity independently of this hydration pass, for rendering its pinned
+   * row. A single dropped request here — while `ChatView`'s own, later call
+   * succeeds — used to render the row but permanently omit its id from the
+   * rehydration targets and this 5s poll, since this pass had already given
+   * up on it. `fetchWithOneRetry` closes the common transient case.
+   */
+  it("retries the Operator channel fetch instead of giving up on the first miss", () => {
+    expect(appShell).toContain(
+      "fetchWithOneRetry(() => client.getOperatorChannel(company))",
+    );
+    expect(appShell).not.toContain("client.getOperatorChannel(company).catch(() => null)");
+  });
+
   // The polling merge is `mergeHistoryInOrder` — the same reconstruction rule
   // the cold mount and every 5s tick share, which is what the source-wiring
   // test above arms but cannot itself observe. These exercise the real
