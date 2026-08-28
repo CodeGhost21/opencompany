@@ -1518,6 +1518,169 @@ async fn reconciliation_does_not_redispatch_a_node_whose_dispatch_already_landed
     );
 }
 
+/// Issue #1825 (finding `3877718169`, chatgpt-codex-connector): a ghost
+/// decision reaching the **live** resolve path — not the boot reconciler —
+/// must not repeat a dispatch that already landed.
+///
+/// `ApprovalResolved` is `Durability::Process`, deliberately: the journal's
+/// own doc on it argues a ghost approval "cannot duplicate the effect,
+/// because the effect's own commit is host-durable and `is_executed` skips
+/// it." That covers a gated call's own effect replayed through the same
+/// park. It says nothing about this node's *continuation dispatch*, which
+/// `resume_blocked_agent_node` used to launch on nothing but
+/// `stashed.is_some() && approved` — no check against
+/// `blocked_node_dispatched` at all, unlike
+/// `reconciliation_does_not_redispatch_a_node_whose_dispatch_already_landed`
+/// above.
+///
+/// The twin of that test, but for the path it does not cover: instead of
+/// calling `reconcile_stranded_blocked_nodes` directly (which never reaches
+/// this turn once `already_dispatched` matches, and never reaches it at all
+/// while the card is still parked — see `reconciliation_does_not_fire_early_
+/// on_a_node_still_awaiting_a_sibling_decision`), this drives the exact
+/// public API a second operator click takes: `resolve_approval` on a card
+/// parked, by hand, for the same turn — reproducing what a host crash that
+/// loses only the `Process`-tier resolution leaves behind: the original
+/// card's own `ApprovalParked` line (`Durability::Host`) survives right
+/// alongside the `BlockedNodeApproved`/`BlockedNodeDispatched` facts that
+/// already redeemed it, so the turn reads as "still parked" rather than
+/// "stranded" and the reconciler leaves it alone.
+#[tokio::test]
+async fn a_ghost_decision_on_the_live_path_does_not_redispatch_an_already_dispatched_node() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo hi" }),
+            },
+            Turn::Say("I was refused, so I stopped."),
+            Turn::Say("Done."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(runner.started(), 1);
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // Capture the stash contents and the card's own effect before either is
+    // ever taken — both are needed below to rebuild what a host crash leaves
+    // behind, and `resolve_and_settle` removes the card from `pending()`.
+    let original = rt
+        .blocked_nodes()
+        .peek(&turn)
+        .expect("the cold run's block is stashed");
+    let original_effect = rt
+        .journal()
+        .pending()
+        .into_iter()
+        .find(|p| p.id == cards[0])
+        .expect("the cold run's card is still parked")
+        .effect;
+
+    // The real path: approve, let the real continuation actually spawn and
+    // retire the stash. This is the one dispatch the ghost must not repeat.
+    resolve_and_settle(&rt, &cards[0], Verdict::Approve).await;
+    assert_eq!(
+        runner.started(),
+        2,
+        "the approval dispatched exactly one continuation"
+    );
+    assert!(
+        !rt.blocked_nodes().is_armed(&turn),
+        "the real release succeeded here — the crash below is reconstructed \
+         by hand on top of this, same as the reconciliation test above"
+    );
+
+    // Rebuild, by hand, exactly what a host crash losing only the
+    // `Process`-tier `ApprovalResolved` record leaves behind: the stash and
+    // its approval both restored, and the dispatch marker that already fired
+    // — all three `Durability::Host`, so none of them were lost.
+    rt.blocked_nodes()
+        .arm(&turn, &original.workflow_id, &original.input);
+    rt.blocked_nodes().mark_approved(&turn);
+    rt.journal()
+        .record_blocked_node_stashed(&turn, &original.workflow_id, &original.input)
+        .await
+        .expect("the durable re-stash succeeds");
+    rt.journal()
+        .record_blocked_node_approved(&turn)
+        .await
+        .expect("the durable re-approve succeeds");
+    rt.journal()
+        .record_blocked_node_dispatched(&turn)
+        .await
+        .expect("the durable dispatch marker succeeds");
+
+    // The piece the reconciliation test does not need: the card itself is
+    // also `Durability::Host` (issue #1825's own earlier fix,
+    // `a_blocked_node_tool_call_park_is_host_durable_too` in `journal.rs`),
+    // so it survives the same crash right alongside the facts above — a
+    // fresh id here stands in for "the original card, still parked",
+    // functionally identical from the runtime's side: a live, decidable card
+    // whose `approval_cycle` maps to an already-dispatched turn. Routed
+    // through the real production entry point (`DeliveryParking::
+    // park_and_journal`, the same call `park_gated_calls` makes), reusing
+    // `rt`'s own live handles so the resolve below is indistinguishable from
+    // a genuine operator click.
+    let parking = super::delivery::DeliveryParking {
+        approvals: rt.approvals.clone(),
+        journal: rt.journal().clone(),
+        continuations: rt.continuations.clone(),
+        gates: rt.workflow_gates().clone(),
+        blocked_nodes: rt.blocked_nodes().clone(),
+    };
+    let ghost_id = parking
+        .park_and_journal(
+            rt.id(),
+            original_effect,
+            crate::runtime::journal::TaskLink::Unlinked,
+            None,
+            Some(turn.clone()),
+        )
+        .await
+        .expect("the ghost card parks");
+
+    assert!(
+        rt.blocked_nodes()
+            .approved_turns()
+            .contains(&turn.to_string()),
+        "precondition: the rebuilt stash looks exactly like the stranded case"
+    );
+    assert!(
+        rt.journal().parked_turns().iter().any(|t| t == &turn),
+        "precondition: unlike the reconciliation case, this turn still has a \
+         card parked — the ghost — so a boot's reconciler would read this as \
+         mid-turn and leave it alone"
+    );
+    assert!(
+        rt.journal().is_blocked_node_dispatched(&turn),
+        "precondition: the dispatch marker is durably set"
+    );
+
+    // The second click: resolved through the same public API a real operator
+    // action uses, not a direct call into `resume_blocked_agent_node`.
+    resolve_and_settle(&rt, &ghost_id, Verdict::Approve).await;
+
+    assert_eq!(
+        runner.started(),
+        2,
+        "a ghost decision on an already-dispatched turn must not launch a \
+         second continuation — that would duplicate model spend and any \
+         external work the first continuation already did"
+    );
+    assert!(
+        !rt.blocked_nodes().is_armed(&turn),
+        "the stash is retired once the ghost decision is recorded, so it \
+         does not linger for a third click to find"
+    );
+}
+
 /// Issue #1825 (P1 follow-up, found by chatgpt-codex-connector): the durable
 /// `BlockedNodeDispatched` marker must land *before* the continuation it
 /// marks is handed to `tokio::spawn`, not after.

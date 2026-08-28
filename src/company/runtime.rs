@@ -2301,6 +2301,45 @@ impl CompanyRuntime {
             self.retire_blocked_stash(turn).await;
             return Ok(CycleRunner::new(self).already_resolved_report());
         };
+        // Issue #1825 (finding `3877718169`, chatgpt-codex-connector): a ghost
+        // decision reaching this **live** path must not repeat a dispatch
+        // that already landed. `reconcile_stranded_blocked_nodes` only ever
+        // calls this function once its own `already_dispatched` check has
+        // already ruled that out — but that check runs once per boot, over
+        // turns with nothing left parked. `continue_turn` routes here off
+        // nothing but a turn key and a fresh `ApprovalResolved`, with no such
+        // filter, and a ghost card supplies that event exactly as faithfully
+        // as a genuine one.
+        //
+        // `ApprovalResolved` is `Durability::Process` by design —
+        // `journal.rs`'s own doc on it: "a ghost approval that is approved a
+        // second time cannot duplicate the effect, because the effect's own
+        // commit is host-durable and `is_executed` skips it." True for the
+        // gated call's own effect, replayed through the same park. Not true
+        // for this node's *continuation dispatch*, which sits behind no such
+        // guard — `spawn_blocked_node_continuation` below launches on nothing
+        // but `stashed.is_some() && approved`. A host crash that loses only
+        // the resolution leaves the card's own `ApprovalParked` line intact
+        // (`Durability::Host`, same tier as `BlockedNodeApproved`/
+        // `BlockedNodeDispatched`) — visible to the operator and decidable
+        // again — while `reconcile_stranded_blocked_nodes`, seeing the turn
+        // still parked, reads that as "waiting on a sibling decision" and
+        // deliberately leaves it alone (see that function's own `continue`
+        // above `already_dispatched`'s check). So the operator's second
+        // click on the reopened card is the only thing left standing between
+        // an already-dispatched continuation and a duplicate one: same model
+        // spend, same external side effects, run twice.
+        if self.journal.is_blocked_node_dispatched(turn) {
+            tracing::warn!(
+                company = %self.id,
+                %turn,
+                "[approval] a decision landed on a blocked node whose continuation was \
+                 already dispatched; recording it and retiring the stash without launching \
+                 a second continuation"
+            );
+            self.retire_blocked_stash(turn).await;
+            return Ok(CycleRunner::new(self).already_resolved_report());
+        }
         match crate::runtime::workflow_resume::spawn_blocked_node_continuation(
             self,
             turn,

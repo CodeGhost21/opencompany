@@ -1894,6 +1894,24 @@ impl RuntimeJournal {
             .collect()
     }
 
+    /// Whether `turn`'s continuation has already been durably marked
+    /// dispatched (issue #1825, finding `3877718169`).
+    ///
+    /// A single-lookup twin of [`blocked_node_dispatched`](Self::blocked_node_dispatched),
+    /// for callers that only need one turn's membership rather than the whole
+    /// set — [`CompanyRuntime::resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)'s
+    /// own guard checks this on every live decision reaching a blocked node,
+    /// not once per boot the way [`CompanyRuntime::reconcile_stranded_blocked_nodes`](crate::company::runtime::CompanyRuntime::reconcile_stranded_blocked_nodes)
+    /// does, so cloning the full set on every call would be waste for no
+    /// reason a `HashSet::contains` doesn't already avoid.
+    pub fn is_blocked_node_dispatched(&self, turn: &str) -> bool {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_node_dispatched
+            .contains(turn)
+    }
+
     /// Records durably that a blocked agent node's continuation has been
     /// spawned, the moment the spawn attempt actually succeeds (issue #1825).
     ///
