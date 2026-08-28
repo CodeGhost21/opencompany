@@ -2892,12 +2892,29 @@ export function AppShell({
   }
 
   return (
-    // The ambient `(client, company)` for the leaves that have to fetch and are
-    // drawn from too many parents to thread props to — today, the avatar tile,
-    // which fetches an uploaded face through the client because an `<img>`
-    // cannot carry a credential. See `lib/console-context.tsx` for why this is
-    // deliberately not a general escape from props.
-    <ConsoleProvider client={client} company={company}>
+    // PR #1875 review finding on this file's own `setupController` doc: the
+    // two branches above share a `<>` root specifically so React reconciles
+    // `setupController` against the same position across every render this
+    // component can produce while a hold is in play. This branch used to
+    // start straight at `<ConsoleProvider>` instead — a root-type change React
+    // cannot tell apart from an unrelated subtree replacing another, so
+    // landing here (an unstaffed roster's own read flips `setupChecked` and
+    // `setupOpen` both `true` in the same tick, clearing both guards above at
+    // once) tore down the already-resolved `SetupController` instance and
+    // mounted a fresh one — discarding the just-proven "unstaffed" result and
+    // re-issuing `listTeam`, with the ordinary shell already on screen while
+    // that second read was in flight. Wrapping this branch in the same `<>`
+    // `setupController` sits in keeps it at the identical position in every
+    // branch, so only the branch's *other* child is ever torn down.
+    <>
+      {setupController}
+      {/* The ambient `(client, company)` for the leaves that have to fetch and
+          are drawn from too many parents to thread props to — today, the
+          avatar tile, which fetches an uploaded face through the client
+          because an `<img>` cannot carry a credential. See
+          `lib/console-context.tsx` for why this is deliberately not a general
+          escape from props. */}
+      <ConsoleProvider client={client} company={company}>
       {/* `SidebarProvider` paints the chrome layer itself — see its own note on
           why that fill lives there and not here (issue #1178). */}
       <SidebarProvider className="h-svh overflow-hidden">
@@ -3385,8 +3402,6 @@ export function AppShell({
         onOpenChange={setFeedbackOpen}
       />
 
-      {setupController}
-
       <TourController
         company={company}
         setView={setView}
@@ -3395,5 +3410,6 @@ export function AppShell({
       />
       </SidebarProvider>
     </ConsoleProvider>
+    </>
   );
 }
