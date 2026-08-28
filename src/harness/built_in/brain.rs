@@ -8773,10 +8773,18 @@ members = ["eng1", "eng2"]
             origin_parent: Some(root),
             origin_task: None,
         });
-        let brain = brain_with_queue_and_events(
-            dir.path(),
-            requests,
-            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf())),
+        let pool = Arc::new(HarnessPool::new());
+        let brain = HarnessBrain::new(
+            pool.clone(),
+            HarnessDeps {
+                ..(*brain_with_queue_and_events(
+                    dir.path(),
+                    requests,
+                    Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf())),
+                )
+                .deps)
+            },
+            record(),
         );
 
         brain
