@@ -118,6 +118,7 @@ import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
 import {
+  channelForThread,
   channelIdForThread,
   deskFromDto,
   dmChannelId,
@@ -1363,7 +1364,7 @@ export function AppShell({
               return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
             }),
           );
-          const channelId = chatChannelByThreadRef.current[threadId];
+          const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
           // The thread settled before the desks/roster effect populated its
           // channel id — on a cold load, or the moment after a company switch
           // (issue #1701). The `threads` fold above still ran; park the id so
@@ -1746,7 +1747,7 @@ export function AppShell({
    */
   const onThreadViewed = useCallback(
     (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
-      const channelId = chatChannelByThreadRef.current[threadId];
+      const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
       if (!channelId) return;
       onChannelViewed(
         channelId,
@@ -1814,7 +1815,10 @@ export function AppShell({
    * next — #368's bug, re-introduced one surface over.
    */
   const noteInChannel = (threadId: string | null | undefined, line: string) => {
-    const target = threadId ? chatChannelByThread[threadId] : undefined;
+    // Through `channelForThread`, not a bare index: the host accepts any casing
+    // of a General spelling and echoes back the one the caller used, so a map
+    // of four literals misses `MAIN` from an API client (issue #1743).
+    const target = threadId ? (channelForThread(chatChannelByThread, threadId) ?? undefined) : undefined;
     if (!target) {
       noteSystem(line);
       return;
@@ -1871,7 +1875,12 @@ export function AppShell({
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op, the
       // same as the thread store above: better silent than in the wrong place.
-      const channelId = chatChannelByThread[event.chatId];
+      //
+      // `channelForThread`, for the reason `noteInChannel` gives: the map holds
+      // four literal General spellings and the host echoes whatever casing the
+      // caller addressed, so a bare index drops the live reply and it appears
+      // only when polling recovers the durable history (issue #1743).
+      const channelId = channelForThread(chatChannelByThread, event.chatId);
       if (!channelId) return;
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];

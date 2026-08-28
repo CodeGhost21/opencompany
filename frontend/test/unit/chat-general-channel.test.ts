@@ -590,3 +590,36 @@ describe("resolving a live frame's thread id against the shell's map", () => {
     expect(channelForThread(MAP, "workflows")).toBeNull();
   });
 });
+
+/**
+ * The shell actually calling `channelForThread` at every thread-to-channel
+ * lookup, not just the two the earlier General-channel restoration touched
+ * (`channelMap`'s own construction, and `firstDeskChannelId`).
+ *
+ * PR #1781 review: these four call sites were bare `map[key]` indexes on
+ * `chatChannelByThread`/`chatChannelByThreadRef.current`, which the tests
+ * above prove misses any casing other than the map's own literal keys and
+ * (for the live-reply lookup) drops the frame until polling recovers the
+ * durable history. Pinned by source-text, the same idiom
+ * `chat-rail-focus.test.ts` established, since a full `AppShell` render needs
+ * the whole client and every hook.
+ */
+describe("the shell resolves every thread-to-channel lookup through channelForThread", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const shell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
+
+  it("resolves a live reply's channel through the fold, not a bare index", () => {
+    expect(shell).toContain("channelForThread(chatChannelByThread, event.chatId)");
+    expect(shell).not.toContain("chatChannelByThread[event.chatId]");
+  });
+
+  it("resolves the addressed-notice target through the fold", () => {
+    expect(shell).toContain("channelForThread(chatChannelByThread, threadId)");
+  });
+
+  it("resolves both `chatChannelByThreadRef.current` lookups through the fold", () => {
+    const matches = shell.match(/channelForThread\(chatChannelByThreadRef\.current, threadId\)/g);
+    expect(matches?.length ?? 0).toBe(2);
+    expect(shell).not.toContain("chatChannelByThreadRef.current[threadId]");
+  });
+});
