@@ -387,7 +387,12 @@ mod test {
     #[test]
     fn mark_approved_flips_the_stashed_flag() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }), &StartedBy::Operator);
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
 
         q.mark_approved("workflow-node:run-1:draft");
 
@@ -417,7 +422,12 @@ mod test {
     #[test]
     fn rearm_alone_does_not_recover_a_pre_restart_approval() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }), &StartedBy::Operator);
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
         q.mark_approved("workflow-node:run-1:draft");
 
         // Simulate the restart: the in-memory queue is gone, and boot rehydrates
@@ -478,7 +488,12 @@ mod test {
     #[test]
     fn peek_reads_the_stash_without_taking_it() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }), &StartedBy::Operator);
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
 
         let seen = q.peek("workflow-node:run-1:draft").expect("armed");
         assert_eq!(seen.input, json!({ "n": 1 }));
@@ -513,8 +528,18 @@ mod test {
     #[test]
     fn approved_turns_lists_only_the_marked_ones() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }), &StartedBy::Operator);
-        q.arm("workflow-node:run-2:draft", "digest", &json!({ "n": 2 }), &StartedBy::Operator);
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
+        q.arm(
+            "workflow-node:run-2:draft",
+            "digest",
+            &json!({ "n": 2 }),
+            &StartedBy::Operator,
+        );
         q.mark_approved("workflow-node:run-1:draft");
 
         assert_eq!(
@@ -530,7 +555,12 @@ mod test {
     #[test]
     fn approved_turns_is_empty_with_nothing_marked() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }), &StartedBy::Operator);
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
         assert!(q.approved_turns().is_empty());
     }
 
@@ -541,8 +571,18 @@ mod test {
     #[test]
     fn stashed_turns_lists_approved_and_unapproved_alike() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }), &StartedBy::Operator);
-        q.arm("workflow-node:run-2:draft", "digest", &json!({ "n": 2 }), &StartedBy::Operator);
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
+        q.arm(
+            "workflow-node:run-2:draft",
+            "digest",
+            &json!({ "n": 2 }),
+            &StartedBy::Operator,
+        );
         q.mark_approved("workflow-node:run-1:draft");
 
         let mut turns = q.stashed_turns();

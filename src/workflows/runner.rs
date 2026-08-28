@@ -6870,12 +6870,18 @@ to = "done"
             crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
         // Simulates what `park_gated_calls` already did at real park time,
         // for both nodes, before this settle pass ever runs.
-        parking
-            .blocked_nodes
-            .arm(&first_turn, "wf-1", &trigger_input, &crate::ports::types::StartedBy::Operator);
-        parking
-            .blocked_nodes
-            .arm(&second_turn, "wf-1", &trigger_input, &crate::ports::types::StartedBy::Operator);
+        parking.blocked_nodes.arm(
+            &first_turn,
+            "wf-1",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+        parking.blocked_nodes.arm(
+            &second_turn,
+            "wf-1",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
 
         let handle = tokio::spawn(async move {
             stash_blocked_agent_nodes(
@@ -6946,9 +6952,12 @@ to = "done"
         let turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "solo");
 
         // What `park_gated_calls` already did at real park time.
-        parking
-            .blocked_nodes
-            .arm(&turn, "wf-1825-p2d", &trigger_input, &crate::ports::types::StartedBy::Operator);
+        parking.blocked_nodes.arm(
+            &turn,
+            "wf-1825-p2d",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
         // What deciding this turn's last card already did, in the window
         // before this settle pass got here: dispatched and retired.
         parking.blocked_nodes.release(&turn);
@@ -7046,12 +7055,18 @@ to = "done"
             crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
         // What `park_gated_calls` already did for both, at real park time,
         // before this settle pass ever runs.
-        parking
-            .blocked_nodes
-            .arm(&first_turn, "wf-1825-p2e", &trigger_input, &crate::ports::types::StartedBy::Operator);
-        parking
-            .blocked_nodes
-            .arm(&second_turn, "wf-1825-p2e", &trigger_input, &crate::ports::types::StartedBy::Operator);
+        parking.blocked_nodes.arm(
+            &first_turn,
+            "wf-1825-p2e",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+        parking.blocked_nodes.arm(
+            &second_turn,
+            "wf-1825-p2e",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
 
         let handle = tokio::spawn(async move {
             stash_blocked_agent_nodes(

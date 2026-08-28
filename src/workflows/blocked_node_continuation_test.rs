@@ -1481,8 +1481,12 @@ async fn reconciliation_does_not_redispatch_a_node_whose_dispatch_already_landed
     // approval both restored (as release never ran), plus the
     // `BlockedNodeDispatched` marker the dispatch that actually happened did
     // manage to write.
-    rt.blocked_nodes()
-        .arm(&turn, &original.workflow_id, &original.input, &original.started_by);
+    rt.blocked_nodes().arm(
+        &turn,
+        &original.workflow_id,
+        &original.input,
+        &original.started_by,
+    );
     rt.blocked_nodes().mark_approved(&turn);
     rt.journal()
         .record_blocked_node_stashed(&turn, &original.workflow_id, &original.input)
@@ -1601,8 +1605,12 @@ async fn a_ghost_decision_on_the_live_path_does_not_redispatch_an_already_dispat
     // `Process`-tier `ApprovalResolved` record leaves behind: the stash and
     // its approval both restored, and the dispatch marker that already fired
     // — all three `Durability::Host`, so none of them were lost.
-    rt.blocked_nodes()
-        .arm(&turn, &original.workflow_id, &original.input, &original.started_by);
+    rt.blocked_nodes().arm(
+        &turn,
+        &original.workflow_id,
+        &original.input,
+        &original.started_by,
+    );
     rt.blocked_nodes().mark_approved(&turn);
     rt.journal()
         .record_blocked_node_stashed(&turn, &original.workflow_id, &original.input)

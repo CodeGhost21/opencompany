@@ -1491,9 +1491,12 @@ impl HarnessAgentRunner {
         // of narrowing it. `arm` is first-write-wins and cheap (one HashMap
         // insert under a `Mutex`), so a redundant call from the settle pass
         // below is a harmless no-op, not a second source of truth.
-        parking
-            .blocked_nodes
-            .arm(node_turn, &self.workflow_id, &self.trigger_input, &self.started_by);
+        parking.blocked_nodes.arm(
+            node_turn,
+            &self.workflow_id,
+            &self.trigger_input,
+            &self.started_by,
+        );
 
         // Issue #1825 (P1, second follow-up — found by chatgpt-codex-connector):
         // the in-memory arm above only helps the no-restart case. The durable
