@@ -1761,8 +1761,23 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
     // second, narrower copy of the parsing logic is exactly how it drifted
     // from the turn path the first time; calling the shared function directly
     // means there is only one content path to keep in sync.
-    model_response_from_payload(payload)
+    let response = model_response_from_payload(payload)
         .map_err(|e| anyhow::anyhow!("probe response carried no usable content: {e}"))?;
+    // `model_response_from_payload` accepts a tool-call-only reply — correct
+    // for a real turn, where the model may have been offered tools and
+    // legitimately chose to call one instead of answering in prose. This
+    // probe offers none (`Vec::new()` above), so a tool call here can only
+    // be the endpoint hallucinating or defaulting to an action it was never
+    // given, not a valid response to `ping`. Letting it through would report
+    // a broken endpoint as reachable, passing the setup wizard or console
+    // Test action for a provider that cannot complete the bare chat turn it
+    // exists to verify (CodeRabbit review on #1779, comment 3877827976).
+    if response.message.content.is_empty() {
+        return Err(anyhow::anyhow!(
+            "probe response carried no visible text — endpoint returned a \
+             tool call instead of answering a turn that offered no tools"
+        ));
+    }
     Ok(())
 }
 
@@ -4153,6 +4168,48 @@ mod tests {
         probe(&decl, None)
             .await
             .expect("reasoning-only content must be recognized as a successful probe");
+    }
+
+    /// CodeRabbit review on #1779 (comment 3877827976): `probe` routes
+    /// through the shared `model_response_from_payload`, which is correct
+    /// for a real turn but accepts a tool-call-only reply as a success —
+    /// tool calls are a valid outcome when the caller offered tools. `probe`
+    /// offers none (`Vec::new()`), so an endpoint answering `ping` with a
+    /// tool call instead of prose never actually answered the bare chat turn
+    /// the probe exists to verify. Without an explicit check for visible
+    /// text, the setup wizard or console Test action would report such an
+    /// endpoint as reachable.
+    #[tokio::test]
+    async fn probe_rejects_tool_call_only_reply() {
+        let url = spawn_stub_message(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "lookup_weather", "arguments": "{}" }
+                }
+            ]
+        }))
+        .await;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url);
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = probe(&decl, None)
+            .await
+            .expect_err("a tool-call-only reply to a no-tools probe must not pass");
+        assert!(
+            err.to_string().contains("tool call"),
+            "error should name why the probe failed: {err}"
+        );
     }
 
     /// Issue #1811: the managed backend's raw refusal for a model id that does
