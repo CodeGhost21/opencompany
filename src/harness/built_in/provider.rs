@@ -817,7 +817,9 @@ fn extract_array_refusal_text(value: Option<&serde_json::Value>) -> Option<Strin
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
     // Content may be a plain string OR an array of `{type:"text",text:…}`
     // parts; tolerate both.
-    let mut content = extract_content_text(payload.pointer("/choices/0/message/content"));
+    let raw_content = payload.pointer("/choices/0/message/content");
+    let content_is_null = raw_content.is_some_and(serde_json::Value::is_null);
+    let mut content = extract_content_text(raw_content);
     let tool_calls = parse_tool_calls(&payload);
     let finish_reason = payload
         .pointer("/choices/0/finish_reason")
