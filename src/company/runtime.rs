@@ -2911,7 +2911,6 @@ impl CompanyRuntime {
             .and_then(|run| run.task_id)
     }
 
-    ///
     /// The single projection point for [`ApprovalSummary`], and therefore the
     /// single place issue #372's `agent` + `payload` are filled in. The payload
     /// is redacted and bounded **here**, before it is a summary at all, so no
