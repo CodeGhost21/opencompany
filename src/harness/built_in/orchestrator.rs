@@ -4405,6 +4405,8 @@ pub(crate) struct CreateWorkflowArgs {
     #[serde(default)]
     name: String,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
     owner_desk: Option<String>,
     #[serde(default)]
     nodes: Vec<CreateWorkflowArgNode>,
