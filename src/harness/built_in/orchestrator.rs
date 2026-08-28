@@ -3243,6 +3243,7 @@ pub fn orchestrator_tools(
     workflow_runner: WorkflowRunnerHandle,
     run_supervisor: crate::runtime::RunSupervisor,
     store: Arc<dyn CompanyStore>,
+    notifications: Arc<dyn crate::ports::notifications::NotificationStore>,
     // Issue #274's snapshot ring, for the #661 (M7) edit/delete tools. `None`
     // makes those two refuse rather than write with no undo — see
     // `HarnessDeps::workflow_revisions`.
