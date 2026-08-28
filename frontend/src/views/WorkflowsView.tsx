@@ -445,6 +445,18 @@ export function WorkflowsView({
   // deps), the same pattern `selectedIdRef`/`companyRef` use above.
   const nudgeRef = useRef<NotificationDto | null>(null);
   nudgeRef.current = nudge;
+  // Issue #1845 (review: PR #1878): set the moment `handleCreated` fires,
+  // before `refreshNudge` below has necessarily resolved. A fetch already in
+  // flight when a local create happens (the mount fetch, or a poll tick) can
+  // land AFTER `handleCreated`, carrying the row the scheduler filed before
+  // this create — `clearNudge` could not have marked it read yet, because at
+  // that moment it did not know the row's id (`nudgeRef.current` was still
+  // `null`). This nudge is a one-time, first-workflow-only ask (the
+  // scheduler's own idempotency ledger never files a second one), so once
+  // this session has created a workflow, no fetch response — stale or not —
+  // should ever put the banner back up. Reset on a company switch, since a
+  // create in one company says nothing about another.
+  const hasCreatedLocallyRef = useRef(false);
   const refreshNudge = useCallback(() => {
     const requestCompany = company;
     client
@@ -452,7 +464,20 @@ export function WorkflowsView({
       .then((feed) => {
         if (requestCompany !== companyRef.current) return; // stale: company switched mid-flight
         const rows = Array.isArray(feed?.notifications) ? feed.notifications : [];
-        setNudge(pickActiveNudge(rows));
+        const active = pickActiveNudge(rows);
+        if (active && hasCreatedLocallyRef.current) {
+          // This response was already stale the moment it landed — see
+          // `hasCreatedLocallyRef`'s own doc comment. Reconcile the server
+          // row rather than display it, the same best-effort mark-read
+          // `clearNudge` performs below.
+          setNudge(null);
+          void client.markNotificationsRead([active.id], requestCompany).catch(() => {
+            // The next poll tick retries; nothing renders in the meantime
+            // either way, since `hasCreatedLocallyRef` stays set.
+          });
+          return;
+        }
+        setNudge(active);
       })
       .catch(() => {
         // An older host (404) or a transient failure: no banner, and nothing
@@ -462,8 +487,22 @@ export function WorkflowsView({
   }, [client, company]);
   useEffect(() => {
     setNudge(null);
+    hasCreatedLocallyRef.current = false;
     refreshNudge();
   }, [company, refreshNudge]);
+  // Issue #1845 (review: PR #1878): the host files this nudge off a daily
+  // scheduler tick, which mounts no SSE frame — nothing else tells a tab left
+  // open across that tick that a nudge landed, so it would otherwise sit
+  // unseen until the next reload or company switch. `approvalsNow` is the
+  // same polling cadence the mention badge already piggybacks on for the
+  // identical reason (`app-shell.tsx`'s own `feed.now` — no per-viewer SSE
+  // projection either), so this re-runs the fetch on every tick rather than
+  // adding a second poller.
+  useEffect(() => {
+    if (approvalsNow === undefined) return;
+    refreshNudge();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on the poll tick only
+  }, [approvalsNow]);
   // Marks the current nudge read (best-effort) and hides it locally at once,
   // rather than waiting for the next poll to confirm the write. Shared by the
   // banner's own Dismiss button and by a workflow actually getting created
@@ -1823,7 +1862,13 @@ export function WorkflowsView({
     }
     // Issue #1845: this console's own create is the clearest possible signal
     // — do not wait for the `workflow_created` SSE round trip to clear the
-    // nudge when we already know it landed.
+    // nudge when we already know it landed. Set BEFORE `clearNudge`, and
+    // unconditionally: `clearNudge` only marks the row read when it already
+    // knows the nudge's id (`nudgeRef.current`), which a fetch still in
+    // flight at this instant has not supplied yet — see
+    // `hasCreatedLocallyRef`'s own doc comment for how `refreshNudge`
+    // reconciles that response when it lands.
+    hasCreatedLocallyRef.current = true;
     clearNudge();
   }, [announceDisarm, clearNudge]);
 
