@@ -749,16 +749,13 @@ impl HarnessBrain {
         // is recorded on the card the hand-off opens.
         let drained = match self
             .delegation_runner(run_turn.as_ref(), &record)
+            // The conversation the approval was raised in (#1890) — both halves
+            // of it. A grant records `origin_parent` beside `origin_thread` for
+            // exactly this reason, so a threaded approval resumes in its own
+            // thread rather than against the channel's unparented history.
+            .in_thread(grant.origin_parent)
             .drain_and_execute(
-                // The conversation the approval was raised in (#1890) — both
-                // halves of it. A grant records `origin_parent` beside
-                // `origin_thread` for exactly this reason, so a threaded
-                // approval resumes in its own thread rather than against the
-                // channel's unparented history.
-                crate::runtime::delegation::ChatTarget::in_thread(
-                    grant.origin_thread.as_deref(),
-                    grant.origin_parent,
-                ),
+                grant.origin_thread.as_deref(),
                 delegation::MessageContext::default(),
                 delegation::HandOffs::Run,
             )
@@ -2820,11 +2817,7 @@ impl HarnessBrain {
         let run_turn = self.run_turn();
         let record = self.record();
         self.delegation_runner(run_turn.as_ref(), &record)
-            .run_delegation(
-                delegation,
-                crate::runtime::delegation::ChatTarget::channel(chat_id),
-                delegation::MessageContext::default(),
-            )
+            .run_delegation(delegation, chat_id, delegation::MessageContext::default())
             .await
     }
 
@@ -3367,12 +3360,18 @@ impl HarnessBrain {
                         // Who else this message named (issue: mentions). Context
                         // for the turn, never a second dispatch.
                         .also_mentioned(also_mentioned)
+                        // The thread this message belongs to (#1890). Its own
+                        // `parent` IS the root — a reply is parented to its
+                        // question's parent, never to the question — so an
+                        // unparented message carries `None` and lands on the
+                        // channel-level conversation.
+                        .in_thread(*parent)
                         // Issue #1846 review (Codex #3864988176): the operator's
                         // own words, so a delegate's budget-pause marker re-parks
                         // with what the operator actually asked for rather than
                         // the hand-off instruction the model wrote.
                         .reissue_message(composed.clone())
-                        .handle_operator_message(&responder, &composed, chat_target)
+                        .handle_operator_message(&responder, &composed, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
                     let mut operator_reply = turn.reply;
@@ -3682,11 +3681,7 @@ impl HarnessBrain {
                     let record = self.record();
                     let turn = self
                         .delegation_runner(run_turn.as_ref(), &record)
-                        .handle_operator_message(
-                            &responder,
-                            prompt,
-                            crate::runtime::delegation::ChatTarget::default(),
-                        )
+                        .handle_operator_message(&responder, prompt, None)
                         .await?;
                     let mut responses = vec![OutboundMessage {
                         message_id: None,

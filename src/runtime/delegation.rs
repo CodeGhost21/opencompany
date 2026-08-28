@@ -722,6 +722,19 @@ pub(crate) struct DelegationRunner<'a> {
     /// worse than before this fix, for the paths that have not been taught to
     /// carry a re-issue text.
     reissue_message: Option<String>,
+    /// The thread this turn belongs to, when it belongs to one (#1890).
+    ///
+    /// A builder for the same reason [`requested`](Self::requested) and
+    /// [`also_mentioned`](Self::also_mentioned) are, and the argument their docs
+    /// already make applies here with more force: optional context about the
+    /// turn, absent on every path that is not an operator message in a thread,
+    /// and threading it as an argument made well over a hundred call sites
+    /// restate "no thread" to say nothing — with `main` adding more of them
+    /// while the change was in review, so every rebase re-broke the branch.
+    ///
+    /// The channel stays an argument, because every caller has one and it
+    /// selects *who answers*. The thread only narrows *what they remember*.
+    thread_root: Option<EventSeq>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -780,6 +793,7 @@ impl<'a> DelegationRunner<'a> {
             requested_intent: None,
             also_mentioned: Vec::new(),
             reissue_message: None,
+            thread_root: None,
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -831,6 +845,7 @@ impl<'a> DelegationRunner<'a> {
             requested_intent: None,
             also_mentioned: Vec::new(),
             reissue_message: None,
+            thread_root: None,
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -942,7 +957,7 @@ impl<'a> DelegationRunner<'a> {
             // The SAME arm the chat path runs — which is what makes the
             // no-column-move invariant inherited rather than re-promised here.
             let outcome = self
-                .run_delegation(delegation, ChatTarget::default(), MessageContext::default())
+                .run_delegation(delegation, None, MessageContext::default())
                 .await;
             let row = match (spawn, outcome) {
                 // A card id comes back only after the store took the write
@@ -1043,6 +1058,24 @@ impl<'a> DelegationRunner<'a> {
     /// context about the turn, absent on every path that is not an operator
     /// message, and threading it as an argument would make a dozen test call
     /// sites restate an empty vector to say nothing.
+    /// The conversation a turn in `chat_id` belongs to: that channel, plus
+    /// whatever thread [`in_thread`](Self::in_thread) bound this runner to.
+    ///
+    /// The single place the two halves are rejoined, so a caller cannot pair a
+    /// channel with the wrong thread by getting the argument order wrong — the
+    /// hazard `ChatTarget`'s own docs name.
+    fn target(&self, chat_id: Option<&'a str>) -> ChatTarget<'a> {
+        ChatTarget::in_thread(chat_id, self.thread_root)
+    }
+
+    /// Binds this turn to the thread rooted at `root` (#1890) — `None` is the
+    /// channel-level conversation, which is what every non-threaded path wants
+    /// and therefore never has to say.
+    pub(crate) fn in_thread(mut self, root: Option<EventSeq>) -> Self {
+        self.thread_root = root;
+        self
+    }
+
     pub(crate) fn also_mentioned(mut self, agents: Vec<String>) -> Self {
         self.also_mentioned = agents;
         self
@@ -1079,7 +1112,7 @@ impl<'a> DelegationRunner<'a> {
         &self,
         responder: &str,
         message: &str,
-        chat: ChatTarget<'_>,
+        chat_id: Option<&str>,
     ) -> Result<OperatorTurn> {
         // What this message IS, decided once (issue #267).
         //
@@ -1243,7 +1276,7 @@ impl<'a> DelegationRunner<'a> {
         // lies.
         let workflow_requested = self.requested_intent
             == Some(crate::ports::types::MessageIntent::Workflow)
-            && !crate::company::copilot::is_copilot_thread(chat.chat_id);
+            && !crate::company::copilot::is_copilot_thread(chat_id);
         // Issue #463: did the REST chat handler already card this message?
         //
         // Two ways it does, and until #1035 this saw only the first. The triage
@@ -1301,7 +1334,7 @@ impl<'a> DelegationRunner<'a> {
         // authored. Run records stay reserved for actual work attempts (#183
         // §4), so this turn mints none — see `TaskOutputSource`.
         let handler_card = match carded_by_handler {
-            true => self.chat_handler_card(message, chat.chat_id).await?,
+            true => self.chat_handler_card(message, chat_id).await?,
             false => None,
         };
         // Issue #442, path one: a desk lead or teammate asked DIRECTLY carries
@@ -1312,7 +1345,7 @@ impl<'a> DelegationRunner<'a> {
         // the tracking decision stops depending on which agent answered or which
         // tools it happens to carry.
         let mut direct_card = self
-            .open_direct_work_card(responder, message, chat.chat_id, ctx)
+            .open_direct_work_card(responder, message, chat_id, ctx)
             .await?;
         // Same discipline `run_task` keeps on the dispatched-card path: only
         // what *this* turn stages can be attributed to this turn's card, so
@@ -1409,7 +1442,8 @@ impl<'a> DelegationRunner<'a> {
                 || (chatter && is_pure_small_talk(operator_words(message))));
         let outcome = with_chat_only_hint(
             chat_only,
-            self.run_turn.run(self.company, responder, message, chat),
+            self.run_turn
+                .run(self.company, responder, message, self.target(chat_id)),
         )
         .await?;
         let parked = self.approvals_queued().saturating_sub(approvals_before);
@@ -1484,7 +1518,7 @@ impl<'a> DelegationRunner<'a> {
         // card, and it has to still be readable after `spawned_task` takes it
         // (issue #678).
         let mut spawned_task: Option<String> = handler_card.clone().or(direct_card_id);
-        let drained = self.drain_and_execute(chat, ctx, HandOffs::Run).await?;
+        let drained = self.drain_and_execute(chat_id, ctx, HandOffs::Run).await?;
         if let Some(id) = drained.spawned_task {
             spawned_task.get_or_insert(id);
         }
@@ -1526,7 +1560,7 @@ impl<'a> DelegationRunner<'a> {
             self.queue.clear();
             let relay = self
                 .run_turn
-                .run(self.company, responder, &relay_prompt, chat)
+                .run(self.company, responder, &relay_prompt, self.target(chat_id))
                 .await?;
             // The relay turn may only relay — a second hand-off from here is the
             // re-delegation loop this drain exists to stop, and it is dropped.
@@ -1557,7 +1591,7 @@ impl<'a> DelegationRunner<'a> {
             // and let the operator ask for it. Pinned by
             // `the_relay_turns_card_is_held_back_on_a_question_turn` and its
             // non-question sibling.
-            let drained = self.drain_and_execute(chat, ctx, HandOffs::Drop).await?;
+            let drained = self.drain_and_execute(chat_id, ctx, HandOffs::Drop).await?;
             if let Some(id) = drained.spawned_task {
                 spawned_task.get_or_insert(id);
             }
@@ -1622,7 +1656,7 @@ impl<'a> DelegationRunner<'a> {
                 let marker = crate::runtime::grants::budget_pauses_for(self.company)
                     .park_preserving_background(
                         pause.agent.clone(),
-                        chat.chat_id.map(str::to_string),
+                        chat_id.map(str::to_string),
                         park_message,
                         pause.summary.clone(),
                         now_millis(),
@@ -1660,7 +1694,7 @@ impl<'a> DelegationRunner<'a> {
                     responder,
                     parked,
                     &authored,
-                    chat.chat_id,
+                    chat_id,
                 )
                 .await;
             }
@@ -1834,7 +1868,7 @@ impl<'a> DelegationRunner<'a> {
     /// one fact rather than something a shared drain can decide.
     pub(crate) async fn drain_and_execute(
         &self,
-        chat: ChatTarget<'_>,
+        chat_id: Option<&str>,
         ctx: MessageContext,
         hand_offs: HandOffs,
     ) -> Result<Drained> {
@@ -1854,7 +1888,7 @@ impl<'a> DelegationRunner<'a> {
             // Captured before the delegation is consumed, so a cancellation can
             // be reported against whoever it was aimed at (issues #176, #884).
             let target = hand_off_target_of(&delegation).map(str::to_string);
-            let out = self.run_delegation(delegation, chat, ctx).await?;
+            let out = self.run_delegation(delegation, chat_id, ctx).await?;
             if out.cancelled
                 && let Some(desk) = target
             {
@@ -1996,7 +2030,7 @@ impl<'a> DelegationRunner<'a> {
                 // therefore no chat-handler card to defer to. It opens no card
                 // of its own regardless — `for_task` is set, which
                 // `open_work_card` refuses on first.
-                self.run_delegation(delegation, ChatTarget::default(), MessageContext::default())
+                self.run_delegation(delegation, None, MessageContext::default())
                     .await?;
                 if let Some((target, cause)) = undeliverable {
                     card.note = Some(append_note(
@@ -2021,7 +2055,7 @@ impl<'a> DelegationRunner<'a> {
                     .await?;
             }
             let outcome = self
-                .run_delegation(delegation, ChatTarget::default(), MessageContext::default())
+                .run_delegation(delegation, None, MessageContext::default())
                 .await?;
             match (owns_card, outcome.desk_reply, outcome.cancelled) {
                 // The delegate answered: they own the card and it settles from
@@ -2076,7 +2110,7 @@ impl<'a> DelegationRunner<'a> {
     async fn run_hand_off(
         &self,
         hand_off: HandOff,
-        chat: ChatTarget<'_>,
+        chat_id: Option<&str>,
         ctx: MessageContext,
     ) -> Result<DelegationOutcome> {
         let HandOff {
@@ -2100,7 +2134,7 @@ impl<'a> DelegationRunner<'a> {
         // (issue #463), or when the instruction is not a piece of work —
         // see `is_trackable_work`.
         let mut card = self
-            .open_hand_off_work_card(&member, &instruction, chat.chat_id, ctx)
+            .open_hand_off_work_card(&member, &instruction, chat_id, ctx)
             .await?;
         // Register the delegated turn so an operator can CANCEL it
         // mid-flight (cancel-only in v1 — pause/redirect are rejected at
@@ -2146,7 +2180,7 @@ impl<'a> DelegationRunner<'a> {
                 &member,
                 &instruction,
                 &control,
-                chat,
+                self.target(chat_id),
                 // Issue #242: when this drain is running inside a
                 // dispatched card, the delegate's turn is part of that
                 // card's attempt — its steps and its spend belong to the
@@ -2193,7 +2227,7 @@ impl<'a> DelegationRunner<'a> {
             let marker = crate::runtime::grants::budget_pauses_for(self.company)
                 .park_preserving_background(
                     pause.agent.clone(),
-                    chat.chat_id.map(str::to_string),
+                    chat_id.map(str::to_string),
                     park_message,
                     pause.summary.clone(),
                     now_millis(),
@@ -2271,7 +2305,7 @@ impl<'a> DelegationRunner<'a> {
         // `answering` are properties of the OPERATOR's message, and they
         // stay true at every depth — a question the operator asked is
         // still a question three desks down, and must still mint no card.
-        let nested = Box::pin(self.drain_and_execute(chat, ctx, HandOffs::Run)).await?;
+        let nested = Box::pin(self.drain_and_execute(chat_id, ctx, HandOffs::Run)).await?;
         // Fold the nested answers INTO this member's reply rather than
         // giving each level its own relay turn. The top-level CEO-relay
         // already synthesises every desk reply into one coherent answer
@@ -2842,7 +2876,7 @@ impl<'a> DelegationRunner<'a> {
     pub(crate) async fn run_delegation(
         &self,
         delegation: Delegation,
-        chat: ChatTarget<'_>,
+        chat_id: Option<&str>,
         ctx: MessageContext,
     ) -> Result<DelegationOutcome> {
         match delegation {
@@ -2872,7 +2906,7 @@ impl<'a> DelegationRunner<'a> {
                     // *scheduled* the workflow hours earlier would make the card
                     // answer into a conversation the operator has left. The run
                     // reference below is the provenance instead.
-                    origin_chat_id: chat.chat_id.map(str::to_string),
+                    origin_chat_id: chat_id.map(str::to_string),
                     // Lineage (#185): the dispatched card whose turn queued this
                     // one, when the drain is running inside a task
                     // (`for_task`) — since #204 a dispatched turn drains the
@@ -2946,7 +2980,7 @@ impl<'a> DelegationRunner<'a> {
                         label: desk,
                         scope_key,
                     },
-                    chat,
+                    chat_id,
                     ctx,
                 ))
                 .await
@@ -2984,7 +3018,7 @@ impl<'a> DelegationRunner<'a> {
                         instruction,
                         scope_key,
                     },
-                    chat,
+                    chat_id,
                     ctx,
                 ))
                 .await
@@ -4570,11 +4604,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         fx.runner(&turns)
             .also_mentioned(vec!["chief".to_string()])
-            .handle_operator_message(
-                "engineer",
-                "look into this",
-                ChatTarget::channel(Some("eng_desk")),
-            )
+            .handle_operator_message("engineer", "look into this", Some("eng_desk"))
             .await
             .expect("operator message handled");
 
@@ -4598,11 +4628,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         fx.runner(&turns)
             .also_mentioned(vec!["engineer".to_string()])
-            .handle_operator_message(
-                "chief",
-                "look into this",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "look into this", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -4627,11 +4653,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         fx.runner(&turns)
             .also_mentioned(vec!["researcher".to_string(), "designer".to_string()])
-            .handle_operator_message(
-                "engineer",
-                "look into this",
-                ChatTarget::channel(Some("eng_desk")),
-            )
+            .handle_operator_message("engineer", "look into this", Some("eng_desk"))
             .await
             .expect("operator message handled");
 
@@ -4686,11 +4708,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
 
         fx.runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "approve the launch plan card",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "approve the launch plan card", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -4750,11 +4768,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "map out the pricing repo",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "map out the pricing repo", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -4801,7 +4815,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .runner(&turns)
             .run_delegation(
                 handoff("draft the launch plan"),
-                ChatTarget::default(),
+                None,
                 MessageContext::default(),
             )
             .await
@@ -4830,7 +4844,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .runner(&turns)
             .run_delegation(
                 handoff("write the migration plan"),
-                ChatTarget::default(),
+                None,
                 MessageContext::default(),
             )
             .await
@@ -4856,7 +4870,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", "is the build ok?", ChatTarget::default())
+            .handle_operator_message("chief", "is the build ok?", None)
             .await
             .expect("operator message handled");
         assert!(fx.cards().await.is_empty(), "a question is not work");
@@ -4875,7 +4889,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .for_task("card-1")
             .run_delegation(
                 handoff("write the migration plan"),
-                ChatTarget::default(),
+                None,
                 MessageContext::default(),
             )
             .await
@@ -4898,7 +4912,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .handle_operator_message(
                 "engineer",
                 "read the pricing repo and write modules.md",
-                ChatTarget::channel(Some("eng_desk")),
+                Some("eng_desk"),
             )
             .await
             .expect("operator message handled");
@@ -4952,7 +4966,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turn = fx
             .runner(&turns)
             .with_triage(&escalation)
-            .handle_operator_message("engineer", probe, ChatTarget::channel(Some("eng_desk")))
+            .handle_operator_message("engineer", probe, Some("eng_desk"))
             .await
             .expect("operator message handled");
 
@@ -4991,7 +5005,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
             fx.runner(&turns)
                 .with_triage(&escalation)
-                .handle_operator_message("engineer", residue, ChatTarget::channel(Some("eng_desk")))
+                .handle_operator_message("engineer", residue, Some("eng_desk"))
                 .await
                 .expect("operator message handled");
             let cards = fx.cards().await;
@@ -5035,7 +5049,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turn = fx
             .runner(&turns)
             .requested(Some(crate::ports::types::MessageIntent::Workflow))
-            .handle_operator_message("engineer", residue, ChatTarget::channel(Some("eng_desk")))
+            .handle_operator_message("engineer", residue, Some("eng_desk"))
             .await
             .expect("operator message handled");
 
@@ -5061,7 +5075,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
             fx.runner(&turns)
                 .requested(choice)
-                .handle_operator_message("engineer", residue, ChatTarget::channel(Some("eng_desk")))
+                .handle_operator_message("engineer", residue, Some("eng_desk"))
                 .await
                 .expect("operator message handled");
             assert_eq!(
@@ -5088,11 +5102,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         fx.runner(&turns)
             .requested(Some(crate::ports::types::MessageIntent::Workflow))
-            .handle_operator_message(
-                "engineer",
-                residue,
-                ChatTarget::channel(Some("workflow-copilot:weekly_report")),
-            )
+            .handle_operator_message("engineer", residue, Some("workflow-copilot:weekly_report"))
             .await
             .expect("operator message handled");
 
@@ -5141,7 +5151,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turn = fx
             .runner(&turns)
             .requested(Some(crate::ports::types::MessageIntent::Chat))
-            .handle_operator_message("engineer", residue, ChatTarget::channel(Some("eng_desk")))
+            .handle_operator_message("engineer", residue, Some("eng_desk"))
             .await
             .expect("operator message handled");
 
@@ -5174,7 +5184,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         fx.runner(&turns)
             .with_triage(&escalation)
             .requested(Some(crate::ports::types::MessageIntent::Chat))
-            .handle_operator_message("engineer", residue, ChatTarget::channel(Some("eng_desk")))
+            .handle_operator_message("engineer", residue, Some("eng_desk"))
             .await
             .expect("operator message handled");
 
@@ -5197,7 +5207,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("ack")]);
         fx.runner(&turns)
-            .handle_operator_message("engineer", probe, ChatTarget::channel(Some("eng_desk")))
+            .handle_operator_message("engineer", probe, Some("eng_desk"))
             .await
             .expect("operator message handled");
         assert_eq!(
@@ -5231,7 +5241,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .handle_operator_message(
                 "frontend_engineer",
                 "read the pricing repo and write modules.md",
-                ChatTarget::channel(Some("eng_desk")),
+                Some("eng_desk"),
             )
             .await
             .expect("operator message handled");
@@ -5263,7 +5273,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .handle_operator_message(
                 "frontend_engineer",
                 "read the pricing repo and write modules.md",
-                ChatTarget::channel(Some("eng_desk")),
+                Some("eng_desk"),
             )
             .await
             .expect("operator message handled");
@@ -5300,7 +5310,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .handle_operator_message(
                 "frontend_engineer",
                 "read the pricing repo and write modules.md",
-                ChatTarget::channel(Some("eng_desk")),
+                Some("eng_desk"),
             )
             .await
             .expect("operator message handled");
@@ -5327,11 +5337,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             ],
         );
         fx.runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "map out the pricing repo",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "map out the pricing repo", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -5363,11 +5369,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("planned")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "engineer",
-                imperative,
-                ChatTarget::channel(Some("eng_desk")),
-            )
+            .handle_operator_message("engineer", imperative, Some("eng_desk"))
             .await
             .expect("operator message handled");
         assert!(
@@ -5425,7 +5427,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             let turns = ScriptedTurns::new(&fx, vec![Turn::reply("ok")]);
             fx.runner(&turns)
                 .with_triage(&escalation)
-                .handle_operator_message("chief", named, ChatTarget::channel(Some("general")))
+                .handle_operator_message("chief", named, Some("general"))
                 .await
                 .expect("operator message handled");
         }
@@ -5452,7 +5454,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
         fx.runner(&turns)
             .with_triage(&escalation)
-            .handle_operator_message("chief", residue, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", residue, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -5486,7 +5488,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
             fx.runner(&turns)
                 .with_triage(&escalation)
-                .handle_operator_message("chief", residue, ChatTarget::channel(Some("general")))
+                .handle_operator_message("chief", residue, Some("general"))
                 .await
                 .expect("operator message handled");
             assert_eq!(
@@ -5509,7 +5511,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
         fx.runner(&turns)
-            .handle_operator_message("chief", residue, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", residue, Some("general"))
             .await
             .expect("operator message handled");
         assert_eq!(
@@ -5578,7 +5580,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", imperative, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -5626,7 +5628,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::default())
+            .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
 
@@ -5682,7 +5684,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", imperative, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -5744,7 +5746,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", imperative, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -5781,7 +5783,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             vec![Turn::authoring("done", vec![authored("nightly-digest")])],
         );
         fx.runner(&turns)
-            .handle_operator_message("chief", chatter, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", chatter, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -5808,7 +5810,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("I could not build that")]);
         fx.runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", imperative, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -5840,7 +5842,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("I could not build that")]);
         fx.runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", imperative, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -5907,7 +5909,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::default())
+            .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
 
@@ -5965,7 +5967,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::default())
+            .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
 
@@ -6021,11 +6023,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "engineer",
-                imperative,
-                ChatTarget::channel(Some("engineer")),
-            )
+            .handle_operator_message("engineer", imperative, Some("engineer"))
             .await
             .expect("operator message handled");
 
@@ -6074,11 +6072,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "engineer",
-                imperative,
-                ChatTarget::channel(Some("dm:engineer")),
-            )
+            .handle_operator_message("engineer", imperative, Some("dm:engineer"))
             .await
             .expect("operator message handled");
 
@@ -6123,11 +6117,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "engineer",
-                imperative,
-                ChatTarget::channel(Some("dm:engineer")),
-            )
+            .handle_operator_message("engineer", imperative, Some("dm:engineer"))
             .await
             .expect("operator message handled");
 
@@ -6170,11 +6160,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                imperative,
-                ChatTarget::channel(Some("dm:engineer")),
-            )
+            .handle_operator_message("chief", imperative, Some("dm:engineer"))
             .await
             .expect("operator message handled");
 
@@ -6221,7 +6207,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::default())
+            .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
 
@@ -6268,7 +6254,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::default())
+            .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
 
@@ -6295,11 +6281,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "draft the launch plan for next quarter",
-                ChatTarget::default(),
-            )
+            .handle_operator_message("chief", "draft the launch plan for next quarter", None)
             .await
             .expect("operator message handled");
         assert!(fx.cards().await.is_empty(), "no second card is opened");
@@ -6314,11 +6296,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("green")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "engineer",
-                "is the build green?",
-                ChatTarget::channel(Some("eng_desk")),
-            )
+            .handle_operator_message("engineer", "is the build green?", Some("eng_desk"))
             .await
             .expect("operator message handled");
         assert!(fx.cards().await.is_empty());
@@ -6357,7 +6335,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", question, ChatTarget::default())
+            .handle_operator_message("chief", question, None)
             .await
             .expect("operator message handled");
 
@@ -6413,11 +6391,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "Tell what is there in the tasks list",
-                ChatTarget::default(),
-            )
+            .handle_operator_message("chief", "Tell what is there in the tasks list", None)
             .await
             .expect("operator message handled");
 
@@ -6462,7 +6436,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", question, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", question, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -6536,7 +6510,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turn = fx
             .runner(&turns)
             .with_triage(&escalation)
-            .handle_operator_message("chief", residue, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", residue, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -6590,7 +6564,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         fx.runner(&turns)
             .with_triage(&escalation)
-            .handle_operator_message("chief", residue, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", residue, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -6645,7 +6619,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turn = fx
             .runner(&turns)
             .requested(Some(crate::ports::types::MessageIntent::Chat))
-            .handle_operator_message("chief", residue, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", residue, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -6701,11 +6675,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "the pricing repo needs a map",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "the pricing repo needs a map", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -6748,7 +6718,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", neutral, ChatTarget::default())
+            .handle_operator_message("chief", neutral, None)
             .await
             .expect("operator message handled");
 
@@ -6793,7 +6763,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("Hi! How can I help you today?")]);
         fx.runner(&turns)
-            .handle_operator_message("chief", greeting, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", greeting, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -6827,7 +6797,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("Not much, what's up?")]);
         fx.runner(&turns)
-            .handle_operator_message("chief", greeting, ChatTarget::channel(Some("general")))
+            .handle_operator_message("chief", greeting, Some("general"))
             .await
             .expect("operator message handled");
 
@@ -6858,7 +6828,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             ],
         );
         fx.runner(&turns)
-            .handle_operator_message("chief", imperative, ChatTarget::default())
+            .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
 
@@ -6897,7 +6867,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("shipped the importer")]);
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("engineer", question, ChatTarget::channel(Some("eng_desk")))
+            .handle_operator_message("engineer", question, Some("eng_desk"))
             .await
             .expect("operator message handled");
 
@@ -6949,7 +6919,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .handle_operator_message(
                 "brand_strategist",
                 "SEO Specialist: run an SEO pass over the pricing page",
-                ChatTarget::channel(Some("strategy")),
+                Some("strategy"),
             )
             .await
             .expect("operator message handled");
@@ -7010,7 +6980,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .handle_operator_message(
                 "brand_strategist",
                 "sort out the pricing page",
-                ChatTarget::channel(Some("strategy")),
+                Some("strategy"),
             )
             .await
             .expect("operator message handled");
@@ -7055,7 +7025,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .handle_operator_message(
                 "brand_strategist",
                 "sort out the pricing page",
-                ChatTarget::channel(Some("strategy")),
+                Some("strategy"),
             )
             .await
             .expect("operator message handled");
@@ -7098,11 +7068,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             ],
         );
         fx.runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "get the launch note drafted",
-                ChatTarget::default(),
-            )
+            .handle_operator_message("chief", "get the launch note drafted", None)
             .await
             .expect("operator message handled");
 
@@ -7126,7 +7092,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
         fx.runner(&turns)
-            .handle_operator_message("chief", "draft the investor update", ChatTarget::default())
+            .handle_operator_message("chief", "draft the investor update", None)
             .await
             .expect("operator message handled");
         assert!(fx.cards().await.is_empty());
@@ -7171,7 +7137,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             ],
         );
         fx.runner(&turns)
-            .handle_operator_message("chief", instruction, ChatTarget::default())
+            .handle_operator_message("chief", instruction, None)
             .await
             .expect("operator message handled");
 
@@ -7230,7 +7196,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", question, ChatTarget::default())
+            .handle_operator_message("chief", question, None)
             .await
             .expect("operator message handled");
 
@@ -7276,7 +7242,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             ],
         );
         fx.runner(&turns)
-            .handle_operator_message("chief", "is the build ok?", ChatTarget::default())
+            .handle_operator_message("chief", "is the build ok?", None)
             .await
             .expect("operator message handled");
 
@@ -7334,11 +7300,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -7423,11 +7385,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -7468,11 +7426,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -7522,11 +7476,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -7591,11 +7541,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             // The production wiring in `brain.rs` sets this from the operator's
             // own composed message before calling `handle_operator_message`.
             .reissue_message("ship the API")
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
         assert!(
@@ -7690,11 +7636,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let out = crate::runtime::grants::with_redeem_context(redeem.clone(), async {
             fx.runner(&turns)
                 .reissue_message("ship the API")
-                .handle_operator_message(
-                    "chief",
-                    "ship the API",
-                    ChatTarget::channel(Some("general")),
-                )
+                .handle_operator_message("chief", "ship the API", Some("general"))
                 .await
                 .expect("operator message handled")
         })
@@ -7754,11 +7696,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -7797,11 +7735,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -7833,7 +7767,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .handle_operator_message(
                 "engineer",
                 "read the pricing repo and write modules.md",
-                ChatTarget::channel(Some("eng_desk")),
+                Some("eng_desk"),
             )
             .await
             .expect("operator message handled");
@@ -7869,7 +7803,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .runner(&turns)
             .run_delegation(
                 handoff("draft the launch plan"),
-                ChatTarget::default(),
+                None,
                 MessageContext::default(),
             )
             .await
@@ -7927,11 +7861,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -8003,11 +7933,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -8057,11 +7983,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -8107,11 +8029,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -8151,11 +8069,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let out = fx
             .runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -8189,11 +8103,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         .with_max_depth(1);
 
         fx.runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -8249,11 +8159,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
 
         fx.runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -8301,11 +8207,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
 
         fx.runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
@@ -8352,11 +8254,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
 
         fx.runner(&turns)
-            .handle_operator_message(
-                "chief",
-                "ship the API",
-                ChatTarget::channel(Some("general")),
-            )
+            .handle_operator_message("chief", "ship the API", Some("general"))
             .await
             .expect("operator message handled");
 
