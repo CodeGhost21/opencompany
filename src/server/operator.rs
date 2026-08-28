@@ -3103,7 +3103,7 @@ async fn history_viewer(
         Some(actor) if actor.kind == ActorKind::User => {
             let is_admin = state
                 .users()
-                .get(company, &actor.id)
+                .get_user(company, &actor.id)
                 .await
                 .map_err(|_| crate::server::Rejection::from(unauthorized_response()))?
                 .is_some_and(|user| user.role == UserRole::Admin);
