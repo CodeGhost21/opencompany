@@ -69,18 +69,25 @@ export function CompanyPicker({ companies, onPick, onCreate, onReset, canCreate 
           {companies.map((c) => (
             <Card
               key={c.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => onPick(c.id)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onPick(c.id);
-                }
-              }}
-              className="group cursor-pointer p-5 transition-colors hover:border-primary/40 hover:bg-accent/40"
+              className="p-5 transition-colors hover:border-primary/40 hover:bg-accent/40"
             >
-              <div className="flex items-start gap-3">
+              {/* Only this row is the "open company" control. A screen reader
+                  flattens or inconsistently represents an interactive
+                  descendant (the Reset button below) inside another
+                  interactive element, so Reset lives as this div's sibling —
+                  not its child — even though it's laid out to appear inline. */}
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => onPick(c.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onPick(c.id);
+                  }
+                }}
+                className="group flex cursor-pointer items-start gap-3"
+              >
                 <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
                   <Building2 className="size-5" />
                 </div>
@@ -92,32 +99,20 @@ export function CompanyPicker({ companies, onPick, onCreate, onReset, canCreate 
                       <Badge variant="secondary">{c.pending_approvals} to approve</Badge>
                     )}
                   </div>
-                  {onReset && canCreate && c.lifecycle !== "archived" && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="mt-3 h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
-                      // The card is a button; keep the reset click from also
-                      // opening the company under it.
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onReset(c);
-                      }}
-                      // Enter/Space on this button bubble as `keydown` before
-                      // the browser synthesizes their own `click` — the card's
-                      // handler below reacts to that bubbled keydown itself,
-                      // so a `stopPropagation` on click alone (above) is too
-                      // late: Space would switch into the company without
-                      // opening Reset, and Enter could fire both.
-                      onKeyDown={(e) => e.stopPropagation()}
-                      data-testid={`picker-reset-${c.id}`}
-                    >
-                      <RotateCcw className="size-3.5" /> Reset
-                    </Button>
-                  )}
                 </div>
                 <ArrowRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
               </div>
+              {onReset && canCreate && c.lifecycle !== "archived" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="mt-3 ml-[52px] h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
+                  onClick={() => onReset(c)}
+                  data-testid={`picker-reset-${c.id}`}
+                >
+                  <RotateCcw className="size-3.5" /> Reset
+                </Button>
+              )}
             </Card>
           ))}
         </div>

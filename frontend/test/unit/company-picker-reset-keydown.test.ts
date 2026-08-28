@@ -92,3 +92,24 @@ describe("the Reset button on a company card", () => {
     expect(onPick).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Codex review on #1828 (PR comment 3878750741): the card's `role="button"`
+ * made the nested Reset `<Button>` an interactive descendant of another
+ * button. Accessibility trees flatten or inconsistently represent button
+ * descendants of another button, so Reset could go unannounced as its own
+ * action to assistive technology even though it remained keyboard-focusable
+ * (which is why the keydown-bubbling tests above still passed). Reset must
+ * render as a sibling of the card's `role="button"` element, not inside it.
+ */
+describe("the Reset button's place in the accessibility tree", () => {
+  it("is not a descendant of the card's role=button control", async () => {
+    await open();
+
+    const interactiveAncestor = resetButton().closest('[role="button"]');
+    expect(
+      interactiveAncestor,
+      "Reset must not be nested inside the card's role=button element",
+    ).toBeNull();
+  });
+});
