@@ -1215,9 +1215,22 @@ export function AppShell({
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
         setChatChannelByThread(channelMap(fallbackDesks, []));
-        setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
+        // `MAIN_THREAD_ID`, not `fallbackDesks[0]?.id`: `defaultDesks()` no
+        // longer carries a fabricated `main` row (issue #1743), so the first
+        // fallback desk is just whichever one sorts first — landing the
+        // console on an arbitrary desk on an unexpected error instead of the
+        // company-wide line every other path opens on (issue #1781 review,
+        // Codex P2/medium).
+        setFirstDeskChannelId(MAIN_THREAD_ID);
         const threadIds = defaultThreads().map((t) => t.id);
-        const channels = fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id }));
+        const channels = [
+          // `#general` is not a desk here either — same reason the success
+          // path above names it explicitly. Without this entry `mainThread()`
+          // is still in `threadIds` (via `defaultThreads()`) but has no
+          // channel to rehydrate history through.
+          { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
+          ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+        ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         rehydrateAll();
         disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);

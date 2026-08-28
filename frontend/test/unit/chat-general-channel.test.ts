@@ -559,6 +559,29 @@ describe("the shell maps the main line to #general, not to the first desk", () =
     );
   });
 
+  /**
+   * The last-resort `.catch` handler is a second, independent path to the
+   * same landing/rehydration decision the two tests above pin for the success
+   * path — and `defaultDesks()` dropping its fabricated `main` row regressed
+   * it the same way, one call further down: `fallbackDesks[0]?.id` used to
+   * agree with the company-wide line only by accident (the first fallback
+   * desk happened to be that fabricated row), and the explicit
+   * `{ channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID }` rehydration
+   * entry it also carried was dropped with it — so `mainThread()` stayed in
+   * `threadIds` (via `defaultThreads()`) with no channel to rehydrate
+   * through (issue #1781 review, Codex P2/medium).
+   */
+  it("lands the unexpected-error fallback on #general too, not the first fallback desk", () => {
+    expect(shell).toContain("setFirstDeskChannelId(MAIN_THREAD_ID);");
+    expect(shell).not.toContain("setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);");
+  });
+
+  it("names #general as a rehydration target on the unexpected-error fallback too", () => {
+    expect(shell).toContain(
+      "{ channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID }, ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),",
+    );
+  });
+
   it("hydrates a DM from a thread id that actually belongs to that DM", () => {
     // A DM's history is fetched under the address it is written on. For a
     // teammate whose id is a General spelling the bare id is *not* that
