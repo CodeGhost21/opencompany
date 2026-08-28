@@ -588,6 +588,26 @@ async fn create_desk(
             "invalid desk id {id:?} — use lowercase letters, digits, and underscores"
         ))));
     }
+    // A desk that claimed one of the General spellings would shadow the
+    // built-in `#general` channel: the console would show two `#general` rows
+    // and the host would route messages addressed to it at this desk's lead
+    // instead of the orchestrator (issue #1743). Refused at creation, which
+    // costs nothing — no manifest can reach this path, so no existing company
+    // loses a desk.
+    //
+    // The **display name** is reserved for the same reason and not a weaker
+    // one: `resolve_desk_id` matches a desk by id *or* by case-insensitive
+    // name, so `{"id": "ops", "name": "General"}` shadows the channel just as
+    // thoroughly — `everyone_desk` folds the built-in `main` thread to
+    // `General`, that lookup then selects this desk, and `@everyone` on the
+    // company-wide line expands to its members instead of the roster.
+    if crate::server::chat_history::is_general_chat(Some(&id))
+        || crate::server::chat_history::is_general_chat(Some(&name))
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_RESERVED.to_string(),
+        )));
+    }
     // Issue #1757: `operator` is reserved for the built-in, read-only Operator
     // system channel — `desk_exists` alone would miss this, since the system
     // channel is never a manifest or overlay desk. Without this, a created
@@ -5596,6 +5616,14 @@ mode = "full"
                 StatusCode::CONFLICT,
             ),
             (r#"{"name":"operator"}"#, StatusCode::CONFLICT),
+            // Issue #1743 / PR #1781 review: a desk claiming a General
+            // spelling — by id or by display name — would shadow the
+            // built-in `#general` channel exactly as an `operator`-id desk
+            // shadows the Operator feed.
+            (r#"{"name":"Ops","id":"general"}"#, StatusCode::CONFLICT),
+            (r#"{"name":"Ops","id":"main"}"#, StatusCode::CONFLICT),
+            (r#"{"name":"General"}"#, StatusCode::CONFLICT),
+            (r#"{"name":"Main"}"#, StatusCode::CONFLICT),
         ];
         for (body, want) in cases {
             let response = app
