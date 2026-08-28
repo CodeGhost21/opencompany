@@ -45,6 +45,7 @@ import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { RouteLoading } from "@/components/route-loading";
 import {
   RESTING_ROW,
   SidebarCollapseButton,
@@ -2976,11 +2977,7 @@ export function AppShell({
           )}
           {view === "workspace" && (
             <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading workspace…
-                </div>
-              }
+              fallback={<RouteLoading title="Workspace" label="Loading workspace…" />}
             >
               <WorkspaceView
                 client={client}
@@ -3023,9 +3020,11 @@ export function AppShell({
           {view === "observatory" && (
           <Suspense
             fallback={
-              <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
-                Loading observatory…
-              </div>
+              // Matches `ObservatoryView`'s own rule for the same reason
+              // `RouteLoading`'s doc gives: the loading state has to settle on
+              // the name the loaded header will actually show, or the title
+              // flips the moment the chunk lands.
+              <RouteLoading title={sub ? "Run" : "Observatory"} label="Loading observatory…" />
             }
           >
             <ObservatoryView
@@ -3045,9 +3044,12 @@ export function AppShell({
         {view === "workflows" && (
             <Suspense
               fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading canvas…
-                </div>
+                // Static, not sub-aware: the loaded header's "Workflows" /
+                // "Runs" split reads `indexTab`, a tab this boundary cannot
+                // see (persisted client-side, not carried by the route) — see
+                // `RouteLoading`'s own doc for why a guess here would be worse
+                // than no bar.
+                <RouteLoading title="Workflows" label="Loading canvas…" />
               }
             >
               <WorkflowsView
@@ -3089,22 +3091,18 @@ export function AppShell({
             </Suspense>
           )}
           {view === "pages" && (
-            <Suspense
-              fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading pages…
-                </div>
-              }
-            >
+            <Suspense fallback={<RouteLoading title="Pages" label="Loading pages…" />}>
               <PagesView client={client} company={company} />
             </Suspense>
           )}
           {view === "finances" && (
             <Suspense
               fallback={
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                  Loading finances…
-                </div>
+                // Names the section itself while its own lazy chunk is still
+                // in flight — before `FinanceSection` has even mounted to run
+                // its own per-subpage Suspense (which already uses
+                // `RouteLoading` with this same static title, one level in).
+                <RouteLoading title="Finances" label="Loading finances…" />
               }
             >
               <FinanceSection
