@@ -2922,6 +2922,7 @@ impl CompanyRuntime {
                 // stalled workflow up.
                 workflow_id: crate::runtime::workflow_resume::gate_workflow_id(&p.effect)
                     .map(str::to_owned),
+                owner_task_id: None,
                 id: p.id,
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
