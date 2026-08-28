@@ -46,6 +46,15 @@ import { LIVE_BRAIN } from "./capabilities";
  * this spec instead of failing it, and a host that never replies fails it with
  * that stated plainly rather than as a timeout somewhere downstream.
  *
+ * That reading needs an address to read from, and taking one turned out to
+ * carry an assumption of its own. The address is captured from the console's
+ * own hydration read, inside the route handler — and capturing it with
+ * `await route.request().allHeaders()` suspended that handler for an unbounded
+ * interval, so on a loaded runner the history bar went up before the capture
+ * completed and the premise wait had nothing to poll. It then reported the
+ * turn as undelivered, which is the same misdirection in a new place. The
+ * capture is now synchronous, and the send waits on it.
+ *
  * Nothing else can draw this reply, and the spec makes that true rather than
  * assuming it. The `202` body never reached the page, so no turn id was learned
  * from the POST — but the shell also arms its turn poll from `listRuns` at
@@ -126,10 +135,24 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
       // this turn at all. The thread rides the `desk` query param
       // (`client.getChatHistory`).
       if (new URL(request.url()).searchParams.get("desk") === ENGINEERING.id) {
-        historyProbe = {
-          url: request.url(),
-          auth: (await request.allHeaders()).authorization,
-        };
+        // `headers()`, NOT `await allHeaders()` — the awaited form is what left
+        // this spec failing in CI while passing everywhere else (issue #1885).
+        // It suspends the handler between the `holdHistory` test above and the
+        // assignment below for an interval nothing bounds: measured at 3ms on
+        // one local run and longer than the whole remaining hydration fan-out
+        // on the next. Lose that race and the bar goes up while the capture is
+        // still suspended, `awaitJournaledReply` has no probe to poll, and the
+        // spec reports a delivery failure that never happened. The same
+        // suspension also stalls the console's own hydration read, which
+        // cannot be continued until the handler resumes.
+        //
+        // Nothing is given up by dropping the await. It exists to see headers
+        // the *browser* adds; the only header wanted here is one the console
+        // sets itself (`ApiClient.authHeaders`), which the synchronous
+        // provisional map already holds. In this lane it is not set at all —
+        // a same-origin console authenticates by HttpOnly cookie — and the
+        // `page.request` context below carries that cookie on its own.
+        historyProbe = { url: request.url(), auth: request.headers().authorization };
       }
       await route.continue();
       return;
@@ -159,26 +182,29 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
    * assertions honest; it must not blind the test's own premise check too.
    */
   const awaitJournaledReply = async (): Promise<string | null> => {
+    // Read once, up front. The send does not start until the capture above has
+    // landed (see the wait after `openChannel`), so this is non-null by
+    // construction rather than by luck — and taking it once means the poll
+    // cannot be handed a different probe halfway through.
+    const probe: { url: string; auth: string | undefined } | null = historyProbe;
+    if (probe == null) return "no history request was captured before the send";
     const deadline = Date.now() + 45_000;
-    let lastStatus = "no history request was captured during hydration";
+    let lastStatus = "the host has not journaled this turn's reply yet";
     while (Date.now() < deadline) {
-      if (historyProbe) {
-        const probe: { url: string; auth: string | undefined } = historyProbe;
-        const response = await page.request
-          .get(probe.url, probe.auth ? { headers: { authorization: probe.auth } } : {})
-          .catch(() => null);
-        if (response == null) lastStatus = "the history probe request failed";
-        else if (!response.ok()) lastStatus = `history probe returned ${response.status()}`;
-        else {
-          const body = await response.text().catch(() => "");
-          // The REPLY, not the marker alone — the operator's own message
-          // carries the marker too and is journaled the moment the host
-          // accepts the turn, so matching that would cut before any reply
-          // existed and defeat the premise this wait exists to establish.
-          // Same text `reply()` locates in the DOM.
-          if (body.includes(`You said: ${marker}`)) return null;
-          lastStatus = "the host has not journaled this turn's reply yet";
-        }
+      const response = await page.request
+        .get(probe.url, probe.auth ? { headers: { authorization: probe.auth } } : {})
+        .catch(() => null);
+      if (response == null) lastStatus = "the history probe request failed";
+      else if (!response.ok()) lastStatus = `history probe returned ${response.status()}`;
+      else {
+        const body = await response.text().catch(() => "");
+        // The REPLY, not the marker alone — the operator's own message
+        // carries the marker too and is journaled the moment the host
+        // accepts the turn, so matching that would cut before any reply
+        // existed and defeat the premise this wait exists to establish.
+        // Same text `reply()` locates in the DOM.
+        if (body.includes(`You said: ${marker}`)) return null;
+        lastStatus = "the host has not journaled this turn's reply yet";
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
@@ -237,6 +263,23 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   });
 
   await openChannel(page, ENGINEERING.id);
+
+  // The probe is the premise of the cut, so wait for it rather than assume it.
+  // The console issues its whole hydration fan-out synchronously inside the
+  // `listDesks`/`listTeam` continuation — before React can paint the composer
+  // `openChannel` waits on — so with the capture no longer suspending, this is
+  // already true by the time it is read. That is an ordering an effect in
+  // `app-shell` happens to have, not a promise it makes, and this spec has now
+  // cost two triage passes to an assumption of exactly that shape. Enforced, a
+  // console that stops reading this desk's history fails here, saying so,
+  // rather than downstream as a delivery failure that never happened.
+  await expect
+    .poll(() => historyProbe !== null, {
+      timeout: 30_000,
+      message:
+        "the console never read #engineering-desk's history, so the cut has no journal to observe",
+    })
+    .toBe(true);
 
   await page.getByPlaceholder(/^Message /).fill(marker);
   holdHistory = true;

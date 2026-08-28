@@ -457,6 +457,32 @@ fn advertised_tools(script: &Script) -> Vec<String> {
     names
 }
 
+/// Every distinct `system` message the harness actually sent to the model —
+/// the composed system prompt as it went over the wire, so a test can assert
+/// what an agent was really told rather than what a brief function returns in
+/// isolation.
+fn system_prompts(script: &Script) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for body in script.seen.lock().unwrap().iter() {
+        for message in body
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            if message.get("role").and_then(Value::as_str) != Some("system") {
+                continue;
+            }
+            if let Some(content) = message.get("content").and_then(Value::as_str)
+                && !seen.iter().any(|s| s == content)
+            {
+                seen.push(content.to_string());
+            }
+        }
+    }
+    seen
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -671,5 +697,40 @@ async fn a_narrowed_listing_on_an_unknown_toolkit_needs_no_provider_specific_cod
     assert!(
         !joined.contains("TRUNCATED"),
         "a single match is not a cut: {joined}"
+    );
+}
+
+/// Issue #1759, wired end to end: the capability-grounding + Composio-routing
+/// brief is not just a pure function — it reaches the model. This drives the
+/// real harness (real `build_agent`, real `HostedProvider`) and reads the system
+/// prompt off the wire, proving the agent is actually told to route GitHub /
+/// connected SaaS through `composio_execute` and NOT to hand-roll `http_request`
+/// against a provider API. A unit test on `composio_brief` cannot make this
+/// claim; it pins the text, not whether the text was ever composed into a turn.
+#[tokio::test]
+async fn the_composio_routing_brief_reaches_the_model_system_prompt() {
+    let (model_url, script) = spawn_script(vec![Turn::Say("Understood.")]).await;
+    let (composio_url, _stub) = spawn_composio_backend().await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (pool, deps, record) = harness(model_url, composio_url, dir.path()).await;
+    pool.run(&record.id, "ceo", "What can you do on GitHub?", &deps, None)
+        .await
+        .expect("turn runs");
+
+    let system = system_prompts(&script).join("\n");
+    // The routing rule reached the model.
+    assert!(
+        system.contains("composio_execute"),
+        "the system prompt must name the Composio call path: {system}"
+    );
+    assert!(
+        system.contains("http_request") && system.contains("api.github.com"),
+        "the system prompt must warn off hand-rolling provider APIs: {system}"
+    );
+    // The grounding half reached it too.
+    assert!(
+        system.to_lowercase().contains("no browser"),
+        "the system prompt must ground the agent against promising browser actions: {system}"
     );
 }

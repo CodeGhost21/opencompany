@@ -121,6 +121,21 @@ pub struct RunContext<'a> {
     /// The operator's topic for this run (issue #154), threaded to the agent
     /// capability so a node's turn carries what was actually asked.
     pub run_request: Option<String>,
+    /// The trigger payload this run was started with (issue #1825, P1
+    /// follow-up). Threaded to [`HarnessAgentRunner`] so a blocked node's
+    /// in-memory continuation stash can be armed at park time — see
+    /// [`park_gated_calls`](HarnessAgentRunner::park_gated_calls) — rather than
+    /// only after the engine settles, which is what let an approval decided in
+    /// that window be consumed with nothing to release.
+    pub trigger_input: &'a Value,
+    /// This run's own attribution (issue #1862 prerequisite), threaded to
+    /// [`HarnessAgentRunner`] so [`park_gated_calls`](HarnessAgentRunner::park_gated_calls)
+    /// arms a blocked node's continuation stash with the run's real
+    /// `started_by` at park time — `arm` is first-write-wins, and park time
+    /// runs before the runner's block-settle pass, so this call is the one
+    /// that actually sticks; leaving it defaulted here would silently pin
+    /// every blocked node to `Operator` regardless of who triggered the run.
+    pub started_by: crate::ports::types::StartedBy,
     /// Issue #542: stub every effectful slot and journal nothing.
     pub dry_run: bool,
     /// Where an agent node leaves an operator-facing notice (issue #638).
@@ -196,6 +211,8 @@ pub async fn build_capabilities(
         workflow_id,
         run_id,
         run_request,
+        trigger_input,
+        started_by,
         dry_run,
         notices,
         board,
@@ -387,6 +404,8 @@ pub async fn build_capabilities(
                 workflow_id.to_string(),
                 run_id.to_string(),
                 run_request,
+                trigger_input.clone(),
+                started_by,
                 notices,
                 board,
                 blocks,
@@ -561,6 +580,18 @@ pub struct HarnessAgentRunner {
     /// run, so without this the run's topic never reaches the teammate doing the
     /// work — the agent would run, find no subject, and ask for one.
     run_request: Option<String>,
+    /// The trigger payload this run was started with (issue #1825, P1
+    /// follow-up). Carried so [`park_gated_calls`](Self::park_gated_calls) can
+    /// arm a blocked node's continuation stash itself, at park time, instead
+    /// of leaving that to the runner's block-settle pass — see that method's
+    /// doc for the window this closes.
+    trigger_input: Value,
+    /// This run's own attribution (issue #1862 prerequisite), carried so
+    /// [`park_gated_calls`](Self::park_gated_calls) can arm a blocked node's
+    /// continuation stash with it at park time — see that method's doc for
+    /// why the value stamped here, not the settle-time call, is the one that
+    /// survives `arm`'s first-write-wins semantics.
+    started_by: crate::ports::types::StartedBy,
     /// Where this node leaves an operator-facing notice (issue #638).
     notices: RunNotices,
     /// Where this node's board writes are recorded (issue #661 / M5).
@@ -849,6 +880,8 @@ impl HarnessAgentRunner {
         workflow_id: String,
         run_id: String,
         run_request: Option<String>,
+        trigger_input: Value,
+        started_by: crate::ports::types::StartedBy,
         notices: RunNotices,
         board: RunBoard,
         blocks: RunBlocks,
@@ -868,6 +901,8 @@ impl HarnessAgentRunner {
             workflow_id,
             run_id,
             run_request,
+            trigger_input,
+            started_by,
             notices,
             board,
             blocks,
@@ -1441,6 +1476,91 @@ impl HarnessAgentRunner {
             return summary;
         };
 
+        // Issue #1825 (P1 follow-up): arm this node's in-memory continuation
+        // stash BEFORE the loop below parks a single call, not after the
+        // runner's block-settle pass — which is `stash_blocked_agent_nodes`,
+        // and runs only once the agent has returned, the engine has settled,
+        // and (on the halt path) the run's output has been persisted. The
+        // first `park_and_journal` call below is what makes this turn's
+        // approval card durable and clickable; an operator who acts on it in
+        // the window between that and block-settle used to have their
+        // decision consumed by `continue_turn` against an empty stash — the
+        // turn retired with nothing to release, and the batch-settle arm then
+        // stashed facts a spent decision would never come back for. Arming
+        // here, before any card exists to act on, closes the window instead
+        // of narrowing it. `arm` is first-write-wins and cheap (one HashMap
+        // insert under a `Mutex`), so a redundant call from the settle pass
+        // below is a harmless no-op, not a second source of truth.
+        parking
+            .blocked_nodes
+            .arm(node_turn, &self.workflow_id, &self.trigger_input, &self.started_by);
+
+        // Issue #1825 (P1, second follow-up — found by chatgpt-codex-connector):
+        // the in-memory arm above only helps the no-restart case. The durable
+        // mirror this node's stash needs to survive a restart —
+        // `record_blocked_node_stashed`'s `BlockedNodeStashed` — used to be
+        // written only from `stash_blocked_agent_nodes`, after settle, same as
+        // the in-memory arm was before the fix above. `park_and_journal` below
+        // is what makes the first card in this node's batch host-durable and
+        // clickable; a process that dies after that write lands but before the
+        // settle pass's durable stash runs leaves a restart with a recoverable
+        // card and no matching stash for it to release — approving it then
+        // consumes the card against nothing, identical in shape to the
+        // in-memory race the arm above closes, one durability tier up. Writing
+        // it here, before any card is durable, closes that window the same
+        // way. Best-effort, matching every other park-time write in this
+        // function: a failed durable stash still leaves the in-memory arm
+        // above serving the common (no-restart) case, and failing the node
+        // over an approvals-queue write would be the wrong trade.
+        if let Err(error) = parking
+            .journal
+            .record_blocked_node_stashed(node_turn, &self.workflow_id, &self.trigger_input)
+            .await
+        {
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                node_turn,
+                %error,
+                "workflow agent node: a blocked node's continuation facts could not be \
+                 durably stashed at park time; the in-memory stash still covers a resolve \
+                 without a restart, and the block-settle pass's own stash write remains as \
+                 a fallback"
+            );
+        }
+
+        // Issue #1825 (P1, fourth follow-up — found by chatgpt-codex-connector):
+        // for a node parking MORE than one gated call, hold this turn's
+        // `ContinuationQueue` counter open across the whole loop below, so
+        // approving the first card the loop parks cannot complete the batch
+        // before the remaining calls have even been attempted. Each
+        // successful `park_and_journal` call arms this same counter (issue
+        // #469/#978's original mechanism, unchanged): with no hold, that
+        // per-call increment means outstanding briefly equals exactly the
+        // number of calls parked *so far*, not the batch's true size — a
+        // decision on the very first card can zero it out while later
+        // iterations are still awaiting store I/O. `blocked_nodes.arm` above
+        // already makes the workflow id and trigger input available the
+        // instant that first card exists (closing the single-call race this
+        // node's stash used to hit), so a premature zero here does not find
+        // an empty stash and safely fall back to "re-run the workflow" the
+        // way it once did — it finds a real one and re-dispatches, duplicating
+        // whatever the run does next. The hold pins outstanding at least 1
+        // above the count of *decided* cards until every request has been
+        // attempted, released only after the loop below (see there).
+        //
+        // Skipped for a single-call node (the overwhelmingly common case):
+        // there is no "rest of the batch" to protect against, and holding
+        // would only insert an extra decrement between that lone card's
+        // approval and its release — reopening, for the common case, the
+        // exact empty-window this function's first follow-up (above) exists
+        // to close. See the release site for what happens on the rare batch
+        // that is fully decided before this loop finishes attempting it.
+        let holds_continuation = requests.len() > 1;
+        if holds_continuation {
+            parking.continuations.arm(node_turn);
+        }
+
         for request in requests {
             push_tool(&mut summary.tools, &request.tool);
             // The delivery precedent: a workflow run has no board card behind it
@@ -1504,6 +1624,81 @@ impl HarnessAgentRunner {
             }
         }
         self.approvals.extend(rows);
+
+        // Issue #1825 (P1, fourth follow-up): release the hold armed above,
+        // now that every request in this batch has actually been attempted —
+        // whether it parked or failed. From here on, `outstanding` for this
+        // turn again means exactly what `ContinuationQueue::decide` assumes it
+        // means: the count of *real, parked* cards left undecided.
+        //
+        // `Some(batch)` back means this release was itself the batch's last
+        // decision — every card this loop parked was already approved or
+        // denied by the time the loop finished attempting the rest, which
+        // needs an operator (or an API caller) faster than this function's
+        // own sequential parks. `park_gated_calls` runs on `HarnessAgentRunner`,
+        // deep inside the agent's own turn, with no path back to
+        // `CompanyRuntime::resume_blocked_agent_node` — the only place that
+        // spawns a continuation — short of re-entering this run's own
+        // execution while it is still mid-turn, which is a worse hazard than
+        // the one this hold exists to close (double-dispatch again, just
+        // moved). So this rare batch is left exactly as `blocked_nodes.arm`
+        // above already left it: approved and durably stashed. The decisions
+        // themselves are not lost — each was already resolved and journaled
+        // independently of this counter — only the automatic re-dispatch is
+        // deferred, to the next boot's `reconcile_stranded_blocked_nodes`
+        // (see `resume_blocked_agent_node`'s doc for that path). An empty
+        // batch (every request below failed to park, so nothing was ever
+        // decided) is silently fine — the cleanup right after this handles
+        // that case.
+        if holds_continuation
+            && let Some(batch) = parking.continuations.decide(node_turn, None)
+            && !batch.is_empty()
+        {
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                node_turn,
+                decisions = batch.len(),
+                "workflow agent node: every gated call this node parked was already decided \
+                 before the rest of the batch finished parking; the approval is recorded but \
+                 the run will not auto-resume until the next boot's stranded-block \
+                 reconciliation"
+            );
+        }
+
+        // Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector):
+        // the arm and the durable stash above run unconditionally, before this
+        // loop even attempts a single park — that ordering is the whole point
+        // (it is what closes the race the P1 follow-up fixed). But if every
+        // request in this node's batch then fails to park or journal,
+        // `summary.approval_ids` comes back empty: nothing was ever parked for
+        // an operator to decide, so nothing will ever call `continue_turn` for
+        // this turn, and the stash this function just armed and durably wrote
+        // sits forever — one workflow id and complete trigger payload retained
+        // in memory for the life of the process, and durably on every replay,
+        // per store outage this hits. Retire what was just armed the same way
+        // the background-retry cleanup above does: release the in-memory
+        // stash, then append one `BlockedNodeReleased` so a durable stash (if
+        // the write landed) does not outlive the batch it was for either.
+        if summary.approval_ids.is_empty() {
+            parking.blocked_nodes.release(node_turn);
+            if let Err(error) = parking
+                .journal
+                .record_blocked_node_released(node_turn)
+                .await
+            {
+                tracing::warn!(
+                    company = %self.company,
+                    run_id = %self.run_id,
+                    node_turn,
+                    %error,
+                    "workflow agent node: every gated call for this node failed to park, but \
+                     retiring the stash armed for it also failed durably; a stale entry may \
+                     linger until a manual sweep"
+                );
+            }
+        }
+
         summary
     }
 }
@@ -2474,6 +2669,8 @@ mod tests {
             "wf-1".to_string(),
             "run-1702".to_string(),
             None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -2612,6 +2809,8 @@ mod tests {
             "wf-1".to_string(),
             "run-1880".to_string(),
             None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -2688,6 +2887,552 @@ mod tests {
         assert!(notices.is_empty(), "nothing was discarded: {notices:?}");
     }
 
+    /// Issue #1825 (P1, found by chatgpt-codex-connector): `park_gated_calls`
+    /// must arm a blocked node's in-memory continuation stash itself, before
+    /// it parks a single call — not leave that to the runner's block-settle
+    /// pass (`stash_blocked_agent_nodes` in `super::super::runner`), which
+    /// only runs after the agent has returned, the engine has settled, and —
+    /// on the halt path — the run's output has already been persisted.
+    ///
+    /// # The race this closes
+    ///
+    /// `park_and_journal` (inside the loop this test drives) is what makes a
+    /// blocked node's approval card durable and clickable. Before this fix,
+    /// nothing armed `BlockedNodeQueue` until well after that — an operator
+    /// who approved the card in that window found `continue_turn` consuming
+    /// their decision against an empty stash: the turn retired with nothing
+    /// to release, and the later block-settle pass then stashed facts for a
+    /// decision that had already been spent, permanently stranding the run
+    /// (exactly the loss `stashed_turns()`'s reconciliation retires as
+    /// "unapproved"). `HarnessAgentRunner` carrying no trigger input was why
+    /// the arm could not happen here before — see `RunContext::trigger_input`
+    /// and this struct's own `trigger_input` field.
+    ///
+    /// # Why this drives `park_gated_calls` directly
+    ///
+    /// No `stash_blocked_agent_nodes` block-settle pass runs anywhere in this
+    /// test — the queue is inspected immediately after the parking call
+    /// returns, the same way the resolve path's `peek` would find it if an
+    /// approval landed at that instant. Pre-fix this assertion fails: nothing
+    /// in `park_gated_calls` armed the queue, so the peek is `None`. Post-fix
+    /// it holds this run's own trigger input, proving the card cannot outrun
+    /// the stash that redeems it.
+    #[tokio::test]
+    async fn park_gated_calls_arms_the_stash_before_any_block_settle_pass_runs() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+        use crate::ports::types::{Effect, EffectGroup};
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p1-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let parking = deps
+            .delivery
+            .clone()
+            .expect("gated_tool_turn_test::deps wires delivery")
+            .parking
+            .clone()
+            .expect("gated_tool_turn_test::deps wires parking");
+        let queue = deps.approval_requests.clone();
+        let trigger_input = json!({ "request": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1825-p1"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1825-p1"));
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1825-p1".to_string(),
+            "run-1825-p1".to_string(),
+            None,
+            trigger_input.clone(),
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+
+        // Pushed inside the run's own scope, exactly as its turn would.
+        let claim = queue.claim(ApprovalScope::Run("run-1825-p1".to_string()));
+        claim
+            .scoped(async {
+                queue.push(ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "gated".to_string(),
+                    effect: Effect {
+                        kind: "shell".to_string(),
+                        group: EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: json!({ "cmd": "rm -rf /" }),
+                        agent: Some("ceo".to_string()),
+                        run_id: None,
+                    },
+                });
+            })
+            .await;
+
+        // The real call a turn's tool loop makes. No block-settle pass runs
+        // anywhere in this test.
+        claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
+
+        let stashed = parking.blocked_nodes.peek(&node_turn).expect(
+            "the stash must be armed by park_gated_calls itself, before any block-settle \
+             pass runs — an operator approving this node's just-parked card must always find \
+             something to release",
+        );
+        assert_eq!(stashed.workflow_id, "wf-1825-p1");
+        assert_eq!(stashed.input, trigger_input);
+    }
+
+    /// Issue #1825 (P1, second follow-up — found by chatgpt-codex-connector):
+    /// `park_gated_calls` must durably stash a blocked node's continuation
+    /// facts itself, before it parks a single call, not leave the durable
+    /// mirror to `stash_blocked_agent_nodes`'s block-settle pass alone.
+    ///
+    /// # The race this closes
+    ///
+    /// The test above proves the *in-memory* arm can no longer be outrun by
+    /// an operator acting on a just-published card. But `park_and_journal`
+    /// (inside the loop this test also drives) is what makes that card
+    /// **host-durable** and clickable across a restart — and until this fix,
+    /// nothing durable backed the in-memory arm until
+    /// `stash_blocked_agent_nodes` ran, which is strictly later: only once
+    /// the agent has returned and the engine has settled. A process that
+    /// died in that window left a restart with a recoverable card
+    /// (`ApprovalParked` is `Durability::Host` for a workflow-scoped effect)
+    /// and no matching `BlockedNodeStashed` record for `BlockedNodeQueue`'s
+    /// own `rearm` to rebuild a stash from — approving the recovered card
+    /// then consumed it against nothing, the identical shape the in-memory
+    /// race above closes, one durability tier up.
+    ///
+    /// # Why this drives `park_gated_calls` directly, and reads the journal
+    ///
+    /// Exactly like the test above: no `stash_blocked_agent_nodes` block-
+    /// settle pass runs anywhere here, so a durable stash observed right
+    /// after `park_gated_calls` returns can only have come from the park-time
+    /// write this fix adds. Pre-fix this assertion fails: `blocked_stashes()`
+    /// is empty, because nothing durable is written until settle. Post-fix it
+    /// holds this run's own trigger input, proving the durable record cannot
+    /// outrun the card that redeems it either.
+    #[tokio::test]
+    async fn park_gated_calls_durably_stashes_before_any_block_settle_pass_runs() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+        use crate::ports::types::{Effect, EffectGroup};
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p1b-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let queue = deps.approval_requests.clone();
+        let trigger_input = json!({ "request": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1825-p1b"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1825-p1b"),
+        );
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1825-p1b".to_string(),
+            "run-1825-p1b".to_string(),
+            None,
+            trigger_input.clone(),
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+
+        let claim = queue.claim(ApprovalScope::Run("run-1825-p1b".to_string()));
+        claim
+            .scoped(async {
+                queue.push(ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "gated".to_string(),
+                    effect: Effect {
+                        kind: "shell".to_string(),
+                        group: EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: json!({ "cmd": "rm -rf /" }),
+                        agent: Some("ceo".to_string()),
+                        run_id: None,
+                    },
+                });
+            })
+            .await;
+
+        // The real call a turn's tool loop makes. No block-settle pass runs
+        // anywhere in this test.
+        claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
+
+        let stashed = journal
+            .blocked_stashes()
+            .into_iter()
+            .find(|(turn, ..)| turn == &node_turn)
+            .expect(
+                "the durable stash must be written by park_gated_calls itself, before any \
+                 block-settle pass runs — a restart landing after this node's card goes \
+                 durable must always find a matching stash to rebuild from",
+            );
+        assert_eq!(stashed.1, "wf-1825-p1b");
+        assert_eq!(stashed.2, trigger_input);
+    }
+
+    /// Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector): a
+    /// node whose every gated call fails to park must not leave a stash behind
+    /// with nothing that can ever redeem it.
+    ///
+    /// The arm and the durable stash run unconditionally, before the request
+    /// loop attempts a single park — required, since that ordering is what
+    /// closes the P1 race. But when every request in the batch then fails
+    /// (journal outage), `summary.approval_ids` comes back empty: no approval
+    /// id was ever minted for this turn, so nothing will ever call
+    /// `continue_turn` for it, and the stash this call armed and durably wrote
+    /// would otherwise sit forever — one workflow id and trigger payload
+    /// retained in memory for the process's life, and durably on every replay.
+    ///
+    /// Forces every park to fail by pointing `parking.journal` at a path whose
+    /// parent directory does not exist, so `record_parked` inside
+    /// `park_and_journal` fails for each request — the gate's own `park` stays
+    /// in-memory and always succeeds, so this isolates the journal failure
+    /// without needing a custom `ApprovalGate` double.
+    #[tokio::test]
+    async fn a_node_with_no_successfully_parked_call_leaves_no_stash_behind() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+        use crate::ports::types::{Effect, EffectGroup};
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p2c-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        // `FsJournalStore::append_journal` calls `create_dir_all` on the
+        // parent, so a merely-missing directory would not fail the write — it
+        // would just get created. A regular file standing where the journal's
+        // parent directory needs to be does: `create_dir_all` cannot turn a
+        // file into a directory, so every append genuinely fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write blocker file");
+        let broken_journal = Arc::new(crate::runtime::journal::RuntimeJournal::new(
+            blocker.join("journal.jsonl"),
+        ));
+        let delivery = deps
+            .delivery
+            .as_mut()
+            .expect("gated_tool_turn_test::deps wires delivery");
+        let parking = delivery
+            .parking
+            .as_mut()
+            .expect("gated_tool_turn_test::deps wires parking");
+        parking.journal = broken_journal.clone();
+        let queue = deps.approval_requests.clone();
+        let trigger_input = json!({ "request": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1825-p2c"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1825-p2c"),
+        );
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1825-p2c".to_string(),
+            "run-1825-p2c".to_string(),
+            None,
+            trigger_input.clone(),
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+
+        let claim = queue.claim(ApprovalScope::Run("run-1825-p2c".to_string()));
+        claim
+            .scoped(async {
+                queue.push(ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "gated".to_string(),
+                    effect: Effect {
+                        kind: "shell".to_string(),
+                        group: EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: json!({ "cmd": "rm -rf /" }),
+                        agent: Some("ceo".to_string()),
+                        run_id: None,
+                    },
+                });
+            })
+            .await;
+
+        let summary = claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
+
+        assert!(
+            summary.approval_ids.is_empty(),
+            "precondition: the broken journal must fail every park attempt"
+        );
+        assert_eq!(summary.unparkable, 1);
+        assert!(
+            !runner
+                .deps
+                .delivery
+                .as_ref()
+                .expect("delivery wired")
+                .parking
+                .as_ref()
+                .expect("parking wired")
+                .blocked_nodes
+                .is_armed(&node_turn),
+            "a node with zero successfully parked calls must not leave an unredeemable \
+             in-memory stash behind"
+        );
+        assert!(
+            broken_journal
+                .blocked_stashes()
+                .into_iter()
+                .all(|(turn, ..)| turn != node_turn),
+            "a node with zero successfully parked calls must not leave a durable stash \
+             behind either"
+        );
+    }
+
+    /// Issue #1825 (P1, fourth follow-up — found by chatgpt-codex-connector):
+    /// approving the first card a multi-call node parks must not complete its
+    /// continuation batch before the rest of the node's calls have even been
+    /// attempted.
+    ///
+    /// # The race this closes
+    ///
+    /// `park_gated_calls` parks a node's gated calls one at a time in a loop,
+    /// and each successful `park_and_journal` arms `ContinuationQueue` for the
+    /// node's turn — issue #469/#978's original per-call mechanism, unchanged.
+    /// With no hold, `outstanding` right after the FIRST call parks is exactly
+    /// 1: a decision on that lone card zeroes it out and
+    /// `ContinuationQueue::decide` hands back a "complete" batch, even though
+    /// the loop has not attempted the node's second call yet.
+    /// `blocked_nodes.arm` (the P1 first follow-up, above) already makes the
+    /// workflow id and trigger input available the instant the first card
+    /// exists, so a premature zero here finds a real stash rather than an
+    /// empty one — pre-fix, that reaches `resume_blocked_agent_node` and
+    /// re-dispatches the run while this node is still parking its remaining
+    /// calls.
+    ///
+    /// # How this is reproduced deterministically
+    ///
+    /// A real timing race needs two concurrent tasks; this test gets the same
+    /// interleaving without one. `RaceGate` wraps the approval gate
+    /// `park_gated_calls` parks through, and its second `park` call — the
+    /// second gated call's — first decides the FIRST card via the SAME
+    /// `ContinuationQueue` handle `park_and_journal` arms, synchronously,
+    /// before that second park even returns. That is exactly where a fast
+    /// operator's decision would land relative to the loop below, reproduced
+    /// on ordering rather than wall-clock luck.
+    #[tokio::test]
+    async fn approving_the_first_card_of_a_multi_call_node_does_not_complete_the_batch_early() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{
+            Actor, ActorKind, ApprovalId, CompanyEvent, Effect, EffectGroup, PolicyDecision,
+            Verdict,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Mutex as AsyncMutex;
+
+        /// Delegates every call to `inner`, except that the SECOND `park` it
+        /// sees first decides the FIRST approval it minted, via the same
+        /// `ContinuationQueue` the real park path arms — simulating an
+        /// operator racing ahead of `park_gated_calls`'s own loop.
+        struct RaceGate {
+            inner: Arc<dyn ApprovalGate>,
+            continuations: crate::runtime::continuation::ContinuationQueue,
+            node_turn: String,
+            calls: AtomicUsize,
+            first_approval: AsyncMutex<Option<ApprovalId>>,
+            /// What `ContinuationQueue::decide` returned for the interleaved
+            /// decision on the first card — the assertion this test exists
+            /// for. Outer `Option`: whether the interleave actually ran.
+            early_decide_result: AsyncMutex<Option<Option<Vec<CompanyEvent>>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApprovalGate for RaceGate {
+            async fn evaluate(
+                &self,
+                company: &CompanyId,
+                effect: &Effect,
+            ) -> crate::Result<PolicyDecision> {
+                self.inner.evaluate(company, effect).await
+            }
+
+            async fn park(&self, company: &CompanyId, effect: Effect) -> crate::Result<ApprovalId> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let id = self.inner.park(company, effect).await?;
+                if call == 0 {
+                    *self.first_approval.lock().await = Some(id.clone());
+                } else if call == 1 {
+                    let first = self
+                        .first_approval
+                        .lock()
+                        .await
+                        .clone()
+                        .expect("the first card must have parked before the second");
+                    let event = CompanyEvent::ApprovalResolved {
+                        approval_id: first,
+                        verdict: Verdict::Approve,
+                        by: Actor {
+                            kind: ActorKind::Operator,
+                            id: "operator".to_string(),
+                        },
+                    };
+                    let result = self.continuations.decide(&self.node_turn, Some(event));
+                    *self.early_decide_result.lock().await = Some(result);
+                }
+                Ok(id)
+            }
+
+            async fn resolve(
+                &self,
+                id: &ApprovalId,
+                verdict: Verdict,
+                by: Actor,
+            ) -> crate::Result<Option<Effect>> {
+                self.inner.resolve(id, verdict, by).await
+            }
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p1-4-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key("run-1825-p1-4", "work");
+
+        let delivery = deps
+            .delivery
+            .as_mut()
+            .expect("gated_tool_turn_test::deps wires delivery");
+        let parking = delivery
+            .parking
+            .as_mut()
+            .expect("gated_tool_turn_test::deps wires parking");
+        let race_gate = Arc::new(RaceGate {
+            inner: parking.approvals.clone(),
+            continuations: parking.continuations.clone(),
+            node_turn: node_turn.clone(),
+            calls: AtomicUsize::new(0),
+            first_approval: AsyncMutex::new(None),
+            early_decide_result: AsyncMutex::new(None),
+        });
+        parking.approvals = race_gate.clone();
+
+        let queue = deps.approval_requests.clone();
+        let trigger_input = json!({ "request": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1825-p1-4"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1825-p1-4"),
+        );
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1825-p1-4".to_string(),
+            "run-1825-p1-4".to_string(),
+            None,
+            trigger_input.clone(),
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let claim = queue.claim(ApprovalScope::Run("run-1825-p1-4".to_string()));
+        claim
+            .scoped(async {
+                for tool in ["shell", "http"] {
+                    queue.push(ApprovalRequest {
+                        tool: tool.to_string(),
+                        reason: "gated".to_string(),
+                        effect: Effect {
+                            kind: tool.to_string(),
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: json!({ "call": tool }),
+                            agent: Some("ceo".to_string()),
+                            run_id: None,
+                        },
+                    });
+                }
+            })
+            .await;
+
+        let summary = claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
+
+        assert_eq!(summary.approval_ids.len(), 2, "both calls must have parked");
+
+        let early_result = race_gate.early_decide_result.lock().await.clone();
+        assert_eq!(
+            early_result,
+            Some(None),
+            "deciding the first card while the loop was still parking the second must NOT \
+             complete the batch — ContinuationQueue::decide must report 'still waiting' \
+             (None), not hand back a batch the run has not finished parking yet"
+        );
+    }
+
     /// Queues `count` gated calls in a run's scope, drains them through
     /// `park_gated_calls`, and returns whatever the run was told.
     ///
@@ -2722,6 +3467,8 @@ mod tests {
             "wf-1".to_string(),
             "run-1".to_string(),
             None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
             notices.clone(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -2788,6 +3535,8 @@ mod tests {
             "wf-1".to_string(),
             "run-1775".to_string(),
             None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
             notices.clone(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -3338,6 +4087,8 @@ mod tests {
                 workflow_id: "wf",
                 run_id: "run:1",
                 run_request: None,
+                trigger_input: &Value::Null,
+                started_by: crate::ports::types::StartedBy::Operator,
                 dry_run: false,
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
@@ -3389,6 +4140,8 @@ mod tests {
                 workflow_id: "wf",
                 run_id: "run:1",
                 run_request: None,
+                trigger_input: &Value::Null,
+                started_by: crate::ports::types::StartedBy::Operator,
                 dry_run: true,
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
@@ -3557,6 +4310,8 @@ mod tests {
                 workflow_id: "wf",
                 run_id: "run:1",
                 run_request: None,
+                trigger_input: &Value::Null,
+                started_by: crate::ports::types::StartedBy::Operator,
                 dry_run: false, // live: the workspace mkdir runs
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
@@ -3615,6 +4370,8 @@ mod tests {
                 workflow_id: "wf",
                 run_id: "run:1",
                 run_request: None,
+                trigger_input: &Value::Null,
+                started_by: crate::ports::types::StartedBy::Operator,
                 dry_run: true, // dry: no workspace mkdir at all
                 notices: RunNotices::default(),
                 board: RunBoard::default(),

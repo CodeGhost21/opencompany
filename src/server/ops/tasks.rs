@@ -1371,7 +1371,6 @@ pub(crate) struct TaskDetail {
     pub(crate) waiting_since: Option<u64>,
 }
 
-/// `GET …/tasks/{task_id}` — the Task Detail screen's single read (issue #185).
 ///
 /// Assembles six things the console would otherwise have to stitch client-side
 /// (and could not, for the journal-derived halves):

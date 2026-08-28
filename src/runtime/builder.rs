@@ -2429,18 +2429,33 @@ impl RuntimeBuilder {
             }
         };
 
-        // Issue #899 (Stage 1): the blocked-agent-node stash, shared between the
-        // workflow runner (which arms it at block-settle through `DeliveryParking`)
-        // and the runtime (whose `continue_turn` releases it). Inherited live on a
-        // rebuild, and a plain `default()` on a boot — unlike its two neighbours
-        // it is NOT rehydrated from the journal, because the parked tool-call
-        // effect carries no workflow id or trigger input to rebuild a stash from.
-        // A boot mid-block therefore re-arms the `continuations` counter but not
-        // this, and the released batch reports "re-run the workflow" instead of
-        // spawning. See `BlockedNodeQueue`.
+        // Issue #899 (Stage 1) / #1816 (Stage 2): the blocked-agent-node stash,
+        // shared between the workflow runner (which arms it at block-settle
+        // through `DeliveryParking`) and the runtime (whose `continue_turn`
+        // releases it). Inherited live on a rebuild. On a boot it is now
+        // rehydrated from the journal's still-live stash records — the durable
+        // half #1816 added beneath Stage 1's in-memory queue — exactly as
+        // `workflow_gates` above re-arms from its still-parked gates. A boot
+        // mid-block therefore re-arms both the `continuations` counter (from
+        // `parked_turns`) and this stash (from `blocked_stashes`), so an approval
+        // landing after the restart re-dispatches the run instead of reporting
+        // "re-run the workflow". See `BlockedNodeQueue`.
         let blocked_nodes = match handover.as_ref() {
             Some(h) => h.blocked_nodes.clone(),
-            None => crate::runtime::blocked_nodes::BlockedNodeQueue::default(),
+            None => {
+                let blocked_nodes = crate::runtime::blocked_nodes::BlockedNodeQueue::default();
+                blocked_nodes.rearm(journal.blocked_stashes());
+                // Issue #1816: fold in whichever of those rehydrated stashes
+                // already had an approve banked before the restart — the fact
+                // `ContinuationQueue`'s own rearm cannot carry (see its docs),
+                // and the one a blocked node has no re-park to fall back on if
+                // lost. Always after `rearm` above: the stash it names must
+                // already exist for this to land anywhere.
+                for turn in journal.blocked_node_approvals() {
+                    blocked_nodes.mark_approved(&turn);
+                }
+                blocked_nodes
+            }
         };
 
         // Brain selection, in precedence order:
@@ -3828,6 +3843,21 @@ impl RuntimeBuilder {
                 .await
                 .map(Some);
             runtime.hydrate_emergency(engaged);
+        }
+
+        // Issue #1816 (Stage 3): a blocked-node stash the journal durably
+        // marks approved, with nothing left parked for its turn, is a run a
+        // restart stranded between its last approval banking and the release
+        // that should have followed. A rebuild skips this for the same reason
+        // it skips the rearms above: the live queues it inherits already
+        // reflect every decision taken since the last replay, so there is
+        // nothing here a fresh boot's journal-only view would find that the
+        // live one has not already acted on. Placed last, after every queue
+        // above (and the workflow runner, wired earlier in this function
+        // under the `openhuman` harness arm) is in place, so a stash this
+        // finds ready has somewhere real to resume to.
+        if handover.is_none() {
+            runtime.reconcile_stranded_blocked_nodes().await;
         }
 
         Ok(runtime)

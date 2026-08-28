@@ -3959,6 +3959,45 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         Ok(true)
     }
 
+    async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if exists.is_none() {
+            return Ok(false);
+        }
+        let has_child: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM workspace_nodes WHERE company_id = ?1 AND parent_id = ?2 LIMIT 1",
+                params![company.as_ref(), id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        if has_child.is_some() {
+            return Ok(false);
+        }
+        let removed = tx
+            .execute(
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2 AND NOT EXISTS (\
+                     SELECT 1 FROM workspace_nodes AS child \
+                     WHERE child.company_id = ?1 AND child.parent_id = ?2)",
+                params![company.as_ref(), id],
+            )
+            .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(removed > 0)
+    }
+
     async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
         let conn = self.conn();
         let count: i64 = conn

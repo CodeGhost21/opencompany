@@ -1252,6 +1252,14 @@ approval.]"
             }
             _ => {}
         }
+        // Issue #1825: bank a blocked-node approval here, inline and durable,
+        // rather than leaving it to `continue_turn` on the detached follow-up
+        // task this function's caller (`resolve_approval_spawned`) is about to
+        // spawn. A restart between that spawn and the task's first poll used to
+        // leave the verdict durable above but this bank never run — see
+        // `CompanyRuntime::bank_blocked_node_approval` for the full window this
+        // closes.
+        self.rt.bank_blocked_node_approval(id, verdict).await;
         // The follow-up event, so the brain learns the verdict. Returning it
         // (rather than appending it here) keeps the event logged exactly once:
         // the cycle that runs it is the thing that appends it.
@@ -1745,13 +1753,24 @@ approval.]"
     /// executes the amended version (at-most-once).
     ///
     /// The amend counterpart to [`settle_approval`](Self::settle_approval), and
-    /// split from its follow-up cycle for the same reasons (issue #383). It has
-    /// no `AlreadyResolved` arm: an id with nothing parked yields no executable
-    /// effect and simply settles to a resolution the brain is still told about,
-    /// exactly as before.
+    /// split from its follow-up cycle for the same reasons (issue #383).
     ///
     /// It **does** have an [`Expired`](ResolveReceipt::Expired) arm, on the same
     /// terms as the plain path (issue #1449), and the caller owes the retirement.
+    ///
+    /// It also has an [`AlreadyResolved`](ResolveReceipt::AlreadyResolved) arm
+    /// (issue #1825, PR review), on the same terms as the plain path: an id
+    /// with nothing parked — never parked, or already resolved by an earlier
+    /// call, by any verdict — owes no cycle. Before this it fell through and
+    /// "simply settled to a resolution the brain is still told about", which
+    /// was harmless before per-turn continuation batching (issue #469) but not
+    /// after: `spawn_follow_up` runs a `Settled` receipt straight into
+    /// `continue_turn`, which durably banks the (hardcoded) verdict and
+    /// decrements the turn's outstanding-decisions counter — for a call that
+    /// decided nothing. A retried amend against an id another call already
+    /// resolved (a double-submit, or an amend replayed after a plain deny)
+    /// would then count as a *second* decision on a node blocked on only two,
+    /// releasing its continuation one real decision early.
     ///
     /// Both the original and the amended effect are preserved in the immutable
     /// journal (`ApprovalParked` + `ApprovalAmended`), so the audit trail shows
@@ -1778,6 +1797,15 @@ approval.]"
             }
             None => ResolveOutcome::NotParked,
         };
+        // Issue #1825 (PR review): nothing was parked under `id` this call —
+        // either it was never parked, or an earlier call (amend or plain,
+        // approve or deny) already resolved it. Same answer as the plain
+        // path's identical guard in `settle_approval`: no journal record, no
+        // bank, no continuation decision. See this function's doc comment for
+        // why this arm is now required rather than merely tidy.
+        if outcome == ResolveOutcome::NotParked {
+            return Ok(ResolveReceipt::AlreadyResolved);
+        }
         // Issue #1449, the amend half of the same defect. An edit applied to a
         // card past its deadline is still not a decision — and it is the worse
         // half of the bug, because the fall-through recorded an `ApprovalAmended`
@@ -1787,6 +1815,10 @@ approval.]"
         if outcome == ResolveOutcome::Expired {
             return Ok(ResolveReceipt::Expired);
         }
+        // Only `Approved` reaches here now — `NotParked` and `Expired` both
+        // returned above. `executed` stays an `Option` (rather than unwrapping
+        // outright) so the arm this guards stays legible on its own terms if a
+        // future `ResolveOutcome` variant is ever added here.
         let executed = match outcome {
             ResolveOutcome::Approved(effect) => Some(effect),
             _ => None,
@@ -1816,6 +1848,21 @@ approval.]"
                 .await?;
         }
 
+        // Issue #1825: same inline, durable bank as the plain approve path —
+        // see `settle_approval` and `CompanyRuntime::bank_blocked_node_approval`.
+        // `executed.is_some()` now always holds by construction (`NotParked`
+        // and `Expired` both returned above), so this bank runs exactly when
+        // `outcome` was `ResolveOutcome::Approved` — kept as an explicit `if`,
+        // rather than unconditional, so the invariant this call depends on
+        // ("only bank an id this call actually approved") stays visible here
+        // too, not only at the early return that currently guarantees it.
+        // `Verdict::Approve` is still the right constant to bank: an amend is
+        // *defined* as an approve, and this arm now only ever runs for one.
+        if executed.is_some() {
+            self.rt
+                .bank_blocked_node_approval(id, Verdict::Approve)
+                .await;
+        }
         // The follow-up event, so the brain learns the approval resolved (with
         // an edit). `CompanyEvent` is closed, so the verdict rides as `Approve`;
         // the edit itself lives in the journal audit trail.
