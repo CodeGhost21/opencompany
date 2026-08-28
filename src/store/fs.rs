@@ -501,6 +501,65 @@ pub(crate) mod fault_probe {
     }
 }
 
+/// Test-only cancellation harness for [`stage_atomic_bytes`].
+///
+/// Issue #1828 review, sixth round: proving the cancellation hazard (and the
+/// fix for it) requires reliably cancelling the caller of `stage_atomic_bytes`
+/// *while* its blocking write is still in flight — a plain `sleep`-based race
+/// would be flaky. `arm` registers a gate for a target path; the blocking
+/// write closure parks on that gate (from a blocking-pool thread, so it never
+/// blocks the async runtime) until `maybe_block` is called and a test signals
+/// `wait_blocked()`, giving the test a deterministic window to `abort()` the
+/// caller before releasing the write to actually run.
+#[cfg(test)]
+pub(crate) mod stall_probe {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc::{Receiver, Sender};
+    use std::sync::{LazyLock, Mutex};
+    use tokio::sync::Notify;
+
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, Receiver<()>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static BLOCKED: LazyLock<Notify> = LazyLock::new(Notify::new);
+
+    fn key(path: &Path) -> PathBuf {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Arms a one-shot stall for the next [`stage_atomic_bytes`] write
+    /// targeting `path`. Returns the sender a test uses to release it.
+    pub(crate) fn arm(path: &Path) -> Sender<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        GATES
+            .lock()
+            .expect("stall-probe poisoned")
+            .insert(key(path), rx);
+        tx
+    }
+
+    /// Called from inside the blocking write closure. No-op unless `path`
+    /// was armed. Notifies [`wait_blocked`], then parks this blocking-pool
+    /// thread until the test's sender releases it.
+    pub(crate) fn maybe_block(path: &Path) {
+        let gate = GATES
+            .lock()
+            .expect("stall-probe poisoned")
+            .remove(&key(path));
+        if let Some(gate) = gate {
+            BLOCKED.notify_one();
+            let _ = gate.recv();
+        }
+    }
+
+    /// Waits until an armed write has reached its stall point. `notify_one`
+    /// stores its permit if called before this is polled, so there is no
+    /// race between arming, spawning the write, and awaiting this.
+    pub(crate) async fn wait_blocked() {
+        BLOCKED.notified().await;
+    }
+}
+
 /// Reads a file to a string, returning an empty string if it does not exist.
 pub(crate) async fn read_optional(path: &Path) -> Result<String> {
     match tokio::fs::read_to_string(path).await {
@@ -758,6 +817,28 @@ pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> 
 /// Every other caller of [`write_atomic_bytes`] gets the same fault-injection
 /// point and the same durability recipe as before — this only splits *when*
 /// the temp file is published from *when* it is written.
+///
+/// ### Cancellation safety (issue #1828 review, sixth round)
+///
+/// `tokio::task::spawn_blocking` cannot be cancelled: dropping the
+/// `JoinHandle` future stops nothing, it only discards the result. If the
+/// future *calling* this function is itself dropped while on the `.await`
+/// below — a task `abort()`ed, or an axum handler cancelled by a client
+/// disconnect mid-`save` — the old direct `spawn_blocking(...).await` lost
+/// the only reference to `tmp`: the write still finishes on the blocking
+/// pool regardless, leaving a fully written, fsynced temp file that neither
+/// [`commit_staged`] nor [`remove_staged`] will ever run against, because
+/// the caller that would call either one never got the path back.
+///
+/// The write now runs inside a *detached* task, with the result routed back
+/// through a [`tokio::sync::oneshot`] channel instead of directly through
+/// the `spawn_blocking` `JoinHandle`. On the non-cancelled path this changes
+/// nothing observable — the write still happens on `spawn_blocking` exactly
+/// as before, and `rx.await` yields the same `Ok(tmp)` / `Err(_)` the direct
+/// call did. What it adds is the one case that matters: `tx.send` failing
+/// because `rx` — and the caller awaiting it — was dropped is now the
+/// detached task's own signal to remove the orphan it just wrote, rather
+/// than depending on downstream code that was cancelled before it could run.
 async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     // Test-only: see `fault_probe`. Fails before any filesystem call, like a
     // real early I/O error — no temp file, no partial write under `path`.
@@ -780,25 +861,45 @@ async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     #[cfg_attr(not(test), allow(unused_variables))]
     let owned_path = path.to_path_buf();
     let bytes = bytes.to_vec();
+    let cleanup_tmp = tmp.clone();
 
-    tokio::task::spawn_blocking(move || {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&owned_tmp).map_err(|e| io_err(&owned_tmp, e))?;
-        file.write_all(&bytes).map_err(|e| io_err(&owned_tmp, e))?;
-        // Before the rename, deliberately — see the recipe on
-        // `write_atomic_bytes`'s doc comment.
-        file.sync_data().map_err(|e| io_err(&owned_tmp, e))?;
-        // Recorded here rather than at the end of the block, and that placement
-        // is the whole value of the probe: tallying on the way out would count
-        // the *function running*, so deleting the `sync_data` above would leave
-        // every assertion still passing. Tied to the call, removing the call
-        // fails the test.
-        #[cfg(test)]
-        append_probe::record_atomic_sync(&owned_path);
-        Ok::<_, OpenCompanyError>(())
-    })
-    .await
-    .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))??;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::task::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            // Test-only: see `stall_probe`. Parks this blocking-pool thread
+            // until the test releases it, giving it a window to cancel the
+            // caller below while the write has not happened yet.
+            #[cfg(test)]
+            stall_probe::maybe_block(&owned_path);
+            let mut file = std::fs::File::create(&owned_tmp).map_err(|e| io_err(&owned_tmp, e))?;
+            file.write_all(&bytes).map_err(|e| io_err(&owned_tmp, e))?;
+            // Before the rename, deliberately — see the recipe on
+            // `write_atomic_bytes`'s doc comment.
+            file.sync_data().map_err(|e| io_err(&owned_tmp, e))?;
+            // Recorded here rather than at the end of the block, and that placement
+            // is the whole value of the probe: tallying on the way out would count
+            // the *function running*, so deleting the `sync_data` above would leave
+            // every assertion still passing. Tied to the call, removing the call
+            // fails the test.
+            #[cfg(test)]
+            append_probe::record_atomic_sync(&owned_path);
+            Ok::<_, OpenCompanyError>(())
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))
+        .and_then(|inner| inner);
+
+        // `rx` (and the caller awaiting it) is gone: the write already
+        // landed on disk, so reclaim it here instead of leaving it for a
+        // `commit_staged` / `remove_staged` call nobody is left to make.
+        if tx.send(result).is_err() {
+            remove_staged(&cleanup_tmp).await;
+        }
+    });
+
+    rx.await
+        .map_err(|_| OpenCompanyError::Store("stage task dropped before completing".into()))??;
 
     Ok(tmp)
 }
@@ -3383,6 +3484,85 @@ mod test {
             Vec::<std::path::PathBuf>::new(),
             "a successful save must not leave any staged temp file behind \
              either"
+        );
+    }
+
+    /// **Issue #1828 review, sixth round**: the fifth round's `remove_staged`
+    /// calls only run on `save`'s own error path — code that never executes
+    /// if `save`'s caller is cancelled before that path is reached.
+    /// `spawn_blocking` cannot be cancelled: dropping its `JoinHandle` future
+    /// stops nothing, it only discards the result. So if the future calling
+    /// `stage_atomic_bytes` is itself dropped while parked on that await —
+    /// exactly what happens when an axum handler is cancelled by a client
+    /// disconnect mid-`save`, or a task is `abort()`ed — the write finishes
+    /// on the blocking pool regardless, but the only reference to the temp
+    /// path it wrote is gone with the dropped future. Neither `commit_staged`
+    /// nor `remove_staged` ever runs, and the fully written, fsynced temp
+    /// file is orphaned for good.
+    ///
+    /// This proves it with `stall_probe`: park the write mid-flight, `abort`
+    /// the task awaiting `stage_atomic_bytes` (simulating the cancellation),
+    /// then release the write and confirm it still lands on disk (proving
+    /// cancellation didn't stop it — that's the hazard, not the fix). Pre-fix
+    /// the temp file then sits there forever; post-fix the detached task
+    /// notices nobody claimed the result and removes it itself.
+    #[tokio::test]
+    async fn cancelling_the_caller_does_not_strand_the_staged_temp_file() {
+        let root_dir = tmp_root();
+        let target = root_dir.path().join("bundle").join("company.toml");
+
+        let release = stall_probe::arm(&target);
+
+        let awaited_target = target.clone();
+        let handle =
+            tokio::spawn(async move { stage_atomic_bytes(&awaited_target, b"hello").await });
+
+        // Deterministic rendezvous: the write closure has reached the gate
+        // and parked, so aborting now is guaranteed to land on the await
+        // this test is exercising, not before or after it.
+        stall_probe::wait_blocked().await;
+
+        handle.abort();
+        let joined = handle.await;
+        assert!(
+            joined.as_ref().is_err_and(|e| e.is_cancelled()),
+            "the task awaiting stage_atomic_bytes must actually have been \
+             cancelled for this test to mean anything, got {joined:?}"
+        );
+
+        // Let the parked write proceed. Nothing above the blocking pool is
+        // watching it anymore — this is the crux of the hazard: the write
+        // was never cancellable, only the caller's ability to hear about it.
+        release.send(()).expect("stall gate still open");
+
+        // Poll for the temp file's fate instead of a fixed sleep: the
+        // detached cleanup task needs a moment to resume after the blocking
+        // write returns. Pre-fix there is nothing to wait for — the file
+        // sits there for the lifetime of the test (and the process) — so
+        // this loop only terminates via the timeout, which is the failing
+        // signal on unpatched code.
+        let bundle_dir = target.parent().unwrap().to_path_buf();
+        let cleaned_up = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let has_orphan = std::fs::read_dir(&bundle_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().contains(".tmp-"));
+                if !has_orphan {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            cleaned_up.is_ok(),
+            "cancelling the caller must not strand the temp file \
+             stage_atomic_bytes already wrote and fsynced — it sat in {} \
+             for the whole timeout",
+            bundle_dir.display()
         );
     }
 
