@@ -25,6 +25,19 @@ export interface GateDecisionInput {
   setupOpen: boolean;
   /** Whether "skip for now" was clicked earlier in this tab's session. */
   skippedThisSession: boolean;
+  /**
+   * Whether the signed-in user is this company's admin — `null` before that
+   * read has landed (PR #1878 review finding).
+   *
+   * None of the three steps this gate blocks on can be cleared by anyone
+   * else: naming the company (`PATCH {scope}`) is `require_admin`-gated on
+   * the host, and the Composio connect routes use `AdminScopedCompany`. An
+   * invited member's only way past an unconditional gate was "Skip for now"
+   * — session-scoped by design (see `onboarding/state.ts`), so it re-traps
+   * them every new tab — which made this screen a dead end for exactly the
+   * people it cannot ask anything of.
+   */
+  isAdmin: boolean | null;
 }
 
 /**
@@ -51,6 +64,14 @@ export function shouldShowOnboardingGate(input: GateDecisionInput): boolean {
   // gate here would flash it open for every company, activated or not, for
   // the one round trip it takes to learn which.
   if (!input.checked || !input.status) return false;
+
+  // PR #1878 review finding: an invited member cannot act on any of the
+  // three steps below (see `isAdmin`'s own doc comment), so the gate must
+  // never be their dead end. `null` — the admin read has not landed yet — is
+  // held here the same way `checked`/`status` are just above: an admin who
+  // would otherwise see the gate immediately now waits one extra round trip
+  // rather than this ever flashing open for a member who cannot clear it.
+  if (input.isAdmin === null || !input.isAdmin) return false;
 
   return !input.status.isActivated;
 }
