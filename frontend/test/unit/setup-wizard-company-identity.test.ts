@@ -8,6 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { SetupStatus } from "@/api/setup";
 import {
   SetupWizard,
+  offeredAuthModes,
   shouldSeedTemplate,
   suggestedCompanyName,
 } from "@/views/setup/SetupWizard";
@@ -365,5 +366,25 @@ describe("whether a finished wizard seeds a template or a designed company", () 
 
   it("seeds nothing onto a host that already has a company", () => {
     expect(shouldSeedTemplate({ ...picked, hasCompany: true })).toBe(false);
+  });
+});
+
+describe("the sign-in modes a first run may offer", () => {
+  const host = (modes: string[]) => status({ auth_modes: modes });
+
+  it("withholds wallet, which this flow cannot finish", () => {
+    // `[users].wallets` is what a wallet company is bootstrapped by, and
+    // nothing here can collect one — so finishing on `wallet` produces a
+    // company with no eligible administrator and no anonymous way back in.
+    expect(offeredAuthModes(host(["none", "email", "wallet"]), "")).toEqual(["none", "email"]);
+  });
+
+  it("still shows a wallet host the mode it is already running", () => {
+    expect(offeredAuthModes(host(["email", "wallet"]), "wallet")).toEqual(["email", "wallet"]);
+  });
+
+  it("leaves every other mode exactly as the host offered it", () => {
+    expect(offeredAuthModes(host(["none", "email"]), "")).toEqual(["none", "email"]);
+    expect(offeredAuthModes(host(["email"]), "email")).toEqual(["email"]);
   });
 });

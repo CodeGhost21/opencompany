@@ -1093,6 +1093,37 @@ function requiresSignIn(status: SetupStatus, values: Record<string, string>): bo
 // ---------------------------------------------------------------------------
 // Steps
 // ---------------------------------------------------------------------------
+/**
+ * The sign-in modes this wizard may offer, out of the ones the host accepts.
+ *
+ * `wallet` is withheld, and this is a lockout guard rather than a preference.
+ * A wallet company is bootstrapped by `[users].wallets` — "listing an address
+ * makes it eligible, signing a challenge mints the admin" — and nothing in this
+ * flow can collect one: the account step asks for an email, and both seed paths
+ * write `[users].admins`, which `wallet` mode never reads. Choosing it
+ * therefore finishes setup on a company with **no eligible administrator**, and
+ * the door closes behind it: once a company exists and setup is stamped
+ * complete, `server::setup::authorize` stops answering an anonymous caller, so
+ * the console cannot be used to undo it.
+ *
+ * That was previously unreachable on the instance most operators have, because
+ * it seeded a company and never opened this wizard at all. Making the wizard
+ * the way in is what makes withholding this necessary rather than tidy.
+ *
+ * A mode already in force is always offered, even when withheld: an operator
+ * re-running setup on a wallet host is looking at their own configuration, and
+ * a screen that silently omits the answer it is currently showing would read as
+ * the setting having been lost.
+ *
+ * Wallet remains available the way it is actually set up today — `auth_mode` in
+ * `config.toml` beside a `[users].wallets` list on the company. Collecting a
+ * wallet key here, and writing the mode and its list onto the seeded manifest
+ * together, is the fuller fix and is its own change.
+ */
+export function offeredAuthModes(status: SetupStatus, current: string): string[] {
+  return status.auth_modes.filter((mode) => mode !== "wallet" || current === "wallet");
+}
+
 function SignInStep({
   status,
   value,
@@ -1123,7 +1154,7 @@ function SignInStep({
       )}
 
       <div className="mt-2.5 space-y-2">
-        {status.auth_modes.map((mode) => {
+        {offeredAuthModes(status, value || field?.value || "").map((mode) => {
           const copy = AUTH_MODE_COPY[mode] ?? { label: mode, hint: "" };
           const active = (value || field?.value) === mode;
           return (
