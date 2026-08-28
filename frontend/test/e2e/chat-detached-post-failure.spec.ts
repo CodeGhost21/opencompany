@@ -55,6 +55,22 @@ import { LIVE_BRAIN } from "./capabilities";
  * turn as undelivered, which is the same misdirection in a new place. The
  * capture is now synchronous, and the send waits on it.
  *
+ * Knowing the reply exists is still not knowing that THIS BROWSER is holding
+ * it, and the cut is only a test of the release path if it is. That gap was a
+ * one-second sleep — a second wall-clock guess, and a tighter one than the
+ * eight seconds it replaced, standing in for "the SSE frame arrived and
+ * `PendingSyncPosts` captured it" (issue #1907). Losing that race is the quiet
+ * failure rather than the loud one: `route.abort` lifts the suppression, the
+ * still-in-flight frame lands after it is gone and renders by the ordinary
+ * live path, and every assertion below still passes — green having never
+ * exercised the release logic this spec is named for, and green in exactly the
+ * same way if that logic were entirely broken.
+ *
+ * So that sleep is an observation too. The cut now waits until the frame has
+ * demonstrably reached the page (`awaitCapturedFrame`), which together with
+ * `repliesAtCut === 0` pins where the frame is rather than inferring it: it
+ * arrived, and nothing drew it, so the hold is the only place left for it.
+ *
  * Nothing else can draw this reply, and the spec makes that true rather than
  * assuming it. The `202` body never reached the page, so no turn id was learned
  * from the POST — but the shell also arms its turn poll from `listRuns` at
@@ -81,15 +97,20 @@ import { LIVE_BRAIN } from "./capabilities";
 const ENGINEERING = { id: "engineering", channel: "engineering-desk" };
 
 /**
- * How long the released `agent_reply` frame is given to traverse the stream and
- * be captured, once the host is KNOWN to have journaled the reply.
+ * The page-side key the stream recorder installed in `beforeEach` writes and
+ * `awaitCapturedFrame` reads: every `data:` payload this page has been handed
+ * on the company event stream, in arrival order.
  *
- * Issue #1885: this replaces a fixed 8s `CUT_AFTER_MS` that stood in for "the
- * turn has surely finished by now". The distinction is not the number — it is
- * that this waits on one already-sent push rather than on a turn of unknown
- * duration, so a slow host delays the spec instead of failing it.
+ * Test scaffolding, deliberately NOT a product surface. Nothing under `src/`
+ * knows this key exists, so the console being measured is byte-identical to the
+ * shipped one. The alternative was a debug accessor on `PendingSyncPosts`' held
+ * map, which would have put a test-only reader on the single highest-risk rule
+ * in the detached design (see that class's own doc) — a worse trade than
+ * reading the wire the frame arrives on, which is a fact about the browser
+ * rather than about the console's internals, and which therefore cannot go
+ * stale when that rule is refactored.
  */
-const FRAME_SETTLE_MS = 1_000;
+type FrameLogWindow = Window & { __ocLiveFrames?: string[] };
 
 test.beforeEach(async ({ page }) => {
   // Same tour-skip shim the rest of the suite uses — the first-run modal
@@ -98,6 +119,40 @@ test.beforeEach(async ({ page }) => {
     const real = Storage.prototype.getItem;
     Storage.prototype.getItem = function getItem(key: string) {
       return key.startsWith("oc-tour:") ? '{"skipped":true}' : real.call(this, key);
+    };
+  });
+
+  // Every frame the company event stream hands this page, recorded so the cut
+  // can wait on this turn's `agent_reply` ARRIVING rather than on a duration
+  // guessed to outlast its flight (issue #1907).
+  //
+  // `EventSource` is the right seam because it is the lane this console is on:
+  // `BrowserTransport.subscribe` only takes its `fetch` fallback for a
+  // credential an `EventSource` cannot carry, and a same-origin console like
+  // this one authenticates by `HttpOnly` cookie and sets no auth header at all
+  // (the same fact `historyProbe` below relies on). Should that ever change,
+  // the recorder stays empty and `awaitCapturedFrame` says so in as many
+  // words — which is the failure mode this spec keeps choosing: a premise that
+  // stopped holding reports itself, rather than surfacing as a wait for
+  // something else.
+  //
+  // The listener is added in the constructor, ahead of the transport's own
+  // `onmessage` assignment, and `message` dispatch runs every listener
+  // synchronously — `handleEvent` -> `injectAgentReply` -> `capture` included.
+  // A poll from the test side is a later task by construction, so a frame this
+  // log has is a frame the console has already routed. Nothing here inspects
+  // the console's state; the ordering is what makes that unnecessary.
+  await page.addInitScript(() => {
+    const frames: string[] = [];
+    (window as FrameLogWindow).__ocLiveFrames = frames;
+    const RealEventSource = window.EventSource;
+    window.EventSource = class extends RealEventSource {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        this.addEventListener("message", (event) => {
+          frames.push(String(event.data));
+        });
+      }
     };
   });
 });
@@ -211,6 +266,48 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
     return lastStatus;
   };
 
+  /**
+   * Block until this turn's `agent_reply` frame has reached the browser, or
+   * throw.
+   *
+   * The cut's second premise, and the one the sleep this replaces could only
+   * hope for (issue #1907). `awaitJournaledReply` establishes that the reply
+   * EXISTS; this establishes that the live copy — the one the assertions are
+   * about — is in this page. They are different facts that fail for different
+   * reasons, and keeping them apart is what lets a host that never answered be
+   * reported as that rather than as a stream that never delivered.
+   *
+   * It does not read `PendingSyncPosts`, and does not need to. Suppression is
+   * up for certain: `ChatView` calls `onSendStart` before `client.chat`, and
+   * this handler is holding that very POST unresolved — so a frame for this
+   * thread landing now is a frame `capture` held. `repliesAtCut`, read the
+   * moment this returns, is the other half of that reading, and between them
+   * nothing is assumed: the frame arrived, and nothing had drawn it.
+   *
+   * Same 45s budget as the journal wait above, and for the same reason — this
+   * waits on one push already known to have been sent, so the number is slack
+   * for a saturated runner rather than a guess at how long a turn takes.
+   */
+  const awaitCapturedFrame = async (): Promise<string | null> => {
+    const needle = `You said: ${marker}`;
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
+      const arrived = await page
+        .evaluate(
+          (text) =>
+            ((window as FrameLogWindow).__ocLiveFrames ?? []).some((frame) => frame.includes(text)),
+          needle,
+        )
+        // A navigation or a torn-down context loses the poll, not the run: the
+        // deadline above still bounds it and the message below still explains
+        // it.
+        .catch(() => false);
+      if (arrived) return null;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return "the reply never reached this page over the event stream";
+  };
+
   // What was on screen at the moment of the cut, read inside the handler and
   // asserted after it. An `expect` that throws inside a route handler aborts
   // the handler, so `route.abort` never runs, the POST never fails, and the
@@ -233,13 +330,10 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
     // then is the answer thrown away. Holding the browser-facing response
     // keeps the POST in flight until the latch confirms the premise below.
     const response = await route.fetch();
-    // Wait for the reply to EXIST, not for a duration guessed to outlast it
-    // (issue #1885). Then a short settle so the `agent_reply` frame the host
-    // just pushed can traverse the stream and be captured while this POST is
-    // still unresolved — which is the state the assertions below are about.
-    // Bounded and small: it covers one push already known to have been sent,
-    // not an unbounded turn of unknown length, which is exactly the difference
-    // between this and the fixed wait it replaces.
+    // Two observations, and the cut waits on both. First that the reply EXISTS,
+    // rather than a duration guessed to outlast the turn that writes it (issue
+    // #1885).
+    //
     // Recorded, never thrown — the same discipline `repliesAtCut` below is
     // written with, and for the same reason stated there: an exception inside
     // a route handler aborts the HANDLER, so `route.abort` never runs, the
@@ -248,7 +342,17 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
     // timeout somewhere else entirely, which is precisely the misdirection
     // this spec is being fixed to stop making.
     premiseFailure = await awaitJournaledReply();
-    await new Promise((resolve) => setTimeout(resolve, FRAME_SETTLE_MS));
+    // Then that its live frame is HERE, rather than sleeping a second in the
+    // hope that it is by now (issue #1907). This is the state every assertion
+    // below is about — the frame captured while this POST is still unresolved —
+    // and the cut destroys it the moment it lifts suppression, so guessing at
+    // it is how this spec comes to pass while testing nothing.
+    //
+    // Ordered after the journal wait, and reported only if that one passed:
+    // both are the same premise seen from two sides, and a host that never
+    // answered explains a frame that never arrived, so naming the second there
+    // would bury the cause under the symptom.
+    premiseFailure ??= await awaitCapturedFrame();
     cuts += 1;
     // The premise, recorded rather than assumed: at the moment the connection
     // is cut, nothing has drawn this reply yet — it can only appear later from
@@ -292,14 +396,20 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   await expect(page.getByText(/Couldn't send/).first()).toBeVisible({ timeout: 60_000 });
   await cutReadyPromise;
   expect(cuts, "the chat POST must actually have been cut").toBe(1);
+  // With the frame observed to have arrived (`awaitCapturedFrame`), this is no
+  // longer only "nothing rendered early" — it is where the frame WAS. It was in
+  // the page and it was not on screen, so `PendingSyncPosts` was holding it,
+  // and the bubble below can only have come from the release (issue #1907).
   expect(repliesAtCut, "nothing had drawn this reply when the connection was cut").toBe(0);
-  // Stated before the reply assertion below, so a host that never produced the
-  // reply is reported as exactly that rather than as a 60-second wait for a
-  // bubble that was never coming (issue #1885).
+  // Stated before the reply assertion below, so a premise that did not hold is
+  // reported as exactly that rather than as a 60-second wait for a bubble that
+  // was never coming (issue #1885). The message carries the reading itself,
+  // because both premises are about the same window and only their subject
+  // differs: the reply had to exist, and this browser had to be holding it.
   expect(
     premiseFailure,
-    `the host never journaled a reply for ${marker} before the cut — a real delivery failure, ` +
-      "not a timing artefact: the turn was accepted and the connection was still open",
+    `the cut for ${marker} was taken with nothing held — a real delivery failure, not a timing ` +
+      "artefact: the turn was accepted and the connection was still open the whole time",
   ).toBeNull();
 
   // …and the answer is on screen anyway, drawn from the frame that was held
