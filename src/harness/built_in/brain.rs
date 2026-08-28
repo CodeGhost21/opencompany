@@ -8790,8 +8790,8 @@ members = ["eng1", "eng2"]
             .await
             .expect("cycle runs");
 
-        let agent = brain
-            .pool
+        let pool = brain.pool.clone();
+        let agent = pool
             .agents
             .read()
             .await
