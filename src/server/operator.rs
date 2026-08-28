@@ -3128,8 +3128,16 @@ async fn chat_history_response(
         .limit
         .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
         .min(CHAT_HISTORY_PAGE_LIMIT);
-    let messages =
-        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit).await?;
+        history_for_desk(
+            &runtime,
+            &desk_id,
+            &desk_name,
+            &viewer,
+            query.before,
+            limit,
+            is_admin,
+        )
+        .await?;
     Ok(Json(
         messages
             .into_iter()
