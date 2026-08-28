@@ -24,7 +24,14 @@ Each node's `WorkflowNodeStarted` and `WorkflowNodeFinished` ride the **same**
 unbounded observer channel, so the collector drains them in order and a node's
 start is always journaled ahead of its finish.
 
-### Why the journal rather than a dedicated store
+### Run-start sender
+
+`WorkflowRunStarted` also carries `startedBy`, identifying the source of the
+run: `"operator"`, `"schedule"`, or `{ "agent": "<teammate-id>" }`. The field
+is serialized in the same mixed shape as the runtime event and is available on
+the operator SSE projection so consumers can attribute a run without guessing
+from `scheduled` alone.
+
 
 A chat turn emits dozens of steps per message; a workflow run emits **one event
 per non-trigger node** — roughly eight for a six-node graph. At that volume the
