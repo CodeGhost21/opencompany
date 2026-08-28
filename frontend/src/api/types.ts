@@ -501,6 +501,8 @@ export interface ApprovalSummary {
    * heuristic for it, and for nothing else.
    */
   task?: { link: "task"; id: string } | { link: "unlinked" };
+  /** The host-resolved task owner, when an authoritative task-detail projection provides it. */
+  ownerTaskId?: string;
   /**
    * The host-resolved task owner for this parked approval, when available.
    *
