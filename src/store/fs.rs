@@ -998,6 +998,70 @@ async fn commit_staged(path: &Path, tmp: PathBuf) -> Result<()> {
 /// error path that is already returning the real failure to the caller, and
 /// a second failure here must not shadow it or abort the cleanup of any
 /// other temp file still owed.
+/// Owns every temp path a multi-step save has staged but not yet committed,
+/// so that **dropping** the save future cannot strand them.
+///
+/// Issue #1828 review, seventh round. Every explicit error path in
+/// [`FsCompanyStore::save`] already calls [`remove_staged`], but none of them
+/// runs when the future is simply dropped mid-flight — an aborted task, or an
+/// axum handler cancelled by a client disconnect. `save` stages `meta.json`
+/// and then awaits the staging of `company.toml`; cancelled in that window,
+/// the first temp file is fsynced on disk and its only handle goes out of
+/// scope with nothing left to reclaim it.
+///
+/// Cleanup runs in `Drop`, so it cannot await: it uses the blocking
+/// `std::fs::remove_file` deliberately. That is a single `unlink` on a path
+/// this process just created, and it must happen before the owning frame
+/// disappears — deferring it to a spawned task would reintroduce the same
+/// "nobody is left to run it" hole on a runtime that is shutting down.
+///
+/// Committing a staged file renames it away, so a later `Drop` sweep of that
+/// path is a no-op; the guard stays armed to the end rather than trying to
+/// track which renames have landed.
+struct StagedGuard {
+    tmps: Vec<PathBuf>,
+}
+
+impl StagedGuard {
+    fn new() -> Self {
+        Self { tmps: Vec::new() }
+    }
+
+    /// Start guarding `tmp` until this guard is dropped or disarmed.
+    fn watch(&mut self, tmp: &Path) {
+        self.tmps.push(tmp.to_path_buf());
+    }
+
+    /// Release every guarded path without removing it — the save reached a
+    /// point where the explicit paths own the outcome.
+    fn disarm(&mut self) {
+        self.tmps.clear();
+    }
+}
+
+impl Drop for StagedGuard {
+    fn drop(&mut self) {
+        for tmp in self.tmps.drain(..) {
+            match std::fs::remove_file(&tmp) {
+                Ok(()) => {
+                    tracing::warn!(
+                        path = %tmp.display(),
+                        "[store] reclaimed a staged temp file whose save was dropped mid-flight"
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(
+                        path = %tmp.display(),
+                        error = %e,
+                        "[store] failed to reclaim a staged temp file after its save was dropped"
+                    );
+                }
+            }
+        }
+    }
+}
+
 async fn remove_staged(tmp: &Path) {
     match tokio::fs::remove_file(tmp).await {
         Ok(()) => {}
@@ -1347,14 +1411,23 @@ impl CompanyStore for FsCompanyStore {
         // effort and safe to call on a path that a later `commit_staged`
         // already renamed away, so every early return below cleans up
         // whichever staged temp file(s) are still sitting unrenamed.
+        // Dropping this future — an aborted task, or a handler cancelled by a
+        // client disconnect — runs none of the explicit `remove_staged` calls
+        // below. `guard` covers exactly that: it owns each staged path from
+        // the moment it exists until the save is committed or has failed
+        // explicitly (issue #1828 review, seventh round).
+        let mut guard = StagedGuard::new();
         let meta_tmp = stage_atomic_bytes(&bundle.meta_json(), meta_src.as_bytes()).await?;
+        guard.watch(&meta_tmp);
         let toml_tmp = match stage_atomic_bytes(&bundle.company_toml(), toml_src.as_bytes()).await {
             Ok(tmp) => tmp,
             Err(e) => {
+                guard.disarm();
                 remove_staged(&meta_tmp).await;
                 return Err(e);
             }
         };
+        guard.watch(&toml_tmp);
         if updating_existing_bundle {
             if let Err(e) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
                 remove_staged(&toml_tmp).await;
@@ -1376,6 +1449,9 @@ impl CompanyStore for FsCompanyStore {
                 return Err(e);
             }
         }
+        // Both files are committed: the renames moved each temp away, so the
+        // guard has nothing left to reclaim.
+        guard.disarm();
         Ok(())
     }
 
@@ -3446,6 +3522,93 @@ mod test {
     /// first-time publish — the same fault as the very first round's test
     /// above, which already proves the *live* files stay safe — and, in
     /// addition to that, assert no `*.tmp-*` file is left anywhere under the
+    /// **Issue #1828 review, seventh round**: the sibling test below covers a
+    /// second-stage write that *fails*. This covers the second-stage write
+    /// that never returns at all because the caller went away — an aborted
+    /// task, or an axum handler cancelled by a client disconnect, which is a
+    /// reachable path since `save` is called from the operator routes.
+    ///
+    /// `save` stages `meta.json`, then awaits the staging of `company.toml`.
+    /// Dropped in that window, none of its explicit `remove_staged` branches
+    /// runs, and the already-fsynced `meta.tmp-<id>` loses its only handle.
+    /// The second stage cleans up after itself (sixth round), so pre-fix the
+    /// bundle is left with exactly one orphan; post-fix `StagedGuard`'s
+    /// `Drop` reclaims it as the frame unwinds.
+    #[tokio::test]
+    async fn dropping_save_between_its_two_stages_does_not_strand_the_first_temp_file() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: sample_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "provisioning".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        // Park the *second* stage, so the abort below lands squarely in the
+        // window where `meta.json` is staged and `company.toml` is not.
+        let release = stall_probe::arm(&bundle.company_toml());
+
+        let handle = tokio::spawn(async move { store.save(&record).await });
+
+        stall_probe::wait_blocked().await;
+        handle.abort();
+        let joined = handle.await;
+        assert!(
+            joined.as_ref().is_err_and(|e| e.is_cancelled()),
+            "the task running save must actually have been cancelled for \
+             this test to mean anything, got {joined:?}"
+        );
+
+        // Let the parked second stage finish; it reclaims its own temp.
+        release.send(()).expect("stall gate still open");
+
+        let bundle_dir = bundle.company_toml().parent().unwrap().to_path_buf();
+        let cleaned_up = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let orphans = std::fs::read_dir(&bundle_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                    .count();
+                if orphans == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            cleaned_up.is_ok(),
+            "dropping save between its two stages must not strand the \
+             meta.json temp it had already staged — an orphan sat in {} for \
+             the whole timeout",
+            bundle_dir.display()
+        );
+    }
+
     /// bundle directory afterward. Pre-fix, `meta.tmp-<id>` survives the
     /// failed `save` call; post-fix, `save`'s error path removes it before
     /// returning.
