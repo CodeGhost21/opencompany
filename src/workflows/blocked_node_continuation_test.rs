@@ -1168,7 +1168,7 @@ async fn reconciliation_retires_an_unapproved_stash_stranded_after_its_last_deni
         rt.journal()
             .blocked_stashes()
             .iter()
-            .all(|(t, _, _)| t != &turn),
+            .all(|(t, ..)| t != &turn),
         "the durable stash is retired too, or the next boot's rearm would rehydrate the \
          same leak"
     );
@@ -1489,7 +1489,12 @@ async fn reconciliation_does_not_redispatch_a_node_whose_dispatch_already_landed
     );
     rt.blocked_nodes().mark_approved(&turn);
     rt.journal()
-        .record_blocked_node_stashed(&turn, &original.workflow_id, &original.input)
+        .record_blocked_node_stashed(
+            &turn,
+            &original.workflow_id,
+            &original.input,
+            &original.started_by,
+        )
         .await
         .expect("the durable re-stash succeeds");
     rt.journal()
@@ -1613,7 +1618,12 @@ async fn a_ghost_decision_on_the_live_path_does_not_redispatch_an_already_dispat
     );
     rt.blocked_nodes().mark_approved(&turn);
     rt.journal()
-        .record_blocked_node_stashed(&turn, &original.workflow_id, &original.input)
+        .record_blocked_node_stashed(
+            &turn,
+            &original.workflow_id,
+            &original.input,
+            &original.started_by,
+        )
         .await
         .expect("the durable re-stash succeeds");
     rt.journal()

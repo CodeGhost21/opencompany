@@ -1770,7 +1770,7 @@ async fn stash_blocked_agent_nodes(
         // happened in the synchronous pass above that built `turns`.
         if let Err(error) = parking
             .journal
-            .record_blocked_node_stashed(&turn, workflow_id, trigger_input)
+            .record_blocked_node_stashed(&turn, workflow_id, trigger_input, started_by)
             .await
         {
             tracing::warn!(

@@ -1517,7 +1517,12 @@ impl HarnessAgentRunner {
         // over an approvals-queue write would be the wrong trade.
         if let Err(error) = parking
             .journal
-            .record_blocked_node_stashed(node_turn, &self.workflow_id, &self.trigger_input)
+            .record_blocked_node_stashed(
+                node_turn,
+                &self.workflow_id,
+                &self.trigger_input,
+                &self.started_by,
+            )
             .await
         {
             tracing::warn!(

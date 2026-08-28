@@ -193,20 +193,23 @@ impl BlockedNodeQueue {
     /// the builder folds the durable
     /// [`blocked_stashes`](crate::runtime::journal::RuntimeJournal::blocked_stashes)
     /// left by a park that outlived its process and re-arms one stash per still-
-    /// undelivered `(turn, workflow_id, input)`. **First write wins**, on
-    /// [`arm`](Self::arm)'s terms, so a live stash inherited on a rebuild is never
-    /// clobbered by a journal replay of the same turn.
-    pub fn rearm(&self, stashes: impl IntoIterator<Item = (String, String, Value)>) {
+    /// undelivered `(turn, workflow_id, input, started_by)`. **First write
+    /// wins**, on [`arm`](Self::arm)'s terms, so a live stash inherited on a
+    /// rebuild is never clobbered by a journal replay of the same turn.
+    ///
+    /// `started_by` comes straight from the durable
+    /// [`BlockedNodeStashed`](crate::runtime::journal::JournalRecord::BlockedNodeStashed)
+    /// record now (issue #1862 prerequisite) — the journal itself is what
+    /// degrades a stash written before that record carried the field to
+    /// `Operator` (its `#[serde(default)]`), so this call site just passes the
+    /// fact through rather than re-deciding the fallback.
+    pub fn rearm(&self, stashes: impl IntoIterator<Item = (String, String, Value, StartedBy)>) {
         let mut inner = self.inner.lock().expect("blocked node queue poisoned");
-        for (turn, workflow_id, input) in stashes {
+        for (turn, workflow_id, input, started_by) in stashes {
             inner.entry(turn).or_insert(StashedBlock {
                 workflow_id,
                 input,
-                // The durable stash record predates issue #1862's attribution
-                // threading and does not carry `started_by`, so a card parked
-                // before this landed degrades to the old `Operator` default
-                // rather than erroring.
-                started_by: StartedBy::Operator,
+                started_by,
                 approved: false,
             });
         }
@@ -349,17 +352,25 @@ mod test {
                 "workflow-node:run-1:draft".to_string(),
                 "digest".to_string(),
                 json!({ "topic": "x" }),
+                StartedBy::Agent("ceo".into()),
             ),
             (
                 "workflow-node:run-2:draft".to_string(),
                 "digest".to_string(),
                 json!({ "topic": "y" }),
+                StartedBy::Operator,
             ),
         ]);
         assert_eq!(q.waiting(), 2, "both durable stashes came back");
         let block = q.release("workflow-node:run-1:draft").expect("rehydrated");
         assert_eq!(block.workflow_id, "digest");
         assert_eq!(block.input, json!({ "topic": "x" }));
+        assert_eq!(
+            block.started_by,
+            StartedBy::Agent("ceo".into()),
+            "rearm must carry the real attribution through, not degrade every \
+             rehydrated stash to Operator"
+        );
     }
 
     /// A live stash (inherited on a rebuild) is never clobbered by a journal
@@ -377,9 +388,15 @@ mod test {
             "workflow-node:run-1:draft".to_string(),
             "digest".to_string(),
             json!({ "n": "replayed" }),
+            StartedBy::Agent("ceo".into()),
         )]);
         let block = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(block.input, json!({ "n": "live" }), "live wins over replay");
+        assert_eq!(
+            block.started_by,
+            StartedBy::Operator,
+            "live wins over replay for started_by too"
+        );
     }
 
     /// A fresh stash starts unapproved, and `mark_approved` flips it — the
@@ -438,6 +455,7 @@ mod test {
             "workflow-node:run-1:draft".to_string(),
             "digest".to_string(),
             json!({ "n": 1 }),
+            StartedBy::Operator,
         )]);
 
         let block = rehydrated
