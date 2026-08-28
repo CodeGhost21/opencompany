@@ -1609,8 +1609,6 @@ impl HarnessBrain {
             return Ok(None);
         };
         let relay = lifecycle::relay_reply(&card, &orchestrator, &orchestrator, origin);
-        self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
-            .await;
         Ok(Some(relay))
     }
 
