@@ -915,10 +915,9 @@ export function taskStatusesById(
 export function listTaskApprovals(
   client: OpenCompanyClient,
   company: string | null,
-  taskId: string,
-): Promise<import("@/api/types").ApprovalSummary[]> {
-  return client.get<import("@/api/types").ApprovalSummary[]>(
-    `${client.scopeFor(company)}/tasks/${encodeURIComponent(taskId)}/approvals`,
+): Promise<Record<string, import("@/api/types").ApprovalSummary[]>> {
+  return client.get<Record<string, import("@/api/types").ApprovalSummary[]>>(
+    `${client.scopeFor(company)}/tasks/approvals`,
   );
 }
 
