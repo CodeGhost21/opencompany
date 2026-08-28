@@ -2,8 +2,20 @@
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
 import type { ApprovalSummary, DeskDto, OperatorChannelDto, Verdict } from "@/api/types";
-import { clearTaskCard, type ChatMessage, type Reaction } from "@/lib/chat";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import {
+  clearTaskCard,
+  generalAwareChannel,
+  MAIN_THREAD_ID,
+  type ChatMessage,
+  type Reaction,
+} from "@/lib/chat";
+import {
+  defaultDesks,
+  deskClaimsGeneralChannel,
+  GENERAL_CHANNEL,
+  isGeneralChannel,
+  type Desk,
+} from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
 
 /**
@@ -27,6 +39,7 @@ export function deskFromDto(d: DeskDto): Desk {
     blurb: d.description ?? "",
     members: d.members,
     overlayMembers: d.overlayMembers,
+    overlayCreated: d.overlayCreated,
     responder: d.responder,
   };
 }
@@ -159,26 +172,89 @@ export interface ChannelSection {
  * Both kinds post to the same company endpoint. A channel scopes a transcript
  * and gives the company side a stable identity; it is not a separate backend.
  */
+/**
+ * The built-in `#general` channel: the company-wide line, in every company,
+ * from first boot (issue #1743).
+ *
+ * # It is not a desk, and that is the point
+ *
+ * Every other channel here is a desk, and a desk has a lead and a hierarchy.
+ * "Everyone" has neither, so `#general` is deliberately absent from
+ * `GET .../desks` — which is what keeps every desk-shaped surface honest for
+ * free: the org chart, the assignee picker and the desk counts all read that
+ * route, so none of them can offer this channel a lead, a seat, a rename or a
+ * delete. The console renders no edit or delete affordance on it because there
+ * is nothing to render one from, not because a button is hidden. The host
+ * refuses those writes anyway, with a reason (`GENERAL_CHANNEL_IMMUTABLE`).
+ *
+ * # Membership is derived, never stored
+ *
+ * `memberIds` is the roster this render was handed, in roster order. Nothing
+ * anywhere records who is in `#general`, so a teammate added a minute ago is a
+ * member with no write and the two cannot drift. The host derives the same set
+ * the same way when it expands `@everyone` here.
+ *
+ * # Who answers a message that mentions nobody
+ *
+ * The orchestrator — the same teammate that has always answered the company's
+ * main line, one turn per message. `isOrchestrator` is the host's own roster
+ * rule read off `GET .../team`, never re-derived from `tier`; a host that does
+ * not answer it leaves every row `undefined`, and the purpose line then simply
+ * does not make the claim.
+ */
+function generalChannel(members: TeamMember[]): Channel {
+  const orchestrator = members.find((m) => m.isOrchestrator);
+  return {
+    id: MAIN_THREAD_ID,
+    name: GENERAL_CHANNEL,
+    voice: orchestrator?.name ?? "Your company",
+    kind: "channel",
+    purpose: orchestrator
+      ? `Everyone's here. ${orchestrator.name} picks up anything you don't @-mention.`
+      : "Everyone's here — the whole company on one line",
+    memberIds: members.map((m) => m.id),
+  };
+}
+
 export function buildChannels(
   members: TeamMember[],
   desks: Desk[] = defaultDesks(),
   transcripts: Transcripts = {},
 ): ChannelSection[] {
-  const channels: Channel[] = desks.map((d) => ({
-    id: d.id,
-    name: d.channel,
-    voice: d.name,
-    kind: "channel" as const,
-    // An `auto` channel with no blurb of its own states its routing rule —
-    // the honest line about who answers, in place of a rank nothing confers
-    // (issue #1835). An operator-written blurb still wins.
-    purpose:
-      d.blurb ||
-      (d.responder === "auto" ? "Best fit picks up anything you don't @-mention" : d.blurb),
-    tone: d.tone,
-    memberIds: d.members,
-    leadless: d.responder === "auto" || undefined,
-  }));
+  // A desk that answers to a General spelling owns the company-wide line, and
+  // the built-in channel steps aside for it rather than doubling it.
+  //
+  // This is the host's own rule, not a console one: `is_general_channel`
+  // (`src/server/operator.rs`) is guarded on `!record.desk_exists(desk_id)`, so
+  // a blueprint that declares `[[group_chat]] id = "general"` — or `"main"` —
+  // keeps its desk, its lead, its writes, and `responder_for` routes messages
+  // addressed there to that lead. A rail that showed a second, lead-less
+  // `#general` beside it, or hid the desk and named the orchestrator as who
+  // answers, would state something the host does not do.
+  //
+  // Desk *creation* refuses every General spelling, so such a desk can only
+  // come from a blueprint — and `defaultDesks()` no longer fabricates one, so
+  // "a desk claims it" is now a fact about the company rather than about which
+  // fallback set the console happened to be holding.
+  const claimed = desks.some(deskClaimsGeneralChannel);
+  const channels: Channel[] = [
+    ...(claimed ? [] : [generalChannel(members)]),
+    ...desks.map((d) => ({
+      id: d.id,
+      name: d.channel,
+      voice: d.name,
+      kind: "channel" as const,
+      // An `auto` channel with no blurb of its own states its routing rule —
+      // the honest line about who answers, in place of a rank nothing confers
+      // (issue #1835). An operator-written blurb still wins.
+      purpose:
+        d.blurb ||
+        (d.responder === "auto" ? "Best fit picks up anything you don't @-mention" : d.blurb),
+      tone: d.tone,
+      memberIds: d.members,
+      leadless: d.responder === "auto" || undefined,
+    })),
+  ];
 
   const dms = directMessageChannels(members)
     .filter((dm) => (transcripts[dm.id]?.length ?? 0) > 0)
@@ -284,6 +360,40 @@ export function dmChannelId(member: TeamMember): string {
 }
 
 /**
+ * The **host thread** a teammate's DM is addressed on — not always the same
+ * string as {@link dmChannelId}, which is its console-local channel id.
+ *
+ * Issue #364 re-keyed DMs onto the bare teammate id, and for every ordinary
+ * teammate that is still what this answers. The exception is a teammate whose
+ * id is itself a General spelling: the host folds that bare key to the
+ * company-wide line before it ever reaches the roster — deliberately, so `main`
+ * cannot be captured by a teammate called `main` — and answers it as the
+ * orchestrator. Addressed bare, that DM was writable and unreadable at once.
+ *
+ * So exactly that one teammate is addressed prefixed, which `chat_responder`
+ * unwraps and resolves (`chat_responder("dm:main") == Some("main")`).
+ *
+ * **Every seam that turns a roster member into a thread id has to ask this**,
+ * not only the sender: the live thread → channel map, the rehydration targets
+ * that recover history after a reload, and the Approvals page resolving an
+ * origin back to its conversation. Any one of them left on the bare id puts
+ * that DM's replies, its recovered history, or its approval link back on the
+ * company's line (issue #1743).
+ */
+export function dmThreadId(member: TeamMember): string {
+  return isGeneralChannel(member.id) ? dmChannelId(member) : member.id;
+}
+
+/** The teammate a thread addresses, whether it is bare or `dm:`-prefixed. */
+export function memberForThread(members: TeamMember[], threadId: string): TeamMember | null {
+  return (
+    members.find((m) => dmThreadId(m) === threadId) ??
+    members.find((m) => dmChannelId(m) === threadId) ??
+    null
+  );
+}
+
+/**
  * The name-derived DM id this console minted before issue #364.
  *
  * Kept for one release, and for one purpose: a `#/chat/dm:ada-1f3k` link that
@@ -362,8 +472,75 @@ export function channelIdForThread(
   members: TeamMember[],
 ): string | null {
   if (desks.some((d) => d.id === threadId)) return threadId;
+  // The built-in `#general` channel is in no desk list, so it has to be
+  // resolved by name (issue #1743). The host journals this one conversation
+  // under four ids — `""`, `main`, `General`, `general` — and folds them on
+  // read; a thread carrying any of them belongs to the one channel that
+  // renders it. Without this, an approval raised on the company's main line
+  // matched no channel and stayed stranded on the Approvals page, and an
+  // unaddressed live message had nowhere in `Transcripts` to land.
+  //
+  // Checked before the roster, same order the host resolves in
+  // (`responder_for`: desk, then the General fold, then the roster) — so the
+  // console never claims a thread belongs somewhere the host would answer
+  // from somewhere else.
+  if (isGeneralChannel(threadId)) {
+    return generalChannelId(desks);
+  }
   const member = members.find((m) => m.id === threadId);
-  return member ? dmChannelId(member) : null;
+  if (member) return dmChannelId(member);
+  // The prefixed form, last, exactly as `chat_responder` unwraps it.
+  //
+  // A teammate whose id *is* a General spelling cannot be addressed bare — the
+  // fold above answers first and the company's line wins, which is deliberate
+  // (`chat_responder("main") == None`, "a teammate called `main` does not
+  // inherit the company's line"). `ChatView` therefore addresses that one DM as
+  // `dm:<id>`, which the host does answer. The frames it emits carry that
+  // prefixed key, so without this arm they resolved to no channel at all and
+  // the reply never appeared — the DM was writable and unreadable at once.
+  const prefixed = threadId.startsWith("dm:") ? threadId.slice("dm:".length) : null;
+  const dmMember = prefixed ? members.find((m) => m.id === prefixed) : null;
+  return dmMember ? dmChannelId(dmMember) : null;
+}
+
+/**
+ * The channel the company-wide line actually renders in.
+ *
+ * `main` — the built-in channel — in every ordinary company. A blueprint that
+ * declares a `[[group_chat]]` under a General id is grandfathered by the host
+ * (`is_general_channel` is guarded on `!record.desk_exists`), and
+ * {@link buildChannels} then lets that desk own the line and adds no built-in
+ * channel beside it; here that desk's own id is the answer.
+ *
+ * One place, because two answers to "where does the main line render" is
+ * precisely how a message ends up somewhere nothing is listening.
+ */
+function generalChannelId(desks: Desk[]): string {
+  return desks.find(deskClaimsGeneralChannel)?.id ?? MAIN_THREAD_ID;
+}
+
+/**
+ * The channel that renders `threadId`, given the shell's thread → channel map.
+ *
+ * The map holds one entry per id the company can be addressed on, which cannot
+ * cover the General spellings exhaustively: the host compares them
+ * case-insensitively (`is_general_chat`) and then emits on live events the raw
+ * id it was addressed with, so an API client posting to `MAIN` produces frames
+ * keyed `MAIN` and a four-literal map misses them. A missed frame is not a
+ * cosmetic loss — the reply and the working indicator simply do not appear
+ * until polling happens to recover the durable history.
+ *
+ * So: exact match first, then the same question the host asks.
+ */
+export function channelForThread(
+  map: Readonly<Record<string, string>>,
+  threadId: string,
+): string | null {
+  // One implementation, in `lib/chat.ts`, because `dispatchMarkerPlacement`
+  // lives there and has to resolve a thread the same way (issue #1743). A
+  // second copy here is how three of the four live-frame consumers ended up
+  // indexing the map directly and missing every casing the host accepts.
+  return generalAwareChannel(map, threadId);
 }
 
 export function findChannel(sections: ChannelSection[], id: string | null): Channel | null {
