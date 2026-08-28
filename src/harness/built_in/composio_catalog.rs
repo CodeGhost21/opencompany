@@ -990,7 +990,17 @@ fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'stat
 /// alongside `api.github.com`, while an unrelated host that merely *ends with*
 /// the same letters (`notapi.github.com.evil.test`) is not — the boundary dot is
 /// required.
+///
+/// `host` first has a single trailing dot stripped (PR #1780 review, round
+/// 12): `https://api.github.com./repos/o/r` is a valid absolute-FQDN
+/// spelling — the DNS root label — and resolves to the exact same host, but
+/// [`url::Url::host_str`] keeps that dot verbatim, so without stripping it
+/// neither the equality nor the subdomain-suffix arm below would match a
+/// request spelled that way. `api_host` is always one of this module's own
+/// literal constants and never carries a trailing dot, so only `host` needs
+/// normalizing.
 fn host_is(host: &str, api_host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
     host == api_host || host.ends_with(&format!(".{api_host}"))
 }
 
@@ -1682,6 +1692,21 @@ mod tests {
         assert!(
             web_call_deflection(&connected, "https://uploads.api.github.com/x").is_some(),
             "a sub-domain of the API host must be deflected"
+        );
+    }
+
+    /// PR #1780 review (round 12): `https://api.github.com./repos/o/r` is a
+    /// valid absolute-FQDN spelling — the trailing dot is the DNS root label
+    /// and resolves to the exact same host — but `Url::host_str` keeps that
+    /// dot verbatim, so before this fix neither the equality nor the
+    /// subdomain-suffix arm of `host_is` matched it and the request bypassed
+    /// deflection entirely.
+    #[test]
+    fn a_trailing_dot_fqdn_still_matches_the_provider_host() {
+        let connected = vec!["github".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://api.github.com./repos/o/r").is_some(),
+            "the root-label trailing dot must not defeat the host match"
         );
     }
 
