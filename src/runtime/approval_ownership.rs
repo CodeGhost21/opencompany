@@ -59,14 +59,21 @@ use std::collections::HashMap;
 
 use crate::runtime::types::{ApprovalSummary, TaskLink};
 
-/// The card an attempt belongs to — `None` when the attempt names no card, or
-/// when the store has no such run.
+/// What the run store **answered** for each attempt it was asked about.
 ///
-/// Both collapse to the same answer on purpose. [`approval_owner`] asks
-/// `task_runs.contains(run_id)` of one card at a time, so an attempt that
-/// belongs to no card — a chat run, a workflow node's run — and an attempt the
-/// store cannot produce are alike in the only way that matters here: **no card
-/// claims them**, and the queue must therefore not offer them under one.
+/// Presence is the load-bearing part: an entry means the store answered, and
+/// `None` inside it is a definite "this attempt belongs to no card" — a chat
+/// run, a workflow node's run, or a run the store says does not exist. An
+/// attempt **absent from the map** was never successfully asked about, and is a
+/// different thing entirely.
+///
+/// Collapsing those two was a defect (#1895 review). A transient store failure
+/// became "no owner", which unlinked a still-parked approval; the console's
+/// per-card join then dropped the row and the board card re-enabled Resume over
+/// an approval nobody had decided — a store blip handing the operator exactly
+/// the re-dispatch this work exists to keep out of their hand. A stale link is
+/// a label that might be wrong. A dropped blocker is a card claiming to be free
+/// when it is not.
 ///
 /// [`approval_owner`]: crate::server::ops::tasks
 pub type AttemptOwner<'a> = &'a HashMap<String, Option<String>>;
@@ -81,12 +88,16 @@ pub type AttemptOwner<'a> = &'a HashMap<String, Option<String>>;
 /// same reason: an ownership rule that can only be exercised through an HTTP
 /// round trip is one whose edge cases go untested.
 ///
-/// Three outcomes, and the middle one is the point:
+/// Four outcomes, and the two that leave the stamp alone are as deliberate as
+/// the two that overwrite it:
 ///
 /// * the park names **no attempt** — its stamped link stands, untouched;
+/// * the store was **never successfully asked** about the attempt — the stamp
+///   stands too, because the only alternative is asserting something no read
+///   supports (see [`AttemptOwner`]);
 /// * the attempt resolves to a **card** — that card owns it, whatever the park
 ///   stamped, which is the correction;
-/// * the attempt resolves to **nothing** — [`TaskLink::Unlinked`], because a
+/// * the store answered **no card** — [`TaskLink::Unlinked`], because a
 ///   card-level key can never override an attempt-level one. This is the arm
 ///   that matters: the stamped link is what the queue used to hand out, and
 ///   keeping it here would leave exactly the misattribution this exists to fix.
@@ -99,7 +110,12 @@ pub fn resolve_owners(
         let Some(run_id) = attempts.get(summary.id.as_ref()) else {
             continue;
         };
-        summary.task = Some(match owners.get(run_id).and_then(Option::as_deref) {
+        // `get` before the inner `Option`: an absent key is "not asked" and
+        // must fall through, not read as "no card".
+        let Some(answer) = owners.get(run_id) else {
+            continue;
+        };
+        summary.task = Some(match answer.as_deref() {
             Some(task_id) => TaskLink::Task {
                 id: task_id.to_string(),
             },
@@ -212,14 +228,62 @@ mod test {
         assert_eq!(rows[0].task, Some(TaskLink::Unlinked));
     }
 
-    /// An attempt the store cannot produce is the same answer, and for the same
-    /// reason: no card claims it. Falling back to the stamp here would restore
-    /// the misattribution on exactly the rows least able to prove otherwise.
+    /// An attempt the store *says* does not exist is a definite answer — no
+    /// card claims it — and falling back to the stamp there would restore the
+    /// misattribution on exactly the rows least able to prove otherwise.
     #[test]
-    fn an_unknown_attempt_unlinks_rather_than_trusting_the_stamp() {
+    fn an_attempt_the_store_denies_unlinks_rather_than_trusting_the_stamp() {
         let mut rows = vec![summary("a", Some(TaskLink::Task { id: "t-1".into() }))];
-        resolve_owners(&mut rows, &attempts(&[("a", "run-gone")]), &owners(&[]));
+        resolve_owners(
+            &mut rows,
+            &attempts(&[("a", "run-gone")]),
+            &owners(&[("run-gone", None)]),
+        );
         assert_eq!(rows[0].task, Some(TaskLink::Unlinked));
+    }
+
+    /// A read that never succeeded is **not** that answer (#1895 review).
+    ///
+    /// This is the one with teeth. Unlinking here drops the approval out of the
+    /// console's per-card join, and the board card then re-enables Resume over
+    /// something nobody decided — a transient store failure handing the
+    /// operator the re-dispatch. The stamp is kept instead: possibly a wrong
+    /// label, never a card that claims to be free while it is blocked.
+    #[test]
+    fn an_attempt_the_store_could_not_be_asked_about_keeps_its_stamp() {
+        let mut rows = vec![
+            summary("a", Some(TaskLink::Task { id: "t-1".into() })),
+            summary("b", Some(TaskLink::Unlinked)),
+        ];
+        // Neither run id is in `owners` — the reads failed rather than answered.
+        resolve_owners(
+            &mut rows,
+            &attempts(&[("a", "run-a"), ("b", "run-b")]),
+            &owners(&[]),
+        );
+        assert_eq!(rows[0].task, Some(TaskLink::Task { id: "t-1".into() }));
+        assert_eq!(rows[1].task, Some(TaskLink::Unlinked));
+    }
+
+    /// One failed read must not take its neighbours' answers with it.
+    #[test]
+    fn a_failed_read_does_not_disturb_the_attempts_that_answered() {
+        let mut rows = vec![
+            summary("a", Some(TaskLink::Task { id: "t-1".into() })),
+            summary("b", Some(TaskLink::Task { id: "t-1".into() })),
+        ];
+        resolve_owners(
+            &mut rows,
+            &attempts(&[("a", "run-ok"), ("b", "run-failed")]),
+            &owners(&[("run-ok", Some("t-other"))]),
+        );
+        assert_eq!(
+            rows[0].task,
+            Some(TaskLink::Task {
+                id: "t-other".into()
+            })
+        );
+        assert_eq!(rows[1].task, Some(TaskLink::Task { id: "t-1".into() }));
     }
 
     /// Two attempts at one card both land on it — #183 settled that repeat

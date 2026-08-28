@@ -2966,17 +2966,31 @@ impl CompanyRuntime {
         let distinct: HashSet<&str> = attempts.values().map(String::as_str).collect();
         let mut owners: HashMap<String, Option<String>> = HashMap::with_capacity(distinct.len());
         for run_id in distinct {
-            // A read that fails is not a card: `resolve_owners` treats "no
-            // owner" and "cannot say" alike, because both mean no card claims
-            // this attempt and neither may be answered with the stale stamp.
-            let owner = self
-                .runs()
-                .get_run(self.id(), run_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|run| run.task_id);
-            owners.insert(run_id.to_string(), owner);
+            // Only a **successful** read is recorded. An entry means the store
+            // answered — `Some(card)` or a definite "no card" — and an absent
+            // one means it could not be asked, which `resolve_owners` leaves
+            // the stamped link alone for (#1895 review).
+            //
+            // The distinction is the whole of this arm. Folding a failed read
+            // into "no owner" (an `.ok()` away) unlinks a still-parked
+            // approval, `approvalsForTask` then drops the row, and the card
+            // re-enables Resume while the approval is very much still parked —
+            // a transient store blip handing the operator the re-dispatch this
+            // PR exists to keep out of their hand. A stale link is a label that
+            // may be wrong; a dropped blocker is a card that lies about being
+            // free.
+            match self.runs().get_run(self.id(), run_id).await {
+                Ok(run) => {
+                    owners.insert(run_id.to_string(), run.and_then(|run| run.task_id));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        run_id,
+                        error = %err,
+                        "could not resolve an approval's owning card; keeping its parked link",
+                    );
+                }
+            }
         }
         crate::runtime::approval_ownership::resolve_owners(&mut summaries, &attempts, &owners);
         summaries
