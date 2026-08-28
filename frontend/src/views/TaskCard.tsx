@@ -144,6 +144,7 @@ export function TaskItem({
   onDecide,
   onOpen,
   onResume,
+  continuationInFlight,
 }: {
   task: Task;
   dragging: boolean;
