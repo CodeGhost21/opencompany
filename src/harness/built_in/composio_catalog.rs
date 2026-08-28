@@ -906,6 +906,12 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// path prefix under the shared gateway host, not a deeper path under
 /// `/gmail/`, exactly like Drive's `/upload/drive/` entry above. It needs its
 /// own prefix in Gmail's set the same way.
+///
+/// Drive has a THIRD sibling prefix on the shared gateway (PR #1780 review,
+/// round 8): batching several Drive calls into one HTTP request goes to
+/// `www.googleapis.com/batch/drive/v3`, a product-scoped batch endpoint —
+/// another sibling of `/drive/`, not a deeper path under it, same shape as
+/// `/upload/drive/`. It needs its own prefix in Drive's set too.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
         "github" => &[("api.github.com", &[]), ("uploads.github.com", &[])],
@@ -919,7 +925,10 @@ fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'stat
         ],
         "googledrive" => &[
             ("drive.googleapis.com", &[]),
-            ("www.googleapis.com", &["/drive/", "/upload/drive/"]),
+            (
+                "www.googleapis.com",
+                &["/drive/", "/upload/drive/", "/batch/drive/"],
+            ),
         ],
         "slack" => &[("slack.com", &["/api/"])],
         "notion" => &[("api.notion.com", &[])],
@@ -1660,6 +1669,13 @@ mod tests {
     /// Before the fix this entry had no path prefix, so a `googledrive`
     /// connection deflected `www.googleapis.com/youtube/v3/...` to the Drive
     /// toolkit even though Drive cannot serve it (PR #1780 review).
+    ///
+    /// PR #1780 review (round 8): like the `/upload/drive/` sibling prefix
+    /// above, batching several Drive calls into one request goes to
+    /// `www.googleapis.com/batch/drive/v3` — a third sibling prefix under the
+    /// same shared gateway host, not a deeper path under `/drive/`. Before
+    /// this fix `googledrive`'s prefix set had no `/batch/drive/` entry, so a
+    /// batch request passed straight through instead of being deflected.
     #[test]
     fn drive_deflection_on_the_legacy_host_is_scoped_to_drive_paths() {
         let connected = vec!["googledrive".to_string()];
@@ -1687,6 +1703,11 @@ mod tests {
             )
             .is_some(),
             "the resumable/media upload route on the legacy gateway host must also be deflected"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://www.googleapis.com/batch/drive/v3").is_some(),
+            "the batch endpoint on the legacy gateway host must also be deflected, the same as \
+             Drive's sibling /upload/drive/ prefix"
         );
     }
 
