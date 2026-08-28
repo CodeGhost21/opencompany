@@ -32,6 +32,13 @@ is serialized in the same mixed shape as the runtime event and is available on
 the operator SSE projection so consumers can attribute a run without guessing
 from `scheduled` alone.
 
+`startedBy` is optional on the wire, not a guaranteed member: a journal line
+written before this field existed carries none, and replaying it must not fail
+to parse, so the key is omitted rather than sent as `null`. `None` is also the
+honest reading for any future entry point that genuinely has no identity to
+give. A consumer — SSE or otherwise — must treat a missing `startedBy` as
+"unattributed," not assume `scheduled` alone can stand in for it.
+
 
 A chat turn emits dozens of steps per message; a workflow run emits **one event
 per non-trigger node** — roughly eight for a six-node graph. At that volume the
