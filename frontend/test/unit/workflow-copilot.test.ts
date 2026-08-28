@@ -323,4 +323,68 @@ describe("composeCopilotMessage", () => {
     // appear for this run.
     expect(message).not.toMatch(/collect.*finished/);
   });
+
+  /**
+   * PR #1883 review (Codex #3877606130). A `degraded` run — a node under
+   * `on_error: continue|route` errored and the graph kept going past it, or an
+   * agent node's turn truncated at the iteration cap (issue #1865) — has no
+   * top-level `error`, is not `cancelled` and blocked nobody, so before this
+   * fix `describeRun` fell through every arm to the bare "finished" reading
+   * even while the step trail it prints right beside that word named the
+   * errored node. That contradiction (`finished; steps: agent=error(...)`)
+   * is exactly the shape #881 already fixed once for `blocked`, just
+   * reachable through the newer verdict `describeRun` never consulted.
+   */
+  it("grounds the copilot on a degraded run instead of reading it as finished", () => {
+    const degradedRun = {
+      seq: 1,
+      atMillis: 1_700_000_000_000,
+      workflowId: "weekly_report",
+      scheduled: false,
+      runId: "run-1",
+      deliveries: [],
+      pendingApprovals: [],
+      verdict: "degraded" as const,
+      nodes: [
+        { nodeId: "collect", status: "error" as const, elapsedMs: 12 },
+        { nodeId: "send", status: "ok" as const, elapsedMs: 4 },
+      ],
+    };
+    const message = composeCopilotMessage(
+      { ...context, runs: [degradedRun] },
+      "did this run finish cleanly?",
+    );
+    expect(message).toContain("DEGRADED: collect");
+    expect(message).toMatch(/errored but the graph continued/);
+    // The bare "finished" reading this arm exists to replace must not also
+    // appear for this run.
+    expect(message).not.toMatch(/— finished;/);
+  });
+
+  /**
+   * The same fix's fallback half: a host predating issue #1865 sends no
+   * `verdict` field at all, but if it nevertheless sent the node trail (every
+   * host since #371), `describeRun` must still read the errored node off it
+   * rather than defaulting to "finished" — the same "prefer the host's word,
+   * fall back to the same signal it reads" shape `verdictOf` uses elsewhere
+   * in this console.
+   */
+  it("still reads a degraded run off its node trail when an older host sends no verdict", () => {
+    const degradedRun = {
+      seq: 1,
+      atMillis: 1_700_000_000_000,
+      workflowId: "weekly_report",
+      scheduled: false,
+      runId: "run-1",
+      deliveries: [],
+      pendingApprovals: [],
+      nodes: [{ nodeId: "collect", status: "error" as const, elapsedMs: 12 }],
+    };
+    const message = composeCopilotMessage(
+      { ...context, runs: [degradedRun] },
+      "did this run finish cleanly?",
+    );
+    expect(message).toContain("DEGRADED: collect");
+    expect(message).not.toMatch(/— finished;/);
+  });
 });
