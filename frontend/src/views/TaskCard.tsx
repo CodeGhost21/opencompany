@@ -324,11 +324,13 @@ export function TaskItem({
             // decision had already set going. The queue still holds the row
             // until the host drops it, so this stays down across that window
             // and lifts on its own.
-            disabled={rows.length > 0}
+            disabled={rows.length > 0 || continuationInFlight}
             title={
               rows.length > 0
                 ? "Blocked — decide its approvals first; resuming re-runs the work from the start."
-                : undefined
+                : continuationInFlight
+                  ? "The approval continuation is still running."
+                  : undefined
             }
             onClick={(e) => {
               // Don't let the click bubble to the card's open handler.
