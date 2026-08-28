@@ -669,6 +669,57 @@ pub(crate) mod stall_probe {
     }
 }
 
+/// Test-only rendezvous for the seventeenth-round regression test below
+/// (finding on comment 3878696002). `stall_probe` above proves the window
+/// *before* `tx.send` — rx already dropped, send fails, the detached task's
+/// own cleanup runs. This proves the other window: `tx.send` *succeeds*
+/// (the `Receiver` was still alive at that instant) but the future awaiting
+/// it is torn down before it is ever polled again to actually consume the
+/// value. That window can't be reached by aborting a spawned task and
+/// hoping the timing lines up — `send` completing and the awaiting task
+/// resuming are two independently-scheduled events. Instead this notifies a
+/// test the instant `send` returns `Ok`, so the test can race a `select!`
+/// biased toward this notification against the awaited future itself and
+/// drop the future without ever polling it again once notified — a
+/// deterministic reproduction of "sent successfully, never consumed."
+#[cfg(test)]
+pub(crate) mod send_probe {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, LazyLock, Mutex};
+    use tokio::sync::Notify;
+
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, Arc<Notify>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn key(path: &Path) -> PathBuf {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Arms a one-shot "the send just succeeded" signal for `path`. Returns
+    /// the `Notify` a test awaits.
+    pub(crate) fn arm(path: &Path) -> Arc<Notify> {
+        let notify = Arc::new(Notify::new());
+        GATES
+            .lock()
+            .expect("send-probe poisoned")
+            .insert(key(path), notify.clone());
+        notify
+    }
+
+    /// Called right after a successful `tx.send` in `stage_atomic_bytes`'s
+    /// detached task. No-op unless `path` was armed.
+    pub(crate) fn notify_sent(path: &Path) {
+        if let Some(notify) = GATES
+            .lock()
+            .expect("send-probe poisoned")
+            .remove(&key(path))
+        {
+            notify.notify_one();
+        }
+    }
+}
+
 /// Reads a file to a string, returning an empty string if it does not exist.
 pub(crate) async fn read_optional(path: &Path) -> Result<String> {
     match tokio::fs::read_to_string(path).await {
@@ -971,6 +1022,11 @@ async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     let owned_path = path.to_path_buf();
     let bytes = bytes.to_vec();
     let cleanup_tmp = tmp.clone();
+    // Separate from `owned_path` above: that one is moved into the
+    // `spawn_blocking` closure, so the outer detached task needs its own
+    // clone to key the post-send probe hook below by the original `path`.
+    #[cfg_attr(not(test), allow(unused_variables))]
+    let notify_path = path.to_path_buf();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::task::spawn(async move {
@@ -1032,12 +1088,45 @@ async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
         // `commit_staged` / `remove_staged` call nobody is left to make.
         if tx.send(result).is_err() {
             remove_staged(&cleanup_tmp).await;
+        } else {
+            // Test-only: see `send_probe`. Fires the instant a successful
+            // send lands, before this task does anything else, so a test
+            // can race dropping the awaiting future against it.
+            #[cfg(test)]
+            send_probe::notify_sent(&notify_path);
         }
     });
+
+    // Issue #1828 review, seventeenth round (finding on 3878696002): the
+    // detached task above only reclaims `tmp` when `tx.send` itself fails,
+    // i.e. when `rx` was already dropped *before* the send. `send` returning
+    // `Ok` only means the `Receiver` existed at that instant — it does not
+    // mean this function's own future ever gets polled again to retrieve
+    // it. A oneshot value that is sent successfully but whose receiver is
+    // dropped before actually consuming it (this future aborted or
+    // otherwise torn down between the send and this call's next poll) is
+    // simply discarded: no error, no signal, nothing downstream ever runs.
+    // That window is real — `send` completing and this task resuming are
+    // two independently-scheduled events — and the caller loses the only
+    // other reference to `tmp` right along with it, exactly like the
+    // sixth-round hazard this function already exists to close.
+    //
+    // A local guard closes it without needing to know which of those two
+    // events happened first: it watches `tmp` from before the handoff and
+    // is disarmed only once `rx.await` has actually completed, so any drop
+    // of *this* future in between — regardless of whether the detached
+    // task's `send` raced ahead of it — reclaims the file in `Drop`, same
+    // as `StagedGuard` already does for `save`'s own cancellation window.
+    let mut guard = StagedGuard::new();
+    guard.watch(&tmp);
 
     rx.await
         .map_err(|_| OpenCompanyError::Store("stage task dropped before completing".into()))??;
 
+    // The value was both sent and actually consumed here — ownership of
+    // `tmp` now passes to our caller (`commit_staged`, `remove_staged`, or
+    // `save`'s own `StagedGuard`), so stop guarding it ourselves.
+    guard.disarm();
     Ok(tmp)
 }
 
@@ -4678,6 +4767,100 @@ mod test {
         assert!(
             cleaned_up.is_ok(),
             "cancelling the caller must not strand the temp file \
+             stage_atomic_bytes already wrote and fsynced — it sat in {} \
+             for the whole timeout",
+            bundle_dir.display()
+        );
+    }
+
+    /// **Issue #1828 review, seventeenth round** (finding on comment
+    /// 3878696002): the sixth round's fix reclaims `tmp` when `tx.send`
+    /// *fails* — i.e. when `rx` was already dropped before the send was
+    /// attempted. It does nothing for the other order: `send` succeeds
+    /// (the `Receiver` was still alive at that instant) but the future
+    /// awaiting it is dropped before it is ever polled again to actually
+    /// consume the value. `send` completing and the awaiting task resuming
+    /// are two independently-scheduled events, so that gap is real — a
+    /// successfully-sent, never-consumed oneshot value is silently dropped,
+    /// and with it the only other reference to `tmp`.
+    ///
+    /// This can't be proven by aborting a spawned task and hoping the
+    /// timing lines up, the way the sixth round's test does — that races
+    /// two independently-scheduled tasks against wall-clock time. Instead,
+    /// `send_probe` fires the instant `tx.send` returns `Ok`, and this test
+    /// races that notification against the awaited future itself in a
+    /// `biased` `select!`: whichever branch is checked first and found
+    /// ready wins outright within a single poll, so once the notification
+    /// fires, the awaited future is provably *not yet re-polled* to
+    /// retrieve the value — dropping it right there reproduces "sent
+    /// successfully, never consumed" deterministically, no sleeps involved.
+    ///
+    /// Pre-fix (before the local `StagedGuard` in `stage_atomic_bytes`) the
+    /// temp file is orphaned forever: the detached task saw `send` succeed
+    /// and did no cleanup, and the caller never got `tmp` back to hand to
+    /// `commit_staged` / `remove_staged` / `save`'s own guard. Post-fix the
+    /// local guard's `Drop` reclaims it as soon as this test's `drop(fut)`
+    /// runs.
+    #[tokio::test]
+    async fn dropping_the_caller_after_a_successful_send_does_not_strand_the_temp_file() {
+        let root_dir = tmp_root();
+        let target = root_dir.path().join("bundle").join("company.toml");
+
+        let notify = send_probe::arm(&target);
+
+        // `Box::pin`, not `tokio::pin!`: the latter shadows `fut` with a
+        // `Pin<&mut F>` into a hidden stack slot that outlives this
+        // function's scope, so a later `drop(fut)` would only drop that
+        // reference — the real future (and the `StagedGuard` living inside
+        // it) would stay alive, silently defeating this whole test. `Box`
+        // makes `fut` the actual owner, so dropping it drops the future for
+        // real.
+        let mut fut = Box::pin(stage_atomic_bytes(&target, b"hello"));
+
+        tokio::select! {
+            biased;
+            _ = notify.notified() => {
+                // The detached task's `tx.send` has already returned `Ok`
+                // — `rx` was alive at that instant, and the value is now
+                // buffered inside it. `biased` guarantees `&mut fut` was
+                // NOT polled again in the same event that delivered this
+                // notification (this arm is checked first and wins
+                // outright), so `fut` is still parked on `rx.await`,
+                // having never retrieved that buffered value. Falling
+                // through to `drop(fut)` below discards it unconsumed —
+                // exactly the race this test targets.
+            }
+            _ = &mut fut => {
+                panic!(
+                    "stage_atomic_bytes resolved before send_probe's \
+                     notification fired — the race window this test \
+                     targets (send succeeds, caller never consumes it) \
+                     was never actually exercised"
+                );
+            }
+        }
+        drop(fut);
+
+        let bundle_dir = target.parent().unwrap().to_path_buf();
+        let cleaned_up = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let has_orphan = std::fs::read_dir(&bundle_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().contains(".tmp-"));
+                if !has_orphan {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            cleaned_up.is_ok(),
+            "dropping the awaiting future after a successful but \
+             never-consumed send must not strand the temp file \
              stage_atomic_bytes already wrote and fsynced — it sat in {} \
              for the whole timeout",
             bundle_dir.display()
