@@ -1189,7 +1189,7 @@ export interface EditAgentInput {
   /** Which declared harness this teammate runs on. */
   harness?: string | null;
   /** The teammate's own tool-grant globs. */
-  tools?: string[];
+  tools?: string[] | null;
 }
 
 /** One declared or detected harness. */
