@@ -214,6 +214,8 @@ interface Props {
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   decidedApprovals?: Readonly<Record<string, DecidedApproval>>;
   failedApprovals?: Record<string, string>;
+  /** Whether a detached approval continuation is still running for a card. */
+  continuationTaskIds?: ReadonlySet<string>;
   onDecideApproval?: (
     approval: ApprovalSummary,
     verdict: Verdict,
