@@ -2967,6 +2967,7 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
+              continuationTaskIds={continuationTaskIds}
               onDecideApproval={(approval, verdict, scope) =>
                 void decideApproval(approval, verdict, scope)
               }
