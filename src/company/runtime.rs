@@ -2685,6 +2685,11 @@ impl CompanyRuntime {
             .approval_gate
             .sweep_expired_capped(now, MAX_RETIREMENTS_PER_TICK);
         for id in &expired {
+            // Issue #1861: read the blocker's question BEFORE retiring, because
+            // retiring is what removes it from the journal's pending set. After
+            // that there is no way back to what was being asked, and a card
+            // returned without its question is a card nobody can act on.
+            let unanswered = self.unanswered_blocker(id);
             self.retire_approval(id, ExpiryReason::Ttl, now).await?;
             // Issue #1865: a blocker nobody answered is exactly the silent
             // failure this notification exists for — "awaiting approval"
@@ -2692,7 +2697,39 @@ impl CompanyRuntime {
             // and after the retirement, which already propagates its own
             // error: a notification that could not be filed must not undo a
             // default-deny that already happened.
-            self.notify_approval_expired(id).await;
+            self.notify_approval_expired(id, unanswered.is_some()).await;
+            // …and the board, which is the surface an operator actually
+            // watches. Best-effort for the same reason: the default-deny has
+            // already happened, and a board write that fails must not undo it —
+            // the card stays `paused` and the next sweep is not going to find
+            // this approval again, so the log line is the trace.
+            if let Some((task_id, question)) = unanswered {
+                match crate::runtime::advance::return_expired_blocker_card(
+                    self.tasks().as_ref(),
+                    &self.id,
+                    &task_id,
+                    &question,
+                )
+                .await
+                {
+                    Ok(true) => tracing::info!(
+                        company = %self.id,
+                        task = %task_id,
+                        approval = %id.as_ref(),
+                        "[approvals] an unanswered blocker returned its card to To-do"
+                    ),
+                    // The card moved on without us — an operator dragged it, or
+                    // it was already re-dispatched. Theirs, not ours.
+                    Ok(false) => {}
+                    Err(err) => tracing::warn!(
+                        company = %self.id,
+                        task = %task_id,
+                        error = %err,
+                        "[approvals] a blocker expired but its card could not be returned; it \
+                         stays paused with the question on it"
+                    ),
+                }
+            }
         }
         Ok(expired)
     }
@@ -2700,7 +2737,50 @@ impl CompanyRuntime {
     /// Files a durable notification that a parked approval expired unanswered
     /// (issue #1865) — one row, whole company, since expiry has no single
     /// decider the way a mention has a mentioned user.
-    async fn notify_approval_expired(&self, id: &ApprovalId) {
+    ///
+    /// `was_blocker` picks the copy (issue #1861). The two expiries are not the
+    /// same event: an approval that times out **is** decided — denied by
+    /// default — while a blocker that times out was never a decision at all,
+    /// and telling an operator their unanswered question was "denied" would
+    /// describe a judgement nobody made about work that is still perfectly
+    /// possible.
+    /// The card and question behind a parked **blocker**, or `None` for an
+    /// ordinary approval (issue #1861).
+    ///
+    /// Read from the journal's pending set, which is why every caller has to
+    /// call it *before* retiring: retirement is what empties that set.
+    ///
+    /// The task comes from the approval's own [`TaskLink`], not from the
+    /// payload's `step`. Both can name a card, and the link is the one the
+    /// journal has always maintained — a payload written by a future producer
+    /// that forgot the field would silently strand the card, whereas a missing
+    /// link is a case this already handles by returning `None`. A workflow
+    /// node's blocker is parked `Unlinked` and so lands here as `None`, which
+    /// is right: there is no card to return, and #1864 owns what a stalled run
+    /// does next.
+    ///
+    /// [`TaskLink`]: crate::runtime::journal::TaskLink
+    fn unanswered_blocker(&self, id: &ApprovalId) -> Option<(String, String)> {
+        use crate::runtime::journal::TaskLink;
+
+        let pending = self.journal.pending().into_iter().find(|p| &p.id == id)?;
+        let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
+        if !pending.effect.kind.starts_with(&prefix) {
+            return None;
+        }
+        let task_id = match pending.task {
+            Some(TaskLink::Task { id }) => id,
+            _ => return None,
+        };
+        let payload: crate::ports::blockers::BlockerPayload =
+            serde_json::from_value(pending.effect.payload.clone()).ok()?;
+        // The question, then what would answer it. An operator reading this off
+        // a To-do card has neither the thread nor the approvals page in front
+        // of them any more, so both halves have to be on the card.
+        Some((task_id, format!("{} ({})", payload.reason, payload.needed)))
+    }
+
+    async fn notify_approval_expired(&self, id: &ApprovalId, was_blocker: bool) {
         let note = crate::ports::notifications::Notification {
             id: crate::ports::generate_id(),
             kind: "approval_expired".to_string(),
@@ -2709,7 +2789,15 @@ impl CompanyRuntime {
                 id: id.as_ref().to_string(),
             },
             created_at: now_millis(),
-            title: "An approval expired unanswered and was denied by default".to_string(),
+            // Issue #1861: a question nobody answered is not "denied by
+            // default" — there was nothing to deny. Saying so would tell an
+            // operator a decision was made against work that is simply still
+            // waiting to be explained.
+            title: if was_blocker {
+                "A question nobody answered timed out; its card is back in To-do".to_string()
+            } else {
+                "An approval expired unanswered and was denied by default".to_string()
+            },
             audience: None,
             context: None,
         };

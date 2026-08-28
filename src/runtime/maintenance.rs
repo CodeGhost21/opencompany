@@ -631,4 +631,137 @@ mod test {
         }
         out
     }
+
+    // ── Issue #1861: an unanswered blocker returns its card ─────────────────
+
+    fn paused_card(id: &str) -> crate::ports::TaskRecord {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "title": "Ship the changelog",
+            "column": "paused",
+            "priority": "medium",
+            "assignee": "maya",
+            "updatedAtMillis": 7,
+        }))
+        .expect("card")
+    }
+
+    fn blocker_payload(task_id: &str) -> crate::ports::blockers::BlockerPayload {
+        crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: task_id.to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+        }
+    }
+
+    async fn card_after(runtime: &Arc<CompanyRuntime>, id: &str) -> crate::ports::TaskRecord {
+        runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .expect("board reads")
+            .into_iter()
+            .find(|t| t.id == id)
+            .expect("the card survives")
+    }
+
+    /// The close of the epic's own loop: nothing waits forever, and nothing is
+    /// dropped without a record. The question that went unanswered rides back
+    /// to To-do on the card, because the TTL expiring does not make the work
+    /// possible — it only stops pretending somebody is about to answer.
+    #[tokio::test]
+    async fn an_unanswered_blocker_returns_its_card_carrying_the_question() {
+        let home_dir = tmp_home();
+        let (runtime, ticker) =
+            given_an_unscheduled_company_with_an_overdue_gate(home_dir.path()).await;
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &paused_card("t-1"))
+            .await
+            .expect("seed");
+        runtime
+            .park_blocker(&blocker_payload("t-1"), "t-1")
+            .await
+            .expect("parks");
+        assert_eq!(runtime.pending_approvals().len(), 1);
+
+        assert_eq!(ticker.tick().await, 1, "the tick must retire it");
+
+        let after = card_after(&runtime, "t-1").await;
+        assert_eq!(
+            after.column,
+            crate::ports::tasks::COLUMN_TODO,
+            "a card nobody answered must not sit in `paused` waiting on a decision that has \
+             already been made against it"
+        );
+        let note = after.note.expect("the question rides back on the note");
+        assert!(note.contains("gpt-nonexistent"), "{note}");
+        assert!(
+            note.contains("a model id this provider serves"),
+            "what would answer it has to come back too: {note}"
+        );
+        // Issue #1865's chip: an operator scanning To-do must be able to tell
+        // this from a card nobody has started, without opening it.
+        let bounced = after
+            .bounced
+            .expect("the board distinguishes it from fresh work");
+        assert!(bounced.contains("gpt-nonexistent"), "{bounced}");
+    }
+
+    /// An ordinary approval expiring touches no card. It is a decision that was
+    /// defaulted, not a question that went unanswered, and the board has
+    /// nothing to say about it.
+    #[tokio::test]
+    async fn an_expiring_approval_that_is_not_a_blocker_leaves_the_board_alone() {
+        let home_dir = tmp_home();
+        let (runtime, ticker) =
+            given_an_unscheduled_company_with_an_overdue_gate(home_dir.path()).await;
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &paused_card("t-2"))
+            .await
+            .expect("seed");
+        park(&runtime).await.expect("parks");
+
+        assert_eq!(ticker.tick().await, 1);
+
+        let after = card_after(&runtime, "t-2").await;
+        assert_eq!(after.column, "paused", "nothing on the board changed");
+        assert!(after.bounced.is_none());
+    }
+
+    /// A card an operator has since moved is theirs. The expiry records the
+    /// default-deny and leaves the board exactly where they put it — the same
+    /// guard `advance_settled_card` applies one column over.
+    #[tokio::test]
+    async fn an_expiry_does_not_drag_back_a_card_an_operator_has_moved() {
+        let home_dir = tmp_home();
+        let (runtime, ticker) =
+            given_an_unscheduled_company_with_an_overdue_gate(home_dir.path()).await;
+        let mut moved = paused_card("t-3");
+        moved.column = crate::ports::tasks::COLUMN_IN_PROGRESS.to_string();
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &moved)
+            .await
+            .expect("seed");
+        runtime
+            .park_blocker(&blocker_payload("t-3"), "t-3")
+            .await
+            .expect("parks");
+
+        assert_eq!(ticker.tick().await, 1);
+
+        let after = card_after(&runtime, "t-3").await;
+        assert_eq!(
+            after.column,
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "an operator who picked the card back up owns where it sits"
+        );
+        assert!(after.bounced.is_none());
+    }
 }
