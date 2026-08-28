@@ -426,10 +426,18 @@ impl LocalAcpAgent {
     /// codeword planted before a full process restart comes back after it).
     ///
     /// `None` on every failure, never an error: not supported, nothing
-    /// remembered, or the adapter no longer holds that session (a
-    /// `Resource not found`, which is what a cleared CLI session store looks
-    /// like from here). All four mean the same thing to the caller — open a
-    /// new one — and none of them is a reason to fail an operator's turn.
+    /// remembered, or the adapter no longer holds that session. All of them
+    /// mean the same thing to the caller — open a new one — and none is a
+    /// reason to fail an operator's turn.
+    ///
+    /// Matched on *nothing*, deliberately. The two adapters refuse the same
+    /// situation with different codes — `claude-agent-acp` with
+    /// `Resource not found` (`-32002`), `codex-acp` with `Internal error`
+    /// (`-32603`, `"no rollout found for thread id …"`) — so a fallback
+    /// keyed on either one would hard-fail a turn on the other. Both also
+    /// refuse a session that was minted and never prompted, which is why the
+    /// record written at `session/new` may cost one refused round trip before
+    /// the teammate's first turn ever completes.
     async fn resume_session(
         &self,
         client: &AcpClient,

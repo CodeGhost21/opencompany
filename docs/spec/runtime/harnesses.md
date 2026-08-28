@@ -205,16 +205,27 @@ Four things make the attempt safe to make unconditionally:
 
 - It is **capability-gated** on `agentCapabilities.loadSession` from the
   adapter's own `initialize` response, read at spawn. Both catalogue adapters
-  answer `true` today (confirmed live: `claude-agent-acp` 0.70.0, `codex-acp`
-  1.6.2), and one that answers `false` gets a fresh session instead of a
-  "method not found".
+  answer `true` today, and both were driven end to end rather than taken at
+  their word: a codeword planted before a full process kill comes back after
+  it on `claude-agent-acp` 0.70.0 *and* on `codex-acp` 1.6.2. An adapter that
+  answers `false` gets a fresh session instead of a "method not found".
 - A record naming a **different harness** is ignored, not tried: a Claude
   session id means nothing to `codex-acp`, and the record outlives a teammate
   being rebound between them.
-- **Every failure falls through to `session/new`.** An adapter that no longer
-  holds the session answers `Resource not found` (`-32002`) — what a cleared
-  CLI session store looks like from here — and the record is dropped so the
-  next cold start does not re-spend the round trip.
+- **Every failure falls through to `session/new`** — *any* failure, matched on
+  nothing. That generality is load-bearing rather than lazy: the two adapters
+  refuse the same situation with different codes. `claude-agent-acp` answers
+  `Resource not found` (`-32002`); `codex-acp` answers `Internal error`
+  (`-32603`, `data.details = "no rollout found for thread id …"`). Matching on
+  a code would have left one of them hard-failing an operator's turn. The
+  record is dropped either way, so the next cold start does not re-spend the
+  round trip.
+- **A session is not loadable until it has completed a turn.** Both adapters
+  refuse an id that was minted by `session/new` and never prompted — there is
+  no rollout to replay yet. The record is written at `session/new` regardless,
+  so a process that dies before its teammate's first turn costs the next start
+  one refused round trip and then a fresh session. That is the fallback
+  working, not a case to special-case.
 - The **replay is not the turn.** `session/load` replays the conversation as
   ordinary `session/update` notifications, including the operator's own past
   messages (`user_message_chunk`, which `parse_update` maps to nothing).
@@ -223,9 +234,15 @@ Four things make the attempt safe to make unconditionally:
   timeline nor a watching console.
 
 Model steering runs against whichever session results, so an operator who
-changed the model between runs is not left talking to the old one — best-effort,
-since a load response that advertises no model option leaves the resumed
-session on what it was created with.
+changed the model between runs is not left talking to the old one. Confirmed
+live on both adapters: a `session/load` response carries the same
+`configOptions` entry with `category: "model"` that `session/new` does
+(`currentValue` `default` on `claude-agent-acp`, `gpt-5.6-sol` on
+`codex-acp`), which is exactly what `model_config_id` reads. It stays
+best-effort in code — an adapter whose load response advertises no model
+option leaves the resumed session on what it was created with, which is a
+working teammate rather than a broken one — but on what ships today it
+actually applies.
 
 ### Execution state, before the result
 
