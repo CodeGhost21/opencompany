@@ -67,7 +67,7 @@ import {
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { listTasks, patchTask, type Task } from "@/api/tasks";
+import { listTasks, listTaskApprovals, patchTask, type Task } from "@/api/tasks";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
 import { LedgerBoard } from "@/views/LedgerBoard";
