@@ -962,6 +962,23 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             // comment 3875167298). It always wins over leaked text/reasoning,
             // independent of how the turn finished.
             content = refusal;
+        } else if finish_reason.as_deref() == Some("failed") && !content.is_empty() {
+            // `finish_reason: "failed"` is the documented HTTP-200-empty-
+            // response silent provider failure (docs/spec/runtime/providers.md).
+            // It is a *completed* disclaimer that the turn did not succeed —
+            // like a refusal, not a partial/unfinished state — so it must not
+            // be overridden by whatever text leaked alongside it, the same
+            // way `genuinely_finished` already keeps a truncated/filtered/
+            // failed *reasoning* stream from being promoted below. That gate
+            // only covers the `reasoning` fallback though: `content` itself is
+            // extracted unconditionally at the top of this function (string OR
+            // array-shaped), so a provider that emits real text — a leaked
+            // lead-in sentence, or a fuller partial reply — before reporting
+            // `failed` had that text returned as a successful answer with no
+            // finish_reason check at all. Discard it here so the response
+            // falls through to the empty-turn error below, naming `failed` for
+            // diagnosis (CodeRabbit review on #1779, comment 3878355364).
+            content.clear();
         } else if genuinely_finished && content_is_null && content.is_empty() {
             // Reasoning-model fallback: a reasoning-only turn returns
             // `content: null` with the visible text under `reasoning` /
@@ -2643,6 +2660,41 @@ mod tests {
         let err = model_response_from_payload(payload)
             .expect_err("failed reasoning-only turn must not parse as success");
         let msg = err.to_string();
+        assert!(
+            msg.contains("failed"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Same as `failed_finish_reason_reasoning_only_turn_errors`, but the
+    /// leaked text lives in the *primary* `content` field (array-shaped, the
+    /// form round #8 of this PR taught `extract_content_text` to parse) rather
+    /// than `reasoning`. `content` is extracted unconditionally at the top of
+    /// `model_response_from_payload`, with no `finish_reason` check of its
+    /// own — only the `reasoning` fallback is gated on `genuinely_finished`.
+    /// Pre-fix, this payload parsed successfully with the leaked lead-in
+    /// sentence returned as the answer, silently discarding the provider's own
+    /// `failed` disclaimer (CodeRabbit review on #1779, comment 3878355364).
+    #[test]
+    fn failed_finish_reason_with_leaked_array_content_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "failed",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Let me look that up for you" }
+                    ]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("failed turn with leaked content must not parse as success");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("look that up"),
+            "leaked content must not appear in the error, got: {msg}"
+        );
         assert!(
             msg.contains("failed"),
             "error must name finish_reason for diagnosis, got: {msg}"
