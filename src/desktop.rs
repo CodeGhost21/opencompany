@@ -239,6 +239,17 @@ mod generated {
 /// An `archived` company is skipped. Archiving removes a company from the
 /// registry on purpose (`src/server/provision.rs`), and re-registering it at
 /// the next launch would undo that quietly.
+///
+/// ## What the desktop does now
+///
+/// Not this. The application starts every host through `adopt_companies`
+/// alone and lets an empty registry open the first-run wizard, because seeding
+/// answered the wizard's questions silently and then hid it for good — the
+/// reasoning is on `crate::desktop`'s caller side, in the tauri crate's
+/// `local::start_at`. The seed half stayed reachable, since the wizard itself
+/// ends by calling `seed_company` with the template the operator picked, and
+/// this function stayed whole because the two halves belong together for any
+/// caller that does want a company without a wizard.
 pub async fn bootstrap_companies(
     state: &AppState,
     preset_id: &str,
@@ -326,7 +337,32 @@ pub async fn seed_company(
     state: &AppState,
     preset_id: &str,
 ) -> Result<crate::ports::types::CompanyId> {
-    let manifest = first_run_manifest(preset_id)?;
+    seed_company_named(state, preset_id, None).await
+}
+
+/// [`seed_company`], with the operator's own name for the company.
+///
+/// The template decides everything about this company except what it is called.
+/// That one field is the operator's: the first-run wizard now asks for it, and
+/// a company named after the template it happened to start from is a default,
+/// not a fact — the same company with a different name is still that template's
+/// roster, belt and prompts.
+///
+/// `None` keeps the template's own `[company].name`, which is what every seed
+/// before this used and what [`bootstrap_companies`] still passes.
+///
+/// The name is load-bearing rather than cosmetic: the id is minted from it here
+/// and fixed for the life of the company, which is why this is a parameter at
+/// seed time rather than an edit afterwards.
+pub async fn seed_company_named(
+    state: &AppState,
+    preset_id: &str,
+    name: Option<&str>,
+) -> Result<crate::ports::types::CompanyId> {
+    let mut manifest = first_run_manifest(preset_id)?;
+    if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
+        manifest.company.name = name.to_string();
+    }
     let id = company_id_from_name(&manifest.company.name);
     // Issue #85: record which template this install started from. Only the
     // slug, never a host path — there is no source directory on a packaged

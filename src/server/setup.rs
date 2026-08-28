@@ -260,6 +260,23 @@ pub struct SetupRequest {
     /// already has a company — setup must never hand an operator a second
     /// starter company on a re-run.
     pub template: Option<String>,
+    /// What to call the company this setup creates.
+    ///
+    /// Absent means "derive it", which is what every company made here used to
+    /// get with no way to say otherwise: [`company_name`] takes the first
+    /// clause of the *industry* answer, so a field labelled "what kind of
+    /// company are you setting up?" silently named the company — and the id is
+    /// minted from that name and then fixed
+    /// ([`company_id_from_name`](crate::runtime::company_id_from_name)), with
+    /// no rename anywhere in the product. Sent by the review step, which is the
+    /// last screen before that becomes permanent.
+    ///
+    /// Applies to both paths: a designed company and a seeded template. Blank
+    /// or whitespace is treated as absent rather than as a name, since an empty
+    /// company name slugs to the literal id `company`.
+    ///
+    /// [`company_name`]: crate::company::setup::manifest_from_setup
+    pub name: Option<String>,
     /// A company the wizard **designed**, from the operator's answers and the
     /// roster they reviewed.
     ///
@@ -844,6 +861,16 @@ async fn apply_inner(
     // Seed the template only when the host has no company. A re-run must never
     // hand the operator a second starter company, which is the same reason
     // `desktop::bootstrap_companies` seeds only as a fallback.
+    // Blank is not a name. `company_id_from_name` slugs an empty string to the
+    // literal id `company`, so an operator who cleared the field would get a
+    // company called nothing at an id naming nothing — deriving is the better
+    // answer to "I typed no name" than obeying it is.
+    let chosen_name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+
     let seeded = match (&req.company, &req.template, state.registry().is_empty()) {
         // A designed company wins over a template slug: the operator answered
         // three questions and edited the roster, which a preset cannot override.
@@ -876,6 +903,13 @@ async fn apply_inner(
                 &agents,
                 designed.admin_email.as_deref(),
             );
+            // Overrides the derived name, and only the name: everything else
+            // `manifest_from_setup` decided is still what a provisioned company
+            // gets. Set before `seed_generated_company`, because the id is
+            // minted from this field there and never again.
+            if let Some(name) = chosen_name {
+                manifest.company.name = name.to_string();
+            }
             if let Some(inference) = &designed_inference {
                 manifest.inference.provider = Some(inference.provider.clone());
                 manifest.inference.base_url = inference.base_url.clone();
@@ -895,7 +929,12 @@ async fn apply_inner(
             Some(id.as_ref().to_string())
         }
         (None, Some(template), true) => {
-            let id = crate::desktop::seed_company(state, template).await?;
+            // The template path, and now a reachable one: the console sends a
+            // slug rather than a designed company when the operator picked a
+            // template and no model tailored it, so what gets seeded is that
+            // template — its roster, its tool belt, its prompts — instead of an
+            // approximation rebuilt from a roster screen.
+            let id = crate::desktop::seed_company_named(state, template, chosen_name).await?;
             Some(id.as_ref().to_string())
         }
         _ => None,
@@ -1266,6 +1305,39 @@ fn summarise_probe_failure(raw: &str) -> String {
 /// Authorized by the same [`authorize`] the rest of this flow uses, so an
 /// unconfigured loopback host can reach it before anyone can sign in, and a
 /// configured one demands an admin.
+/// The roster a bundled template declares, as review-shaped teammates.
+///
+/// `None` when the template carries no roster at all, which no shipped one does
+/// (`every_preset_seeds_a_non_empty_roster` in `crate::desktop`) but which a
+/// caller must still be able to survive rather than present an empty team.
+///
+/// A manifest `[[agent]]` has no display name — `Agent::name` is an in-memory
+/// carrier for operator-added teammates and is `#[serde(skip)]` — so the role
+/// stands in for both, which is what the console already renders for these
+/// teammates once the company exists.
+fn preset_roster(
+    id: &str,
+) -> Result<Option<Vec<crate::company::setup::ProposedAgent>>, crate::server::Rejection> {
+    let Some(preset) = crate::desktop::preset(id) else {
+        return Ok(None);
+    };
+    let manifest = preset.manifest_parsed()?;
+    let agents: Vec<crate::company::setup::ProposedAgent> = manifest
+        .agents
+        .iter()
+        .map(|agent| crate::company::setup::ProposedAgent {
+            name: agent.role.clone(),
+            role: agent.role.clone(),
+            description: agent.description.clone().unwrap_or_default(),
+            // The template's own `[tools]` decides its belt, and this roster is
+            // shown rather than built from — see the apply, which seeds the
+            // template itself. Claiming a focus here would be inventing one.
+            focus: None,
+        })
+        .collect();
+    Ok((!agents.is_empty()).then_some(agents))
+}
+
 async fn propose_roster(
     State(state): State<AppState>,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
@@ -1303,6 +1375,44 @@ async fn propose_roster(
         req.inference_model.as_deref(),
     )
     .await;
+
+    // A picked template outranks the matched one when no model designed
+    // anything.
+    //
+    // Both are "the curated answer", and they are not the same roster.
+    // `template_proposal` matches a reference team from what the operator
+    // *wrote*; the template list is what they *chose*. So picking "Agentic
+    // Marketing Agency" and skipping the model step returned the five-person
+    // curated marketing team under a heading naming a template that ships
+    // eight — a roster nobody selected, presented as the one they did.
+    //
+    // Only on the fallback paths. A model that designed a team read the
+    // template as one input among the operator's answers and produced
+    // something for *them*; replacing that with the shipped roster would throw
+    // away the entire point of the design pass.
+    let proposal = match (&req.template, proposal.source) {
+        (Some(id), crate::company::setup::RosterSource::Fallback) => {
+            match preset_roster(id)? {
+                // `preset` is the same lookup `template_name` above already
+                // validated, so an unknown id has been rejected before here;
+                // an empty roster is the only remaining reason to keep what we
+                // have, and `every_preset_seeds_a_non_empty_roster` makes that
+                // unreachable for a bundled template.
+                Some(agents) => crate::company::setup::preset_proposal(
+                    &answers,
+                    crate::desktop::preset(id)
+                        .map(|preset| preset.id)
+                        .unwrap_or(""),
+                    agents,
+                    proposal
+                        .reason
+                        .unwrap_or(crate::company::setup::FallbackReason::NoModel),
+                ),
+                None => proposal,
+            }
+        }
+        _ => proposal,
+    };
 
     tracing::info!(
         template = proposal.template_key,

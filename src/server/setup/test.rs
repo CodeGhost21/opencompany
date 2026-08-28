@@ -441,6 +441,7 @@ async fn a_write_to_an_env_owned_field_is_refused() {
                 .collect(),
             template: None,
             company: None,
+            name: None,
         },
         &env,
     )
@@ -1005,6 +1006,175 @@ async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, s
         .unwrap();
     let status = response.status();
     (status, body_json(response).await)
+}
+
+/// A template the operator picked is the roster they get back, not the curated
+/// team matched from their words.
+///
+/// The two are different rosters and only one of them was chosen by anybody.
+/// Picking "Agentic Marketing Agency" — a card that says eight teammates — and
+/// skipping the model step returned the five-person curated marketing team,
+/// under a heading naming the template. Asserted against the template's own
+/// count rather than a literal, so a template that gains a teammate does not
+/// fail this.
+#[tokio::test]
+async fn a_picked_template_proposes_its_own_roster() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+    let expected = crate::desktop::preset("agentic_marketing_agency")
+        .expect("a bundled template")
+        .manifest_parsed()
+        .expect("it parses")
+        .agents;
+
+    let (status, body) = post_roster(
+        state,
+        serde_json::json!({
+            "template": "agentic_marketing_agency",
+            "industry": "",
+            "teamHint": "",
+            "automate": "campaign briefs and weekly reporting",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["source"], "preset",
+        "the console needs to know this roster can be seeded as the template itself: {body}"
+    );
+    assert_eq!(
+        body["agents"].as_array().map(Vec::len),
+        Some(expected.len()),
+        "the roster on the review screen must be the roster the card advertised: {body}"
+    );
+    let roles: Vec<&str> = body["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|agent| agent["role"].as_str().unwrap())
+        .collect();
+    assert!(
+        expected
+            .iter()
+            .all(|agent| roles.contains(&agent.role.as_str())),
+        "every teammate the template declares must be on it: {roles:?}"
+    );
+}
+
+/// The curated path is untouched where no template was picked.
+///
+/// The pair matters: the fix above must not become "always ship a preset", or
+/// an operator who typed their business in their own words and never opened the
+/// template list would get a roster matched by slug instead of by what they
+/// wrote.
+#[tokio::test]
+async fn answers_without_a_template_still_propose_the_curated_team() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_roster(
+        state,
+        serde_json::json!({
+            "industry": "E-commerce",
+            "teamHint": "",
+            "automate": "order dispatch and returns",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["source"], "fallback", "{body}");
+}
+
+/// Setup seeds the template itself when the console sends a slug, under the
+/// name the operator typed.
+///
+/// Both halves are the point. The template arm was unreachable from the console
+/// — the wizard only ever sent a designed company — so a picked template was
+/// rebuilt from the review screen and lost the belt and prompts it ships. And
+/// the name was derived from the *industry* answer with no way to say
+/// otherwise, on a field that mints the company id.
+#[tokio::test]
+async fn applying_a_template_seeds_it_under_the_name_the_operator_chose() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "agentic_marketing_agency",
+            "name": "Northwind Studio",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["seeded_company"], "northwind-studio",
+        "the id is minted from the name the operator gave: {body}"
+    );
+
+    let id = crate::ports::types::CompanyId::new("northwind-studio");
+    let runtime = state
+        .registry()
+        .get(&id)
+        .expect("the seeded company is registered");
+    // Read back off the store rather than off the runtime: what matters is the
+    // bundle the next launch adopts, which is what `adopt_companies` reads.
+    let record = runtime
+        .store()
+        .load(&id)
+        .await
+        .expect("the bundle is readable")
+        .expect("the bundle exists");
+    let manifest = record.manifest;
+    assert_eq!(manifest.company.name, "Northwind Studio");
+    // Every teammate the template declares, by role. Not a count: a registered
+    // company's stored manifest also carries the roster `globals/` contributes,
+    // so an equality here would be asserting the size of something this change
+    // has nothing to do with.
+    let template_roles: Vec<String> = crate::desktop::preset("agentic_marketing_agency")
+        .unwrap()
+        .manifest_parsed()
+        .unwrap()
+        .agents
+        .iter()
+        .map(|agent| agent.role.clone())
+        .collect();
+    let seeded_roles: Vec<String> = manifest.agents.iter().map(|a| a.role.clone()).collect();
+    assert!(
+        template_roles
+            .iter()
+            .all(|role| seeded_roles.contains(role)),
+        "a renamed template is still that template's roster: {seeded_roles:?}"
+    );
+}
+
+/// A blank name is not a name.
+///
+/// `company_id_from_name` slugs an empty string to the literal id `company`, so
+/// obeying a cleared field would produce a company called nothing at an id
+/// naming nothing. The template's own name is the better answer to "I typed no
+/// name" than that is.
+#[tokio::test]
+async fn a_blank_name_falls_back_to_the_templates_own() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "agentic_law_firm",
+            "name": "   ",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["seeded_company"], "agentic-law-firm", "{body}");
 }
 
 /// The wizard's whole reason for a second route: it needs a roster *before*
