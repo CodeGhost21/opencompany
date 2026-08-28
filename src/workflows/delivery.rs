@@ -1454,7 +1454,24 @@ async fn send_to_channel_adapter(
         format!("{subject}\n\n{text}")
     };
     let journal_channel = if is_operator {
-        record.operator_feed_channel()
+        let feed = record.operator_feed_channel();
+        // Issue #1781 review (CodeRabbit P2 follow-up): `operator_feed_channel`
+        // diverts to `OPERATOR_CHANNEL_COLLISION_FALLBACK` without re-checking
+        // that address is itself free — a second grandfathered desk name can
+        // still shadow it (see `operator_feed_channel_fallback_shadowed`'s own
+        // doc for why no third address closes this). There is nowhere else to
+        // journal this report, so it still lands on `feed`; log loudly rather
+        // than let the misroute go unnoticed.
+        if record.operator_feed_channel_fallback_shadowed() {
+            tracing::error!(
+                company = %record.id,
+                fallback = feed,
+                "operator feed collision-fallback channel is itself shadowed by a \
+                 grandfathered desk name; this workflow report will be misrouted \
+                 into that desk's own transcript"
+            );
+        }
+        feed
     } else {
         channel_id
     };

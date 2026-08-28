@@ -4522,6 +4522,12 @@ impl CompanyRecord {
     /// undiverted, the pinned console row's `?desk=operator` read would
     /// resolve to that desk's own transcript instead of the system feed
     /// (issue #1781 review, CodeRabbit P2 follow-up).
+    ///
+    /// Diverting to [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK) does not itself
+    /// re-check whether *that* address is free — see
+    /// [`operator_feed_channel_fallback_shadowed`](Self::operator_feed_channel_fallback_shadowed)
+    /// for the residual double-collision this leaves and why it is logged
+    /// rather than resolved here.
     pub fn operator_feed_channel(&self) -> &'static str {
         if self.desk_exists(crate::runtime::OPERATOR_CHANNEL)
             || self
@@ -4534,6 +4540,37 @@ impl CompanyRecord {
         } else {
             crate::runtime::channel::OPERATOR_CHANNEL
         }
+    }
+
+    /// Whether [`operator_feed_channel`](Self::operator_feed_channel) has
+    /// diverted to [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK) ("operator-feed")
+    /// and that address is *itself* shadowed by a second grandfathered desk
+    /// name (issue #1781 review, CodeRabbit P2 follow-up to `316bc9229`).
+    ///
+    /// `resolve_desk_id`'s name match makes this theoretically reachable: a
+    /// manifest desk cannot claim the fallback by **id** (`is_valid_desk_id`
+    /// rejects the hyphen, so nothing can ever mint it — see the constant's
+    /// own doc), but a *different* desk's display **name** can, the same way
+    /// a desk named `Operator` shadows the primary address above. `316bc9229`
+    /// and `16dcce235` already close every creation path going forward — a
+    /// manifest authored through `opencompany check`/`from_path`, or an
+    /// overlay desk created through `POST .../desks`, can never be named
+    /// "operator-feed" again — so this can only happen to a manifest edited
+    /// outside those paths (hand-authored `company.toml` on disk) and loaded
+    /// through [`CompanyManifest::from_path_for_reload`], the same
+    /// grandfathering that makes the *primary* collision reachable at all.
+    ///
+    /// There is no third, similarly collision-proof address to divert to —
+    /// picking one would only shrink this residual gap, not close it, the
+    /// same way the fallback itself does not fully close the primary's. This
+    /// predicate exists so the delivery layer can at least log the double
+    /// collision instead of misrouting a report with no trace: see its call
+    /// site in `workflows::delivery::send_to_channel_adapter`.
+    pub fn operator_feed_channel_fallback_shadowed(&self) -> bool {
+        self.operator_feed_channel() == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+            && self
+                .resolve_desk_id(crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+                .is_some()
     }
 
     /// Mints the roster id for a teammate about to be added under
@@ -9048,6 +9085,63 @@ mod test {
              even though its id is free — `resolve_desk` shadows by name too, \
              so the pinned Operator row would otherwise resolve to this \
              desk's own transcript"
+        );
+    }
+
+    /// PR #1781 review follow-up (CodeRabbit P2): a double legacy collision —
+    /// one desk shadowing the primary `operator` address *and a second,
+    /// different* desk shadowing the collision-fallback's own display name
+    /// ("operator-feed") — leaves `operator_feed_channel` with nowhere safe
+    /// left to divert to. `316bc9229` and `16dcce235` block both names from
+    /// ever being (re-)created going forward, so this fixture only models a
+    /// manifest hand-edited outside those guards and reloaded via
+    /// `from_path_for_reload`, the same grandfathering the single-collision
+    /// cases above rely on.
+    ///
+    /// `operator_feed_channel_fallback_shadowed` exists precisely so this
+    /// residual gap is detectable rather than silent — asserted here directly
+    /// since the logging it drives (`workflows::delivery::send_to_channel_adapter`)
+    /// has no return value to assert on.
+    #[test]
+    fn operator_feed_channel_fallback_shadowed_detects_a_double_collision() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"legacy_ops\"\nname = \"Operator\"\nmembers = []\n\
+             [[group_chat]]\nid = \"ops2\"\nname = \"operator-feed\"\nmembers = []\n";
+        let record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the primary collision alone still diverts to the fallback address \
+             — this fixture must reach the same divert as the single-collision \
+             case above before the double-collision check means anything"
+        );
+        assert!(
+            record.operator_feed_channel_fallback_shadowed(),
+            "a second desk named \"operator-feed\" shadows the fallback the \
+             same way the first desk shadows the primary — `resolve_desk` \
+             would fold a `?desk=operator-feed` read onto that second desk \
+             instead of the system feed, and this predicate must catch it"
+        );
+    }
+
+    /// Sibling to the double-collision case above: a fallback-name collision
+    /// with **no** primary collision must not trip the predicate — the divert
+    /// never fires, so the fallback address was never actually depended on.
+    #[test]
+    fn operator_feed_channel_fallback_shadowed_is_false_without_a_primary_collision() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"ops2\"\nname = \"operator-feed\"\nmembers = []\n";
+        let record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL,
+            "no primary collision exists in this fixture, so the feed must \
+             stay on the literal `operator` address"
+        );
+        assert!(
+            !record.operator_feed_channel_fallback_shadowed(),
+            "the fallback address is never consulted unless the feed actually \
+             diverted to it"
         );
     }
 }
