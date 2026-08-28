@@ -58,6 +58,16 @@ import {
   setupHandoffHasScope,
 } from "@/setup/state";
 import { TourController } from "@/tour/TourController";
+import { OnboardingGate } from "@/onboarding/OnboardingGate";
+import { useActivationGate } from "@/onboarding/useActivationGate";
+import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
+import {
+  resolveGateAdminCheckError,
+  shouldHoldShellPending,
+  shouldPollActivationForRole,
+  shouldShowOnboardingGate,
+} from "@/onboarding/gate-logic";
+import { me as fetchMe } from "@/api/auth";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
 import {
@@ -67,6 +77,7 @@ import {
   type TaskStatus,
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
+import { withReadTimeout } from "@/lib/read-timeout";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
@@ -391,6 +402,57 @@ const WORKFLOW_EVENT_WINDOW = 300;
 const TURN_POLL_MS = 4000;
 
 /**
+ * How long the onboarding gate's admin check (PR #1875 review finding) waits
+ * before retrying a `fetchMe` failure that was not a definitive `401` — a
+ * dropped connection or a proxy 5xx, not "this user is not an admin". A few
+ * seconds is generous relative to how rarely this fires (a fresh mount's
+ * first read, or a genuine network blip) and cheap relative to how bad the
+ * alternative is: giving up and reading as non-admin would fail the blocking
+ * gate open for an actual admin.
+ */
+const GATE_ADMIN_CHECK_RETRY_MS = 3000;
+
+/**
+ * How long a single `fetchMe` call is allowed to sit with no response at all
+ * before it is treated as a failure (PR #1875 review finding).
+ *
+ * `resolveGateAdminCheckError`/`GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES` only
+ * ever run once the call's promise *settles* — one way or the other. `fetchMe`
+ * goes through `OpenCompanyClient`, and its request path has no timeout of
+ * its own (`api/transport/browser.ts` calls bare `fetch`, no `AbortSignal`),
+ * so a stalled proxy or a backend that accepts the connection and then never
+ * answers leaves that promise pending forever: no rejection ever reaches the
+ * `catch` below, `failures` never increments, and `isGateAdminStuck` never
+ * flips even though the admin is exactly as wedged as the retry-forever case
+ * three rounds of this file's history already closed. `withReadTimeout` turns
+ * that silence into an ordinary rejection at this bound, which
+ * `resolveGateAdminCheckError` already classifies as non-terminal — so the
+ * existing failure counter below is what actually recovers, this only makes
+ * sure it gets the chance to. Long enough that the legitimate "cold host"
+ * case (the same class of cost `useActivationGate`'s poll interval doc calls
+ * out) is never mistaken for a hang.
+ */
+const GATE_ADMIN_CHECK_TIMEOUT_MS = 20000;
+
+/**
+ * How many consecutive non-settled `fetchMe` failures before the admin check
+ * reports itself stuck, mirroring `useActivationGate`'s `STUCK_AFTER_FAILURES`
+ * (PR #1875 review finding).
+ *
+ * That hook's `stuck` only tracks its own `getActivation` reads — it has no
+ * way to know the admin check is the one wedged. A durable non-401 `fetchMe`
+ * failure (the same class of backend fault: a proxy 5xx, a downstream outage)
+ * leaves `isGateAdmin` at `null` forever, which keeps `shouldHoldShellPending`
+ * returning `true` (its own `input.isAdmin === null` branch) even while
+ * activation itself is reading fine — so `activationGate.stuck` never flips
+ * and the recovery affordance below never appears, wedging an admin who
+ * cannot reach it behind a loader indistinguishable from the one the
+ * activation-side fix already closed. Three failures matches
+ * `STUCK_AFTER_FAILURES`'s own ~9s-at-`GATE_ADMIN_CHECK_RETRY_MS` reasoning.
+ */
+const GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES = 3;
+
+/**
  * Operator-facing copy for a legacy `connect_error` query from the former
  * native OAuth callback (issue #300). The callback now ends in its own dated
  * explanatory page (#838), but an older bookmarked URL still gets a safe
@@ -469,6 +531,13 @@ interface Props {
   companies: CompanyStatus[];
   onSwitchCompany: (id: string) => void;
   onBackToPicker?: () => void;
+  /** Start the New-company flow (issue #1807), owned by `ConnectionConsole`. */
+  onCreateCompany?: () => void;
+  /**
+   * Start the reset (archive + start clean) flow for the given company. Called
+   * from Settings → Lifecycle with the active company's id and name.
+   */
+  onResetCompany?: (id: string, name: string) => void;
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
@@ -479,6 +548,8 @@ export function AppShell({
   companies,
   onSwitchCompany,
   onBackToPicker,
+  onCreateCompany,
+  onResetCompany,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -562,6 +633,27 @@ export function AppShell({
   // whether setup is about to open, and an unheld tour would flash its welcome
   // over it.
   const [setupOpen, setSetupOpen] = useState(true);
+  /**
+   * Whether `SetupController`'s own roster read has landed (PR #1875 review
+   * finding, round 12).
+   *
+   * `setupOpen` starting `true` and a roster read that already landed with
+   * the company genuinely unstaffed are indistinguishable to anything that
+   * only reads `setupOpen` — `shouldHoldShellPending` needs to tell them
+   * apart (see its own doc). `SetupController`'s `onOpenChange` only ever
+   * fires once its internal `checked` is true, so its firing at all is
+   * itself the signal; `handleSetupOpenChange` below turns that into state
+   * the gate predicate can read. A separate flag rather than folding into
+   * `setupOpen` itself: `setupOpen` must stay a plain "is setup on screen or
+   * blocking" boolean for every other reader (`TourController`'s `hold`,
+   * `shouldShowOnboardingGate`), and conflating "resolved" into its value is
+   * exactly the bug this fixes.
+   */
+  const [setupChecked, setSetupChecked] = useState(false);
+  const handleSetupOpenChange = useCallback((open: boolean) => {
+    setSetupChecked(true);
+    setSetupOpen(open);
+  }, []);
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
   // `#/setup` is an intentional, manual recovery path. It is a route rather
@@ -835,6 +927,116 @@ export function AppShell({
   // decisions are in flight or freshly settled, which is never many.
   const ownApprovalDecisionsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
+
+  /**
+   * The account-activation funnel (issue #1844): blocks the shell behind
+   * `OnboardingGate` until the company is named, has an integration and has
+   * run a workflow — see `useActivationGate` for the polling contract.
+   *
+   * `gateSkippedThisSession` is read once, into state rather than a plain
+   * `const`, so clicking "skip for now" re-renders past the gate without a
+   * page reload — `sessionStorage` alone would need one.
+   */
+  const [gateSkipped, setGateSkipped] = useState(() => gateSkippedThisSession(scope));
+  useEffect(() => {
+    setGateSkipped(gateSkippedThisSession(scope));
+  }, [scope]);
+  const skipGate = useCallback(() => {
+    markGateSkipped(scope);
+    setGateSkipped(true);
+  }, [scope]);
+
+  /**
+   * Whether the signed-in user is this company's admin (PR #1875 review
+   * finding) — `null` until the read lands. Mirrors the `admin =
+   * (await fetchMe(...)).role === "admin"` pattern every other admin-gated
+   * view in this app already uses (`OAuthView`, `TeamView`, etc.), with two
+   * differences, both because this reader feeds a *blocking* gate rather
+   * than a read-only view:
+   *
+   * - The `null` "not yet known" state — see `shouldShowOnboardingGate`'s own
+   *   guard for why the gate must never flash open on it.
+   * - A failed read is classified through `resolveGateAdminCheckError`
+   *   instead of settling straight to `false`. Every other view's `catch {
+   *   admin = false }` is safe because the worst case is a control staying
+   *   disabled one round trip longer; here `false` is what suppresses the
+   *   gate, so a transient failure (a dropped connection, a proxy 5xx) would
+   *   read exactly like a real "not an admin" and fail the gate open for an
+   *   actual admin for the rest of that mount (PR #1875 review finding,
+   *   round 2). Only a definitive `401` settles to `false`; anything else
+   *   retries.
+   *
+   * Declared before `activationGate` (below) because that hook's `enabled`
+   * input now reads this state — PR #1875 review finding, round 5.
+   */
+  const [isGateAdmin, setIsGateAdmin] = useState<boolean | null>(null);
+  /**
+   * True once `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES` consecutive `fetchMe`
+   * failures have failed to settle — see that constant's own doc. Read
+   * alongside `activationGate.stuck` below so the recovery affordance covers
+   * either read wedging, not only the activation one.
+   */
+  const [isGateAdminStuck, setIsGateAdminStuck] = useState(false);
+  useEffect(() => {
+    let live = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    setIsGateAdmin(null);
+    setIsGateAdminStuck(false);
+    const load = () => {
+      void (async () => {
+        try {
+          const admin =
+            (await withReadTimeout(fetchMe(client, company), GATE_ADMIN_CHECK_TIMEOUT_MS)).role ===
+            "admin";
+          if (!live) return;
+          setIsGateAdmin(admin);
+          failures = 0;
+          setIsGateAdminStuck(false);
+        } catch (err) {
+          if (!live) return;
+          const outcome = resolveGateAdminCheckError(err);
+          if (outcome.settled) {
+            setIsGateAdmin(outcome.isAdmin);
+            failures = 0;
+            setIsGateAdminStuck(false);
+          } else {
+            failures += 1;
+            if (failures >= GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES) setIsGateAdminStuck(true);
+            retryTimer = setTimeout(load, GATE_ADMIN_CHECK_RETRY_MS);
+          }
+        }
+      })();
+    };
+    load();
+    return () => {
+      live = false;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+    };
+  }, [client, company]);
+
+  // The poll below is passed `shouldPollActivationForRole(isGateAdmin)`, NOT
+  // a bare `true` (PR #1875 review finding, round 5) and NOT `!gateSkipped`
+  // (round 4): `GET {scope}/activation` is the only production caller of
+  // `compute_and_latch` on the host, so an admin who skips and then finishes
+  // the funnel anyway (connects an integration, runs a workflow from the
+  // ordinary shell) needs the poll to still be running to ever notice and
+  // persist it — see `shouldPollActivation` for that half. Round 5 also tried
+  // to stop this poll for a confirmed non-admin, on the premise that no
+  // funnel step is reachable by anyone but the admin; round 7 found that
+  // premise false (`POST {scope}/workflows/{wid}/run` is `ScopedCompany`, not
+  // admin-gated) and reverted it — see `shouldPollActivationForRole`'s own
+  // doc for why every role now polls alike. The poll still stops itself once
+  // the company is actually activated; nothing here needs to.
+  const activationGate = useActivationGate(client, company, shouldPollActivationForRole(isGateAdmin));
+
+  // PR #1875 review finding, round 4: a skip marker from before the funnel
+  // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
+  // already stops gating on it either way), but leaving it in `sessionStorage`
+  // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
+  useEffect(() => {
+    if (activationGate.status?.isActivated) clearGateSkipped(scope);
+  }, [activationGate.status?.isActivated, scope]);
 
   const refreshTaskStatuses = useCallback(async () => {
     const read = ++taskStatusRead.current;
@@ -2705,6 +2907,169 @@ export function AppShell({
     }, []),
   });
 
+  // PR #1875 review finding, round 13: `shouldHoldShellPending` holds on
+  // `!setupChecked` precisely because `SetupController`'s own `onOpenChange`
+  // is the *only* thing that ever sets it (see `setupChecked`'s own doc) —
+  // but the JSX that mounted `<SetupController>` lived below both of this
+  // function's early returns, reachable only once the ordinary shell itself
+  // was chosen. Every fresh mount starts `setupChecked === false`, so the
+  // very predicate this component exists to satisfy made `SetupController`
+  // unreachable: the hold fired, returned before that JSX, `SetupController`
+  // never mounted, `onOpenChange` never fired, and `setupChecked` stayed
+  // `false` forever — a permanent loader, not a brief hold, for every
+  // signed-in operator except a confirmed non-admin (`isAdmin === false`,
+  // the one path `shouldHoldShellPending` returns early on before ever
+  // reaching `setupChecked`) or one who had already skipped in this tab.
+  // Hoisted here and rendered in every branch below so its roster read can
+  // land regardless of which content this render currently picks. Radix's
+  // `Dialog` (via `SetupDialog`) portals its own content and renders nothing
+  // into normal flow while closed, so mounting it alongside `RouteLoading`
+  // or `OnboardingGate` costs nothing visually.
+  //
+  // Round 14: rendering it in every branch is not enough on its own — it has to
+  // sit at the *same* position in all three, or React reconciles it as a
+  // different node and unmounts it on the very transition it exists to survive.
+  // An unstaffed company's first roster result sets `setupChecked` and
+  // `setupOpen` together, which flips this render from a branch below to the
+  // ordinary shell; with the controller under a different root there, React
+  // would throw away the already-proven `unstaffed`/`open` state and issue a
+  // second `listTeam` — exposing the interactive shell while that read is in
+  // flight, and leaving the dialog shut for good if it hangs or fails. So all
+  // three outcomes root at the same `ConsoleProvider` with this as its first
+  // child. That provider is pure context and renders no DOM of its own, so
+  // wrapping the loader and the gate in it costs nothing and hands them the
+  // same ambient `(client, company)` the shell already has.
+  const setupController = (
+    <SetupController
+      client={client}
+      company={company}
+      force={setupForced}
+      routeOpen={view === "setup"}
+      deepLinked={deepLinked}
+      onForceHandled={() => setSetupForced(false)}
+      onOpenChange={handleSetupOpenChange}
+      onCompleted={() => {
+        // Keep these together: Company mounts with the new refresh key, and
+        // setup's payoff is the roster rather than the Overview graph.
+        setTeamBuilt((n) => n + 1);
+        setSetupCompleted(true);
+        setView("company");
+      }}
+      onRouteDismiss={() => setView("overview")}
+    />
+  );
+
+  // PR #1875 review finding, round 8 (widened round 10): hold the shell in a
+  // neutral pending state — never the ordinary interactive shell, never the
+  // gate itself — for as long as the first activation read is unresolved,
+  // whether it is still in flight or already failed once and is retrying.
+  // Without this, the gap below fell straight through to the full shell (its
+  // `shouldShowOnboardingGate` guard reads "not checked yet" identically for
+  // an unresolved read of any cause), leaving an operator clicking around a
+  // shell the funnel had not actually cleared for them to be in, until the
+  // read finally landed and abruptly yanked the gate over it — including on
+  // a merely slow first read (the host scans the journal for this company's
+  // funnel; see `shouldHoldShellPending`'s own doc), not only a proven
+  // outage. `RouteLoading` is the same neutral loader every code-split route
+  // fallback in this file already uses — see its own doc for why a bare
+  // "Loading…" line is not enough (`title` names the page for a screen reader
+  // that never sees a mounted heading otherwise).
+  if (
+    shouldHoldShellPending({
+      status: activationGate.status,
+      checked: activationGate.checked,
+      setupOpen,
+      setupChecked,
+      skippedThisSession: gateSkipped,
+      isAdmin: isGateAdmin,
+      retrying: activationGate.retrying,
+    })
+  ) {
+    // A durable read failure must not read as a hang. `stuck` means three
+    // consecutive non-terminal `getActivation` failures (see
+    // `STUCK_AFTER_FAILURES`) — a malformed event failing the host's
+    // whole-journal scan on every read, say. `checked` never settles, so the
+    // hold above is permanent, and the "skip for now" escape lives inside
+    // `OnboardingGate`, which this branch never mounts: the operator would be
+    // locked out of the whole console by a backend fault with no way forward
+    // (PR #1875 review finding). Offer the same escape here instead of a
+    // loader that never resolves. The polling continues underneath, so a
+    // recovered backend still settles the gate on its own.
+    //
+    // `isGateAdminStuck` covers the other read this hold depends on (PR #1875
+    // review finding): a durable non-401 `fetchMe` failure leaves `isGateAdmin`
+    // at `null` forever with activation reading fine the whole time, so
+    // `activationGate.stuck` alone never flips even though the hold above is
+    // just as permanent — see `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES`'s own
+    // doc.
+    if (activationGate.stuck || isGateAdminStuck) {
+      return (
+        <ConsoleProvider client={client} company={company}>
+          {setupController}
+          <div className="flex min-h-svh items-center justify-center p-6">
+            <div className="max-w-md space-y-3 text-center">
+              <h1 className="text-lg font-medium">We can’t check your setup right now</h1>
+              <p className="text-sm text-muted-foreground">
+                The console keeps failing to read this company’s setup status. It will keep
+                retrying, but you don’t have to wait.
+              </p>
+              <button
+                type="button"
+                onClick={skipGate}
+                className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Continue to the console
+              </button>
+            </div>
+          </div>
+        </ConsoleProvider>
+      );
+    }
+    return (
+      <ConsoleProvider client={client} company={company}>
+        {setupController}
+        <RouteLoading title="Console" label="Loading…" />
+      </ConsoleProvider>
+    );
+  }
+
+  // Issue #1844: the blocking first-run gate. Held behind `!setupOpen` —
+  // `setupOpen` is already true for as long as `SetupController`'s dialog is
+  // open OR the company is unstaffed (see its own `onOpenChange`), the exact
+  // signal `TourController` holds on below for the same reason: staffing runs
+  // first, so an operator is never asked to run a workflow with nobody on the
+  // roster yet to have written it. `activationGate.status` gates on `checked`
+  // rather than rendering the instant `company` is known, so a fresh mount
+  // never flashes the gate open for the one round trip it takes to learn the
+  // company already cleared it.
+  if (
+    shouldShowOnboardingGate({
+      status: activationGate.status,
+      checked: activationGate.checked,
+      setupOpen,
+      skippedThisSession: gateSkipped,
+      isAdmin: isGateAdmin,
+    }) &&
+    // Narrows `status` for the render below — `shouldShowOnboardingGate`
+    // already guarantees this is non-null whenever it returns `true`, but
+    // that guarantee lives in a separate module TypeScript cannot see through.
+    activationGate.status
+  ) {
+    return (
+      <ConsoleProvider client={client} company={company}>
+        {setupController}
+        <OnboardingGate
+          client={client}
+          company={company}
+          status={activationGate.status}
+          currentName={feed.status.name}
+          onRefresh={activationGate.refresh}
+          onSkip={skipGate}
+        />
+      </ConsoleProvider>
+    );
+  }
+
   return (
     // The ambient `(client, company)` for the leaves that have to fetch and are
     // drawn from too many parents to thread props to — today, the avatar tile,
@@ -2712,6 +3077,8 @@ export function AppShell({
     // cannot carry a credential. See `lib/console-context.tsx` for why this is
     // deliberately not a general escape from props.
     <ConsoleProvider client={client} company={company}>
+      {setupController}
+
       {/* `SidebarProvider` paints the chrome layer itself — see its own note on
           why that fill lives there and not here (issue #1178). */}
       <SidebarProvider className="h-svh overflow-hidden">
@@ -2769,6 +3136,8 @@ export function AppShell({
             activeCompany={company}
             onSwitchCompany={onSwitchCompany}
             onBackToPicker={onBackToPicker}
+            onCreateCompany={onCreateCompany}
+            canCreateCompany={client.carriesPlatformBearer}
             view={view}
             onNavigate={setView}
           />
@@ -2802,7 +3171,6 @@ export function AppShell({
             <OperatorOverview
               client={client}
               company={company}
-              companyName={feed.status.name}
               feed={feed}
               scope={scope}
               // Issue #1015: re-read the run panels when a run parks or fails
@@ -2919,6 +3287,19 @@ export function AppShell({
               // than only counting it. The feed the sidebar badge already polls,
               // so the screen says what it is waiting on with no second request.
               parked={feed.approvals}
+              // Issue #1891: and decided here too, not only named. The same
+              // bundle the board and the run drawer get, so a verdict given on
+              // any of the three settles on the others with no reload. Named
+              // as this route's own props rather than the `…Approvals` suffix
+              // the section views take: it is a thin wrapper whose props mirror
+              // `TaskDetailView`'s, which has no other kind of decision to
+              // qualify these against.
+              deciding={decidingApprovals}
+              decided={decidedApprovals}
+              failed={failedApprovals}
+              onDecide={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -2991,11 +3372,25 @@ export function AppShell({
               // second request.
               approvals={feed.approvals}
               now={feed.now}
-              // Issue #883: "Review" on a blocked card opens the queue narrowed
-              // to that card. Through `navigate` rather than `setView` so the
-              // filter lands in the hash and survives a refresh and the Back
-              // button, like every other sub-page.
-              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // Issue #1891: a blocked card decides in place rather than only
+              // reporting that it is blocked. The same four maps the run drawer
+              // receives, owned here for the same reason — an operator who
+              // decides on the board, steps over to Approvals and comes back
+              // must not find a card that forgot what they did. `decided` is
+              // fed by the `approval_resolved` frame as well as by this
+              // console's own resolves, so a decision taken on the page settles
+              // on the board with no reload.
+              //
+              // This replaces `onReviewApprovals`: the card's own "View
+              // details" is an `href` built with `withHostParam`, which lands
+              // the same `#/approvals/<taskId>` in the hash — surviving a
+              // refresh and the Back button — without a callback to route it.
+              decidingApprovals={decidingApprovals}
+              decidedApprovals={decidedApprovals}
+              failedApprovals={failedApprovals}
+              onDecideApproval={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
               // Lists, which reads the same instance) with no reload.
@@ -3177,6 +3572,7 @@ export function AppShell({
               feed={feed}
               sub={sub}
               onFlag={() => setFeedbackOpen(true)}
+              onResetCompany={onResetCompany}
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
@@ -3207,24 +3603,6 @@ export function AppShell({
         company={company}
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}
-      />
-
-      <SetupController
-        client={client}
-        company={company}
-        force={setupForced}
-        routeOpen={view === "setup"}
-        deepLinked={deepLinked}
-        onForceHandled={() => setSetupForced(false)}
-        onOpenChange={setSetupOpen}
-        onCompleted={() => {
-          // Keep these together: Company mounts with the new refresh key, and
-          // setup's payoff is the roster rather than the Overview graph.
-          setTeamBuilt((n) => n + 1);
-          setSetupCompleted(true);
-          setView("company");
-        }}
-        onRouteDismiss={() => setView("overview")}
       />
 
       <TourController

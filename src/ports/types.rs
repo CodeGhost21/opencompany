@@ -3923,11 +3923,49 @@ pub struct OverlayBlob {
     /// [`CompanyRecord::activation_completed_at`].
     #[serde(default)]
     pub activation_completed_at: Option<u64>,
+    /// Whether this bundle has ever been saved by activation-aware code — the
+    /// sqlite/mongodb-backed marker behind
+    /// [`CompanyStore::activation_gate_seen`] (PR #1875 review finding: the
+    /// original fix only stamped a `FsCompanyStore`-private on-disk field, so
+    /// the sqlite and mongodb backends — which round-trip through this same
+    /// blob — inherited the trait's always-`false` default and could not tell
+    /// a fresh company's *second* boot apart from a genuine pre-#1843 legacy
+    /// record, silently re-opening the exact auto-activation bug #1843 fixed
+    /// for every non-filesystem backend, including the hosted platform's
+    /// MongoDB one).
+    ///
+    /// `#[serde(default)]` reads a row written before this field existed as
+    /// `false` — indistinguishable from, and given the same one-time
+    /// grandfather grace as, a genuine pre-#1843 record. [`Self::from_record`]
+    /// always stamps `true`, since every call site that builds a blob to save
+    /// is, by definition, activation-aware code — mirroring
+    /// `FsCompanyStore::save`'s own `activation_gate_seen: true`.
+    ///
+    /// [`CompanyStore::activation_gate_seen`]: crate::ports::store::CompanyStore::activation_gate_seen
+    #[serde(default)]
+    pub activation_gate_seen: bool,
 }
 
 impl OverlayBlob {
     /// Builds a blob from a record's overlay collections and provenance.
+    /// Always stamps `activation_gate_seen: true` — correct for every
+    /// ordinary save, which by definition is activation-aware code. Bundle
+    /// import needs to preserve a *different* value when replaying a legacy
+    /// record; see [`Self::from_record_gated`].
     pub fn from_record(record: &CompanyRecord) -> Self {
+        Self::from_record_gated(record, true)
+    }
+
+    /// Like [`Self::from_record`], but lets the caller supply the
+    /// activation-gate-seen marker explicitly instead of always stamping
+    /// `true`.
+    ///
+    /// The one caller that needs this is bundle import
+    /// (`CompanyStore::save_importing`, see its own doc comment): replaying a
+    /// legacy pre-#1843 record must land with the marker still `false`, or
+    /// `RuntimeBuilder::build`'s grandfather back-fill can never fire on the
+    /// restored company's next boot (PR #1875 review finding).
+    pub fn from_record_gated(record: &CompanyRecord, activation_gate_seen: bool) -> Self {
         Self {
             agents: record.overlay_agents.clone(),
             desk_members: record.overlay_desk_members.clone(),
@@ -3945,6 +3983,7 @@ impl OverlayBlob {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            activation_gate_seen,
         }
     }
 
@@ -3983,6 +4022,11 @@ impl OverlayBlob {
                     // what supplies the right answer for an existing company.
                     name_confirmed: false,
                     activation_completed_at: None,
+                    // Same reasoning again: a legacy bare-array row predates
+                    // activation tracking (and this field) entirely, so it
+                    // has never been seen by activation-aware code — exactly
+                    // what `false` means here.
+                    activation_gate_seen: false,
                 })
                 .map_err(|_| original),
         }

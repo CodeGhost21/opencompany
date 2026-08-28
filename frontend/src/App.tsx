@@ -662,6 +662,7 @@ function Console() {
             defaultCompany={active.defaultCompany}
             notice={active.id === bootstrapId ? auth.notice : undefined}
             forceLogin={active.id === bootstrapId && auth.failed === true}
+            isBootstrap={active.id === bootstrapId}
           />
         ) : (
           // The switcher rides along, because an operator whose local host is
