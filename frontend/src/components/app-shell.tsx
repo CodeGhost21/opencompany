@@ -2498,6 +2498,11 @@ export function AppShell({
       setFailedApprovals((prev) => ({ ...prev, [approval.id]: msg }));
     } finally {
       markDeciding(approval.id, null);
+      setContinuationTaskIds((prev) => {
+        const next = new Set(prev);
+        if (approval.task?.id) next.delete(approval.task.id);
+        return next;
+      });
       void feed.refresh();
     }
   };
