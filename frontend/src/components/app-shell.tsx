@@ -2438,6 +2438,7 @@ export function AppShell({
     if (decidingApprovals.has(approval.id)) return;
     ownApprovalDecisionsRef.current.add(approval.id);
     markDeciding(approval.id, verdict);
+    setContinuationTaskIds((prev) => new Set(prev).add(approval.task?.id ?? ""));
     // A retry starts clean: the previous attempt's error must not sit under a
     // live one, or the operator cannot tell which attempt it belongs to.
     clearFailure(approval.id);
