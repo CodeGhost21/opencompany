@@ -700,17 +700,23 @@ async fn create_desk(
     // CodeRabbit P2 follow-up to `316bc9229`): `CompanyRecord::resolve_desk_id`
     // matches an overlay desk by id *or* case-insensitive name, so
     // `{"id": "ops", "name": "Operator"}` resolves a `?desk=Operator` selector
-    // to this desk exactly as thoroughly as claiming the literal id would —
-    // but `ensure_desk_writable` (`company/runtime.rs`) checks the *raw*
-    // selector string against `OPERATOR_CHANNEL` before any such resolution
-    // runs, so a write addressed to `Operator` is refused as the read-only
-    // system feed regardless, while a write addressed to the desk's real id
-    // (`ops`) sails straight through. That mismatch — reachable by name for
-    // reads, refused by name for writes, wide open under the real id either
-    // way — is a desk this host can never address consistently; refused at
-    // creation like the General case above, for the same reason: no manifest
-    // can reach this API path, so no existing company loses a desk. The
-    // fallback address (`OPERATOR_CHANNEL_COLLISION_FALLBACK`, "operator-feed")
+    // to this desk exactly as thoroughly as claiming the literal id would.
+    // Refused at creation like the General case above, for the same reason:
+    // no manifest can reach this API path, so no existing company loses a
+    // desk — a *newly created* overlay desk can never reach the shape below.
+    //
+    // A **manifest** desk grandfathered onto this name from before
+    // `316bc9229` — the case this creation guard cannot cover, since it
+    // already existed — used to hit exactly the mismatch this paragraph
+    // warned about: `ensure_desk_writable` (`company/runtime.rs`) checked the
+    // *raw* selector string against `OPERATOR_CHANNEL` before any resolution
+    // ran, so a write addressed to the desk's `Operator` alias was refused as
+    // the read-only system feed while a write addressed to its real id sailed
+    // straight through. Fixed (issue #1781 review, Codex P1 follow-up):
+    // `ensure_desk_writable` now resolves the raw selector through
+    // `resolve_desk_id` first, so it agrees with the read path on which desk
+    // a caller meant. The fallback address
+    // (`OPERATOR_CHANNEL_COLLISION_FALLBACK`, "operator-feed")
     // is reserved by name for the identical reason `316bc9229` reserved it on
     // the manifest side — `resolve_desk` folds a `?desk=` selector against it
     // the same way — but not by id: `is_valid_desk_id` above already rejects
@@ -6701,6 +6707,77 @@ mode = "full"
             "a pre-existing desk that already owns the `operator` id must stay \
              writable, got {}",
             response.status()
+        );
+    }
+
+    /// The name-collision sibling of the id-collision test above (issue #1781
+    /// review, Codex P1 follow-up): a manifest desk grandfathered onto the
+    /// **display name** `Operator` (`{ id = "legacy_ops", name = "Operator" }`)
+    /// rather than the literal id. `resolve_desk_id` — what every *read*
+    /// already resolves a `?desk=` selector through — matches this desk by
+    /// name just as thoroughly as the id-collision desk above is matched by
+    /// id, but `ensure_desk_writable` used to check the *raw* selector string
+    /// against `OPERATOR_CHANNEL` before any such resolution ran, so a send
+    /// addressed to the desk's own supported alias (`chat: "Operator"`,
+    /// case-insensitive) was refused as the read-only system feed — reachable
+    /// by name for reads, refused by name for writes, the exact mismatch
+    /// `create_desk`'s reservation comment (above) warns a desk can never be
+    /// addressed consistently under. A send addressed to the desk's real id
+    /// (`legacy_ops`) already sailed through either way, which this also
+    /// covers as the negative control.
+    #[tokio::test]
+    async fn a_manifest_desk_grandfathered_onto_the_operator_name_stays_writable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"legacy_ops\"\nname = \"Operator\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // The desk's own real id still works — this was never broken.
+        let by_id = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"by id","chat":"legacy_ops"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            by_id.status().is_success(),
+            "a send addressed to the grandfathered desk's real id must stay writable, got {}",
+            by_id.status()
+        );
+
+        // The desk's supported display-name alias must now work too.
+        let by_name = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"by name","chat":"Operator"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            by_name.status().is_success(),
+            "a send addressed to the grandfathered desk's own case-insensitive \
+             `Operator` alias must resolve to the real desk, not the read-only \
+             system feed, got {}",
+            by_name.status()
         );
     }
 

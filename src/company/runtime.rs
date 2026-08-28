@@ -1531,11 +1531,21 @@ impl CompanyRuntime {
     /// so a company provisioned earlier can already have a real manifest or
     /// overlay desk (`from_stored_toml` deliberately never re-validates a
     /// stored manifest) or roster teammate (`ChatView` addresses a DM by bare
-    /// id, issue #364) already using that id. `desk_exists` alone would miss
-    /// the teammate case — it only walks `group_chats` and `overlay_desks`,
-    /// never the roster — so `is_roster_agent` is checked alongside it, the
-    /// same carve-out applied to the other namespace `RESERVED_AGENT_IDS`
-    /// reserves.
+    /// id, issue #364) already using that id. A literal `desk_exists` check
+    /// alone would miss two shapes: the teammate case — it only walks
+    /// `group_chats` and `overlay_desks`, never the roster, so
+    /// `is_roster_agent` is checked alongside it, the same carve-out applied
+    /// to the other namespace `RESERVED_AGENT_IDS` reserves — and a desk
+    /// grandfathered by **name** rather than id (issue #1781 review, Codex
+    /// P1 follow-up): `{ id = "legacy_ops", name = "Operator" }` is exactly
+    /// the collision `operator_feed_channel` diverts the system feed off of,
+    /// but `desk_exists("operator")` only ever matches on id, so a chat or
+    /// ACP send addressed through the desk's own supported case-insensitive
+    /// `Operator` alias — which every *read* already resolves via
+    /// `resolve_desk_id` — was refused here as if it named the fake system
+    /// channel. Resolving `desk` (the actual selector, alias and all)
+    /// through `resolve_desk_id` first is what makes this guard agree with
+    /// the read path on which desk a caller meant.
     ///
     /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` is refused unconditionally: it
     /// is the id `list_desks` hands the synthetic system desk when a roster
@@ -1560,7 +1570,12 @@ impl CompanyRuntime {
         if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
             let has_real_operator_recipient =
                 self.store().load(&self.id).await?.is_some_and(|record| {
-                    record.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+                    // `resolve_desk_id(desk)` — not `desk_exists(OPERATOR_CHANNEL)`
+                    // — so a grandfathered desk claiming this alias only by
+                    // **name** (`{ id: "legacy_ops", name: "Operator" }`) is
+                    // recognised the same way the read path already resolves
+                    // it, not just one claiming the literal id.
+                    record.resolve_desk_id(desk).is_some()
                         || record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL)
                 });
             if !has_real_operator_recipient {
