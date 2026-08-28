@@ -4582,7 +4582,7 @@ impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
             id: args.id,
             name: args.name,
             description: args.description,
-            owner_desk: args.owner_desk,
+            owner_desk: RawWorkflow::normalize_owner_desk(args.owner_desk),
             nodes,
             edges: args
                 .edges
@@ -8772,6 +8772,45 @@ name = "Morning"
                 .toml
                 .contains("slug = \"web_fetch\""),
             "the persisted graph carries the tool slug: {}",
+            record.overlay_workflows[0].toml
+        );
+    }
+
+    /// Issue #1882 (tinysweeper): every other external boundary that turns a
+    /// caller-supplied `ownerDesk` into a [`RawWorkflow`] runs it through
+    /// [`RawWorkflow::normalize_owner_desk`] — the HTTP create route
+    /// (`server::ops::workflows`) and the proposal-apply path
+    /// (`workflow_create::raw_workflow_from_spec`) — so a blank/whitespace
+    /// string is stored as `None`, not `Some("   ")`. The orchestrator's
+    /// `create_workflow` tool passed `args.owner_desk` straight through
+    /// instead, so a whitespace `ownerDesk` persisted verbatim in the graph's
+    /// TOML and would defeat the `is_none()` fallback
+    /// `apply_workflow_proposal` relies on later.
+    #[tokio::test]
+    async fn create_workflow_tool_normalizes_a_blank_owner_desk() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+
+        let mut body = greeter_body();
+        body["ownerDesk"] = json!("   ");
+        let result = tool.execute(body).await.expect("execute");
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert!(
+            !record.overlay_workflows[0].toml.contains("owner_desk"),
+            "a blank owner_desk must normalize to None and be omitted from the \
+             persisted TOML, matching every other boundary that builds a \
+             RawWorkflow: {}",
             record.overlay_workflows[0].toml
         );
     }
