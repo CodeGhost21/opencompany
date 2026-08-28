@@ -164,6 +164,30 @@ const WorkspaceView = lazy(() =>
 const FinanceSection = lazy(() =>
   import("@/views/finance/FinanceSection").then((m) => ({ default: m.FinanceSection })),
 );
+
+/**
+ * The `h1` a cold visit to `#/finances/<sub>` announces before the chunk lands.
+ *
+ * On a direct visit — a bookmark, a pasted link — this boundary *is* the whole
+ * page for as long as the chunk takes, so its heading is what a screen reader
+ * announces. A single "Finances" for every subpage told someone who had opened
+ * `#/finances/wallet` that they were somewhere else, and it corrected itself
+ * only once the chunk arrived, which is exactly when they no longer needed it.
+ *
+ * Spelled out here rather than imported from `FinanceSection`: a static import
+ * of anything in that module pulls the chunk eagerly and there is no lazy
+ * boundary left to name. `the finance fallback names every subpage` holds these
+ * to `FINANCE_PAGES`, which a test may import freely.
+ */
+const FINANCE_FALLBACK_TITLES: Readonly<Record<string, string>> = {
+  invoicing: "Invoicing",
+  wallet: "Wallet",
+};
+
+/** The fallback heading for `#/finances/<sub>`, defaulting to the section. */
+export function financeFallbackTitle(sub: string | null): string {
+  return (sub && FINANCE_FALLBACK_TITLES[sub]) || "Finances";
+}
 // Hosts a sandboxed iframe and the postMessage bridge — load on demand, same
 // as the other heavier, less-visited surfaces.
 const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
@@ -3132,7 +3156,10 @@ export function AppShell({
                 // in flight — before `FinanceSection` has even mounted to run
                 // its own per-subpage Suspense (which already uses
                 // `RouteLoading` with this same static title, one level in).
-                <RouteLoading title="Finances" label="Loading finances…" />
+                <RouteLoading
+                  title={financeFallbackTitle(sub)}
+                  label={`Loading ${financeFallbackTitle(sub).toLowerCase()}…`}
+                />
               }
             >
               <FinanceSection
