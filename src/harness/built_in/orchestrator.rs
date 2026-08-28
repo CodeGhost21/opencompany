@@ -3819,6 +3819,24 @@ impl Tool for RunWorkflowTool {
                         );
                     }
                 }
+                // Issue #1865 (PR #1883 review comment 3877518535): a panic is
+                // unambiguously the worst reading a run can settle with —
+                // notify without needing a verdict computation, mirroring
+                // `WorkflowSpawn::spawn_admitted`'s own panic arm. Fired
+                // unconditionally like the journal write above, not gated on
+                // it landing — the two are independent stores, and a journal
+                // miss must not also cost the alert.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    crate::runtime::file_run_unhealthy_notification(
+                        notifications,
+                        &self.company,
+                        &wid,
+                        &ctx.run_id,
+                        "failed",
+                        crate::runtime::PANICKED_BEFORE_FINISH,
+                    )
+                    .await;
+                }
                 // No re-raise: unlike `WorkflowSpawn`'s catch, there is no
                 // `JoinHandle` here to preserve a `JoinError` on — this call is
                 // itself the tool's execution, so the honest answer is an
@@ -3846,6 +3864,56 @@ impl Tool for RunWorkflowTool {
                         Ok(&run),
                     )
                     .await;
+                }
+                // Issue #1865 (PR #1883 review comment 3877518530): the same
+                // unhealthy-run classification `WorkflowSpawn::spawn_admitted`
+                // applies to its own settled runs — a stranded or blocked
+                // agent-started run is otherwise silent to every operator not
+                // watching this turn, especially a stranded run with no
+                // approval card to surface. Unconditional of `run.cancelled`
+                // below, matching `WorkflowSpawn`'s own ordering (it has no
+                // `cancelled` special-case of its own at this point either).
+                //
+                // Stranded checked before blocked, same as `WorkflowSpawn`:
+                // `HarnessAgentRunner` pushes a `WorkflowBlockedNode` whenever
+                // a turn gated anything at all, parked or not, so a fully
+                // unparkable node lands in `blocked_nodes` exactly like one
+                // with a live card — only `stranded_approvals` equalling the
+                // full pending count, with no card still `Pending` delivery
+                // either, tells the two apart.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    if !run.pending_approvals.is_empty()
+                        && crate::ports::workflow_runner::stranded_approvals(
+                            &run.pending_approvals,
+                            &run.approvals,
+                        ) == run.pending_approvals.len()
+                        && !run
+                            .deliveries
+                            .iter()
+                            .any(|d| matches!(d.status, crate::ports::DeliveryStatus::Pending))
+                    {
+                        crate::runtime::file_run_unhealthy_notification(
+                            notifications,
+                            &self.company,
+                            &wid,
+                            &ctx.run_id,
+                            "stranded",
+                            "This run tried to park an approval and could not — nothing is \
+                             waiting on it any more, and nobody was asked.",
+                        )
+                        .await;
+                    } else if !run.blocked_nodes.is_empty() {
+                        crate::runtime::file_run_unhealthy_notification(
+                            notifications,
+                            &self.company,
+                            &wid,
+                            &ctx.run_id,
+                            "blocked",
+                            "This run stopped because a step is waiting on a person to decide \
+                             something.",
+                        )
+                        .await;
+                    }
                 }
                 // Issue #383: a cancelled run is `Ok`, so without this arm the
                 // agent would read the empty node summary as "the workflow did
@@ -7933,6 +8001,109 @@ name = "Morning"
         }
     }
 
+    /// A [`WorkflowRunner`] test double whose `run` always panics — the shape
+    /// PR #1883 review comment 3877514592 flagged as untested: the
+    /// `catch_unwind` arm in `RunWorkflowTool::execute` journals a
+    /// `WorkflowRunFinished` with `PANICKED_BEFORE_FINISH` and returns a
+    /// `ToolResult::error` instead of unwinding past both journal-write arms,
+    /// but nothing drove a panicking runner through this tool to prove it.
+    /// Identical in shape to `workflow_spawn`'s own `PanickingRunner` test
+    /// double.
+    struct PanickingRunner;
+
+    #[async_trait::async_trait]
+    impl WorkflowRunner for PanickingRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &crate::ports::WorkflowRunContext,
+        ) -> crate::Result<WorkflowRun> {
+            panic!("the runner panicked");
+        }
+    }
+
+    /// A [`WorkflowRunner`] test double whose one node gated a call that
+    /// failed to park entirely — nothing is left waiting on anyone, so this
+    /// settles `stranded`, not `blocked` (issue #1865 review comment
+    /// 3877518530). Identical in shape to `workflow_spawn`'s own
+    /// `FullyStrandedRunner` test double.
+    struct FullyStrandedRunner;
+
+    #[async_trait::async_trait]
+    impl WorkflowRunner for FullyStrandedRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &crate::ports::WorkflowRunContext,
+        ) -> crate::Result<WorkflowRun> {
+            Ok(WorkflowRun {
+                output: Value::Null,
+                pending_approvals: vec!["node1".to_string()],
+                deliveries: Vec::new(),
+                cancelled: false,
+                nodes: Vec::new(),
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                    node_id: "node1".to_string(),
+                    tools: vec!["some_tool".to_string()],
+                    approval_ids: Vec::new(),
+                    unparkable: 1,
+                    stranded: 0,
+                }],
+                approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("node1".to_string()),
+                    tool: Some("some_tool".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                    approval_id: None,
+                }],
+            })
+        }
+    }
+
+    /// A [`WorkflowRunner`] test double with one gated node whose call parked
+    /// a live, decidable approval card — this settles `blocked`, not
+    /// `stranded` (issue #1865 review comment 3877518530).
+    struct BlockedRunner;
+
+    #[async_trait::async_trait]
+    impl WorkflowRunner for BlockedRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &crate::ports::WorkflowRunContext,
+        ) -> crate::Result<WorkflowRun> {
+            Ok(WorkflowRun {
+                output: Value::Null,
+                pending_approvals: vec!["node1".to_string()],
+                deliveries: Vec::new(),
+                cancelled: false,
+                nodes: Vec::new(),
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                    node_id: "node1".to_string(),
+                    tools: vec!["some_tool".to_string()],
+                    approval_ids: vec!["appr-1".to_string()],
+                    unparkable: 0,
+                    stranded: 0,
+                }],
+                approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("node1".to_string()),
+                    tool: Some("some_tool".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                    approval_id: Some("appr-1".to_string()),
+                }],
+            })
+        }
+    }
+
     /// Writes `DEMO_WF` to `<dir>/workflows/demo.toml`.
     fn seed_demo_workflow(dir: &std::path::Path) {
         let wf = dir.join("workflows");
@@ -8446,6 +8617,185 @@ name = "Morning"
                 .contains(crate::runtime::RUN_FAILED_DETAIL),
             "{:?}",
             failed.notification.title
+        );
+    }
+
+    /// Issue #1865 (PR #1883 review comments 3877514592, 3877518535): a
+    /// panicking runner is a run-outcome shape nothing drove through
+    /// `RunWorkflowTool::execute` before this test. Proves both halves the
+    /// `catch_unwind` arm promises: the finish still journals (so the run
+    /// does not read `running: true` forever) AND — mirroring
+    /// `WorkflowSpawn::spawn_admitted`'s own panic arm — the same
+    /// `workflow_run_failed` notification a console or scheduled panic files
+    /// gets filed here too, since a panic is unambiguously the worst reading
+    /// a run can settle with.
+    #[tokio::test]
+    async fn run_workflow_tool_files_a_notification_and_journals_a_finish_when_the_runner_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(PanickingRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let company = CompanyId::new("acme");
+        let events: Arc<dyn EventLog> = Arc::new(crate::store::FsEventLog::new(dir.path()));
+        let notifications: Arc<dyn NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+
+        let tool = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            Some(events.clone()),
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "the runner panicked: {result:?}");
+
+        let stored = events
+            .read_from(&company, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read journal");
+        assert!(
+            stored.iter().any(
+                |s| matches!(&s.event, CompanyEvent::WorkflowRunFinished { error, .. }
+                    if error.as_deref() == Some(crate::runtime::PANICKED_BEFORE_FINISH))
+            ),
+            "a panicked run must still journal a finish so it does not read `running: true` \
+             forever: {stored:?}"
+        );
+
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        let failed = notes
+            .iter()
+            .find(|n| n.notification.kind == "workflow_run_failed")
+            .expect(
+                "an agent-started run that panics must file the same durable notification a \
+                 console or scheduled panic does",
+            );
+        assert!(
+            failed
+                .notification
+                .title
+                .contains(crate::runtime::PANICKED_BEFORE_FINISH),
+            "{:?}",
+            failed.notification.title
+        );
+    }
+
+    /// Issue #1865 (PR #1883 review comment 3877518530): a fully-stranded
+    /// agent-started run — every gated node lost its card, nobody is waiting
+    /// on a person to decide anything — must file `workflow_run_stranded`,
+    /// mirroring `WorkflowSpawn::spawn_admitted`'s own classification for the
+    /// console/scheduled/resumed paths.
+    #[tokio::test]
+    async fn run_workflow_tool_files_a_stranded_notification_when_every_gate_lost_its_card() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(FullyStrandedRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let company = CompanyId::new("acme");
+        let notifications: Arc<dyn NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+
+        let tool = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(
+            !result.is_error,
+            "a stranded run still answers the tool call: {result:?}"
+        );
+
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_stranded"),
+            "a fully-stranded agent-started run must file a stranded notification: {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_blocked"),
+            "a fully-stranded run must NOT file the misleading 'blocked' notification: {notes:?}"
+        );
+    }
+
+    /// Issue #1865 (PR #1883 review comment 3877518530): an agent-started run
+    /// with a live, decidable approval card must file `workflow_run_blocked`,
+    /// not `workflow_run_stranded` — somebody really is waiting to decide
+    /// something.
+    #[tokio::test]
+    async fn run_workflow_tool_files_a_blocked_notification_when_a_card_is_still_live() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(BlockedRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let company = CompanyId::new("acme");
+        let notifications: Arc<dyn NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+
+        let tool = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(
+            !result.is_error,
+            "a blocked run still answers the tool call: {result:?}"
+        );
+
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_blocked"),
+            "an agent-started run with a live card must file a blocked notification: {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.notification.kind == "workflow_run_stranded"),
+            "a run with a live, decidable card must NOT be announced as stranded: {notes:?}"
         );
     }
 
