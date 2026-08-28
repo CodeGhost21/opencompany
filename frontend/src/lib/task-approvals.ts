@@ -84,7 +84,11 @@ export function approvalsForTask(
   approvals: readonly ApprovalSummary[],
   taskId: string,
 ): ApprovalSummary[] {
-  return approvals.filter((a) => a.task?.link === "task" && a.task.id === taskId);
+  return approvals.filter(
+    (a) =>
+      (a.ownerTaskId === taskId ||
+        (a.ownerTaskId === undefined && a.task?.link === "task" && a.task.id === taskId)),
+  );
 }
 
 /** Why a card is stopped — read by its board card and by its Resume button (#883). */
