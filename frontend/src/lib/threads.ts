@@ -2,7 +2,7 @@
 // talks to the same company chat endpoint; a thread just scopes a transcript
 // and gives the company side a consistent identity (a "desk" you're talking to).
 
-import type { DeskDto, TeamMemberDto } from "../api/types";
+import type { DeskDto, OperatorChannelDto, TeamMemberDto } from "../api/types";
 import { MAIN_THREAD_ID, type ChatMessage } from "./chat";
 import { toneFor } from "./team";
 
@@ -33,6 +33,33 @@ function mainThread(): Thread {
     contact: { name: "Your company", kind: "company" },
     blurb: "The main line — ask for anything",
     messages: [],
+  };
+}
+
+/**
+ * The read-only Operator system feed (issue #1757 rework), as a thread for
+ * the legacy `#/conversation` route.
+ *
+ * `Conversation` — the route Chat became the nav-listed successor to in #361
+ * — still reads plain `threads`, unlike Chat's own channel model which
+ * already appends the pinned row (`operatorSection`, `views/chat/model.ts`).
+ * Without this, `#/conversation` never receives an Operator thread at all,
+ * so its `readOnly` plumbing (`Conversation.tsx` already forwards
+ * `thread.readOnly` to the composer) has nothing to gate and workflow
+ * reports cannot be opened there (issue #1781 review, Codex P2).
+ *
+ * `readOnly: true` for the same reason Chat's pinned row carries no member
+ * or mutation routes: this is an aggregation surface, not a conversation —
+ * see `operatorChannelFrom`'s `system: true` for the Channel-model sibling
+ * of this same fact.
+ */
+export function operatorThread(dto: OperatorChannelDto): Thread {
+  return {
+    id: dto.id,
+    contact: { name: dto.name, kind: "company" },
+    blurb: dto.description,
+    messages: [],
+    readOnly: true,
   };
 }
 

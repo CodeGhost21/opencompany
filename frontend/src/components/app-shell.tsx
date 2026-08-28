@@ -112,7 +112,7 @@ import { writeLastChannel } from "@/lib/last-channel";
 import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
-import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
+import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { OperatorOverview } from "@/views/OperatorOverview";
@@ -1140,6 +1140,12 @@ export function AppShell({
             team,
             deskThreads.map((t) => t.id),
           ),
+          // The legacy `#/conversation` route's own copy of the pinned
+          // Operator row — Chat's channel model gets it through
+          // `operatorSection`, but `Conversation` reads this thread list
+          // directly and never received one, so its `readOnly` plumbing had
+          // nothing to gate (issue #1781 review, Codex P2).
+          ...(operatorChannel ? [operatorThread(operatorChannel)] : []),
         ];
         setThreads((prev) => {
           const byId = new Map(prev.map((t) => [t.id, t]));
