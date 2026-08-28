@@ -948,6 +948,12 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// content-transfer calls (`/2/files/upload`, `/2/files/download`), so both
 /// get their own unscoped entry the same way `uploads.github.com` and
 /// `files.stripe.com` do.
+///
+/// X (`twitter`) and LinkedIn had the same gap as Dropbox (PR #1780 review,
+/// round 13): both are first-class toolkits in the connection catalogue but
+/// had no match arm here. X ships two live host spellings — the legacy
+/// `api.twitter.com` and the current `api.x.com` — so both are listed;
+/// LinkedIn has a single dedicated REST host, `api.linkedin.com`.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
         "github" => &[("api.github.com", &[]), ("uploads.github.com", &[])],
@@ -980,6 +986,8 @@ fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'stat
         ],
         "discord" => &[("discord.com", &["/api/"]), ("discordapp.com", &["/api/"])],
         "dropbox" => &[("api.dropboxapi.com", &[]), ("content.dropboxapi.com", &[])],
+        "twitter" => &[("api.twitter.com", &[]), ("api.x.com", &[])],
+        "linkedin" => &[("api.linkedin.com", &[])],
         _ => &[],
     }
 }
@@ -2029,6 +2037,28 @@ mod tests {
             web_call_deflection(&connected, "https://content.dropboxapi.com/2/files/upload")
                 .is_some(),
             "the content-transfer host (upload/download) must also be deflected"
+        );
+    }
+
+    /// PR #1780 review (round 13): same gap as Dropbox (round 11) —
+    /// `twitter` (surfaced as "X" in the console) and `linkedin` are
+    /// first-class toolkits in `frontend/src/lib/connections.ts`, but
+    /// neither had a match arm here, so both fell through to the `_ => &[]`
+    /// default and got no deflection at all.
+    #[test]
+    fn x_and_linkedin_are_deflected_across_their_api_hosts() {
+        let connected = vec!["twitter".to_string(), "linkedin".to_string()];
+        assert!(
+            web_call_deflection(&connected, "https://api.twitter.com/2/tweets").is_some(),
+            "the legacy twitter.com API host must be deflected"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://api.x.com/2/tweets").is_some(),
+            "the current x.com API host must also be deflected"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://api.linkedin.com/rest/posts").is_some(),
+            "the LinkedIn API host must be deflected"
         );
     }
 }
