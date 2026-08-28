@@ -717,7 +717,16 @@ export const GRANT_DURATIONS: { label: string; millis: number }[] = [
  * structurally unable to be widened into an argument-matching rule, and why this
  * list needs no redaction of its own.
  */
-export interface StandingGrant {
+export interface BudgetPauseMarker {
+  id: string;
+  agent: string;
+  chatId?: string;
+  message: string;
+  summary: string;
+  atMillis: number;
+}
+
+
   id: string;
   /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
    * which names its subject in `workflow` instead. */
