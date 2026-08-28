@@ -1301,8 +1301,8 @@ async fn remove_staged(tmp: &Path) {
 /// manifest-rollback branch if the second commit fails outright.
 ///
 /// Spawned as a detached task from `save` (issue #1828 review, twelfth
-/// round follow-up, finding on 3878400729) — see that call site for why:
-/// nothing below this point may be torn down by `save`'s own
+/// round follow-up, findings on 3878400729 / 3878400724) — see that call
+/// site for why: nothing below this point may be torn down by `save`'s own
 /// cancellation, because `commit_staged`'s rename cannot be stopped once
 /// dispatched (issue #1828 review, sixth/eleventh rounds), and each
 /// commit's failure-handling assumes the *other* file's temp is still
@@ -1336,11 +1336,34 @@ async fn commit_bundle_writes(
             }
         };
         guard.forget(&toml_tmp);
-        if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
-            remove_staged(&toml_tmp).await;
-            remove_staged(&meta_tmp).await;
-            return Err(f.error);
-        }
+        // Issue #1828 review, twelfth round follow-up (finding on
+        // 3878400724): a post-rename directory-sync failure here used to be
+        // treated exactly like a total failure — `meta_tmp` was discarded
+        // and never even attempted, even though the manifest rename had
+        // already landed. Readers then saw the new manifest paired with the
+        // old metadata: the same mixed record the *second* commit's
+        // `published` branch below (tenth round) already guards against,
+        // just on the other commit. When `published` is true, keep going
+        // instead of abandoning the metadata write, and only surface this
+        // sync failure if nothing worse happens after it.
+        let toml_sync_warning = match commit_staged(&bundle.company_toml(), toml_tmp.clone()).await
+        {
+            Ok(()) => None,
+            Err(f) if f.published => {
+                tracing::warn!(
+                    path = %bundle.company_toml().display(),
+                    error = %f.error,
+                    "[store] company.toml was renamed into place but its directory sync \
+                     failed; continuing to commit meta.json rather than abandoning it"
+                );
+                Some(f.error)
+            }
+            Err(f) => {
+                remove_staged(&toml_tmp).await;
+                remove_staged(&meta_tmp).await;
+                return Err(f.error);
+            }
+        };
         guard.forget(&meta_tmp);
         if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
             remove_staged(&meta_tmp).await;
@@ -1395,6 +1418,9 @@ async fn commit_bundle_writes(
                 }
             }
             return Err(f.error);
+        }
+        if let Some(warning) = toml_sync_warning {
+            return Err(warning);
         }
     } else {
         guard.forget(&meta_tmp);
@@ -4040,6 +4066,83 @@ mod test {
             manifest.contains("After") && !manifest.contains("Before"),
             "meta.json was already published, so the manifest must NOT be \
              rolled back onto it — found {manifest}"
+        );
+    }
+
+    /// **Issue #1828 review, twelfth round follow-up** (finding on
+    /// 3878400724): a post-rename directory-sync failure on the *first*
+    /// commit (`company.toml`, update path) used to be treated exactly like
+    /// a total failure — the staged `meta.json` was discarded and never
+    /// even attempted, even though the manifest rename had already landed.
+    /// Readers then saw the new manifest paired with the old metadata: the
+    /// same mixed record the *second* commit's `published` branch (tenth
+    /// round, the test above) already guards against, just on the other
+    /// commit.
+    ///
+    /// `fault_probe::fail_next_dir_sync` reaches the "rename landed, sync
+    /// alone failed" state on the *first* commit specifically. The metadata
+    /// must still land.
+    #[tokio::test]
+    async fn a_first_commit_sync_failure_still_lands_the_paired_metadata() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = |name: &str, lifecycle: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: {
+                let mut m = sample_manifest();
+                m.company.name = name.to_string();
+                m
+            },
+            ledger: Vec::new(),
+            lifecycle: lifecycle.to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        store
+            .save(&record("Before", "running"))
+            .await
+            .expect("first publish");
+
+        // Fail only the durability step of the *first* commit — the rename
+        // that replaces company.toml has already landed by the time this
+        // fires.
+        fault_probe::fail_next_dir_sync(&bundle.company_toml());
+        let err = store.save(&record("After", "paused")).await;
+        assert!(
+            err.is_err(),
+            "a post-rename sync failure must still be reported to the caller"
+        );
+
+        let manifest = std::fs::read_to_string(bundle.company_toml()).expect("manifest on disk");
+        assert!(
+            manifest.contains("After") && !manifest.contains("Before"),
+            "the manifest rename already landed and must not be rolled back — found {manifest}"
+        );
+
+        let meta = std::fs::read_to_string(bundle.meta_json()).expect("meta.json on disk");
+        assert!(
+            meta.contains("paused"),
+            "the metadata write must not be abandoned just because the manifest's own \
+             directory sync failed after its rename already landed — found {meta}"
         );
     }
 
