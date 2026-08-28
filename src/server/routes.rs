@@ -75,7 +75,7 @@ fn console_dir_from_env() -> Option<PathBuf> {
 /// Keyed on the response's own content type rather than the request path,
 /// because the SPA fallback serves the shell at paths that look like anything
 /// at all — including, in the failure above, paths under `/assets/`.
-fn cache_console_response(mut response: Response) -> Response {
+fn cache_console_response(path: &str, mut response: Response) -> Response {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
     let is_html = response
@@ -95,6 +95,14 @@ fn cache_console_response(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static(policy));
+    // The page shell is an opaque-origin iframe, so its ES module imports send
+    // `Origin: null` even though the console and host share a URL origin. The
+    // module graph therefore needs explicit CORS permission. These SDK files
+    // are only the fixed React/site runtime; the company-authenticated bundle
+    // receives the same headers in `ops::pages`.
+    if path.starts_with("/pages-sdk/") && !is_html {
+        crate::server::ops::pages::apply_page_module_cors_headers(response.headers_mut());
+    }
     response
 }
 
@@ -114,7 +122,6 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .route("/tiny", get(tiny))
         .merge(crate::server::operator::router())
         .merge(crate::server::ops::router())
-        .merge(crate::server::hooks::router())
         .merge(crate::server::hooks_chargebee::router())
         .merge(crate::server::provision::router())
         .merge(crate::server::setup::router())
@@ -122,8 +129,9 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::feedback_board::router())
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
-        .merge(crate::server::users::devices::router())
         .merge(crate::server::graphql::router());
+    #[cfg(feature = "acp")]
+    let router = router.merge(crate::server::acp::router());
     // tiny.place A2A inbound + discovery routes, only when the feature is on.
     #[cfg(feature = "tinyplace")]
     let router = router.merge(crate::server::a2a::router());
@@ -155,8 +163,9 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
                     if is_reserved_path(request.uri().path()) {
                         return StatusCode::NOT_FOUND.into_response();
                     }
+                    let path = request.uri().path().to_owned();
                     match serve.oneshot(request).await {
-                        Ok(response) => cache_console_response(response.into_response()),
+                        Ok(response) => cache_console_response(&path, response.into_response()),
                         Err(err) => match err {},
                     }
                 }
@@ -478,6 +487,12 @@ mod tests {
             "export const x = 1;\n",
         )
         .unwrap();
+        std::fs::create_dir(dir.path().join("pages-sdk")).unwrap();
+        std::fs::write(
+            dir.path().join("pages-sdk").join("react.mjs"),
+            "export const createElement = () => null;\n",
+        )
+        .unwrap();
         let path = dir.path().to_path_buf();
         (dir, path)
     }
@@ -567,6 +582,42 @@ mod tests {
         assert_eq!(
             cache_control(&response),
             "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[tokio::test]
+    async fn page_sdk_modules_allow_credentialed_imports_from_opaque_frames() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pages-sdk/react.mjs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "null"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            response.headers().get(axum::http::header::VARY).unwrap(),
+            "Origin"
         );
     }
 
@@ -832,13 +883,36 @@ mod tests {
         assert_eq!(spec_body(restarted).await["instance_id"], id);
 
         let caps = body["capabilities"].as_array().expect("capabilities");
-        for expected in ["rest", "graphql", "sse", "devices"] {
+        for expected in ["rest", "graphql", "sse"] {
             assert!(caps.iter().any(|c| c == expected), "missing {expected}");
         }
         assert_eq!(body["storage"], "fs");
         // Unset by default rather than an empty string, so a client can tell
         // "unnamed" from "named the empty string".
         assert!(body.get("display_name").is_none());
+    }
+
+    #[tokio::test]
+    async fn spec_names_the_build_commit_beside_the_version() {
+        // `version` has read `0.1.0` for thousands of commits, so it alone
+        // cannot tell an operator which build a host is running. The commit is
+        // the same *kind* of fact — identical for every instance compiled from
+        // one artifact, and saying nothing about this host — which is why it
+        // sits on the unauthenticated handshake where `version` already does.
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        let body = spec_body(state).await;
+
+        let commit = body["build_commit"].as_str().expect("a build commit");
+        assert_eq!(commit, crate::BUILD_COMMIT);
+        assert!(!commit.is_empty(), "an absent stamp must read `unknown`");
+        assert!(
+            commit
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+            "{commit:?} is not a sanitized stamp"
+        );
+        assert_eq!(body["version"], crate::VERSION);
     }
 
     #[tokio::test]
@@ -877,92 +951,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spec_reports_the_default_memory_engine() {
+    async fn spec_does_not_disclose_memory_engine_details() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
         let body = spec_body(state).await;
-        // No overlay: the base storage backend serves memory, so there is no
-        // separate engine to name.
-        assert_eq!(body["memory"]["backend"], "store");
-        assert!(body["memory"]["driver_id"].is_null());
-        assert_eq!(body["memory"]["capabilities"], serde_json::json!([]));
-    }
-
-    #[cfg(feature = "tinymemory")]
-    #[tokio::test]
-    async fn spec_names_the_bound_memory_engine_but_never_its_endpoint_or_key() {
-        // The acceptance criterion from issue #914: `driver_id` is safe to
-        // surface, the URL and the credential are not — and `/spec` is
-        // unauthenticated, so this is the route where that matters most.
-        const KEY: &str = "sk-memory-super-secret-value";
-        const ENDPOINT: &str = "https://memory.internal.example";
-
-        let dir = tempfile::tempdir().unwrap();
-        let overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
-            memory_backend: crate::store::MemoryBackend::Remote,
-            memory_driver: Some("supermemory".to_string()),
-            memory_url: Some(ENDPOINT.to_string()),
-            memory_api_key: Some(KEY.to_string()),
-            ..Default::default()
-        })
-        .expect("a fully configured remote engine binds")
-        .expect("remote yields an overlay");
-
-        let state = AppState::new(AppConfig::default())
-            .with_home(dir.path().to_path_buf())
-            .with_memory_overlay(overlay);
-
-        let body = spec_body(state).await;
-        assert_eq!(body["memory"]["backend"], "remote");
-        assert_eq!(body["memory"]["driver_id"], "supermemory");
-        // Unprobed here (the probe is `serve`'s boot step, not `bind`'s), and
-        // the field is skipped when absent so old clients see the old shape.
+        // `/spec` is the unauthenticated manager handshake. Memory-provider
+        // identity, capability and reachability details belong to the
+        // operator-authenticated engine route instead.
         assert!(
-            body["memory"]["healthy"].is_null(),
-            "an unprobed engine must not report health"
-        );
-        // The mandatory three a hosted adapter advertises, so an operator can
-        // see the tree/graph families it does not have.
-        let caps = body["memory"]["capabilities"].to_string();
-        assert!(caps.contains("core"), "{caps}");
-        assert!(caps.contains("recall"), "{caps}");
-        assert!(caps.contains("portability"), "{caps}");
-
-        let rendered = body.to_string();
-        assert!(!rendered.contains(KEY), "/spec leaked the memory key");
-        assert!(
-            !rendered.contains("memory.internal.example"),
-            "/spec leaked the memory endpoint: {rendered}"
-        );
-    }
-
-    /// The other half of the health contract on the wire: once the boot probe
-    /// has run, `/spec` serves its answer. The `null` driver's `health()` is
-    /// `Ready` by contract, so this covers the probed-`true` serialization
-    /// deterministically; the unprobed case is asserted `null` above, and the
-    /// mapping of degraded/down/timeout onto the bit is pinned in
-    /// `store::select`.
-    #[cfg(feature = "tinymemory")]
-    #[tokio::test]
-    async fn spec_serves_the_boot_probes_health_answer() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
-            memory_backend: crate::store::MemoryBackend::Null,
-            ..Default::default()
-        })
-        .expect("null binds")
-        .expect("null yields an overlay");
-        overlay
-            .refresh_health(std::time::Duration::from_secs(5))
-            .await;
-
-        let state = AppState::new(AppConfig::default())
-            .with_home(dir.path().to_path_buf())
-            .with_memory_overlay(overlay);
-        let body = spec_body(state).await;
-        assert_eq!(
-            body["memory"]["healthy"], true,
-            "probed health must reach /spec"
+            body.get("memory").is_none(),
+            "memory leaked through /spec: {body}"
         );
     }
 }

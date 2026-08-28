@@ -1391,6 +1391,7 @@ async fn post_to_channel(
             text: format!("{subject}\n\n{text}"),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         })
         .await
         // `err` is the adapter's own words. Same rule as mail: it rides
@@ -1490,6 +1491,7 @@ mod tests {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::UserRecord;
     use crate::ports::types::CompanyId;
+    use crate::ports::types::SecretValue;
     use crate::runtime::channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
     use crate::server::ops::mailer::{MailSender, RecordingMailSender};
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
@@ -1592,10 +1594,13 @@ allow = [{allow}]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -1605,7 +1610,7 @@ allow = [{allow}]
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "acme".into(),
-            password: "hunter2".into(),
+            password: SecretValue("hunter2".into()),
             from_name: "Acme".into(),
             from_email: COMPANY_ADDRESS.into(),
         }
@@ -1793,6 +1798,7 @@ admins = [{list}]
                         id: id.to_string(),
                         email: email.to_string(),
                         display_name: None,
+                        avatar: None,
                         role: UserRole::Admin,
                         status: UserStatus::Active,
                         password_hash: None,
@@ -2039,6 +2045,7 @@ admins = [{list}]
                         id: id.to_string(),
                         email: email.to_string(),
                         display_name: None,
+                        avatar: None,
                         role,
                         status,
                         password_hash: None,
@@ -2229,6 +2236,7 @@ admins = [{list}]
                     id: "founder".to_string(),
                     email: "founder@acme.test".to_string(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Suspended,
                     password_hash: None,
@@ -2755,7 +2763,7 @@ admins = [{list}]
     }
 
     /// **The default-configuration case (after #230).** A company with no
-    /// `[tools]` section at all now defaults to `["*", "media", "composio"]`,
+    /// `[tools]` section at all now defaults to the globals `default_allow`,
     /// and `*` satisfies the `email` grant — so on the majority of tenants the
     /// grant gate is open and the established-thread gate is the one actually
     /// holding the line. Pin that it does: a default-configured company still

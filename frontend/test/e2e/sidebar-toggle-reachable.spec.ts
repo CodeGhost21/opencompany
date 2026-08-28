@@ -62,6 +62,36 @@ test.describe("sidebar toggle reachability", () => {
     await expect(page.getByText("Workflows", { exact: true })).toBeVisible();
   });
 
+  test("the mobile sheet closes after selecting a destination", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#/overview");
+    await dismissTour(page);
+
+    await page.getByRole("button", { name: "Toggle sidebar" }).click();
+    const sheet = page.getByRole("dialog", { name: "Sidebar" });
+    await expect(sheet).toBeVisible();
+    await expect(sheet).toHaveAttribute("aria-modal", "true");
+
+    await sheet.getByRole("button", { name: "Work", exact: true }).click();
+    await expect(page).toHaveURL(/#\/ledgers\/tasks$/);
+    await expect(sheet).toBeHidden();
+  });
+
+  test("Escape closes the mobile sheet after focus moves inside it", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#/overview");
+    await dismissTour(page);
+
+    await page.getByRole("button", { name: "Toggle sidebar" }).click();
+    const sheet = page.getByRole("dialog", { name: "Sidebar" });
+    const destination = sheet.getByRole("button", { name: "Overview", exact: true });
+    await destination.focus();
+    await expect(destination).toBeFocused();
+
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
+  });
+
   test("the mobile trigger does not overlap scrollable page content", async ({ page }) => {
     // The issue's own repro viewport (iPhone 12-class).
     await page.setViewportSize({ width: 390, height: 844 });

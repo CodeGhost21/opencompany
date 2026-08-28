@@ -98,6 +98,11 @@ export interface Me {
   id: string;
   email: string;
   displayName?: string;
+  /**
+   * The face they chose (`lib/avatar.ts`), absent when they have not chosen —
+   * which the console draws as the mascot it hashes from their id.
+   */
+  avatar?: string;
   role: UserRole;
   company: string;
   /** Whether they have a password, never what it is. */
@@ -141,8 +146,16 @@ export async function requestCode(
   client: OpenCompanyClient,
   company: string | null,
   email: string,
+  redirect?: string,
 ): Promise<RequestCodeResult> {
-  return client.post<RequestCodeResult>(`${client.scopeFor(company)}/auth/request`, { email });
+  return client.post<RequestCodeResult>(`${client.scopeFor(company)}/auth/request`, {
+    email,
+    // The landing fragment a *mailed* link should carry (setup's hand-off
+    // passes `#/company?from=setup`). Absent for a normal sign-in, which lands
+    // wherever it always did. `undefined` is dropped by JSON.stringify, so the
+    // body is unchanged unless a redirect was actually asked for.
+    redirect,
+  });
 }
 
 /** Redeems a magic link for a session. */
@@ -174,13 +187,19 @@ export interface HubProvider {
  * An empty list is the normal answer on a self-hosted host and is not an
  * error — it means "no ecosystem here, show the magic-link form alone". So this
  * never throws for that case; callers only need to handle the network failing.
+ *
+ * `from`, when present, is the destination the host should put on the sign-in's
+ * return URI — the console's own fragment cannot cross the OAuth round trip, so
+ * the host carries it as a query parameter the landing reads back. Only setup's
+ * dead-link recovery asks for one today (`from=setup`).
  */
 export async function fetchHubProviders(
   client: OpenCompanyClient,
   company: string | null,
+  from?: string,
 ): Promise<HubProvider[]> {
   const result = await client.get<{ providers: HubProvider[] }>(
-    `${client.scopeFor(company)}/auth/hub`,
+    `${client.scopeFor(company)}/auth/hub${from ? `?from=${encodeURIComponent(from)}` : ""}`,
   );
   return result.providers ?? [];
 }
@@ -303,6 +322,15 @@ export interface Person {
   id: string;
   email: string;
   displayName?: string;
+  /**
+   * The face they chose, absent when they have not chosen.
+   *
+   * Readable by anyone who can read the roster, and writable **only by the
+   * person wearing it** — `updateMe`, not `updatePerson`. An admin may set
+   * somebody's `displayName` so a roster of raw addresses can be made legible;
+   * a person's own face is theirs to pick.
+   */
+  avatar?: string;
   role: UserRole;
   status: UserStatus;
   /** Whether they have a password — never what it is. */
@@ -400,6 +428,22 @@ export async function revokeInvite(
   inviteId: string,
 ): Promise<void> {
   await client.del(`${client.scopeFor(company)}/users/invites/${encodeURIComponent(inviteId)}`);
+}
+
+/**
+ * Changes your own name or face.
+ *
+ * Deliberately not `updatePerson`: that one is admin-only and takes a user id,
+ * which is right for administering somebody else and wrong for naming yourself.
+ * Both fields are three-state — omitted leaves it alone, `null` goes back to the
+ * default, a value sets it — so saving a name cannot wipe a face.
+ */
+export async function updateMe(
+  client: OpenCompanyClient,
+  company: string | null,
+  changes: { displayName?: string | null; avatar?: string | null },
+): Promise<Me> {
+  return client.patch<Me>(`${client.scopeFor(company)}/auth/me`, changes);
 }
 
 /** Changes a person's role, status, or display name. */

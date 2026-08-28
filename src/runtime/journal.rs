@@ -3030,6 +3030,7 @@ mod test {
             agent: "ops".into(),
             workflow: None,
             tool: tool.into(),
+            verdict: crate::ports::types::Verdict::Approve,
             granted_by: Actor {
                 kind: crate::ports::types::ActorKind::User,
                 id: "user-42".into(),

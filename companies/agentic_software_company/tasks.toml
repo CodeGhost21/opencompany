@@ -1,0 +1,59 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a software company is defined by —
+# the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-release-flow"
+title = "Set up the release flow"
+priority = "high"
+note = """
+Decide how a change reaches customers and write it down as a row on \
+`releases` for the next version, with the rollback plan filled in before \
+anything ships.
+
+A release is the only fact that lets an incident be correlated with a \
+cause and a support answer be accurate about what a customer is running. A \
+company that ships without cutting release rows cannot answer either \
+question later.
+
+Done when `releases` has a planned row with contents, risk and rollback, \
+and `playbooks/release-checklist.md` matches what the row assumes.\
+"""
+
+[[task]]
+id = "set-up-the-incident-runbook"
+title = "Set up the incident runbook"
+priority = "high"
+note = """
+Make `playbooks/incident-runbook.md` real for this product: who is paged, \
+what is checked first, when a customer is told, and what opens a row on \
+`incidents`.
+
+Written before the first incident or not at all — nobody drafts a runbook \
+at two in the morning, and the version written then is the one that gets \
+used for a year.
+
+Done when the runbook names the first three checks and the row it opens.\
+"""
+
+[[task]]
+id = "set-up-the-security-review-bar"
+title = "Set up the security review bar"
+priority = "medium"
+note = """
+Say which changes need a security review before they ship, and record the \
+answer on `decisions` so it is not re-argued per pull request.
+
+An unstated bar means every reviewer applies their own, which is the same \
+as having none. Open a `security-findings` row for anything already known.
+
+Done when the bar is a decision row and `standards/security-standards.md` \
+states it.\
+"""

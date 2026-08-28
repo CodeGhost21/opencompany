@@ -12,13 +12,18 @@ import { derivePromptCard, newTaskBody } from "@/views/CreateTaskDialog";
  * nothing recorded about the other. Collecting it here is the pre-empt — an
  * operator who already knows the owner never reaches that ambiguity.
  *
- * The rule these pin is what the body **omits**. Both optional controls are sent
+ * The rule these pin is what the body **omits**. Optional controls are sent
  * only when they differ from the host's default, so adding them cannot change
  * what a card created without touching them posts.
  */
 describe("newTaskBody", () => {
   it("omits the owner entirely when the card is left unassigned", () => {
-    const body = newTaskBody({ prompt: "ship the thing", deliverable: "once", assignee: "" });
+    const body = newTaskBody({
+      prompt: "ship the thing",
+      deliverable: "once",
+      priority: "medium",
+      assignee: "",
+    });
     expect(body).not.toBeNull();
     expect(body).not.toHaveProperty("assignee");
   });
@@ -30,16 +35,21 @@ describe("newTaskBody", () => {
    * what keeps the human drag into In progress the only thing that spends.
    */
   it("posts the pre-#580/#1106 body when neither control is touched", () => {
-    expect(newTaskBody({ prompt: "ship the thing", deliverable: "once", assignee: "" })).toEqual({
-      title: "ship the thing",
-      note: undefined,
-    });
+    expect(
+      newTaskBody({ prompt: "ship the thing", deliverable: "once", priority: "medium", assignee: "" }),
+    ).toEqual({ title: "ship the thing", note: undefined });
+  });
+
+  it("carries a chosen priority", () => {
+    const body = newTaskBody({ prompt: "ship the thing", deliverable: "once", priority: "high", assignee: "" });
+    expect(body?.priority).toBe("high");
   });
 
   it("carries a chosen teammate verbatim", () => {
     const body = newTaskBody({
       prompt: "fetch trending tweets about agent harnesses",
       deliverable: "once",
+      priority: "medium",
       assignee: "devrel",
     });
     expect(body?.assignee).toBe("devrel");
@@ -52,18 +62,31 @@ describe("newTaskBody", () => {
    * either, the same invariant `AssigneeSelect` holds.
    */
   it("carries a chosen desk verbatim, without resolving it to a lead", () => {
-    const body = newTaskBody({ prompt: "ship it", deliverable: "once", assignee: "engineering" });
+    const body = newTaskBody({
+      prompt: "ship it",
+      deliverable: "once",
+      priority: "medium",
+      assignee: "engineering",
+    });
     expect(body?.assignee).toBe("engineering");
   });
 
   it("carries the owner alongside a workflow deliverable", () => {
-    const body = newTaskBody({ prompt: "ship it", deliverable: "workflow", assignee: "devrel" });
+    const body = newTaskBody({
+      prompt: "ship it",
+      deliverable: "workflow",
+      priority: "low",
+      assignee: "devrel",
+    });
     expect(body?.deliverable).toBe("workflow");
+    expect(body?.priority).toBe("low");
     expect(body?.assignee).toBe("devrel");
   });
 
   it("refuses a prompt with no title to derive", () => {
-    expect(newTaskBody({ prompt: "   \n  ", deliverable: "once", assignee: "devrel" })).toBeNull();
+    expect(
+      newTaskBody({ prompt: "   \n  ", deliverable: "once", priority: "medium", assignee: "devrel" }),
+    ).toBeNull();
   });
 
   /**
@@ -73,7 +96,7 @@ describe("newTaskBody", () => {
    */
   it("keeps the full prompt on the note when the title was shortened", () => {
     const prompt = `${"a".repeat(100)}\nsecond line`;
-    const body = newTaskBody({ prompt, deliverable: "once", assignee: "" });
+    const body = newTaskBody({ prompt, deliverable: "once", priority: "medium", assignee: "" });
     expect(body?.note).toBe(prompt);
     expect(body?.title).toBe(derivePromptCard(prompt).title);
   });

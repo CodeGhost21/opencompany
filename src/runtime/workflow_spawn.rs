@@ -55,7 +55,7 @@ use crate::Result;
 use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyId;
-use crate::ports::{EventLog, WorkflowRun, WorkflowRunContext, WorkflowRunner};
+use crate::ports::{EventLog, RunStore, WorkflowRun, WorkflowRunContext, WorkflowRunner};
 use crate::runtime::workflow_outcome::{FailedRun, record_run_finished};
 use crate::runtime::{RunGuard, RunSupervisor};
 
@@ -80,6 +80,7 @@ pub struct WorkflowSpawn {
     events: Arc<dyn EventLog>,
     supervisor: RunSupervisor,
     runner: Arc<dyn WorkflowRunner>,
+    runs: Arc<dyn RunStore>,
 }
 
 impl WorkflowSpawn {
@@ -99,6 +100,7 @@ impl WorkflowSpawn {
             events: runtime.events().clone(),
             supervisor: runtime.run_supervisor().clone(),
             runner,
+            runs: runtime.runs().clone(),
         }
     }
 
@@ -258,8 +260,15 @@ impl WorkflowSpawn {
             // pair honest, so a test run leaves no `WorkflowRunFinished` for the
             // history to fold and no boot sweep to adopt. The settled result is
             // the whole record, and it still flows back to the awaiting caller.
+            // `result` can be absent when the runner's hard-abort path drops the
+            // engine future. Settle every workflow-node attempt that is still
+            // active before publishing the run outcome, so cancellation cannot
+            // leave Observatory showing a permanently running attempt.
+            if !dry_run && ctx.cancel.is_cancelled() {
+                settle_cancelled_workflow_attempts(self.runs.as_ref(), &self.company, &ctx.run_id)
+                    .await;
+            }
             if !dry_run {
-                // Issue #228: journaled on BOTH arms. The caller may well have
                 // closed the tab; the record is what is still there tomorrow.
                 let outcome = match result.as_ref() {
                     Ok(run) => Ok(run),
@@ -315,6 +324,50 @@ impl WorkflowSpawn {
             result
         });
         (run_id, handle)
+    }
+}
+
+async fn settle_cancelled_workflow_attempts(
+    runs: &dyn RunStore,
+    company: &CompanyId,
+    workflow_run_id: &str,
+) {
+    let active = match runs
+        .list_runs(
+            company,
+            &crate::ports::RunFilter::for_workflow_run(workflow_run_id.to_string()),
+        )
+        .await
+    {
+        Ok(active) => active,
+        Err(err) => {
+            tracing::error!(
+                %company,
+                %workflow_run_id,
+                %err,
+                "cancelled workflow: could not list active agent attempts"
+            );
+            return;
+        }
+    };
+    for attempt in active {
+        if let Err(err) = runs
+            .finish_run(
+                company,
+                &attempt.id,
+                crate::ports::RunOutcome::new(crate::ports::RunStatus::Cancelled)
+                    .with_error("the workflow run was cancelled before this attempt settled"),
+            )
+            .await
+        {
+            tracing::error!(
+                %company,
+                attempt = %attempt.id,
+                %workflow_run_id,
+                %err,
+                "cancelled workflow: could not settle agent attempt"
+            );
+        }
     }
 }
 
@@ -377,6 +430,7 @@ mod tests {
             events: events.clone(),
             supervisor: RunSupervisor::new(),
             runner: Arc::new(PanickingRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
         };
 
         let (run_id, handle) = spawn
@@ -425,6 +479,7 @@ mod tests {
             events: events.clone(),
             supervisor: RunSupervisor::new(),
             runner: Arc::new(PanickingRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
         };
 
         let (_run_id, handle) = spawn

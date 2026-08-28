@@ -173,7 +173,9 @@ impl axum::extract::FromRequestParts<AppState> for VerifiedDelivery {
             .await
             .map_err(IntoResponse::into_response)?;
         let runtime = resolve(state, &company).map_err(IntoResponse::into_response)?;
-        verify(&runtime, &parts.headers).await?;
+        verify(&runtime, &parts.headers)
+            .await
+            .map_err(IntoResponse::into_response)?;
         Ok(Self(runtime))
     }
 }
@@ -186,15 +188,15 @@ impl axum::extract::FromRequestParts<AppState> for VerifiedDelivery {
 async fn verify(
     runtime: &Arc<CompanyRuntime>,
     headers: &HeaderMap,
-) -> std::result::Result<(), Response> {
+) -> std::result::Result<(), crate::server::Rejection> {
     let expected = match runtime
         .secrets()
         .get(runtime.id(), WEBHOOK_SECRET_KEY)
         .await
     {
         Ok(Some(secret)) if !secret.expose().is_empty() => secret.expose().to_string(),
-        Ok(_) => return Err(unauthorized()),
-        Err(err) => return Err(crate::server::error::ApiError(err).into_response()),
+        Ok(_) => return Err(unauthorized().into()),
+        Err(err) => return Err(crate::server::error::ApiError(err).into_response().into()),
     };
 
     let Some(provided) = headers
@@ -202,10 +204,10 @@ async fn verify(
         .and_then(|v| v.to_str().ok())
         .and_then(decode_basic)
     else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     }
     Ok(())
 }
@@ -374,6 +376,7 @@ mod tests {
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
@@ -382,6 +385,8 @@ mod tests {
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .expect("save company");

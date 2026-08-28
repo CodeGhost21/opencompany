@@ -42,6 +42,7 @@ use crate::company::inference::{
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::UsageMetering;
+use crate::server::cognition::InferenceResolution;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
@@ -122,6 +123,29 @@ struct InferenceStatusDto {
     /// tells the second apart from `cognition` on its own, and this flag never
     /// promises a restart that would change nothing.
     restart_required: bool,
+    /// Whether the harness cognition path is reachable on this host at all (the
+    /// `openhuman` feature compiled in and a harness pool attached at boot).
+    ///
+    /// `false` means no model configuration can ever put this company on the
+    /// design path, so the console's "set up a model" call-to-action would be a
+    /// dead end — the setup dialog uses this to omit it rather than send the
+    /// operator round a redesign loop that cannot end.
+    harness_reachable: bool,
+    /// Whether this host can rebuild a company's runtime in place, so the
+    /// console may offer the restart instead of only naming it (issue #1736).
+    ///
+    /// [`Self::restart_required`] says a restart is needed; this says whether
+    /// the console is allowed to offer to perform one. They are independent
+    /// facts and the card had only the first, so it rendered a "Restart now"
+    /// button on hosts where `POST …/inference/restart` can only answer "this
+    /// host cannot rebuild a company runtime in place; restart the process to
+    /// pick up the new configuration". The operator was told a restart was
+    /// required, handed the control for it, and the control could never work.
+    ///
+    /// Derived from [`AppState::can_rebuild_in_place`] rather than inferred
+    /// from the deployment shape: the rebuilder is wired by the binary, and
+    /// only the binary knows whether it wired one.
+    can_rebuild_in_place: bool,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
@@ -169,6 +193,29 @@ async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiEr
         .unwrap_or_default())
 }
 
+/// What resolving this company's inference configuration produced.
+///
+/// The same three-way read [`runner_gap_for`] performs, lifted out so
+/// [`crate::server::ops::capabilities`] can classify cognition for the chat
+/// surface (issue #1735) from the identical evidence. One reader, so the two
+/// surfaces cannot tell one operator two different next steps about one
+/// company: what `restartRequired` and `inference_required` mean on the
+/// Inference card is what the chat banner says, by construction.
+///
+/// "Manifest unreadable" and "resolve failed" are deliberately folded together
+/// as [`InferenceResolution::Unreadable`] — the operator can act on neither,
+/// and [`runner_gap_for`] already folds them the same way.
+pub(crate) async fn inference_resolution(runtime: &CompanyRuntime) -> InferenceResolution {
+    let Ok(manifest) = manifest_inference(runtime).await else {
+        return InferenceResolution::Unreadable;
+    };
+    match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
+        Ok(Some(_)) => InferenceResolution::Resolved,
+        Ok(None) => InferenceResolution::Nothing,
+        Err(_) => InferenceResolution::Unreadable,
+    }
+}
+
 /// The console-facing source label for a resolved source badge.
 fn source_label(source: InferenceSource) -> &'static str {
     match source {
@@ -186,13 +233,18 @@ fn source_label(source: InferenceSource) -> &'static str {
 /// pool is attached whenever the serve path ran `attach_harness`, independently
 /// of which brain arm won — which is exactly the "this host could have run the
 /// harness, and didn't" signal we need.
+///
+/// Shared with [`crate::server::ops::capabilities`], which asks the same
+/// question for the chat surface's cognition state (issue #1735): whether
+/// Settings → Inference is a remedy or a dead end is one fact, and two copies
+/// of it would let the two surfaces disagree about the same company.
 #[cfg(feature = "openhuman")]
-fn harness_reachable(runtime: &CompanyRuntime) -> bool {
+pub(crate) fn harness_reachable(runtime: &CompanyRuntime) -> bool {
     runtime.harness().is_some()
 }
 
 #[cfg(not(feature = "openhuman"))]
-fn harness_reachable(_runtime: &CompanyRuntime) -> bool {
+pub(crate) fn harness_reachable(_runtime: &CompanyRuntime) -> bool {
     false
 }
 
@@ -317,11 +369,16 @@ fn platform_default(env: &dyn EnvSource) -> Option<EnvDefault> {
     }
 }
 
-/// Resolves the effective status DTO against the real process environment.
-async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto, ApiError> {
+/// Resolves the effective status DTO against the real process environment and
+/// this host's own capabilities.
+async fn effective_status(
+    state: &AppState,
+    runtime: &CompanyRuntime,
+) -> Result<InferenceStatusDto, ApiError> {
     effective_status_with(
         runtime,
         platform_default(&crate::app::config::ProcessEnv).as_ref(),
+        state.can_rebuild_in_place(),
     )
     .await
 }
@@ -348,6 +405,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto
 async fn effective_status_with(
     runtime: &CompanyRuntime,
     platform: Option<&EnvDefault>,
+    can_rebuild_in_place: bool,
 ) -> Result<InferenceStatusDto, ApiError> {
     let manifest = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
@@ -384,6 +442,8 @@ async fn effective_status_with(
             cognition: cognition.path.to_string(),
             usage_metering: cognition.metering,
             restart_required,
+            harness_reachable: harness_reachable(runtime),
+            can_rebuild_in_place,
         },
         None => InferenceStatusDto {
             provider: "managed".to_string(),
@@ -399,13 +459,20 @@ async fn effective_status_with(
             // stranded. Threaded rather than hardcoded so the two arms cannot
             // drift apart.
             restart_required,
+            harness_reachable: harness_reachable(runtime),
+            can_rebuild_in_place,
         },
     })
 }
 
 /// `GET …/inference` — the company's effective inference status.
-async fn get_status(company: ScopedCompany) -> Result<Json<InferenceStatusDto>, ApiError> {
-    Ok(Json(effective_status(company.runtime.as_ref()).await?))
+async fn get_status(
+    State(state): State<AppState>,
+    company: ScopedCompany,
+) -> Result<Json<InferenceStatusDto>, ApiError> {
+    Ok(Json(
+        effective_status(&state, company.runtime.as_ref()).await?,
+    ))
 }
 
 /// `PUT …/inference` — set (or replace) the runtime provider override, and
@@ -450,7 +517,7 @@ async fn set_config(
             .map_err(ApiError)?;
     }
 
-    let status = effective_status(runtime).await?;
+    let status = effective_status(&state, runtime).await?;
     // Issue #290: the not-configured → configured transition is the one a save
     // alone cannot deliver, because the brain was chosen at build time. Rather
     // than telling the operator to restart a container they may have no access
@@ -459,7 +526,7 @@ async fn set_config(
     if status.restart_required {
         match crate::runtime::rebuild_company(&state, runtime.id()).await {
             Ok(successor) => {
-                let status = effective_status(successor.as_ref()).await?;
+                let status = effective_status(&state, successor.as_ref()).await?;
                 return Ok(Json(MutationResponse {
                     // Read off the *successor*, so a rebuild that somehow landed
                     // on the same brain still reports honestly rather than
@@ -504,7 +571,10 @@ async fn set_config(
 /// manifest provider) — clear it explicitly with `PUT { key: "" }`.
 /// Requires authority over the company (issue #403) — same reasoning as the
 /// set: reverting decides which model the company thinks with.
-async fn revert_config(company: AdminScopedCompany) -> Result<Json<MutationResponse>, ApiError> {
+async fn revert_config(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets();
     clear_runtime_config(runtime.id(), secrets.as_ref())
@@ -520,7 +590,7 @@ async fn revert_config(company: AdminScopedCompany) -> Result<Json<MutationRespo
         .await
         .map_err(ApiError)?;
     Ok(Json(MutationResponse {
-        status: effective_status(runtime).await?,
+        status: effective_status(&state, runtime).await?,
         note: "Reverted to the committed manifest (or managed) configuration.".to_string(),
     }))
 }
@@ -558,7 +628,7 @@ async fn restart_runtime(
     // Read the status off the *successor*, never off the runtime we came in
     // with: a rebuild that landed on the same brain must still report honestly
     // rather than claim a success the runtime cannot back up.
-    let status = effective_status(successor.as_ref()).await?;
+    let status = effective_status(&state, successor.as_ref()).await?;
     Ok(Json(MutationResponse {
         note: if status.restart_required {
             RESTART_NOTE
@@ -568,6 +638,73 @@ async fn restart_runtime(
         .to_string(),
         status,
     }))
+}
+
+/// Why a resolved config could not authenticate against its own endpoint, or
+/// `None` when the probe is worth sending (issue #1737).
+///
+/// [`send_plan`](crate::harness::provider::request_plan) omits the
+/// `Authorization` header entirely when no bearer resolves, so a keyless config
+/// aimed at an endpoint that demands one produces a vendor 401 that reads like a
+/// rejected key. That is a fact this process holds before the request leaves it.
+///
+/// **Only the `openrouter` kind is judged**, which after
+/// [`normalize_provider`](inference::normalize_provider) is also every legacy
+/// `managed` config. Both endpoints it can resolve to — OpenRouter's own and the
+/// platform proxy in front of it — reject an unauthenticated request
+/// unconditionally, so refusing there can never be wrong. `ollama` takes no
+/// bearer by design, and an `openai_compatible` endpoint is the operator's own
+/// and may legitimately want none; refusing either would turn a working
+/// configuration into a false alarm, which is worse than the outbound request it
+/// would save.
+#[cfg(feature = "openhuman")]
+async fn unauthenticated_reason(
+    decl: &inference::InferenceDecl,
+) -> Result<Option<String>, OpenCompanyError> {
+    if inference::normalize_provider(&decl.provider) != inference::DEFAULT_PROVIDER {
+        return Ok(None);
+    }
+    // `bearer()` rather than `key_configured()`: a platform token source reports
+    // itself configured while its projected file can still yield nothing, and it
+    // is the value on the wire that decides whether the request authenticates.
+    if decl.bearer().await?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "No inference key is stored for this company, and this host has no platform credential to \
+         fall back on — a request to {} would carry no Authorization header and be rejected, so \
+         none was sent. Save an OpenRouter key above, or point this company at an endpoint that \
+         needs none.",
+        decl.base_url
+    )))
+}
+
+/// The operator-facing reading of a failed probe, and its response code.
+///
+/// A vendor's own 401 is evidence and is kept verbatim, but it is not an
+/// explanation: OpenRouter answers a key it cannot parse with `Missing
+/// Authentication header`, which reads as "nothing was sent" and is how issue
+/// #1737 came to be filed against the wrong layer. The header *was* sent. What
+/// this route knows, and the vendor does not, is that the credential is stored
+/// against whichever provider was selected when it was saved — so a key for
+/// another vendor fails here while the card still reports one is set. Saying so
+/// is the difference between a dead end and a next step.
+#[cfg(feature = "openhuman")]
+fn probe_failure(decl: &inference::InferenceDecl, raw: &str) -> (String, &'static str) {
+    if raw.contains("401 Unauthorized") {
+        return (
+            format!(
+                "{} rejected the credential stored for this company. The request did carry an \
+                 Authorization header — the provider would not accept what was in it. A key is \
+                 stored against the provider selected when it was saved, so a key for another \
+                 vendor fails here even while this card reports one is set. Re-save the key under \
+                 {}, or Remove key to fall back. The provider said: {raw}",
+                decl.base_url, decl.provider
+            ),
+            "credential_rejected",
+        );
+    }
+    (format!("Inference probe failed: {raw}"), "probe_failed")
 }
 
 /// `POST …/inference/test` — a live one-message probe of the resolved provider.
@@ -624,6 +761,26 @@ async fn test_config(company: ScopedCompany) -> Response {
                     }
                 }
             };
+            // Issue #1737: refuse locally rather than send a request this
+            // process already knows cannot authenticate. The card warns that
+            // Test "sends one real message… and your provider may charge for
+            // it", so a doomed request is not merely untidy — and relaying a
+            // vendor's 401 for it hides a configuration fact we hold here.
+            match unauthenticated_reason(&decl).await {
+                Err(err) => return ApiError(err).into_response(),
+                Ok(Some(reason)) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "ok": false,
+                            "error": reason,
+                            "code": "no_key",
+                        })),
+                    )
+                        .into_response();
+                }
+                Ok(None) => {}
+            }
             match crate::harness::provider::probe(&decl).await {
                 Ok(()) => Json(serde_json::json!({
                     "ok": true,
@@ -631,15 +788,18 @@ async fn test_config(company: ScopedCompany) -> Response {
                     "note": "Reached the provider and got a reply.",
                 }))
                 .into_response(),
-                Err(err) => (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "ok": false,
-                        "error": format!("Inference probe failed: {err}"),
-                        "code": "probe_failed",
-                    })),
-                )
-                    .into_response(),
+                Err(err) => {
+                    let (error, code) = probe_failure(&decl, &err.to_string());
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "ok": false,
+                            "error": error,
+                            "code": code,
+                        })),
+                    )
+                        .into_response()
+                }
             }
         }
     }
@@ -726,10 +886,13 @@ base_url = "https://byo.example/v1"
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -867,6 +1030,135 @@ base_url = "https://byo.example/v1"
         assert_eq!(status, StatusCode::OK);
     }
 
+    /// Issue #1736: the console cannot offer a restart it has no way to know is
+    /// available, so the status carries the capability rather than leaving the
+    /// card to guess from the deployment shape.
+    ///
+    /// The pairing is the whole point — a flag that is always `false` would
+    /// satisfy the "no button on a host that cannot" half while silently
+    /// removing the action from every host that can.
+    #[tokio::test]
+    async fn the_status_says_whether_this_host_can_rebuild_in_place() {
+        let bare_home = home();
+        let bare = state_with_company(bare_home.path()).await;
+        let (status, body, raw) = send(&bare, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(
+            body["canRebuildInPlace"],
+            json!(false),
+            "a host with no rebuilder must say so, or the console renders a \
+             Restart now button whose route can only answer with a config error: {raw}"
+        );
+
+        let wired_home = home();
+        let wired =
+            state_with_company(wired_home.path())
+                .await
+                .with_rebuilder(std::sync::Arc::new(Working {
+                    home: wired_home.path().to_path_buf(),
+                }));
+        let (status, body, raw) = send(&wired, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(
+            body["canRebuildInPlace"],
+            json!(true),
+            "a host that wired one must keep offering the action: {raw}"
+        );
+    }
+
+    /// Issue #1737: a probe the process already knows cannot authenticate is
+    /// refused here rather than sent.
+    ///
+    /// The endpoint is the discard port, so a regression does not merely fail
+    /// this assertion — it makes an outbound connection, which is the behaviour
+    /// under test. A keyless `openrouter` carrying its own `base_url` resolves
+    /// direct and credential-less by construction, so this does not depend on
+    /// whatever the process environment happens to hold.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_probe_with_no_credential_is_refused_before_it_is_sent() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openrouter", "baseUrl": "http://127.0.0.1:9/v1" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, body, raw) =
+            send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(body["code"], json!("no_key"), "{raw}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no Authorization header"),
+            "the refusal names the cause the vendor's 401 would have hidden: {raw}"
+        );
+    }
+
+    /// The other half of that judgement: an endpoint the operator supplied may
+    /// legitimately want no bearer, so it is still probed. Refusing there would
+    /// turn a working local server into a false alarm — worse than the outbound
+    /// request it saves.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_keyless_custom_endpoint_is_still_probed() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openai_compatible", "baseUrl": "http://127.0.0.1:9/v1" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, body, raw) =
+            send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{raw}");
+        assert_eq!(body["code"], json!("probe_failed"), "{raw}");
+    }
+
+    /// Issue #1737, the sentence that would have saved an hour: OpenRouter
+    /// answers a credential it cannot parse with `Missing Authentication
+    /// header`, which reads as "nothing was sent" and is how the issue came to
+    /// be filed against the wrong layer. The header *was* sent.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn a_401_is_reported_as_a_rejected_credential_rather_than_a_missing_header() {
+        let decl = inference::decl_for_probe(
+            "openrouter",
+            None,
+            Some("a-key-for-some-other-vendor"),
+            None,
+        );
+        let raw = "inference returned 401 Unauthorized: \
+                   {\"error\":{\"message\":\"Missing Authentication header\",\"code\":401}}";
+        let (message, code) = probe_failure(&decl, raw);
+
+        assert_eq!(code, "credential_rejected");
+        assert!(
+            message.contains("did carry an Authorization header"),
+            "the console must not repeat the vendor's reading back at the operator: {message}"
+        );
+        assert!(
+            message.contains("stored against the provider selected when it was saved"),
+            "and it must name the reason a stored key can still be the wrong one: {message}"
+        );
+        assert!(
+            message.contains("Missing Authentication header"),
+            "the vendor's own words stay attached as evidence: {message}"
+        );
+    }
+
     async fn send(
         state: &AppState,
         method: &str,
@@ -938,11 +1230,11 @@ base_url = "https://byo.example/v1"
 
         // No platform endpoint on this deployment — the built-in constant is
         // still the only honest answer, and this arm must not regress.
-        let dto = effective_status_with(&runtime, None).await.unwrap();
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
         assert_eq!(dto.base_url, inference::PLATFORM_BASE_URL);
 
         // Pointed at staging, the card follows — and *only* the URL moves.
-        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+        let dto = effective_status_with(&runtime, Some(&staging_platform()), false)
             .await
             .unwrap();
         assert_eq!(dto.base_url, STAGING_URL);
@@ -959,6 +1251,10 @@ base_url = "https://byo.example/v1"
             !dto.restart_required,
             "a platform endpoint strands no tenant config behind a restart"
         );
+        assert!(
+            !dto.harness_reachable,
+            "a runtime built without a harness pool cannot reach the design path"
+        );
     }
 
     #[tokio::test]
@@ -971,10 +1267,10 @@ base_url = "https://byo.example/v1"
         let home_dir = home();
         let runtime = runtime_with(home_dir.path(), MANAGED_MANIFEST).await;
 
-        let dto = effective_status_with(&runtime, None).await.unwrap();
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
         assert_eq!(dto.base_url, inference::PLATFORM_BASE_URL);
 
-        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+        let dto = effective_status_with(&runtime, Some(&staging_platform()), false)
             .await
             .unwrap();
         assert_eq!(dto.base_url, STAGING_URL);
@@ -1003,7 +1299,7 @@ base_url = "https://byo.example/v1"
 
         // The platform credential is doing the outbound work, and the card still
         // says no key is configured — because none of it is the tenant's.
-        let dto = effective_status_with(&runtime, Some(&platform))
+        let dto = effective_status_with(&runtime, Some(&platform), false)
             .await
             .unwrap();
         assert!(
@@ -1017,7 +1313,7 @@ base_url = "https://byo.example/v1"
             .await
             .unwrap();
 
-        let dto = effective_status_with(&runtime, Some(&platform))
+        let dto = effective_status_with(&runtime, Some(&platform), false)
             .await
             .unwrap();
         assert!(
@@ -1041,7 +1337,7 @@ base_url = "https://byo.example/v1"
         )
         .await;
 
-        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+        let dto = effective_status_with(&runtime, Some(&staging_platform()), false)
             .await
             .unwrap();
         assert_eq!(dto.base_url, "https://byo.example/v1");
@@ -1060,7 +1356,7 @@ base_url = "https://byo.example/v1"
         )
         .await;
 
-        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+        let dto = effective_status_with(&runtime, Some(&staging_platform()), false)
             .await
             .unwrap();
         assert_eq!(dto.base_url, "http://localhost:11434/v1");
@@ -1082,7 +1378,7 @@ base_url = "https://byo.example/v1"
         .await;
         let platform = staging_platform();
 
-        let dto = effective_status_with(&runtime, Some(&platform))
+        let dto = effective_status_with(&runtime, Some(&platform), false)
             .await
             .unwrap();
         assert_eq!(dto.base_url, STAGING_URL, "proxied");
@@ -1093,7 +1389,7 @@ base_url = "https://byo.example/v1"
             .await
             .unwrap();
 
-        let dto = effective_status_with(&runtime, Some(&platform))
+        let dto = effective_status_with(&runtime, Some(&platform), false)
             .await
             .unwrap();
         assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL, "direct");
@@ -1516,6 +1812,9 @@ base_url = "https://byo.example/v1"
         // The config resolves now; the running brain still does not know it.
         assert_eq!(resp["status"]["cognition"], "echo");
         assert_eq!(resp["status"]["restartRequired"], true, "{raw}");
+        // A pool is attached on this build, so the design path is reachable —
+        // the flag the setup dialog reads to keep the "set up a model" CTA.
+        assert_eq!(resp["status"]["harnessReachable"], true, "{raw}");
 
         let note = resp["note"].as_str().unwrap_or_default();
         assert!(note.contains("restart"), "note must say restart: {note}");
@@ -1603,6 +1902,7 @@ base_url = "https://byo.example/v1"
                 // A stub brain meters per turn and reports zero usage, so
                 // nothing is double-counted (see `Brain::cognition`).
                 provider: "stub",
+                model: None,
                 metering: crate::ports::UsageMetering::PerTurn,
             }
         }

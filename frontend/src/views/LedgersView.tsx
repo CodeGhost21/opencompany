@@ -44,7 +44,10 @@
 // plan, discussion and attempts this screen does not try to reproduce.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useHashFlag } from "@/hooks/use-hash-flag";
+import { useLedgerViewMode, type LedgerViewMode } from "@/hooks/use-ledger-view-mode";
+import { withHostParam } from "@/hooks/use-host-route";
 import { DeclareListWizard } from "@/views/company/DeclareListWizard";
 import {
   AlertTriangle,
@@ -165,7 +168,7 @@ interface Props {
    * does it. Absent when this view is rendered with nowhere to link to, in which
    * case a card opens the ordinary amend form.
    */
-  onOpenCard?: (id: string) => void;
+  onOpenCard?: (id: string, mode: LedgerViewMode) => void;
   /**
    * A counter the shell bumps on every task event off the company SSE stream
    * (issue #464) — a card opened, moved, settled, dispatched or steered.
@@ -241,6 +244,15 @@ export const RESERVED_SEGMENTS: readonly string[] = [
  */
 const EMPTY_APPROVALS: readonly ApprovalSummary[] = [];
 
+/** The task ledger is operated as a board; declared ledgers are read as rows. */
+export function defaultLedgerMode(
+  ledger: LedgerSummary | null,
+): "board" | "list" {
+  return ledger?.source === "native" && ledger.slug === BOARD_LEDGER
+    ? "board"
+    : "list";
+}
+
 /** A row is either being opened fresh or amended; the form differs only in id. */
 interface Composing {
   /** The row this edits, or empty for a new one. */
@@ -275,20 +287,16 @@ export function LedgersView({
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // Issue #1696: the read effect keys on `refreshRead`, whose identity turns
+  // over on every `query` change. Feeding the raw box to it fired one network
+  // read per keystroke; feeding this settled copy fires one per typing pause.
+  // The <Input> stays bound to raw `query` so typing still echoes instantly.
+  const debouncedQuery = useDebouncedValue(query, 300);
   const [statusFilter, setStatusFilter] = useState(EVERY_STATUS);
   const [composing, setComposing] = useState<Composing | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<LedgerEntry | null>(null);
   const [rendered, setRendered] = useState<string | null>(null);
-  /**
-   * Columns or rows.
-   *
-   * Board by default for anything with a status, because that is what a
-   * ledger's statuses *are* — a lifecycle, read left to right. The list is for
-   * reading a row's whole contents, which is what a ledger with long prose
-   * fields is actually for; the board truncates by construction.
-   */
-  const [mode, setMode] = useState<"board" | "list">("board");
   /**
    * The board's own create dialog, for the native `tasks` ledger only.
    *
@@ -316,6 +324,17 @@ export function LedgersView({
     () => (sub ? (ledgers.find((held) => held.slug === sub) ?? null) : null),
     [ledgers, sub],
   );
+
+  /**
+   * Columns or rows.
+   *
+   * The task ledger is operated as a board; declared ledgers read as rows
+   * (`defaultLedgerMode`). The choice is navigation state (`?view=list`) so a
+   * browser Back returns to the rendering the operator left — and the
+   * per-ledger default above applies only when the address names no view, which
+   * is what the fallback argument to `useLedgerViewMode` means here.
+   */
+  const [mode, setMode] = useLedgerViewMode(defaultLedgerMode(ledger));
 
   // A bare `#/ledgers` (no slug — the nav row's own address, a hand-typed
   // one, or a bookmark) lands on Tasks, not "whichever list happened to load
@@ -384,7 +403,7 @@ export function LedgersView({
       if (!quiet) setReading(true);
       try {
         const next = await readLedger(client, company, sub, {
-          q: query.trim() || undefined,
+          q: debouncedQuery.trim() || undefined,
           status: statusFilter === EVERY_STATUS ? undefined : statusFilter,
           limit: 100,
         });
@@ -396,7 +415,7 @@ export function LedgersView({
         if (!quiet) setReading(false);
       }
     },
-    [client, company, sub, query, statusFilter],
+    [client, company, sub, debouncedQuery, statusFilter],
   );
 
   useEffect(() => {
@@ -451,7 +470,7 @@ export function LedgersView({
   // follow it any more — issue #1284 removed the in-page picker that used to
   // own that), so this keys on `sub` directly.
   useEffect(() => {
-    setStatusFilter("all");
+    setStatusFilter(EVERY_STATUS);
     setRendered(null);
   }, [sub]);
 
@@ -836,6 +855,7 @@ export function LedgersView({
                   <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="pl-8"
+                    aria-label="Search ledger entries"
                     placeholder="Search every field"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -853,7 +873,7 @@ export function LedgersView({
                       this read `all` while the list under it read "Every
                       status", and a chosen board column read `in_progress`
                       beside columns headed "In progress". */}
-                  <SelectTrigger className="w-[12rem]">
+                  <SelectTrigger className="w-[12rem]" aria-label="Filter by status">
                     <SelectValue>
                       {statusFilterLabel(ledger, statusFilter)}
                     </SelectValue>
@@ -911,7 +931,8 @@ export function LedgersView({
                   indistinguishably — the read is filtered server-side. The two
                   are not the same claim, and saying the stronger one over a
                   ledger the nav is counting 14 rows for is simply false. */}
-              {read &&
+              {mode === "list" &&
+                read &&
                 read.entries.length === 0 &&
                 !reading &&
                 (emptyNotice ? (
@@ -945,7 +966,7 @@ export function LedgersView({
                   }
                   onOpen={(entry) =>
                     ledger.source === "native" && onOpenCard
-                      ? onOpenCard(entry.id)
+                      ? onOpenCard(entry.id, mode)
                       : setComposing({
                           id: entry.id,
                           fields: { ...entry.fields },
@@ -975,7 +996,14 @@ export function LedgersView({
                       ledger={ledger}
                       onOpen={
                         ledger.source === "native" && onOpenCard
-                          ? () => onOpenCard(entry.id)
+                          ? () => onOpenCard(entry.id, mode)
+                          : undefined
+                      }
+                      detailHref={
+                        ledger.source === "native"
+                          ? withHostParam(`tasks/${encodeURIComponent(entry.id)}`, {
+                              view: "list",
+                            })
                           : undefined
                       }
                       onAmend={() =>
@@ -1232,6 +1260,11 @@ function BoardMode({
             >
               {ownerOf(entry, ledger) || entry.id}
             </span>
+            {entry.closed && entry.fields.reason?.trim() && (
+              <span className="mt-2 block line-clamp-3 text-xs leading-relaxed text-muted-foreground">
+                {entry.fields.reason}
+              </span>
+            )}
           </button>
         );
       }}
@@ -1256,53 +1289,85 @@ function EntryCard({
   entry,
   ledger,
   onOpen,
+  detailHref,
   onAmend,
   onClose,
   onDelete,
 }: {
   entry: LedgerEntry;
   ledger: LedgerSummary;
-  /** Leaves for the row's own screen, when it has one. Only the board does. */
+  /** Opens the row's own screen, when it has one. Only native Tasks do. */
   onOpen?: () => void;
+  /** Native task-detail address, including the List return context. */
+  detailHref?: string;
   onAmend: () => void;
   onClose: () => void;
   onDelete: () => void;
 }) {
   const writable = isWritable(ledger);
+  const columns = columnsOf(ledger);
   return (
-    <Card className={cn(entry.closed && "opacity-75")}>
-      <CardContent className="space-y-2 p-4">
+    <Card
+      className={cn(
+        onOpen && "cursor-pointer transition-colors hover:bg-accent/50",
+        entry.closed && "opacity-75",
+      )}
+      onClick={(event) => {
+        if (!(event.target as HTMLElement).closest("a, button")) onOpen?.();
+      }}
+    >
+      <CardContent
+        className="space-y-2 p-4"
+        data-testid={`ledger-entry-${entry.id}`}
+      >
         <div className="flex flex-wrap items-start gap-2">
-          <code className="text-xs text-muted-foreground">{entry.id}</code>
-          {entry.status && (
-            <Badge variant={entry.closed ? "secondary" : "default"}>
-              {entry.closed && <CheckCircle2 className="mr-1 size-3" />}
-              {entry.status}
-            </Badge>
-          )}
           {onOpen ? (
-            <button
-              type="button"
-              className="flex-1 text-left font-medium hover:underline"
-              onClick={onOpen}
+            <a
+              href={detailHref}
+              className="min-w-0 flex-1 text-left font-medium hover:underline"
+              data-testid="ledger-entry-title"
             >
               {entry.title}
-            </button>
+            </a>
           ) : (
-            <span className="flex-1 font-medium">{entry.title}</span>
+            <span
+              className="min-w-0 flex-1 font-medium"
+              data-testid="ledger-entry-title"
+            >
+              {entry.title}
+            </span>
           )}
+          {entry.status && (
+            <Badge variant="secondary" data-testid="ledger-entry-status">
+              {entry.closed && <CheckCircle2 className="mr-1 size-3" />}
+              {labelFor(columns, entry.status)}
+            </Badge>
+          )}
+          <code
+            className="text-xs text-muted-foreground"
+            data-testid="ledger-entry-id"
+          >
+            {entry.id}
+          </code>
         </div>
 
-        <dl className="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[10rem_1fr]">
+        <dl className="grid max-w-3xl gap-x-4 gap-y-1 text-sm sm:grid-cols-[8rem_minmax(0,1fr)]">
           {ledger.fields
-            .filter((field) => field.role !== "id" && field.role !== "title")
+            .filter(
+              (field) =>
+                field.role !== "id" &&
+                field.role !== "title" &&
+                field.role !== "status",
+            )
             .map((field) => {
               const value = entry.fields[field.name];
               if (!value) return null;
               return (
                 <div key={field.name} className="contents">
                   <dt className="text-muted-foreground">{field.name}</dt>
-                  <dd className="whitespace-pre-wrap">{value}</dd>
+                  <dd className="whitespace-pre-wrap">
+                    {compactFieldValue(value)}
+                  </dd>
                 </div>
               );
             })}
@@ -1338,6 +1403,16 @@ function EntryCard({
       </CardContent>
     </Card>
   );
+}
+
+/** Keep an empty paragraph from turning a compact list row into a document.
+    Only the blank lines go: indentation and aligned columns inside a line are
+    part of what was recorded, so the row still renders with `pre-wrap`. */
+function compactFieldValue(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .join("\n");
 }
 
 function ComposeDialog({

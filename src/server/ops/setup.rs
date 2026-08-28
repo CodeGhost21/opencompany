@@ -38,7 +38,7 @@
 //! next call does not enforce.
 
 use axum::extract::State;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -126,7 +126,8 @@ struct RosterProposalDto {
     jobs: Vec<String>,
     /// The jobs no teammate owns — non-empty only on the `model` path.
     uncovered: Vec<String>,
-    /// Why this is the curated team: `no_model` or `not_designable`.
+    /// Why this is the curated team: `no_model`, `model_unreachable` or
+    /// `not_designable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
 }
@@ -149,7 +150,7 @@ async fn propose_roster(
     company: ScopedCompany,
     State(_state): State<AppState>,
     Json(body): Json<SetupRequest>,
-) -> Result<Json<RosterProposalDto>, Response> {
+) -> Result<Json<RosterProposalDto>, crate::server::Rejection> {
     let answers: SetupAnswers = body.into();
 
     // Remember the answers first. The proposal below may take seconds and the
@@ -182,7 +183,10 @@ async fn propose_roster(
 /// does: this is a read-modify-write of the whole record, and a concurrent
 /// `POST …/team` from the build-out step of a *previous* attempt would otherwise
 /// lose one of the two writes.
-async fn store_answers(company: &ScopedCompany, answers: &SetupAnswers) -> Result<(), Response> {
+async fn store_answers(
+    company: &ScopedCompany,
+    answers: &SetupAnswers,
+) -> Result<(), crate::server::Rejection> {
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;
 
@@ -193,7 +197,7 @@ async fn store_answers(company: &ScopedCompany, answers: &SetupAnswers) -> Resul
         .store()
         .save(&record)
         .await
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// The proposal itself: designed by the model when one is wired, the curated
@@ -209,12 +213,15 @@ async fn build_proposal(company: &ScopedCompany, answers: &SetupAnswers) -> Rost
     };
     let provider = builder.provider_slug();
     let (proposal, usage) = builder.propose(answers).await;
+    // Read *after* the pass, so it names the model the pass actually ran on.
+    let model = builder.model_slug();
     // Metered after the fact and never in the way: the pass has already produced
     // the roster the operator is about to see, and a meter write must not be
     // able to fail it.
     crate::metering::roster_build::record_roster_build_usage(
         &usage,
         &provider,
+        model,
         company.id(),
         company.runtime.store().as_ref(),
         company.runtime.usage().as_ref(),
@@ -231,14 +238,15 @@ async fn build_proposal(_company: &ScopedCompany, answers: &SetupAnswers) -> Ros
 }
 
 /// Loads the addressed company's record, or 404s.
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }

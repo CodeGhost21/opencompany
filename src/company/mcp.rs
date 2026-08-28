@@ -41,6 +41,13 @@ use crate::ports::types::{CompanyId, SecretValue};
 /// overrides).
 pub const RUNTIME_INDEX_KEY: &str = "mcp/servers";
 
+/// The per-request timeout a server declaration gets when it names none.
+///
+/// Lives here rather than beside [`McpServer`] because every declaration path
+/// defaults it — the manifest through serde, `mcp.json` through
+/// [`super::mcp_file`] — and two spellings of "30" is how they come to disagree.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
 /// The canonical per-server credential key. A server's outbound token is stored
 /// here (write-only via the console); the value is a JSON [`StoredAuth`].
 pub fn auth_key(name: &str) -> String {
@@ -759,7 +766,7 @@ fn is_http_url(url: &str) -> bool {
 /// token in a query parameter is the other way a credential reaches a URL, and
 /// it is the shape a default is most likely to arrive in — an operator copying
 /// a "your MCP URL" string out of a vendor dashboard.
-fn has_query_credential(url: &str) -> bool {
+pub(crate) fn has_query_credential(url: &str) -> bool {
     let Some(query) = url.split_once('?').map(|(_, q)| q) else {
         return false;
     };

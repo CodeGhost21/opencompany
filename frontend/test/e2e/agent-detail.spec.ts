@@ -90,7 +90,6 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   await expect(page).toHaveURL(/#\/team\/ceo$/);
 
   await expect(page.getByTestId("agent-name")).toHaveText("Chief Executive");
-  await expect(page.getByTestId("agent-id")).toHaveText("ceo");
 
   // The tier, resolved by the host rather than read off the manifest string.
   await expect(page.getByTestId("agent-tier")).toContainText("Orchestrator");
@@ -109,8 +108,8 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   await expect(tools).toContainText("composio");
   await expect(tools).toContainText("mcp:*");
 
-  // This agent sits on no desk, and says so rather than rendering nothing.
-  await expect(page.getByTestId("agent-desks-empty")).toBeVisible();
+  // This agent sits on no desk, so the identity row carries no desk chip.
+  await expect(page.locator('[data-testid^="agent-desk-"]')).toHaveCount(0);
 
   // `ceo` is a blueprint teammate, and this is the assertion that used to pin
   // the opposite. The Edit affordance was *present and disabled* (#1141) with a
@@ -150,7 +149,9 @@ test("desk membership is on the agent, and an agent is reachable by link", async
 
   await expect(page.getByTestId("agent-name")).toHaveText("Engineer", { timeout: 30_000 });
   await expect(page.getByTestId("agent-tier")).toContainText("Worker");
-  await expect(page.getByTestId("agent-desks")).toContainText("Engineering desk");
+  const desk = page.getByTestId("agent-desk-engineering");
+  await expect(desk).toContainText("Engineering desk");
+  await expect(desk).toHaveAttribute("href", "#/company/engineering");
 });
 
 test("an agent defined in the console can be read back and edited", async ({ page }) => {

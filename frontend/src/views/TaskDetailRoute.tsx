@@ -23,7 +23,14 @@ import { useEffect, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { ApprovalSummary } from "@/api/types";
-import { readTaskFocus, type TaskFocus } from "@/lib/task-output";
+import {
+  readTaskFocus,
+  taskTabHref,
+  type TaskFocus,
+  type TaskTab,
+} from "@/lib/task-output";
+import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
+import { withHostParam } from "@/hooks/use-host-route";
 import { TaskDetailView } from "@/views/TaskDetailView";
 
 export function TaskDetailRoute({
@@ -65,10 +72,24 @@ export function TaskDetailRoute({
       taskId={taskId}
       attemptEventTick={attemptEventTick}
       focus={focus}
+      onTabChange={(tab: TaskTab) => {
+        // A tab is part of the task detail's current place, but a succession
+        // of clicks is not a succession of browser destinations. Replacing the
+        // current entry means Back still returns to the board and Forward
+        // returns to the tab the operator was using there.
+        const next = taskTabHref(window.location.hash, tab);
+        if (next === window.location.hash) return;
+        window.history.replaceState(null, "", next);
+        // replaceState does not emit hashchange, so follow it locally.
+        setFocus(readTaskFocus(next));
+      }}
       parked={parked}
       onBack={onLeave}
       onNavigate={(id) => {
-        window.location.hash = `#/tasks/${encodeURIComponent(id)}`;
+        const view = readLedgerViewMode();
+        window.location.hash = withHostParam(`tasks/${encodeURIComponent(id)}`, {
+          [LEDGER_VIEW_PARAM]: view === "list" ? "list" : null,
+        });
       }}
       onOpenThread={onOpenThread}
       // Both of these used to hand a card back to the board rendered beside

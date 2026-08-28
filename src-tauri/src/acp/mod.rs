@@ -1,7 +1,7 @@
 //! Speaking the Agent Client Protocol to locally-installed coding harnesses.
 //!
-//! The desktop is an ACP **client**: it spawns `claude-agent-acp`, `codex-acp`
-//! or `goose` as a subprocess and drives it over stdio. That direction matters
+//! The desktop is an ACP **client**: it spawns `claude-agent-acp` or
+//! `codex-acp` as a subprocess and drives it over stdio. That direction matters
 //! for what lives here — an ACP *client* is the side that serves
 //! `fs/read_text_file`, `fs/write_text_file`, `terminal/*` and
 //! `session/request_permission`. The agent asks; this process answers, on the
@@ -14,6 +14,8 @@ pub mod codec;
 pub mod confine;
 pub mod discovery;
 pub mod local_agent;
+pub mod shell_env;
+pub mod tools;
 pub mod worktree;
 
 pub use client::{AcpClient, AcpError, ClientHandler, ConfinedFiles};

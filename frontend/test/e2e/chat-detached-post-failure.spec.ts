@@ -112,14 +112,19 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   // run dies waiting for an error line that was never going to appear —
   // reporting a premise violation as a timeout somewhere else entirely.
   let repliesAtCut: number | null = null;
+  let cutReady!: () => void;
+  const cutReadyPromise = new Promise<void>((resolve) => {
+    cutReady = resolve;
+  });
   await page.route("**/chat", async (route) => {
     if (route.request().method() !== "POST") {
       await route.continue();
       return;
     }
     // Upstream first: the host accepts the turn and starts running it. Only
-    // then is the answer thrown away.
-    await route.fetch();
+    // then is the answer thrown away. Holding the browser-facing response
+    // keeps the POST in flight until the latch confirms the premise below.
+    const response = await route.fetch();
     await new Promise((resolve) => setTimeout(resolve, CUT_AFTER_MS));
     cuts += 1;
     // The premise, recorded rather than assumed: at the moment the connection
@@ -129,7 +134,9 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
     // line that would render the answer early fails the test instead of this
     // reading hardening nothing.
     repliesAtCut = await reply(page, marker).count();
+    cutReady();
     await route.abort("connectionaborted");
+    void response;
   });
 
   await openChannel(page, ENGINEERING.id);
@@ -143,6 +150,7 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   // swallowed the error would leave them unable to tell a delivered message
   // from a dropped one.
   await expect(page.getByText(/Couldn't send/).first()).toBeVisible({ timeout: 60_000 });
+  await cutReadyPromise;
   expect(cuts, "the chat POST must actually have been cut").toBe(1);
   expect(repliesAtCut, "nothing had drawn this reply when the connection was cut").toBe(0);
 
@@ -150,8 +158,11 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   // while the POST's fate was unknown and released when it turned out to have
   // died. Before the outcome split this assertion failed: the throw was
   // reported as `onSendEnd`, which discarded the frame, and the reply was gone
-  // for good short of a reload.
-  await expect(reply(page, marker)).toBeVisible({ timeout: 30_000 });
+  // for good short of a reload. Sixty seconds rather than the suite default:
+  // a saturated CI runner can delay the SSE frame well past the echo brain's
+  // millisecond answer, and the reply either appears in that window (proving
+  // the release) or the test fails all the same — the wait is slack, not grace.
+  await expect(reply(page, marker)).toBeVisible({ timeout: 60_000 });
   await expect(reply(page, marker)).toHaveCount(1);
 
   // Releasing must not be a licence to double-render: nothing else is going to

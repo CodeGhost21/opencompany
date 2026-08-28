@@ -32,9 +32,18 @@ a non-negotiable privacy gate in between.
 
 The scrub-then-preview gate returns the exact, byte-for-byte final issue body;
 nothing is transmitted without confirmation or standing per-category consent,
-and both destinations receive that identical body. Capture routes:
-`POST /api/v1/companies/{id}/feedback`, a built-in `feedback` tool, and an
-operator-chat intent. `GET` on the same path lists past reports as the
+and both destinations receive that identical body. The previewed body is frozen
+on the Feedback Item, and Send confirms that item by id — one item per report,
+posting exactly the previewed bytes even if the secret store or manifest
+changes in between (the frozen body is still re-scrubbed fail-closed). Two
+guards close the gap between previewing and sending: a confirm-by-id is refused
+unless the item has a frozen preview (items captured by the built-in `feedback`
+tool or the chat intent were never previewed, and their words are hidden from
+the reports list, so they cannot be sent unseen), and confirming an item that
+already left the machine returns the recorded result rather than filing or
+forwarding again. Capture
+routes: `POST /api/v1/companies/{id}/feedback`, a built-in `feedback` tool, and
+an operator-chat intent. `GET` on the same path lists past reports as the
 `FeedbackSummary` projection, which omits the operator's local-only words.
 
 The console's Feedback page renders both halves: the local capture form, and —

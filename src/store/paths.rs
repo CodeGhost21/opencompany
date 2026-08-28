@@ -27,6 +27,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
@@ -180,6 +182,93 @@ fn slug(id: &CompanyId) -> String {
         out.push('_');
     }
     out
+}
+
+/// Longest percent-encoded secret-key filename component. `NAME_MAX` is 255
+/// bytes on common filesystems; the budget stays clear of it even after the
+/// digest suffix a long key needs.
+const SECRET_FILENAME_BUDGET: usize = 200;
+
+/// Bytes of the truncated SHA-256 digest appended to over-budget keys — 128
+/// bits, i.e. 32 hex characters.
+const SECRET_FILENAME_DIGEST_BYTES: usize = 16;
+
+/// Encodes a secret key as an injective, bounded, filesystem-safe filename.
+///
+/// The leading `%` is the namespace seam that keeps the canonical and legacy
+/// layouts apart: [`slug`] can only emit `[A-Za-z0-9._-]` (everything else
+/// folds to `_`), so no legacy file can ever be a canonical filename. The old
+/// `key-` prefix had no such guarantee — `key-foo` is a valid legacy slug, so
+/// a canonical file for `foo` was readable as the legacy fallback of
+/// `key-foo`, and writing `key-foo` deleted `foo`. Within the canonical
+/// namespace:
+///
+/// - **`%k-`** prefixes a percent-encoded key that fits the budget. Every
+///   byte has a unique encoding (`%` itself is encoded as `%25`), and
+///   [`percent_encode`] keeps the output injective under the filesystem
+///   normalizations that would otherwise fold distinct keys together — case
+///   folding on macOS/Windows volumes, and Windows stripping a trailing
+///   period — so distinct keys map to distinct filenames.
+/// - **`%l-`** prefixes an over-budget key: the encoded form is truncated and
+///   a digest of the *whole* key is appended, so two distinct long keys cannot
+///   collide through the truncation. The distinct `l` class keeps long keys
+///   structurally disjoint from short ones, so the digest only has to separate
+///   long keys from each other.
+fn secret_filename(key: &str) -> String {
+    let encoded = percent_encode(key);
+    if encoded.len() <= SECRET_FILENAME_BUDGET {
+        return format!("%k-{encoded}");
+    }
+    let digest = secret_digest(key);
+    let keep = SECRET_FILENAME_BUDGET - SECRET_FILENAME_DIGEST_BYTES * 2 - 1;
+    format!("%l-{}-{digest}", &encoded[..keep])
+}
+
+/// Percent-encodes every byte outside `[a-z0-9.-]`. `%` itself is encoded so
+/// the output has one parse — and one file — per byte sequence.
+///
+/// ASCII upper-case letters are encoded, not passed through verbatim. On a
+/// case-insensitive filesystem `A` and `a` are one directory entry, so a
+/// passthrough that kept `[A-Za-z0-9.-]` let two keys differing only in case —
+/// two distinct MCP server names, per [`validate_servers`](crate::company::mcp)
+/// — share one file and overwrite each other. Encoding every `A`–`Z` keeps the
+/// output injective under case-folding: the only upper-case bytes it can ever
+/// contain are the hex digits of its own `%`-escapes, which are emitted in one
+/// fixed case, so no two distinct keys fold to the same filename.
+///
+/// A trailing `.` is encoded too. Windows Win32 paths strip trailing periods,
+/// so a passthrough `.` at the end let `foo` and `foo.` resolve to the same
+/// directory entry; the encoded `%2E` keeps the filename from ever ending in a
+/// dot. Interior periods are unaffected — Windows only strips trailing ones.
+fn percent_encode(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let bytes = key.as_bytes();
+    let last = bytes.len().wrapping_sub(1);
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte == b'.' && index == last {
+            out.push_str("%2E");
+        } else if byte.is_ascii_digit() || byte.is_ascii_lowercase() || matches!(byte, b'.' | b'-')
+        {
+            out.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(out, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    out
+}
+
+/// 128-bit truncated SHA-256 of a key, hex-encoded.
+fn secret_digest(key: &str) -> String {
+    let digest = Sha256::digest(key.as_bytes());
+    digest.iter().take(SECRET_FILENAME_DIGEST_BYTES).fold(
+        String::with_capacity(SECRET_FILENAME_DIGEST_BYTES * 2),
+        |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        },
+    )
 }
 
 /// The on-disk directory layout for one company.
@@ -394,6 +483,24 @@ impl Bundle {
         self.dir.join("run-outputs.jsonl")
     }
 
+    /// Path to the unredacted step-detail log (`deep-trace.jsonl`, one
+    /// [`RunStepDetailRecord`] per line; last-write-wins per
+    /// `(run_id, step_seq)`, prune-to-newest-N runs per company).
+    ///
+    /// A sibling of [`run_steps_jsonl`](Self::run_steps_jsonl) rather than a
+    /// widening of it: the skeleton there is safe to render anywhere, this holds
+    /// raw arguments and raw output, and keeping them in separate files is what
+    /// lets the bodies be purged without touching run history.
+    ///
+    /// One shared log rather than a file per run, for the same reason its
+    /// siblings are: a run id is caller-minted and must never become a path
+    /// component the store did not mint.
+    ///
+    /// [`RunStepDetailRecord`]: crate::ports::deep_trace::RunStepDetailRecord
+    pub fn deep_trace_jsonl(&self) -> PathBuf {
+        self.dir.join("deep-trace.jsonl")
+    }
+
     /// The per-company schedule-fire claim subdirectory
     /// (`schedule_fires/<hashed-schedule-id>/<minute>`, one empty-ish marker
     /// file per claimed instant; #241).
@@ -478,7 +585,25 @@ impl Bundle {
     }
 
     /// Path to a single secret file by key.
+    ///
+    /// Canonical filenames always start with `%` (see [`secret_filename`]), so
+    /// they are disjoint from every legacy slugged filename in the same
+    /// directory.
     pub fn secret(&self, key: &str) -> PathBuf {
+        self.secrets_dir().join(secret_filename(key))
+    }
+
+    /// Path used for secrets before secret filenames became injective.
+    ///
+    /// [`FsSecretStore`](crate::store::FsSecretStore) reads this path only as a
+    /// migration fallback. It is never written by the new layout, and its
+    /// `[A-Za-z0-9._-]` filename can never coincide with a canonical
+    /// `%`-prefixed one. [`set`](crate::ports::SecretStore::set) deliberately
+    /// keeps the file: one slug can name several distinct keys, and an
+    /// un-migrated colliding alias still reads it through the fallback. `get`
+    /// prefers the canonical file, so the kept legacy file is shadowed for the
+    /// migrated key.
+    pub(crate) fn legacy_secret(&self, key: &str) -> PathBuf {
         self.secrets_dir().join(slug(&CompanyId::new(key)))
     }
 
@@ -575,6 +700,139 @@ mod test {
         assert_eq!(slug(&CompanyId::new("acme-co")), "acme-co");
         assert_eq!(slug(&CompanyId::new("a/b/../c")), "a_b_.._c");
         assert_eq!(slug(&CompanyId::new("")), "_");
+    }
+
+    #[test]
+    fn secret_filenames_are_injective() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+        let space = bundle.secret("mcp/acme prod/auth");
+        let underscore = bundle.secret("mcp/acme_prod/auth");
+
+        assert_ne!(space, underscore);
+        assert!(space.ends_with("%k-mcp%2Facme%20prod%2Fauth"));
+        assert!(underscore.ends_with("%k-mcp%2Facme%5Fprod%2Fauth"));
+        assert_eq!(
+            bundle.legacy_secret("mcp/acme prod/auth"),
+            bundle.legacy_secret("mcp/acme_prod/auth")
+        );
+    }
+
+    #[test]
+    fn secret_filenames_distinguish_letter_case() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+
+        // `validate_servers` treats `Acme` and `acme` as two distinct valid MCP
+        // server names, so their credential keys must stay apart even on
+        // filesystems that fold case (the macOS and Windows default). Upper-case
+        // letters are percent-encoded while lower-case ones pass through, so
+        // the two filenames differ byte-wise and stay distinct once a
+        // case-insensitive filesystem lower-cases them.
+        let upper = bundle.secret("mcp/Acme/auth");
+        let lower = bundle.secret("mcp/acme/auth");
+        assert_ne!(upper, lower);
+        assert!(upper.ends_with("%k-mcp%2F%41cme%2Fauth"));
+        assert!(lower.ends_with("%k-mcp%2Facme%2Fauth"));
+    }
+
+    #[test]
+    fn secret_filenames_do_not_end_in_a_period() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+
+        // Windows Win32 paths strip trailing periods, so `foo` and `foo.`
+        // would resolve to one directory entry. The trailing `.` is encoded as
+        // `%2E`, so the two keys stay apart and the filename can never end in
+        // a dot for Windows to strip.
+        let plain = bundle.secret("foo");
+        let trailing_dot = bundle.secret("foo.");
+        assert_ne!(plain, trailing_dot);
+        assert!(plain.ends_with("%k-foo"));
+        assert!(trailing_dot.ends_with("%k-foo%2E"));
+        let name = trailing_dot.file_name().unwrap().to_string_lossy();
+        assert!(!name.ends_with('.'));
+
+        // Several trailing periods are each distinct too.
+        let two = bundle.secret("foo..");
+        assert_ne!(two, plain);
+        assert_ne!(two, trailing_dot);
+
+        // Interior periods are unaffected: a dot mid-key is a normal filename
+        // character on Windows, only a trailing one is stripped.
+        let interior = bundle.secret("foo.bar");
+        assert!(interior.ends_with("%k-foo.bar"));
+    }
+
+    #[test]
+    fn canonical_filenames_are_disjoint_from_legacy_slugs() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+
+        // `key-` is itself a valid legacy slug, so the old `key-` canonical
+        // prefix let a canonical file for `foo` be read (or deleted) as the
+        // legacy file of `key-foo`. `%` cannot be emitted by `slug`, so the two
+        // namespaces are structurally disjoint.
+        let canonical = bundle.secret("foo");
+        let legacy_of_prefix_key = bundle.legacy_secret("key-foo");
+        assert_ne!(canonical, legacy_of_prefix_key);
+        assert!(canonical.ends_with("%k-foo"));
+        assert!(legacy_of_prefix_key.ends_with("key-foo"));
+
+        // No legacy slug can start with `%`, so the canonical namespace can
+        // never be entered through the legacy fallback.
+        for key in [
+            "foo",
+            "key-foo",
+            "key_foo",
+            "a/b/../c",
+            "mcp/acme prod/auth",
+        ] {
+            let legacy = bundle.legacy_secret(key);
+            let file_name = legacy.file_name().unwrap().to_string_lossy();
+            assert!(
+                !file_name.starts_with('%'),
+                "legacy slug of {key:?} is {file_name:?}, which starts with %"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_filenames_are_bounded() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+
+        // An emoji MCP server name percent-encodes to ~3 bytes per UTF-8 byte;
+        // the filename must stay inside the filesystem component limit whatever
+        // the key, or `set` fails with ENAMETOOLONG on a 255-byte filesystem.
+        let emoji_name = "🎯".repeat(40); // 40 emoji = 160 UTF-8 bytes
+        let emoji = bundle.secret(&format!("mcp/{emoji_name}/auth"));
+        let emoji_file = emoji.file_name().unwrap().to_str().unwrap();
+        assert!(
+            emoji_file.len() < 255,
+            "emoji key produced a {} byte filename",
+            emoji_file.len()
+        );
+        assert!(
+            emoji_file.starts_with("%l-"),
+            "expected truncated form, got {emoji_file}"
+        );
+
+        // Long ASCII keys (no percent-encoding) stay bounded too.
+        let ascii = bundle.secret(&"a".repeat(400));
+        let ascii_file = ascii.file_name().unwrap().to_str().unwrap();
+        assert!(
+            ascii_file.len() < 255,
+            "long ASCII key produced a {} byte filename",
+            ascii_file.len()
+        );
+
+        // Distinct long keys sharing a prefix still get distinct filenames.
+        let a = bundle.secret(&format!("{}{}", "a".repeat(300), "X"));
+        let b = bundle.secret(&format!("{}{}", "a".repeat(300), "Y"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn empty_secret_key_is_distinct() {
+        let bundle = Bundle::new("/root", &CompanyId::new("acme"));
+        assert_ne!(bundle.secret(""), bundle.secret("a"));
+        assert!(bundle.secret("").ends_with("%k-"));
     }
 
     #[test]

@@ -28,6 +28,7 @@ import { AlertTriangle, Check, Loader2, Lock, RotateCw } from "lucide-react";
 
 import { requestCode } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import { SETUP_HANDOFF_FRAGMENT } from "@/setup/state";
 import {
   changedFields,
   fieldsFor,
@@ -129,13 +130,6 @@ const ADVANCED_GROUPS: readonly {
     hint: "The address it serves on and how much room its workspace gets. Defaults are fine for a laptop.",
     fields: ["bind", "public_url", "workspace.max_blob_mb", "workspace.storage_quota_gb"],
   },
-  {
-    id: "tools",
-    label: "Tools",
-    title: "Repository access",
-    hint: "Lets agents read your code and open pull requests. You can add this later.",
-    fields: ["github_token"],
-  },
 ];
 
 /** How each sign-in mode is described, in consequences rather than mode names. */
@@ -164,9 +158,18 @@ interface Props {
    * run, where there is no console to go back to.
    */
   onCancel?: () => void;
+  /**
+   * Whether `onDone` hands off to a **fresh** shell mount. The connection
+   * console's re-probe does (it boots a new `AppShell`), so its completion
+   * button writes the one-shot hand-off marker for that shell to consume. The
+   * in-shell dialog does not — it closes in place and the running shell
+   * suppresses the welcome through `onCompleted` — and a marker with no
+   * consuming mount would be read as a fresh hand-off on the next reload.
+   */
+  expectsShellRemount?: boolean;
 }
 
-export function SetupWizard({ client, onDone, onCancel }: Props) {
+export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: Props) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   /**
@@ -188,6 +191,8 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
 
   /** The three answers. */
   const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
+  /** The shipped company template the operator explicitly chose. */
+  const [template, setTemplate] = useState("");
   /** The address that will be able to sign in. */
   const [email, setEmail] = useState("");
   /** Whether the operator has been shown a problem on the current step yet. */
@@ -213,7 +218,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
    * that traps them.
    */
   const [tested, setTested] = useState<
-    { kind: "untested" } | { kind: "testing" } | { kind: "ok"; baseUrl: string } | { kind: "failed"; error: string } | { kind: "skipped" }
+    | { kind: "untested" }
+    | { kind: "testing" }
+    | { kind: "ok"; baseUrl: string; model?: string | null }
+    | { kind: "failed"; error: string }
+    | { kind: "skipped" }
   >({ kind: "untested" });
   /**
    * The team, once the host has designed one — and `null` until then.
@@ -350,14 +359,18 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     }
 
     setHandoff({ kind: "arranging" });
-    requestCode(client, company, address)
+    requestCode(client, company, address, SETUP_HANDOFF_FRAGMENT)
       .then((result) => {
         if (result.dev_code) {
           // The only branch holding the code, and so the only one that can hand
-          // over a link rather than describe one.
+          // over a link rather than describe one. The same fragment is passed to
+          // the host above, so a *mailed* link (this host never echoes) carries
+          // the same destination; the magic-link landing preserves the router
+          // hash while it strips the single-use code, so sign-in reaches the
+          // roster setup just created rather than the stale Overview graph.
           setHandoff({
             kind: "link",
-            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}`,
+            url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}${SETUP_HANDOFF_FRAGMENT}`,
           });
         } else {
           setHandoff(status.mail.wired ? { kind: "mailed" } : { kind: "unmailable" });
@@ -372,10 +385,14 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   // See `changedFields`: unchanged fields are omitted, env-owned ones are never
   // sent (the host refuses them and an apply is all-or-nothing), and a secret
   // goes only when the operator typed one.
-  const changed = useMemo(
-    () => (status ? changedFields(status, values) : {}),
-    [status, values],
-  );
+  const changed = useMemo(() => {
+    const fields = status ? changedFields(status, values) : {};
+    // BYOK/local credentials belong to the new company's write-only inference
+    // store. Writing the same bytes into the host-wide TinyHumans key would
+    // both duplicate the secret and falsely report a process restart.
+    if (provider !== "managed") delete fields.tinyhumans_api_key;
+    return fields;
+  }, [status, values, provider]);
 
   /**
    * The steps this host actually shows. `STEPS` stays the source of order.
@@ -423,7 +440,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
         industry: draft.industry,
         teamHint: draft.teamHint,
         automate: draft.automate,
+        template: template || null,
         inferenceKey: values.tinyhumans_api_key || null,
+        inferenceProvider: tested.kind === "ok" ? provider : null,
+        inferenceBaseUrl: tested.kind === "ok" ? tested.baseUrl : null,
+        inferenceModel: tested.kind === "ok" ? tested.model : null,
       });
       // The host is contracted never to answer with an empty roster, so a
       // missing or empty one is a failure rather than a team of nobody — and
@@ -438,7 +459,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     } finally {
       setDesigning(false);
     }
-  }, [client, draft, values.tinyhumans_api_key]);
+  }, [client, draft, template, provider, tested, values.tinyhumans_api_key]);
 
   const submit = useCallback(async () => {
     if (!status) return;
@@ -461,6 +482,15 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
                 // As reviewed, not as proposed.
                 agents: roster.agents,
                 adminEmail: email.trim() || null,
+                inference:
+                  tested.kind === "ok" && provider !== "managed"
+                    ? {
+                        provider,
+                        baseUrl: tested.baseUrl,
+                        model: tested.model ?? null,
+                        key: values.tinyhumans_api_key?.trim() || null,
+                      }
+                    : null,
               }
             : null,
       });
@@ -471,7 +501,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [client, status, changed, roster, draft, email]);
+  }, [client, status, changed, roster, draft, email, provider, tested, values.tinyhumans_api_key]);
 
   if (loadError) {
     return (
@@ -588,6 +618,7 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
           {handoff?.kind === "link" ? (
             <Button
               data-testid="setup-signin"
+              data-handoff-url={handoff.url}
               onClick={() => {
                 window.location.href = handoff.url;
               }}
@@ -595,7 +626,30 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
               Sign in and open my company
             </Button>
           ) : (
-            <Button onClick={onDone} data-testid="setup-open-console">
+            <Button
+              onClick={() => {
+                // The link branch above carries the landing fragment inside its
+                // URL. This branch hands off through `onDone`, and
+                // `expectsShellRemount` says that hands off to a fresh
+                // `AppShell` (the connection console's re-probe), so write the
+                // same fragment first: the fresh shell reads it, routes to the
+                // roster setup just built, suppresses the tour welcome, and
+                // clears the one-shot marker. Without it a no-sign-in host —
+                // and the "anyway" escapes for a mailed sign-in — lands on
+                // Overview with the tour free to open over that roster.
+                //
+                // The in-shell dialog must NOT write it: `onDone` there closes
+                // the dialog in place and the running shell already suppresses
+                // the welcome via `onCompleted`, so the marker would have no
+                // consuming mount and would be read as a fresh hand-off on the
+                // next reload.
+                if (expectsShellRemount && window.location.hash !== SETUP_HANDOFF_FRAGMENT) {
+                  window.location.hash = SETUP_HANDOFF_FRAGMENT;
+                }
+                onDone();
+              }}
+              data-testid="setup-open-console"
+            >
               {/* "Anyway" wherever something is genuinely outstanding — a
                   staged setting, or a sign-in we could not arrange. That word is
                   the only thing saying this button does not finish the job. */}
@@ -625,7 +679,15 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
         ? "That connection did not work. Fix it, or continue without a model."
         : "Test the connection first, or continue without a model.";
     }
-    if (current.id === "business" && !draft.industry.trim()) {
+    if (current.id === "business" && needsCompany && status.templates.length > 0 && !template) {
+      return "Choose the kind of company you want to start with.";
+    }
+    if (
+      current.id === "business" &&
+      needsCompany &&
+      status.templates.length === 0 &&
+      !draft.industry.trim()
+    ) {
       return "Tell us a little about the company first.";
     }
     if (current.id === "account" && needsCompany) {
@@ -735,7 +797,21 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     >
       <div className="space-y-6" data-testid="setup-wizard">
         {current.id === "business" && (
-          <BusinessStep draft={draft} onChange={setDraft} onEnter={advance} />
+          <BusinessStep
+            draft={draft}
+            templates={status.templates}
+            template={template}
+            onTemplate={(id) => {
+              setTemplate(id);
+              const selected = status.templates.find((candidate) => candidate.id === id);
+              if (selected && !draft.industry.trim()) {
+                setDraft((current) => ({ ...current, industry: selected.name }));
+              }
+              setRoster(null);
+            }}
+            onChange={setDraft}
+            onEnter={advance}
+          />
         )}
 
         {current.id === "signin" && (
@@ -950,12 +1026,12 @@ function FieldRow({
         onChange={(e) => onChange(e.target.value)}
       />
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <code className="font-mono text-2xs text-muted-foreground/70">{field.key}</code>
+        <code className="font-mono text-2xs text-muted-foreground">{field.key}</code>
         {/* Only where it is true *and* actionable: a locked field cannot be
             changed here at all, so telling its owner about a restart is noise
             about work they are not doing. */}
         {field.requires_restart && !locked && (
-          <span className="text-2xs text-muted-foreground/70">· needs a restart</span>
+          <span className="text-2xs text-muted-foreground">· needs a restart</span>
         )}
       </div>
       {locked && <div className="mt-1.5">{<LayerLock />}</div>}
@@ -1073,8 +1149,20 @@ function PowerStep({
   // The house already holds one, and this operator may have no way to get their
   // own. The key box is then optional rather than the point of the screen.
   const onTheHouse = status.inference.ready && provider === status.inference.provider;
+  // "Use my own" flips the gate: the host credential is only testable while
+  // that is the operator's actual choice. Once they opt to supply their own
+  // key, an empty box must not test anything — a test with no key probes the
+  // host credential and would report a pass for a key they never provided.
+  const canTest =
+    (!spec.needsKey || (onTheHouse && !override) || value.trim().length > 0) &&
+    (!spec.needsUrl || baseUrl.trim().length > 0);
 
   const run = async () => {
+    // This also protects the Enter shortcut on the inputs. A disabled button
+    // alone would still leave that route to a request the provider cannot
+    // answer usefully.
+    if (!canTest) return;
+
     onTested({ kind: "testing" });
     try {
       const result = await testInference(client, {
@@ -1084,7 +1172,7 @@ function PowerStep({
       });
       onTested(
         result.ok
-          ? { kind: "ok", baseUrl: result.baseUrl }
+          ? { kind: "ok", baseUrl: result.baseUrl, model: result.model }
           : { kind: "failed", error: result.error ?? "Could not reach the provider." },
       );
     } catch (err: unknown) {
@@ -1144,7 +1232,8 @@ function PowerStep({
             Endpoint
           </Label>
           <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
-            The base URL of the chat API, ending in <code>/v1</code>.
+            Paste the local address as shown, for example <code>localhost:6969</code>. We&apos;ll
+            add <code>http://</code> and <code>/v1</code> when needed.
           </p>
           <Input
             id="setup-base-url"
@@ -1241,7 +1330,7 @@ function PowerStep({
         <Button
           type="button"
           variant={tested.kind === "ok" ? "outline" : "default"}
-          disabled={tested.kind === "testing"}
+          disabled={tested.kind === "testing" || !canTest}
           onClick={() => void run()}
           data-testid="setup-test-connection"
         >
@@ -1263,7 +1352,8 @@ function PowerStep({
             watched us produce. */}
         {tested.kind === "ok" && (
           <p className="text-sm leading-snug text-status-done-text" data-testid="setup-test-ok">
-            Reached {tested.baseUrl} and got a reply.
+            Reached {tested.baseUrl}
+            {tested.model ? ` using ${tested.model}` : ""} and got a reply.
           </p>
         )}
         {tested.kind === "failed" && (
@@ -1304,7 +1394,7 @@ function PowerStep({
 type TestState =
   | { kind: "untested" }
   | { kind: "testing" }
-  | { kind: "ok"; baseUrl: string }
+  | { kind: "ok"; baseUrl: string; model?: string | null }
   | { kind: "failed"; error: string }
   | { kind: "skipped" };
 
@@ -1394,7 +1484,9 @@ function ReviewStep({
             ? "Built from what you told us. Rename or drop anyone — you can add more later."
             : roster.reason === "not_designable"
               ? "A standard team for your industry — there wasn't enough in your answers to design one around. Go back and say more about the business, or rename and drop anyone here."
-              : "A solid standard team for your industry — we couldn't reach a model to tailor it. Rename or drop anyone, and add a key later to redesign."}
+              : roster.reason === "model_unreachable"
+                ? "A standard team for your industry — we couldn't reach the model to tailor it right now. Check the connection, or rename and drop anyone here."
+                : "A solid standard team for your industry — we couldn't reach a model to tailor it. Rename or drop anyone, and add a key later to redesign."}
         </p>
       </div>
 
@@ -1481,7 +1573,7 @@ function ReviewStep({
               </ul>
               <p className="mt-2 text-sm leading-snug text-muted-foreground">
                 You can still continue — add someone for it here, or later from
-                the team page.
+                the Company page.
               </p>
             </>
           )}
@@ -1625,10 +1717,16 @@ function AdvancedStep({
  */
 function BusinessStep({
   draft,
+  templates,
+  template,
+  onTemplate,
   onChange,
   onEnter,
 }: {
   draft: SetupDraft;
+  templates: SetupStatus["templates"];
+  template: string;
+  onTemplate: (id: string) => void;
   onChange: (update: (d: SetupDraft) => SetupDraft) => void;
   onEnter: () => void;
 }) {
@@ -1641,24 +1739,57 @@ function BusinessStep({
             breathing room belongs *before the field*, not inside the sentence.
             A uniform `space-y` gave all three the same gap and the question
             read as three unrelated lines. */}
-        <Label htmlFor="setup-industry" className="text-base font-medium leading-snug">
+        <Label htmlFor="setup-template" className="text-base font-medium leading-snug">
           What kind of company are you setting up?
         </Label>
         <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
-          A sentence is plenty. What you sell, or what you do.
+          Pick one of the teams bundled with OpenCompany. You can tailor it below.
         </p>
-        <Input
-          id="setup-industry"
-          autoFocus
-          value={draft.industry}
-          placeholder="e.g. E-commerce — I sell homeware online"
-          data-testid="setup-field-industry"
-          className="mt-2.5"
-          onChange={(e) => onChange((d) => ({ ...d, industry: e.target.value }))}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onEnter();
-          }}
-        />
+        {templates.length > 0 ? (
+          <select
+            id="setup-template"
+            autoFocus
+            value={template}
+            data-testid="setup-field-template"
+            className="mt-2.5 h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+            onChange={(event) => onTemplate(event.target.value)}
+          >
+            <option value="" disabled>
+              Choose a company template…
+            </option>
+            {templates.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.name} ({option.agent_count} teammates)
+              </option>
+            ))}
+          </select>
+        ) : (
+          <Input
+            id="setup-industry"
+            autoFocus
+            value={draft.industry}
+            placeholder="e.g. E-commerce — I sell homeware online"
+            data-testid="setup-field-industry"
+            className="mt-2.5"
+            onChange={(e) => onChange((d) => ({ ...d, industry: e.target.value }))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onEnter();
+            }}
+          />
+        )}
+        {template && (
+          <Input
+            id="setup-industry"
+            value={draft.industry}
+            placeholder="Optional details about what makes yours different"
+            data-testid="setup-field-industry"
+            className="mt-2"
+            onChange={(e) => onChange((d) => ({ ...d, industry: e.target.value }))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onEnter();
+            }}
+          />
+        )}
       </div>
 
       <div>

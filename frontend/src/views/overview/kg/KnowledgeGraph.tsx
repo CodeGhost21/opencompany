@@ -12,8 +12,7 @@ import {
   forceY,
   type Simulation,
 } from 'd3-force';
-import { ClipboardList, Info, Milestone, Sparkles, User, UserRound, Users, Workflow as WorkflowIcon, Wrench, type LucideIcon } from 'lucide-react';
-import { DERIVED_NOTICE } from './adapter';
+import { ClipboardList, Milestone, Sparkles, User, UserRound, Users, Workflow as WorkflowIcon, Wrench, type LucideIcon } from 'lucide-react';
 import { orderGraphDepartments, SELF_ID, toolSlugOf, type KGNode, type KGNodeKind, type KnowledgeGraph as KGData } from './model';
 import { branchPath, branchWidth, cyclicDeltaF, edgeArc, focusWheel, radialRestLayout, responsiveRingR, rotateAbout, shortestAngleDelta, treeLayout, wheelPoint, wheelStageGeom, wheelStageSpot, type RestLayoutResult, type TreeLayoutResult, type TreeNodePos } from './tree-layout';
 import { focusLabelIds, LABEL_PRIORITY, planLabels, type LabelCandidate, type LabelIcon } from './label-plan';
@@ -28,6 +27,7 @@ import {
 } from './KnowledgeDetail';
 import { destinationFor, MEMORY_DESTINATION } from './open-in-console';
 import { KnowledgeGraphFullscreen } from './KnowledgeGraphFullscreen';
+import { WorkflowPlacementNotice } from './WorkflowPlacementNotice';
 
 const W = 880;
 const H = 600;
@@ -48,9 +48,9 @@ const RIM_DELTA_DEG = (WHEEL_GEOM.delta * 180) / Math.PI;
 // connection count (see nodeRadius / TIER_OPACITY).
 const CAT: Record<KGNodeKind, { color: string; Icon: LucideIcon; label: string; r: number }> = {
   self: { color: 'var(--text)', Icon: Sparkles, label: 'Notes', r: 18 },
-  team: { color: 'var(--brain-1)', Icon: Users, label: 'Pillars', r: 15 },
+  team: { color: 'var(--brain-1)', Icon: Users, label: 'Desks', r: 15 },
   workflow: { color: 'var(--brain-2)', Icon: WorkflowIcon, label: 'Workflows', r: 8.5 },
-  step: { color: 'var(--brain-2)', Icon: Milestone, label: 'Stages', r: 6 },
+  step: { color: 'var(--stage)', Icon: Milestone, label: 'Stages', r: 6 },
   task: { color: 'var(--muted)', Icon: ClipboardList, label: 'SOP tasks', r: 7 },
   person: { color: 'var(--warn)', Icon: UserRound, label: 'Humans', r: 10 },
   employee: { color: 'var(--accent)', Icon: User, label: 'AI teammates', r: 10 },
@@ -85,15 +85,9 @@ const EDGE_COLOR: Record<string, string> = {
   reports: 'var(--accent)',
 };
 
-// Task titles are whole jobs ("Broadcast directives across the fleet") — trim
-// for the on-canvas label; the full title lives in the hover tooltip + card.
-const shortLabel = (n: KGNode) =>
-  n.kind === 'task' && n.label.length > 20 ? `${n.label.slice(0, 18).trimEnd()}…` : n.label;
-
-// On-screen label size per tier, in px. Quoted at rest and held there at every
-// camera depth by `fixedLabel`, which is why the declutter can measure in px.
-const labelFontPx = (kind: KGNodeKind): number =>
-  kind === 'self' || kind === 'team' ? 10 : kind === 'task' ? 8.5 : 9;
+// Labels hold at the design system's 10px floor at every camera depth through
+// `fixedLabel`, which is why the declutter can measure their boxes in px.
+const LABEL_FONT_PX = 10;
 
 // 'about how long ago' for the harness card's last-run line
 const agoLabel = (iso: string): string => {
@@ -137,6 +131,49 @@ const hashStr = (s: string) => {
 const HUB_COLOR = 'var(--kg-brain-1)';
 const NOTE_COLOR = 'var(--kg-brain-1)';
 const ORPHAN_COLOR = 'var(--kg-brain-1)'; // rim dust dims via its lower fill opacity
+
+/** The fullscreen wheel's persistent key. Its items wrap within the canvas so
+ * narrower fields never crop the kinds an operator needs to distinguish.
+ *
+ * `flex-wrap` + `max-w-full` are load-bearing, not cosmetic (issue #1385):
+ * this strip is pinned bottom-left inside the field's `overflow-hidden` box,
+ * so a single non-wrapping row is silently cut off at narrow widths — on
+ * mobile, and on desktop whenever the 13.5rem sidebar is expanded. The
+ * trailing caveat is the last item, so it is the first thing to disappear,
+ * which would put the one control that explains the wheel out of reach
+ * exactly where the wheel is hardest to read.
+ *
+ * `gap-y-1` keeps the wrapped rows tighter than the 12px column gap, and
+ * `items-end` keeps every label on the caveat summary's line: that caveat is
+ * a disclosure whose explanation opens in flow ABOVE its summary, so an open
+ * caveat grows this box upward and `items-center` would drag the labels up
+ * with it (see `WorkflowPlacementNotice`). */
+export function KnowledgeGraphLegend() {
+  return (
+    <div
+      aria-label="Graph legend"
+      className="flex max-w-full flex-wrap items-end gap-x-3 gap-y-1 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur"
+    >
+      {(
+        [
+          { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
+          { label: 'Human', color: CAT.person.color, Icon: CAT.person.Icon },
+          { label: 'AI teammate', color: CAT.employee.color, Icon: CAT.employee.Icon },
+          { label: 'Tool', color: CAT.tool.color, Icon: CAT.tool.Icon },
+          { label: 'Workflow', color: CAT.workflow.color, Icon: CAT.workflow.Icon },
+          { label: 'Stage', color: CAT.step.color, Icon: CAT.step.Icon },
+          { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
+        ] as const
+      ).map(({ label, color, Icon }) => (
+        <span key={label} className="flex items-center gap-1.5 whitespace-nowrap font-mono text-3xs text-os-muted">
+          <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
+          {label}
+        </span>
+      ))}
+      <WorkflowPlacementNotice />
+    </div>
+  );
+}
 // the bright traveling sparks that fire along the links like synapses
 const SYNAPSE_COLOR = 'var(--kg-spark)';
 const SYNAPSE_N = 22;
@@ -197,7 +234,7 @@ const CAM_EASE_HOME = 0.3;
 // font counter-scales through it. `px` is the desired size at rest;
 // `groupScale` compensates for an extra ancestor scale (the constellation).
 const fixedLabel = (px: number, groupScale = 1): React.CSSProperties => ({
-  fontSize: `calc(${(px / groupScale).toFixed(3)}px * var(--kg-cam-k, 1))`,
+  fontSize: `calc(${(Math.max(px, LABEL_FONT_PX) / groupScale).toFixed(3)}px * var(--kg-cam-k, 1))`,
 });
 
 type SimNode = KGNode & { x: number; y: number; vx?: number; vy?: number; fx?: number | null; fy?: number | null };
@@ -215,7 +252,7 @@ type SimLink = { source: SimNode | string; target: SimNode | string; kind: strin
  */
 export function KnowledgeGraph({
   graph, agents = [], departments = [], people = [], tasks = [], memory, runsByAgent = {}, toolLabels = {},
-  statusSlot,
+  statusSlot, covered = false, emptyState = false,
   repelDefault = 150, linkDistDefault = 60, centerDefault = 0.32,
 }: {
   graph: KGData; agents?: Agent[]; departments?: Department[]; people?: Person[]; tasks?: SopTask[];
@@ -233,6 +270,11 @@ export function KnowledgeGraph({
    * operator opened.
    */
   statusSlot?: React.ReactNode;
+  /** an outage overlay covers the graph; it must not answer the keyboard at
+      all — `inert` cannot suppress a `window` listener (issue #1314) */
+  covered?: boolean;
+  /** A settled company with no desks gets an explanation and desk-management link. */
+  emptyState?: boolean;
   /** latest run per agent id, for the harness card */
   runsByAgent?: Record<string, AgentRun>;
   /** Tool slug → display name, so a card can name a tool as its source does. */
@@ -253,6 +295,9 @@ export function KnowledgeGraph({
   const [coreExpanded, setCoreExpanded] = useState(false);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [memHoverId, setMemHoverId] = useState<string | null>(null);
+  // The graph is one tab stop. Arrow keys move its roving focus between
+  // visible nodes, rather than making a large company a wall of tab stops.
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(() => graph.nodes[0]?.id ?? null);
   // type-to-find over the open vault; hits highlight in the overlay layer
   const [memQuery, setMemQuery] = useState('');
   const memSearchRef = useRef<HTMLInputElement | null>(null);
@@ -265,6 +310,15 @@ export function KnowledgeGraph({
   const nodesRef = useRef<SimNode[]>([]);
   const linksRef = useRef<SimLink[]>([]);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const nodeRefs = useRef(new Map<string, SVGGElement>());
+  // The memory field is memoized so hover/selection never rebuilds it, but the
+  // roving-focus handlers are recreated every render. The notes read them
+  // through this ref: a note's handlers fire at event time, never at render
+  // time, so the memo can stay blind to them being re-created.
+  const memoryKeyNavRef = useRef<{ move: (direction: number) => void; select: (id: string) => void }>({
+    move: () => {},
+    select: () => {},
+  });
   const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(null);
   const suppressClickRef = useRef(false);
   // Drag-to-pan. `panRef` is an offset in viewBox units added to whatever the
@@ -819,7 +873,7 @@ export function KnowledgeGraph({
     }
     sim.alpha(0.16).restart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repel, linkDist, centerForce, focusId, coreExpanded]);
+  }, [repel, linkDist, centerForce, focusId, coreExpanded, graph]);
 
   // ── cinematic camera ────────────────────────────────────────────────────────
   // The viewBox glides toward (and then tracks) whatever is selected — reading
@@ -1181,8 +1235,10 @@ export function KnowledgeGraph({
 
   // "/" focuses the vault search whenever the Notes core is open — works
   // in both the inline view and fullscreen (registered independently of the
-  // mode-specific handlers above)
+  // mode-specific handlers above). Skipped while an outage overlay covers the
+  // graph (issue #1314): `inert` cannot silence a `window` listener.
   useEffect(() => {
+    if (covered) return;
     const onSlash = (e: KeyboardEvent) => {
       if (e.key !== '/') return;
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -1193,7 +1249,7 @@ export function KnowledgeGraph({
     };
     window.addEventListener('keydown', onSlash);
     return () => window.removeEventListener('keydown', onSlash);
-  }, []);
+  }, [covered]);
 
   // The constellation subtree is ~2k SVG elements; memoize it so the physics
   // tick (which re-renders the component every animation frame) reuses the
@@ -1257,11 +1313,40 @@ export function KnowledgeGraph({
               return (
                 <g
                   key={m.id}
-                  className={coreExpanded && !restIds.has(m.id) ? 'kg-mem-in' : undefined}
+                  ref={(el) => {
+                    // namespaced so a note id can never collide with an org node id
+                    const key = `memory:${m.id}`;
+                    if (el) nodeRefs.current.set(key, el);
+                    else nodeRefs.current.delete(key);
+                  }}
+                  // Collapsed, the notes are backdrop for the core's single
+                  // click target; only the opened vault exposes them as buttons.
+                  role={coreExpanded ? 'button' : undefined}
+                  aria-label={
+                    coreExpanded ? `Memory note: ${m.label}. Press Enter or Space to open.` : undefined
+                  }
+                  tabIndex={coreExpanded && activeNodeId === `memory:${m.id}` ? 0 : -1}
+                  className={coreExpanded && !restIds.has(m.id) ? 'kg-mem-node kg-mem-in' : 'kg-mem-node'}
                   transform={`translate(${p.x},${p.y})`}
                   style={{ pointerEvents: coreExpanded ? 'auto' : 'none', cursor: 'pointer' }}
                   onMouseEnter={() => setMemHoverId(m.id)}
                   onMouseLeave={() => setMemHoverId((h) => (h === m.id ? null : h))}
+                  onFocus={() => setActiveNodeId(`memory:${m.id}`)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.move(1);
+                    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.move(-1);
+                    } else if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      memoryKeyNavRef.current.select(m.id);
+                    }
+                  }}
                   // keep the core's drag machinery (and its pointer capture,
                   // which would retarget the click) out of note interactions
                   onPointerDown={(e) => e.stopPropagation()}
@@ -1330,7 +1415,7 @@ export function KnowledgeGraph({
       </g>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memoryOn, memory, memLayout, memById, coreExpanded, coreScale]);
+  }, [memoryOn, memory, memLayout, memById, coreExpanded, coreScale, activeNodeId]);
 
   // Static backdrop chrome — depends only on constants, so memoize it once and
   // let React skip reconciling it on every (now frame-throttled) sim tick.
@@ -1514,42 +1599,9 @@ export function KnowledgeGraph({
     if (target) selectTool(target);
   };
 
-  // compact legend for the fullscreen wheel: color + icon per kind, with the
-  // Notes core in its vault orange
-  const compactLegend = (
-    <div className="flex items-center gap-3 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
-      {(
-        [
-          { label: 'Notes', color: HUB_COLOR, Icon: CAT.self.Icon },
-          { label: 'Human', color: CAT.person.color, Icon: CAT.person.Icon },
-          { label: 'AI teammate', color: CAT.employee.color, Icon: CAT.employee.Icon },
-          { label: 'Tool', color: CAT.tool.color, Icon: CAT.tool.Icon },
-          { label: 'Workflow', color: CAT.workflow.color, Icon: CAT.workflow.Icon },
-          { label: 'Stage', color: CAT.step.color, Icon: CAT.step.Icon },
-          { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
-        ] as const
-      ).map(({ label, color, Icon }) => (
-        <span key={label} className="flex items-center gap-1.5 font-mono text-3xs text-os-muted">
-          <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
-          {label}
-        </span>
-      ))}
-      {/* The standing caveat (adapter.ts's DERIVED_NOTICE): this legend is the
-          graph's persistent, low-weight chrome, so it is where an operator
-          reading the wheel is already looking to learn how to read it. The
-          full sentence lives in the title — the strip is crowded enough
-          without seven kind-labels wrapping around a whole caveat.
-
-          It used to read "derived data", covering three whole invented rings.
-          Since issue #601 the notice names the one thing left: where a flow
-          sits on the wheel. Departments, tools and stages are the company's own
-          answers now, so claiming otherwise here would understate them. */}
-      <span className="flex items-center gap-1 border-l border-os-border pl-3 font-mono text-3xs text-os-dim" title={DERIVED_NOTICE}>
-        <Info className="h-3 w-3 shrink-0" strokeWidth={2} />
-        flow placement
-      </span>
-    </div>
-  );
+  // The compact legend lives in `KnowledgeGraphLegend` (above) so its distinct
+  // colours and responsive class contract are pinned by a regression test.
+  const compactLegend = <KnowledgeGraphLegend />;
 
   // the vault search chip — one instance, rendered by whichever chrome is live
   // (inline top-left row or the fullscreen wrapper slot)
@@ -1884,11 +1936,11 @@ export function KnowledgeGraph({
     const degree = (adjacency.get(n.id)?.size ?? 1) - 1;
     labelCandidates.push({
       id: n.id,
-      text: shortLabel(n),
+      text: n.label,
       x: n.x,
       y: n.y,
       dy: v.r + 11 + (labelDy.get(n.id) ?? 0),
-      fontPx: labelFontPx(n.kind),
+      fontPx: LABEL_FONT_PX,
       priority: priority + Math.min(degree, 50) / 100,
     });
   }
@@ -1899,16 +1951,92 @@ export function KnowledgeGraph({
   // from under a neighbour's icon, so it hands back the `dy` to draw it at
   const labelPlan = planLabels(labelCandidates, { x: camRectRef.current.x, y: camRectRef.current.y, w: camK * W }, W, labelIcons);
 
+  // A roving tab stop keeps the graph reachable without inserting every node
+  // between the console's ordinary controls. Nodes hidden behind the focused
+  // tree are excluded, because focus must never move somewhere a reader cannot
+  // see or operate.
+  const simNavigable = nodes.filter((n) => !visuals.get(n.id)?.hidden);
+  // With the Notes core open, its notes are visible click targets — keyboard
+  // users get the same set. They are namespaced so a note id can never collide
+  // with an org node id in the roving state or the ref map.
+  const memoryNavigable =
+    coreExpanded && memoryOn ? memory!.nodes.map((m) => ({ id: `memory:${m.id}` })) : [];
+  const selfNode = simNavigable.find((n) => n.id === SELF_ID);
+  // The memory notes belong to the core they sit inside, so the roving order
+  // walks self → its notes → the departments, rather than making a keyboard
+  // user pass every department to reach the vault they just opened.
+  const navigableNodes = [
+    ...(selfNode ? [selfNode] : []),
+    ...memoryNavigable,
+    ...simNavigable.filter((n) => n !== selfNode),
+  ];
+  useEffect(() => {
+    if (navigableNodes.some((n) => n.id === activeNodeId)) return;
+    const next = navigableNodes[0]?.id ?? null;
+    setActiveNodeId(next);
+    // The roving focus parked on a node that just left the set (Escape
+    // collapsed the vault and unmounted its note, or a tree closed under
+    // it): the browser strands focus on <body> the moment a focused element
+    // unmounts, so hand it to the fallback node or arrow keys stop reaching
+    // the graph's handler.
+    if (activeNodeId) {
+      const prev = nodeRefs.current.get(activeNodeId) ?? null;
+      const stranded =
+        document.activeElement === document.body ||
+        (prev !== null && prev.contains(document.activeElement));
+      if (stranded) nodeRefs.current.get(next ?? '')?.focus();
+    }
+  }, [activeNodeId, navigableNodes]);
+  const moveActiveNode = (direction: number) => {
+    if (navigableNodes.length === 0) return;
+    const current = navigableNodes.findIndex((n) => n.id === activeNodeId);
+    const next = navigableNodes[(current + direction + navigableNodes.length) % navigableNodes.length];
+    setActiveNodeId(next.id);
+    nodeRefs.current.get(next.id)?.focus();
+  };
+  const onNodeKeyDown = (e: React.KeyboardEvent<SVGGElement>, n: KGNode) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      moveActiveNode(1);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      moveActiveNode(-1);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      onNodeClick(n);
+    }
+  };
+  const nodeAriaLabel = (n: KGNode) => `${CAT[n.kind].label}: ${n.label}. Press Enter or Space to select.`;
+  // The memory notes (memoized, rendered earlier) read these through their ref
+  // so the roving logic here can stay exactly where the sim nodes use it.
+  memoryKeyNavRef.current = {
+    move: moveActiveNode,
+    select: (id: string) => {
+      clearDetail();
+      setSelectedMemoryId((s) => (s === id ? null : id));
+    },
+  };
+
   // ── the graph itself (reused inline + fullscreen) ───────────────────────────
   const graphInner = (
     <>
+      {/* The visual lane runs with `reducedMotion: "reduce"`, and this graph
+          reads that media query itself: the camera snaps instead of gliding,
+          the orbit and pulses freeze, and once the d3 sim cools to sleep
+          (`alphaDecay(0.015)` ≈ 8s) nothing repaints — so `visual.spec.ts`
+          compares the settled graph instead of masking it. Without the media
+          query the graph never holds still, which is exactly why the lane
+          sets it. */}
       <div className="kg-grid pointer-events-none absolute inset-0" aria-hidden />
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
         className="h-full w-full cursor-grab touch-none active:cursor-grabbing"
-        role="img"
-        aria-label="Operating knowledge graph"
+        role="application"
+        aria-label="Operating knowledge graph. Use arrow keys to move between nodes, then Enter or Space to select one."
         onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
@@ -2123,7 +2251,23 @@ export function KnowledgeGraph({
             return (
               <g
                 key={n.id}
-                ref={coreGRef}
+                ref={(el) => {
+                  coreGRef.current = el;
+                  if (el) nodeRefs.current.set(n.id, el);
+                  else nodeRefs.current.delete(n.id);
+                }}
+                // The open vault's notes are buttons that sit inside this <g>;
+                // a `button` role would make them presentational, so once the
+                // constellation is expanded the core becomes a labelled group
+                // and the notes carry the interactive roles.
+                role={coreExpanded ? 'group' : 'button'}
+                aria-label={
+                  coreExpanded
+                    ? `Notes: ${n.label}. ${memory?.nodes.length ?? 0} notes.`
+                    : nodeAriaLabel(n)
+                }
+                tabIndex={activeNodeId === n.id ? 0 : -1}
+                className="kg-node"
                 transform={`translate(${n.x},${n.y})`}
                 opacity={dim ? 0.15 : 1}
                 style={{ cursor: dragRef.current?.id === n.id ? 'grabbing' : 'grab', transition: 'opacity 0.25s' }}
@@ -2138,6 +2282,15 @@ export function KnowledgeGraph({
                 onPointerDown={(e) => onNodePointerDown(e, n.id)}
                 onPointerMove={(e) => onNodePointerMove(e, n.id)}
                 onPointerUp={(e) => onNodePointerUp(e, n.id)}
+                onFocus={(e) => {
+                  // The vault's notes live inside this <g>, and focus moving
+                  // onto a note bubbles its focusin up through the core — the
+                  // core must not claim a focus that landed on one of its notes
+                  // (that would kick the roving active id off the note and
+                  // strand the tab stop back on the core).
+                  if (e.target === e.currentTarget) setActiveNodeId(n.id);
+                }}
+                onKeyDown={(e) => onNodeKeyDown(e, n)}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (suppressClickRef.current) {
@@ -2217,7 +2370,7 @@ export function KnowledgeGraph({
                               fontFamily="var(--font-mono)"
                               fontWeight={500}
                               fill="var(--text-2)"
-                              style={fixedLabel(9, coreScale)}
+                              style={fixedLabel(LABEL_FONT_PX, coreScale)}
                             >
                               {m.label.length > 22 ? `${m.label.slice(0, 20).trimEnd()}…` : m.label}
                             </text>
@@ -2259,7 +2412,7 @@ export function KnowledgeGraph({
                               fontFamily="var(--font-mono)"
                               fontWeight={500}
                               fill="var(--text-2)"
-                              style={fixedLabel(9.5, coreScale)}
+                              style={fixedLabel(LABEL_FONT_PX, coreScale)}
                             >
                               {m.label.length > 24 ? `${m.label.slice(0, 22).trimEnd()}…` : m.label}
                             </text>
@@ -2275,9 +2428,18 @@ export function KnowledgeGraph({
           }
 
           return (
-            <g
-              key={n.id}
-              transform={`translate(${n.x},${n.y})`}
+              <g
+                key={n.id}
+                ref={(el) => {
+                  if (el) nodeRefs.current.set(n.id, el);
+                  else nodeRefs.current.delete(n.id);
+                }}
+                role="button"
+                aria-label={nodeAriaLabel(n)}
+                aria-hidden={hidden || undefined}
+                tabIndex={activeNodeId === n.id ? 0 : -1}
+                className="kg-node"
+                transform={`translate(${n.x},${n.y})`}
               opacity={nodeOpacity}
               style={{
                 cursor: dragRef.current?.id === n.id ? 'grabbing' : 'grab',
@@ -2291,6 +2453,8 @@ export function KnowledgeGraph({
               onPointerDown={(e) => onNodePointerDown(e, n.id)}
               onPointerMove={(e) => onNodePointerMove(e, n.id)}
               onPointerUp={(e) => onNodePointerUp(e, n.id)}
+              onFocus={() => setActiveNodeId(n.id)}
+              onKeyDown={(e) => onNodeKeyDown(e, n)}
               onClick={(e) => {
                 e.stopPropagation();
                 if (suppressClickRef.current) {
@@ -2316,9 +2480,9 @@ export function KnowledgeGraph({
                   fontFamily="var(--font-mono)"
                   fontWeight={n.kind === 'self' || n.kind === 'team' || hoverId === n.id ? 600 : 400}
                   fill={hoverId === n.id ? 'var(--text)' : n.kind === 'team' ? color : 'var(--text-2)'}
-                  style={fixedLabel(labelFontPx(n.kind))}
+                  style={fixedLabel(LABEL_FONT_PX)}
                 >
-                  {shortLabel(n)}
+                  {n.label}
                 </text>
               )}
             </g>
@@ -2386,6 +2550,14 @@ export function KnowledgeGraph({
 .kg-fade { opacity: 0; animation: kg-fade-in 0.7s ease 0.25s forwards; }
 .kg-leaf { transform-box: fill-box; transform-origin: center; opacity: 0; animation: kg-leaf-in 0.6s ease 0.2s forwards; }
 .kg-glow { opacity: 0; animation: kg-glow-in 0.9s ease forwards; }
+/* SVG groups have no useful browser focus outline, so keep the keyboard
+   position visible on the node itself rather than around its whole subtree. */
+.kg-node:focus-visible > circle:first-of-type { stroke: var(--ring); stroke-width: 3px; }
+/* The memory-backed core draws its body as nested groups (the constellation),
+   so the direct-circle rule above reaches nothing — ring its disc instead. */
+.kg-node:focus-visible > g:first-of-type > circle:first-of-type { stroke: var(--ring); stroke-width: 3px; }
+/* Memory notes get the same ring when the keyboard reaches them. */
+.kg-mem-node:focus-visible > circle:first-of-type { stroke: var(--ring); stroke-width: 2px; }
 
 /* detail cards glide in with the camera instead of popping */
 @keyframes kg-panel-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
@@ -2420,6 +2592,8 @@ export function KnowledgeGraph({
         searchSlot={vaultSearchInput}
         legendSlot={compactLegend}
         statusSlot={statusSlot}
+        covered={covered}
+        emptyState={emptyState}
         onNavDept={navDept}
         onBack={clearDetail}
       >

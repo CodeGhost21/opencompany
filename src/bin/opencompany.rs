@@ -103,6 +103,43 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Issue a sign-in password for a company, from the host (#1718).
+    ///
+    /// The way in when a deployment cannot mail a sign-in link: the magic-link
+    /// code is minted and stored hashed, every admin route needs an admin that
+    /// does not exist yet, and the console's own advice — "an admin can issue
+    /// you one" — has nobody to ask on a first boot.
+    ///
+    /// Only for an address the company ALREADY admits: named in the manifest's
+    /// `[users] admins`, or injected as the deployment's bootstrap admin
+    /// (`OPENCOMPANY_ADMIN_EMAIL`). It makes a standing grant usable without
+    /// mail; it does not create one.
+    IssuePassword {
+        /// The company id, as `serve` registers it. In shared-database mode
+        /// this is the namespaced `<tenant>--<id>` form.
+        #[arg(long)]
+        company: String,
+        /// The address to issue for.
+        #[arg(long)]
+        email: String,
+        /// The password. Omit to read it from stdin, which keeps it out of
+        /// shell history and out of `ps` — argv is world-readable for the
+        /// lifetime of the exec, and this is a credential.
+        #[arg(long)]
+        password: Option<String>,
+        /// Do not require the holder to replace this password on first use.
+        ///
+        /// The default requires a change, matching an admin-issued temporary
+        /// password: whoever runs this knows the value, and usually conveys it
+        /// over a channel they do not control. Pass this when the operator and
+        /// the holder are the same person.
+        #[arg(long)]
+        no_change_required: bool,
+        /// Data root, for backends that resolve one. Defaults the same way
+        /// `serve` does.
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
     /// Report companies whose durable owner row is missing, and owner rows
     /// naming no company (issue #1077).
     ///
@@ -213,10 +250,6 @@ enum MemoryCmd {
         /// Target credential (hosted engines only).
         #[arg(long)]
         to_api_key: Option<String>,
-        /// Target data root (`namespace` only). Defaults to the env data dir —
-        /// refused when that resolves to the source's own store.
-        #[arg(long)]
-        to_data_dir: Option<PathBuf>,
         /// Records per page.
         #[arg(long, default_value_t = 500)]
         page_size: usize,
@@ -240,7 +273,6 @@ impl std::fmt::Debug for MemoryCmd {
                 to,
                 to_url,
                 to_api_key,
-                to_data_dir,
                 page_size,
                 dry_run,
                 resume_cursor,
@@ -249,7 +281,6 @@ impl std::fmt::Debug for MemoryCmd {
                 .field("to", to)
                 .field("to_url", &to_url.as_ref().map(|_| "<set>"))
                 .field("to_api_key", &to_api_key.as_ref().map(|_| "<set>"))
-                .field("to_data_dir", to_data_dir)
                 .field("page_size", page_size)
                 .field("dry_run", dry_run)
                 .field("resume_cursor", &resume_cursor.is_some())
@@ -516,6 +547,11 @@ fn company_builder(
     // `[users].mode` to answer, which is the normal case.
     .with_auth_mode_override(state.auth_mode_override())
     .with_skills_registry(state.shared_skill_registry()?)
+    // The setup cards a real operator should find waiting on a real board. Turned
+    // on here rather than inferred from the seed directory, so a test or a
+    // fixture that builds a company gets the empty board it is asserting about —
+    // see `RuntimeBuilder::with_task_seeding`. First boot only.
+    .with_task_seeding(true)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
         builder = builder.with_seed_dir(source_dir);
@@ -525,6 +561,12 @@ fn company_builder(
     }
     if let Some(overlay) = state.memory_overlay() {
         builder = builder.with_memory_overlay(&overlay);
+    } else {
+        // The engine is (now) the base backend. On a live rebuild this must
+        // clear the outgoing provider engine's ports rather than inherit them —
+        // a company switched to `store` must not keep reading the provider it
+        // just deselected. See `RuntimeBuilder::with_memory_overlay_cleared`.
+        builder = builder.with_memory_overlay_cleared();
     }
     #[cfg(feature = "smtp")]
     if let Ok(Some(cfg)) = opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
@@ -654,6 +696,16 @@ fn spawn_maintenance_ticker(
     MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
 }
 
+/// Starts the process-wide presence sweep (issue: "Bound client-supplied
+/// console leases"). See [`opencompany::server::presence::PresenceSweeper`]
+/// for why this is a separate task from the maintenance ticker above rather
+/// than folded into it: presence is host-global, not scoped to a registered
+/// company.
+fn spawn_presence_sweeper(state: &AppState, shutdown: &Arc<Notify>) -> tokio::task::JoinHandle<()> {
+    opencompany::server::presence::PresenceSweeper::new(state.presence_handle())
+        .spawn(shutdown.clone())
+}
+
 /// Starts a company's IMAP mailbox poller as a background task, if the
 /// platform injected mailbox credentials for this tenant.
 ///
@@ -713,46 +765,6 @@ fn spawn_mailbox_poller(
     {
         let _ = (state, id, shutdown, handles, cfg);
     }
-}
-
-/// Starts a company's Telegram `getUpdates` long-polling listener as a
-/// background task, whenever this host has an outbound Telegram transport wired
-/// (the `telegram` feature).
-///
-/// Issue #203: this is what makes inbound Telegram work on a local or
-/// self-hosted instance, where Telegram's servers can never reach an inbound
-/// `/hooks/...` URL. It is started unconditionally rather than only when a bot
-/// token is already stored — the poller idles cheaply until one appears, so an
-/// operator who pastes a token in the console is receiving DMs on the next tick
-/// with no restart. On a publicly reachable host that opted into the webhook
-/// fast-path, the poller sees the registration and stands by.
-fn spawn_telegram_poller(
-    state: &AppState,
-    id: &str,
-    shutdown: &Arc<Notify>,
-    handles: &mut Vec<tokio::task::JoinHandle<()>>,
-) {
-    let Some(api) = state.connections().telegram.clone() else {
-        return;
-    };
-    let Some(runtime) = state.registry().get(&CompanyId::new(id)) else {
-        return;
-    };
-    let poll_secs = std::env::var("OPENCOMPANY_TELEGRAM_POLL_SECONDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(opencompany::runtime::telegram_poller::DEFAULT_POLL_SECONDS);
-    let webhook_capable = state.config().public_webhook_base_url().is_some();
-    let poller = opencompany::runtime::telegram_poller::TelegramPoller::new(
-        runtime,
-        api,
-        poll_secs,
-        webhook_capable,
-    )
-    // See `spawn_scheduler`: follow the registry so a rebuild reaches inbound
-    // Telegram instead of stranding it on the replaced runtime.
-    .following(state.registry().clone());
-    handles.push(poller.spawn(shutdown.clone()));
 }
 
 /// Attaches an OpenHuman JSON-RPC transport when the `openhuman-rpc` feature is
@@ -899,12 +911,6 @@ fn connections_runtime() -> Result<opencompany::server::ops::ConnectionsRuntime>
         connections =
             connections.with_mail(Arc::new(opencompany::server::ops::smtp::LettreMailSender));
     }
-    #[cfg(feature = "telegram")]
-    {
-        connections = connections.with_telegram(Arc::new(
-            opencompany::company::telegram::HttpTelegramApi::new(),
-        ));
-    }
     if let Some(mail) = opencompany::server::ops::mailer::MailConfig::from_env()? {
         connections = connections.with_mail_credentials(mail.credentials);
     }
@@ -925,9 +931,30 @@ fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
     Ok(home)
 }
 
+/// Layers the data root's `config.toml` `[memory]` section onto the env-built
+/// settings, the exact resolution the `serve` path uses.
+///
+/// A self-hosted operator's engine selection lives only in that file — the
+/// console never exports environment variables — so bundle export/import must
+/// see it or they would read and write the base stores instead of the engine
+/// the host actually remembers with. An absent file layers nothing, and
+/// `OPENCOMPANY_MEMORY` still owns the choice when set
+/// (`StorageSettings::with_memory_config`).
+fn layer_config_memory(
+    settings: opencompany::store::StorageSettings,
+    config_dir: &std::path::Path,
+) -> Result<opencompany::store::StorageSettings> {
+    let section = ConfigFile::load(config_dir)?
+        .map(|c| c.memory.clone())
+        .unwrap_or_default();
+    settings.with_memory_config(&section)
+}
+
 /// The bundle ports plus the fact port, resolved the way `serve` resolves
 /// them: the env-selected storage backend (`OPENCOMPANY_STORAGE`), with the
-/// env-selected memory engine (`OPENCOMPANY_MEMORY*`) overlaid on top.
+/// memory engine overlaid on top — `OPENCOMPANY_MEMORY*` from the environment,
+/// or the instance's `config.toml` `[memory]` section under it (an env-owned
+/// selection keeps the file layer inert).
 ///
 /// Export and import used to hardwire the fs ports over `home`, which made a
 /// bundle capture the *base* stores rather than what the deployment actually
@@ -936,13 +963,13 @@ fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
 /// `serve` uses means a bundle now reads and writes the live engine, and a
 /// misconfigured engine refuses here exactly as it refuses a boot.
 ///
-/// One deployment per bundle, enforced: with a non-default environment
-/// (`OPENCOMPANY_STORAGE` or `OPENCOMPANY_MEMORY` set), an explicit `--home`
-/// is refused rather than mixed in — the base ports would come from the flag
-/// while the engine roots at `OPENCOMPANY_DATA_DIR`, and a bundle spanning
-/// two deployments is a company that never existed. Under the fs+store
-/// default the environment is inert and `--home` means exactly what it
-/// always has. `null` is refused in both directions (an export of nothing,
+/// One deployment per bundle, enforced: with a non-default selection (an env
+/// or `config.toml` that names a live storage backend or a memory engine), an
+/// explicit `--home` is refused rather than mixed in — the base ports would
+/// come from the flag while the engine roots at `OPENCOMPANY_DATA_DIR`, and a
+/// bundle spanning two deployments is a company that never existed. Under the
+/// fs+store default the environment is inert and `--home` means exactly what
+/// it always has. `null` is refused in both directions (an export of nothing,
 /// an import into a black hole, both exiting 0), and so is shared-single-DB
 /// tenant mode (bundle ops write no owner rows; raw slugs would miss the
 /// `<tenant>--` namespaced ids).
@@ -952,6 +979,7 @@ async fn live_ports(
 ) -> Result<(
     opencompany::store::export::Ports,
     Option<Arc<dyn opencompany::ports::FactStore>>,
+    Option<Arc<dyn opencompany::store::MemoryScopes>>,
     opencompany::store::StorageKind,
 )> {
     use opencompany::store::{
@@ -959,31 +987,53 @@ async fn live_ports(
         open_memory_overlay, open_storage,
     };
     let settings = StorageSettings::from_env()?;
+    // Layer the instance's own `config.toml` `[memory]` section under the
+    // environment, the same resolution `serve` uses: a self-hosted operator's
+    // console selection lives only in that file, and a bundle must read and
+    // write the engine the host actually remembers with. The env still owns
+    // the choice when it names one (`with_memory_config`).
+    let settings = layer_config_memory(settings, &opencompany::app::config::data_dir_from_env())?;
     // Every refusal lives in the lib (`store::select::refuse_bundle_env`)
     // where the feature lanes execute its tests; the bin only reports.
     opencompany::store::refuse_bundle_env(&settings, home_was_flagged)?;
-    let (store, events, mut memory, mut context, mut facts) = match open_storage(&settings, home)
-        .await?
-    {
-        Some(h) => (h.company, h.events, h.memory, h.context, Some(h.facts)),
-        // The fs default: the same ports the old hardwired path built,
-        // plus the fs fact store the old path silently left behind.
-        None => (
-            Arc::new(FsCompanyStore::new(home.to_path_buf())) as _,
-            Arc::new(FsEventLog::new(home.to_path_buf())) as _,
-            Arc::new(FsMemoryStore::new(home.to_path_buf())) as _,
-            Arc::new(FsContextStore::new(home.to_path_buf())) as _,
-            Some(Arc::new(FsOps::new(home.to_path_buf())) as Arc<dyn opencompany::ports::FactStore>),
-        ),
-    };
+    let (store, events, mut memory, mut context, mut facts, mut scopes) =
+        match open_storage(&settings, home).await? {
+            Some(h) => (
+                h.company,
+                h.events,
+                h.memory,
+                h.context,
+                Some(h.facts),
+                None,
+            ),
+            // The fs default: the same ports the old hardwired path built,
+            // plus the fs fact store the old path silently left behind.
+            None => (
+                Arc::new(FsCompanyStore::new(home.to_path_buf())) as _,
+                Arc::new(FsEventLog::new(home.to_path_buf())) as _,
+                Arc::new(FsMemoryStore::new(home.to_path_buf())) as _,
+                Arc::new(FsContextStore::new(home.to_path_buf())) as _,
+                Some(Arc::new(FsOps::new(home.to_path_buf()))
+                    as Arc<dyn opencompany::ports::FactStore>),
+                None,
+            ),
+        };
     if let Some(overlay) = open_memory_overlay(&settings)? {
         memory = overlay.memory;
         context = overlay.context;
+        if let Some(s) = overlay.scopes {
+            scopes = Some(s);
+        }
         if let Some(f) = overlay.facts {
             facts = Some(f);
         }
     }
-    Ok(((store, events, memory, context), facts, settings.kind))
+    Ok((
+        (store, events, memory, context),
+        facts,
+        scopes,
+        settings.kind,
+    ))
 }
 
 /// A process-unique temporary path under the system temp dir. Used only by the
@@ -1005,19 +1055,23 @@ async fn export_to_dir(
     include_secrets: bool,
     dest: &std::path::Path,
 ) -> Result<()> {
-    use opencompany::store::export::{ExportOpts, export_bundle};
+    use opencompany::store::export::{ExportOpts, export_bundle_with_scopes};
     use opencompany::store::paths::Bundle;
 
     // The same exclusive root lock `serve` holds: a bundle read while the host
     // is writing is torn, and the refusal here names the running process
     // instead of silently racing it.
     let _home_lock = opencompany::store::lock::acquire(home)?;
-    let ((store, events, memory, context), facts, _) = live_ports(home, home_was_flagged).await?;
+    let ((store, events, memory, context), facts, scopes, _) =
+        live_ports(home, home_was_flagged).await?;
     let opts = ExportOpts {
         include_secrets,
         fs_bundle: Some(Bundle::new(home.to_path_buf(), id).dir().to_path_buf()),
     };
-    export_bundle(id, dest, store, events, memory, context, facts, opts).await
+    export_bundle_with_scopes(
+        id, dest, store, events, memory, context, facts, scopes, opts,
+    )
+    .await
 }
 
 /// Default build: export writes an unpacked bundle directory (no `.tar` support
@@ -1041,6 +1095,190 @@ async fn run_export(
     Ok(())
 }
 
+/// `opencompany issue-password` — the host-side way into a company whose
+/// deployment cannot mail a sign-in link (issue #1718).
+///
+/// Opens the configured storage directly rather than going through a running
+/// server, because the authority here is possession of the process and its
+/// data — which an operator has and an HTTP caller never does.
+async fn run_issue_password(
+    company: String,
+    email: String,
+    password: Option<String>,
+    require_change: bool,
+    home: Option<PathBuf>,
+) -> Result<()> {
+    use opencompany::ports::CompanyStore;
+    use opencompany::server::users::bootstrap;
+
+    // stdin when not passed, so the value stays out of shell history and out of
+    // `ps`. Deliberately not a TTY prompt: a pipe is the case that matters
+    // here — from a password manager, a secret file, or a provisioning script —
+    // and reading stdin serves an interactive operator too.
+    let password = match password {
+        Some(value) => value,
+        None => {
+            use std::io::Read as _;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                opencompany::error::OpenCompanyError::Config(format!(
+                    "could not read a password from stdin: {e}"
+                ))
+            })?;
+            // Only the trailing newline goes: a password may legitimately end
+            // in a space, and trimming both ends would silently change it.
+            buf.trim_end_matches(['\n', '\r']).to_string()
+        }
+    };
+
+    let home = resolve_home_migrated(home)?;
+    let settings = opencompany::store::StorageSettings::from_env()?;
+    // Serialize filesystem mutations with serve/import/export — but only for
+    // the filesystem store. `serve` holds this same root lock for its whole
+    // lifetime even on a MongoDB-backed tenant, so contending with it here
+    // would refuse this command in exactly the environment it exists for: a
+    // live hosted container that cannot mail a sign-in link. Those mutations
+    // go through the storage handles and never touch `home`, so the lock has
+    // nothing to protect there. The guard must outlive storage opening and
+    // the complete password operation.
+    let _home_lock = match settings.kind {
+        opencompany::store::StorageKind::Fs => Some(opencompany::store::lock::acquire(&home)?),
+        _ => None,
+    };
+    let config_root = opencompany::app::config::data_dir_from_env();
+    let config_file = ConfigFile::load(&config_root)?;
+    let fs_ops = Arc::new(opencompany::store::FsOps::new(home.clone()));
+    let handles = opencompany::store::open_storage(&settings, &home).await?;
+    let users: Arc<dyn opencompany::ports::users::UserStore> = handles
+        .as_ref()
+        .map(|handles| handles.users.clone())
+        .unwrap_or_else(|| fs_ops.clone());
+    let sessions: Arc<dyn opencompany::ports::sessions::SessionStore> = handles
+        .as_ref()
+        .map(|handles| handles.sessions.clone())
+        .unwrap_or_else(|| fs_ops.clone());
+    let login_codes: Arc<dyn opencompany::ports::login_codes::LoginCodeStore> = handles
+        .as_ref()
+        .map(|handles| handles.login_codes.clone())
+        .unwrap_or_else(|| fs_ops.clone());
+
+    // In shared-single-DB mode the `--company` argument is also a tenant
+    // namespace carrier. Try the tenant-prefixed candidate first, because a
+    // bare company id may itself contain `--`; then accept an already-expanded
+    // id only when it carries this tenant's prefix. A different prefix is
+    // refused rather than allowing a caller to select another tenant.
+    let (id, record) = match std::env::var("OPENCOMPANY_TENANT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        None => {
+            let id = CompanyId::new(company);
+            let record = if let Some(handles) = handles.as_ref() {
+                handles.company.load(&id).await?
+            } else {
+                opencompany::store::FsCompanyStore::new(home.clone())
+                    .load(&id)
+                    .await?
+            };
+            (id, record)
+        }
+        Some(tenant) => {
+            if let Err(reason) = opencompany::app::validate_tenant_namespace(&tenant) {
+                return Err(opencompany::error::OpenCompanyError::Config(reason));
+            }
+            let prefix = format!("{tenant}--");
+            let (id, record) = if let Some(bare) = company.strip_prefix(&prefix) {
+                if bare.is_empty() {
+                    return Err(opencompany::error::OpenCompanyError::Config(format!(
+                        "company id `{company}` is only the `{tenant}--` namespace prefix; \
+                         it names no company"
+                    )));
+                }
+                let id = CompanyId::new(company);
+                let record = if let Some(handles) = handles.as_ref() {
+                    handles.company.load(&id).await?
+                } else {
+                    opencompany::store::FsCompanyStore::new(home.clone())
+                        .load(&id)
+                        .await?
+                };
+                (id, record)
+            } else {
+                let bare_id = CompanyId::new(format!("{prefix}{company}"));
+                let bare_record = if let Some(handles) = handles.as_ref() {
+                    handles.company.load(&bare_id).await?
+                } else {
+                    opencompany::store::FsCompanyStore::new(home.clone())
+                        .load(&bare_id)
+                        .await?
+                };
+                if let Some(record) = bare_record {
+                    (bare_id, Some(record))
+                } else if company.contains("--") {
+                    return Err(opencompany::error::OpenCompanyError::Config(format!(
+                        "company id `{company}` is namespaced for another tenant; this deployment is \
+                         `{tenant}`, whose ids take the `<tenant>--<name>` form"
+                    )));
+                } else {
+                    (bare_id, None)
+                }
+            };
+            (id, record)
+        }
+    };
+    let record = record.ok_or_else(|| {
+        opencompany::error::OpenCompanyError::Config(format!(
+            "no company `{}` in this storage. Check the id — in shared-database mode it is the \
+             namespaced `<tenant>--<id>` form.",
+            id.as_ref()
+        ))
+    })?;
+    let manifest_admins: Vec<String> = record.manifest.users.admins.clone();
+    let auth_mode = {
+        use std::str::FromStr as _;
+        let raw = std::env::var("OPENCOMPANY_AUTH_MODE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| config_file.as_ref().and_then(|c| c.auth_mode.clone()))
+            .unwrap_or_else(|| record.manifest.users.mode.clone());
+        opencompany::app::config::AuthMode::from_str(&raw)?
+    };
+    if !auth_mode.uses_email() {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "issue-password requires effective email auth mode, but the host is configured for `{auth_mode}`"
+        )));
+    }
+
+    // The same variable `serve` reads for the deployment's standing admin, read
+    // the same way. `standing_admins` normalizes and drops a blank, so this is
+    // the value `AppConfig::bootstrap_admin` would produce.
+    let bootstrap_admin = std::env::var("OPENCOMPANY_ADMIN_EMAIL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let issued = bootstrap::issue_password(
+        bootstrap::PasswordIssueContext {
+            users: &users,
+            sessions: &sessions,
+            login_codes: &login_codes,
+            company: &id,
+            manifest_admins: &manifest_admins,
+            bootstrap_admin: bootstrap_admin.as_deref(),
+        },
+        &email,
+        &password,
+        require_change,
+    )
+    .await?;
+
+    let verb = if issued.created { "created" } else { "updated" };
+    println!("{verb} {} in `{}`", issued.email, id.as_ref());
+    if issued.must_change_password {
+        println!("they will be asked to replace this password on first sign-in");
+    }
+    Ok(())
+}
+
 /// `opencompany orphans` — the on-demand form of the boot check (issue #1077).
 ///
 /// Opens storage, reads the two collections, and prints the set difference both
@@ -1059,12 +1297,20 @@ async fn run_export(
 /// "the query ran and found three" is a success, not a failure. The findings
 /// are on stdout for a human and behind `--json` for anything else.
 async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
+    run_orphans_from(home, json, &ProcessEnv).await
+}
+
+async fn run_orphans_from(
+    home: Option<PathBuf>,
+    json: bool,
+    env: &dyn opencompany::app::config::EnvSource,
+) -> Result<()> {
     // Gate on OPENCOMPANY_TENANT_ID: the same condition that gates the
     // durable owner-row write at register_company. Without a tenant
     // namespace no owner rows are ever persisted, and reading zero owners
     // against N companies would report every company as orphaned.
-    let tenant_id = std::env::var("OPENCOMPANY_TENANT_ID")
-        .ok()
+    let tenant_id = env
+        .get("OPENCOMPANY_TENANT_ID")
         .filter(|v| !v.trim().is_empty());
     if let Some(tenant) = &tenant_id {
         // A namespace containing the `--` id delimiter would make the
@@ -1085,7 +1331,7 @@ async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
     }
 
     let home = resolve_home_migrated(home)?;
-    let settings = opencompany::store::StorageSettings::from_env()?;
+    let settings = opencompany::store::StorageSettings::from_env_source(env)?;
     let Some(handles) = opencompany::store::open_storage(&settings, &home).await? else {
         // `StorageKind::Fs` yields no handles at all, so there is no `owners`
         // collection and this condition cannot arise. Say that plainly rather
@@ -1193,7 +1439,9 @@ async fn run_import(path: PathBuf, home: Option<PathBuf>) -> Result<()> {
 /// restoring any fs-only secrets/keys the bundle carried.
 async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result<()> {
     let home_was_flagged = home.is_some();
-    use opencompany::store::export::{find_bundle_root, import_bundle, restore_fs_artifacts};
+    use opencompany::store::export::{
+        find_bundle_root, import_bundle_with_scopes, restore_fs_artifacts,
+    };
     use opencompany::store::paths::Bundle;
 
     let home = resolve_home_migrated(home)?;
@@ -1201,9 +1449,10 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     // Exclusive, same as `serve`: an import into stores a running host has
     // open is the single-writer violation the lock module exists to prevent.
     let _home_lock = opencompany::store::lock::acquire(&home)?;
-    let ((store, events, memory, context), facts, storage_kind) =
+    let ((store, events, memory, context), facts, scopes, storage_kind) =
         live_ports(&home, home_was_flagged).await?;
-    let id = import_bundle(&root, store, events, memory, context, facts).await?;
+    let id =
+        import_bundle_with_scopes(&root, store, events, memory, context, facts, scopes).await?;
     restore_fs_artifacts(&root, Bundle::new(home.clone(), &id).dir()).await?;
     // On a non-fs base backend the records above went to the live backend
     // while these artifacts (secrets/, keys/) are fs-only by design and land
@@ -1231,18 +1480,17 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
 /// what a boot would bind — you migrate *before* flipping the environment, so
 /// the environment still names the source. Only provider-backed engines can
 /// migrate (the seam is what `export_page`/`import_records` live on); the
-/// `store` default and the EngineCortex overlay are refused by name.
+/// `store` default is refused by name.
 #[cfg(feature = "tinymemory")]
 async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     use opencompany::store::StorageSettings;
-    use opencompany::store::memory::driver::{MemoryMode, open_driver};
+    use opencompany::store::memory::driver::open_driver;
     use opencompany::store::memory::migrate::migrate;
 
     let MemoryCmd::Migrate {
         to,
         to_url,
         to_api_key,
-        to_data_dir,
         page_size,
         dry_run,
         resume_cursor,
@@ -1263,27 +1511,12 @@ async fn run_memory_cmd(cmd: MemoryCmd) -> Result<()> {
     // (`store::memory::migrate::resolve_migrate_configs`), where the feature
     // lanes execute the guards' tests; the bin drives the loop and reports.
     let (from_config, to_config) = opencompany::store::memory::migrate::resolve_migrate_configs(
-        &settings,
-        &to,
-        to_url,
-        to_api_key,
-        to_data_dir,
+        &settings, &to, to_url, to_api_key,
     )?;
 
-    // The same exclusive root lock serve holds, whenever an embedded store is
-    // on either side: a migration reading a SQLite store a live host is
-    // writing walks a shifting export cursor (skipped or repeated records).
-    // Hosted-to-hosted has no local store to lock; the pause-first
-    // precondition printed below still applies to the remote writer.
-    let _home_lock = if matches!(from_config.mode, MemoryMode::Embedded)
-        || matches!(to_config.mode, MemoryMode::Embedded)
-    {
-        Some(opencompany::store::lock::acquire(&resolve_home_migrated(
-            None,
-        )?)?)
-    } else {
-        None
-    };
+    // Hosted providers have no local memory store to lock. The pause-first
+    // precondition printed below still applies to remote writers.
+    let _home_lock: Option<()> = None;
 
     let (from, _) = open_driver(&from_config)?.ok_or_else(|| {
         opencompany::error::OpenCompanyError::Config(
@@ -2003,7 +2236,6 @@ async fn async_main() -> Result<()> {
                     );
                 }
                 spawn_mailbox_poller(&state, &id, &shutdown, &mut scheduler_handles);
-                spawn_telegram_poller(&state, &id, &shutdown, &mut scheduler_handles);
             }
             if companies.is_empty() {
                 // Nothing was named on the command line, so adopt whatever this
@@ -2026,7 +2258,6 @@ async fn async_main() -> Result<()> {
                         scheduler_handles.push(handle);
                     }
                     spawn_mailbox_poller(&state, slug, &shutdown, &mut scheduler_handles);
-                    spawn_telegram_poller(&state, slug, &shutdown, &mut scheduler_handles);
                     println!(
                         "adopted company `{slug}` ({}) from {}",
                         manifest.company.name,
@@ -2048,6 +2279,7 @@ async fn async_main() -> Result<()> {
             // and fire claims are retired, and it covers a company registered
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
+            scheduler_handles.push(spawn_presence_sweeper(&state, &shutdown));
 
             // Stop the schedulers on a termination signal so background cycle
             // work halts with the process (lifecycle shutdown).
@@ -2116,6 +2348,13 @@ async fn async_main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::IssuePassword {
+            company,
+            email,
+            password,
+            no_change_required,
+            home,
+        }) => run_issue_password(company, email, password, !no_change_required, home).await,
         Some(Command::Orphans { home, json }) => run_orphans(home, json).await,
         Some(Command::Export {
             company,
@@ -2133,7 +2372,14 @@ async fn async_main() -> Result<()> {
             args,
         }) => run_openhuman(root, mode, release, dry_run, args).await,
         None => {
-            println!("opencompany {}", opencompany::VERSION);
+            // The commit as well as the version: `0.1.0` has been thousands of
+            // commits wide, so this line could not tell an operator which
+            // build they are actually holding.
+            println!(
+                "opencompany {} ({})",
+                opencompany::VERSION,
+                opencompany::BUILD_COMMIT
+            );
             Ok(())
         }
     }
@@ -2279,6 +2525,58 @@ mod test {
             assert!(!home.join("companies/companies").exists());
             let _ = std::fs::remove_dir_all(&home);
         }
+    }
+
+    #[test]
+    fn live_ports_layers_the_config_file_memory_section() {
+        // A self-hosted operator's engine selection lives only in `config.toml`
+        // (the console never exports environment variables), so `live_ports`
+        // must layer that section the way `serve` does — otherwise a bundle
+        // would read and write the base stores instead of the engine the host
+        // actually remembers with. This pins the load-and-layer composition
+        // `live_ports` feeds its settings through.
+        let tmp = std::env::temp_dir().join(format!(
+            "oc-bin-memcfg-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("config.toml"),
+            "[memory]\nbackend = \"remote\"\ndriver = \"supermemory\"\nurl = \"https://memory.example\"\n",
+        )
+        .unwrap();
+        let settings =
+            layer_config_memory(opencompany::store::StorageSettings::default(), &tmp).unwrap();
+        assert_eq!(
+            settings.memory_backend,
+            opencompany::store::MemoryBackend::Remote
+        );
+        assert_eq!(settings.memory_driver.as_deref(), Some("supermemory"));
+        assert_eq!(
+            settings.memory_url.as_deref(),
+            Some("https://memory.example")
+        );
+
+        // The absent-file shape (a fresh root, or the fs default) stays on the
+        // base backend's own memory.
+        let absent = std::env::temp_dir().join(format!(
+            "oc-bin-memcfg-absent-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&absent);
+        std::fs::create_dir_all(&absent).unwrap();
+        let settings =
+            layer_config_memory(opencompany::store::StorageSettings::default(), &absent).unwrap();
+        assert_eq!(
+            settings.memory_backend,
+            opencompany::store::MemoryBackend::Store
+        );
+        let _ = std::fs::remove_dir_all(&absent);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]
@@ -2562,15 +2860,9 @@ mod test {
     /// reviewer's false-positive case, with no database needed to hit it.
     #[tokio::test]
     async fn orphans_refuses_to_run_without_a_tenant_namespace() {
-        // Save and restore so a box configured for shared-single-DB (or a
-        // parallel test) is unaffected.
-        let previous = std::env::var("OPENCOMPANY_TENANT_ID").ok();
-        unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") };
-        let err = run_orphans(None, false).await.unwrap_err();
-        match previous {
-            Some(value) => unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", value) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") },
-        }
+        let err = run_orphans_from(None, false, &opencompany::app::config::MapEnv::default())
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(&err, opencompany::error::OpenCompanyError::Config(_)),

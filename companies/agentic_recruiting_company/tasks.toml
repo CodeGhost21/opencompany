@@ -1,0 +1,47 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a recruiting firm is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-scorecard"
+title = "Set up the scorecard"
+priority = "high"
+note = """
+Decide what a `scorecards` row measures before anyone is interviewed: the \
+handful of things that actually predict success in the role, and what \
+evidence counts for each.
+
+A scorecard written after the interviews is a record of who was liked. \
+Written before, it is the only thing that makes candidates comparable.
+
+Done when the open searches each have a scorecard.\
+"""
+
+[[task]]
+id = "set-up-the-search-brief"
+title = "Set up the search brief"
+priority = "high"
+note = """
+Open a `searches` row for each live search with what the client actually \
+needs — not the job description, the problem the hire is meant to solve.
+
+Done when every live search has a brief the client has agreed to.\
+"""
+
+[[task]]
+id = "set-up-the-candidate-record"
+title = "Set up the candidate record"
+priority = "medium"
+note = """
+State what a `candidates` row carries and when it is updated, so a \
+pipeline can be read without asking anybody.
+
+Done when the rule is recorded and the live pipeline has rows.\
+"""

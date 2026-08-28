@@ -76,4 +76,14 @@ describe("roleSubtitle", () => {
 
     expect(roleSubtitle(member.name, member.role)).toBe("Growth Analyst");
   });
+
+  it("keeps global-baseline provenance for the roster to show", () => {
+    const member = fromDto({
+      id: "operations",
+      role: "Operations",
+      global: true,
+    } satisfies TeamMemberDto);
+
+    expect(member.global).toBe(true);
+  });
 });

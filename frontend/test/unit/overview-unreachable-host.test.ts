@@ -20,16 +20,23 @@ import type { DeskDto, TeamMemberDto } from "@/api/types";
  * `KnowledgeGraph` — the lazy-loaded graph itself — is mocked out below. It
  * drives a force simulation off `requestAnimationFrame` and reads
  * `window.matchMedia`, neither of which jsdom provides, and none of that
- * machinery is under test here: what is under test is the snapshot corner
- * `Overview` renders around it.
+ * machinery is under test here: what is under test is the outage state
+ * `Overview` renders over it.
  */
+
+// Captured by the mock below so a test can assert the outage gates the
+// graph's keyboard (issue #1314).
+let lastCovered: boolean | undefined;
 
 vi.mock("@/views/overview/kg/KnowledgeGraph", () => ({
   // The snapshot corner is a slot the graph's shell positions (issue #1307),
   // because only the shell knows how wide the detail rail is. The stand-in
-  // therefore has to render that slot — a mock that dropped it would take the
-  // whole surface under test with it and pass by drawing nothing.
-  KnowledgeGraph: ({ statusSlot }: { statusSlot?: unknown }) => statusSlot ?? null,
+  // therefore has to render that slot; the outage itself is owned by Overview
+  // and deliberately covers that chrome (issue #1314).
+  KnowledgeGraph: ({ statusSlot, covered }: { statusSlot?: unknown; covered?: boolean }) => {
+    lastCovered = covered;
+    return statusSlot ?? null;
+  },
 }));
 
 const { Overview } = await import("@/views/Overview");
@@ -43,10 +50,12 @@ function member(id: string, role = "Analyst"): TeamMemberDto {
 }
 
 /** Every `client.get` path this component reads, keyed by its suffix. */
-const HEALTHY_GET: Record<string, unknown[]> = {
+const HEALTHY_GET: Record<string, unknown> = {
   "/tasks": [],
   "/users": [],
-  "/memory": [],
+  // `GET /memory` answers with `{ items, totalContext, contextTruncated }` —
+  // the truncation metadata rides beside the rows from one read.
+  "/memory": { items: [], totalContext: 0, contextTruncated: false },
   "/workflows": [],
 };
 
@@ -83,6 +92,16 @@ function goUnreachable(mocks: ReturnType<typeof fakeClient>) {
   mocks.listTeam.mockImplementation(fail);
 }
 
+/** Restores the six reads after `goUnreachable`, so a test can heal a host. */
+function goHealthy(mocks: ReturnType<typeof fakeClient>) {
+  mocks.get.mockImplementation((path: string) => {
+    const suffix = Object.keys(HEALTHY_GET).find((k) => path.endsWith(k));
+    return Promise.resolve(suffix ? HEALTHY_GET[suffix] : []);
+  });
+  mocks.listDesks.mockResolvedValue([]);
+  mocks.listTeam.mockResolvedValue([]);
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -91,6 +110,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  lastCovered = undefined;
 });
 
 afterEach(() => {
@@ -128,17 +148,189 @@ function clickRefresh() {
   button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 }
 
+function retryButton(): HTMLButtonElement | undefined {
+  return (
+    container.querySelector<HTMLButtonElement>('[aria-label="Retry loading the company overview"]') ??
+    undefined
+  );
+}
+
 describe("a host that cannot be reached at all", () => {
-  it("says so, and does not draw an empty company", async () => {
+  it("keeps Refresh at a 24px touch target below the desktop breakpoint", async () => {
+    await render(fakeClient().client);
+
+    const refresh = container.querySelector('[aria-label="Refresh the graph"]');
+    expect(refresh).not.toBeNull();
+    expect(refresh?.className).toContain("min-h-6");
+    expect(refresh?.className).toContain("md:min-h-0");
+    // A healthy host leaves the graph interactive — nothing covered.
+    expect(lastCovered).toBe(false);
+  });
+
+  it("covers the empty graph with a centered, actionable outage state", async () => {
     const unreachable = fakeClient();
     goUnreachable(unreachable);
     await render(unreachable.client);
 
     expect(alertText()).toContain("Could not reach the company");
+    expect(container.querySelector('[data-testid="overview-outage"]')).not.toBeNull();
+    expect(retryButton()?.textContent).toContain("Try again");
     // Never a company with nothing in it: the corner says there was no
     // snapshot to draw, not that one was taken and came back empty.
     expect(snapshotText()).not.toContain("Snapshot");
     expect(snapshotText()).toContain("No snapshot yet");
+  });
+
+  it("makes the covered graph inert while the outage shows", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+
+    // The overlay exists and the covered shell — the wrapper around the
+    // graph and its status slot — is inert, so a keyboard user cannot tab
+    // into invisible Refresh / pillar / detail controls underneath (issue
+    // #1314), and a screen reader does not expose the covered graph.
+    expect(container.querySelector('[data-testid="overview-outage"]')).not.toBeNull();
+    const shell = container.querySelector('[data-graph-shell]');
+    expect(shell).not.toBeNull();
+    expect(shell?.hasAttribute("inert")).toBe(true);
+  });
+
+  it("flags the graph as covered while the outage shows", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+
+    // `covered` is handed to the graph so its global keyboard handler is
+    // suspended too — `inert` cannot silence a `window` listener (issue
+    // #1314).
+    expect(lastCovered).toBe(true);
+  });
+
+  it("retries from the outage state", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+    const readsBeforeRetry = unreachable.get.mock.calls.length;
+
+    await act(async () => {
+      retryButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(unreachable.get.mock.calls.length).toBeGreaterThan(readsBeforeRetry);
+  });
+
+  it("returns focus to the graph's Refresh control after a successful retry", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+
+    // The outage overlay grabs focus so a keyboard user lands on the
+    // explanation and its retry control (issue #1314).
+    const outage = container.querySelector('[data-testid="overview-outage"]');
+    expect(outage).not.toBeNull();
+    expect(document.activeElement).toBe(outage);
+
+    // The host comes back; the retry now succeeds and the overlay unmounts.
+    goHealthy(unreachable);
+    await act(async () => {
+      retryButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(container.querySelector('[data-testid="overview-outage"]')).toBeNull();
+    // Dismissing the outage removed the focused button; focus must land back
+    // on a control — the graph's Refresh — not drop to <body>.
+    expect(document.activeElement).toBe(
+      container.querySelector('[aria-label="Refresh the graph"]'),
+    );
+  });
+
+  it("does not steal focus from a user who moved it during a slow retry", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+    expect(retryButton()).toBeDefined();
+
+    // Heal the host, but keep the company's one saved flow's graph read
+    // pending until the test releases it — so there is a real window between
+    // the outage overlay dismissing and the retried load answering.
+    let releaseFlowRead: (() => void) | undefined;
+    const flowReadGate = new Promise<void>((resolve) => {
+      releaseFlowRead = resolve;
+    });
+    unreachable.get.mockImplementation((path: string): Promise<unknown> => {
+      const suffix = Object.keys(HEALTHY_GET).find((k) => path.endsWith(k));
+      if (suffix === "/workflows") {
+        return Promise.resolve([
+          { id: "flow-1", name: "Flow", description: "", editable: false, enabled: true },
+        ]);
+      }
+      if (path.endsWith("/workflows/flow-1")) {
+        return flowReadGate.then(() => ({ nodes: [], edges: [] }));
+      }
+      return Promise.resolve(suffix ? HEALTHY_GET[suffix] : []);
+    });
+
+    await act(async () => {
+      retryButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    // The overlay is gone and focus landed on the graph shell — not <body> —
+    // while the flow's graph read is still in flight.
+    expect(container.querySelector('[data-testid="overview-outage"]')).toBeNull();
+    expect(document.activeElement).toBe(container.querySelector('[data-graph-shell]'));
+
+    // The user moves focus somewhere of their own before the retry answers.
+    const sentinel = document.createElement("button");
+    sentinel.textContent = "sentinel";
+    document.body.appendChild(sentinel);
+    sentinel.focus();
+    expect(document.activeElement).toBe(sentinel);
+
+    // The retried load completes; the deferred hand-off must not yank focus
+    // back to Refresh over the user's own choice.
+    await act(async () => {
+      releaseFlowRead?.();
+    });
+    await act(async () => {});
+
+    expect(document.activeElement).toBe(sentinel);
+    sentinel.remove();
+  });
+
+  it("does not reclaim focus from the sidebar when the outage dismisses", async () => {
+    const unreachable = fakeClient();
+    goUnreachable(unreachable);
+    await render(unreachable.client);
+
+    // The graph shell is inert, but the app around it is not — a keyboard
+    // user can tab out of the outage overlay into the sidebar while a retry
+    // is pending. Plant focus there.
+    const sidebarLink = document.createElement("a");
+    sidebarLink.href = "#/company/desks";
+    sidebarLink.textContent = "Desks";
+    document.body.appendChild(sidebarLink);
+    sidebarLink.focus();
+    expect(document.activeElement).toBe(sidebarLink);
+
+    // The host comes back; the retry succeeds and the overlay unmounts.
+    // Focus must stay on the sidebar, not jump back to the graph.
+    goHealthy(unreachable);
+    await act(async () => {
+      retryButton()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(container.querySelector('[data-testid="overview-outage"]')).toBeNull();
+    expect(document.activeElement).toBe(sidebarLink);
+    sidebarLink.remove();
   });
 
   it("keeps the previous snapshot's time rather than re-stamping it", async () => {

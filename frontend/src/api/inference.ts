@@ -67,6 +67,29 @@ export interface InferenceStatus {
    * (this host has no harness path at all) — tell those apart with `cognition`.
    */
   restartRequired: boolean;
+  /**
+   * Whether the harness cognition path is reachable on this host at all (the
+   * `openhuman` feature compiled in and a pool attached). `false` means no
+   * model configuration can ever move this company onto the design path, so
+   * the setup dialog's "set up a model" call-to-action would be a dead end —
+   * it omits the CTA rather than send the operator round a redesign loop that
+   * cannot end.
+   */
+  harnessReachable: boolean;
+  /**
+   * Whether this host can rebuild the company's runtime in place, so the
+   * console may offer to perform the restart `restartRequired` names (issue
+   * #1736).
+   *
+   * The two are independent, and the card only had the first: it rendered a
+   * "Restart now" button on hosts where `POST …/inference/restart` can only
+   * answer "this host cannot rebuild a company runtime in place". An operator
+   * was told a restart was required, handed the control for it, and the control
+   * could never work. `false` means name the remedy instead of offering the
+   * action — the same rule the setup capability flags exist for (`api/setup.ts`):
+   * say "not in this build" rather than offer a switch that does nothing.
+   */
+  canRebuildInPlace: boolean;
 }
 
 /** The set-provider body. `key` is write-only (never returned). */

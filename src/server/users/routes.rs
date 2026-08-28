@@ -25,7 +25,7 @@
 //! kind of grant, not a second one: eligibility only, minted on redemption,
 //! revoked by unsetting the source.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -79,7 +79,7 @@ pub fn router() -> Router<AppState> {
         .merge(public_scoped("/auth/verify", post(verify_code)))
         .merge(public_scoped("/auth/login", post(login_password)))
         .merge(public_scoped("/auth/logout", post(logout)))
-        .merge(public_scoped("/auth/me", get(me)))
+        .merge(public_scoped("/auth/me", get(me).patch(edit_me)))
         .merge(public_scoped(
             "/auth/hub",
             get(hub_providers).post(hub_sign_in),
@@ -99,6 +99,13 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct RequestCode {
     email: String,
+    /// Where the console should land after this magic-link sign-in, carried as
+    /// a URL fragment (`#/company`). Only setup's hand-off asks for one today;
+    /// a normal sign-in omits it and lands wherever it always did. The value is
+    /// mailed inside the login link, so it is validated to a conservative
+    /// fragment subset — see [`redirect_fragment`].
+    #[serde(default)]
+    redirect: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,6 +153,19 @@ struct HubProvidersResult {
     providers: Vec<HubProviderOption>,
 }
 
+/// What the console may ask a hub sign-in to return to, beyond its company.
+#[derive(Debug, Deserialize)]
+struct HubProvidersQuery {
+    /// The console destination the hub sign-in should land on, asked as a
+    /// *query* parameter because the console's fragment cannot survive the
+    /// OAuth round trip — the hub appends `token=…&key=auth` to the return URI
+    /// it was given, and anything after a `#` there would swallow them. Only
+    /// setup's dead-link recovery forwards a destination today (`from=setup`);
+    /// every other sign-in omits it and lands wherever it always did.
+    #[serde(default)]
+    from: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct LoginPassword {
     email: String,
@@ -165,6 +185,15 @@ pub struct MeResult {
     email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
+    /// The face this person chose (`docs/spec/runtime/avatars.md`), absent when
+    /// they have not chosen one.
+    ///
+    /// Absent is a real answer and is why the key is skipped rather than
+    /// defaulted: the console draws the mascot it hashes from `id` in that case,
+    /// and a client that could not tell the two apart would have no way to offer
+    /// "use the default face again".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
     role: UserRole,
     company: String,
     /// Whether this user has a password set (vs magic-link only).
@@ -316,13 +345,10 @@ pub(crate) async fn bootstrap_admins(
 ///
 /// Split out so the invite listing can tell the two sources apart without
 /// reading the manifest twice.
-fn with_platform_admin(config: &AppConfig, mut admins: Vec<String>) -> Vec<String> {
-    if let Some(email) = config.bootstrap_admin()
-        && !admins.contains(&email)
-    {
-        admins.push(email);
-    }
-    admins
+fn with_platform_admin(config: &AppConfig, admins: Vec<String>) -> Vec<String> {
+    // Delegated so the host-side `issue-password` command and this route cannot
+    // come to different answers about who a company already admits (#1718).
+    super::bootstrap::standing_admins(&admins, config.bootstrap_admin().as_deref())
 }
 
 /// Whether `email` may hold an account in this company, and as what role.
@@ -363,6 +389,60 @@ async fn eligibility(
     Ok(invite.filter(|i| i.is_redeemable(now)).map(|i| i.role))
 }
 
+/// Write `user`, or adopt the record that reached its address first.
+///
+/// Every caller below is find-then-create: look the address up, and mint a
+/// record when it is absent. That pair is not atomic, and each caller mints a
+/// **fresh `generate_id()`**, so two requests arriving together both miss the
+/// lookup and then present two different ids for one address. The store is
+/// right to refuse the second — `upsert_user` holds a lock and rejects an email
+/// already held by another id, which is the invariant that keeps
+/// `find_user_by_email` unambiguous — but the caller's question was wrong. It
+/// asked "may I create this user", when what it needed to know was "who owns
+/// this address now".
+///
+/// So a `Conflict` here is read as "somebody else materialized it", and the
+/// winner is returned. That is what makes the operation idempotent under
+/// concurrency, which is what both callers' doc comments already claim.
+///
+/// Issue #1833. On a desktop first boot three requests raced
+/// [`local_owner_record`]; one won and two were refused 16ms later, and
+/// `graphql::auth` turns that refusal into `GatesRefused` — so the console
+/// reported the healthy host it was talking to as "Unreachable" and offered no
+/// way in. A restart fixed it permanently, because by then the record existed.
+///
+/// **Only `Conflict` is adopted.** Every other error still propagates, so the
+/// store-outage refusal that `graphql::auth` deliberately makes fatal stays
+/// fatal: a store that cannot be read must not read as "this user is fine".
+///
+/// A `Conflict` with nothing behind it returns the original error rather than
+/// retrying. That means the winner was deleted between the write and the
+/// re-read, and looping on it would spin against a store doing something this
+/// function has no business papering over.
+pub(super) async fn insert_or_adopt(
+    runtime: &CompanyRuntime,
+    user: UserRecord,
+) -> Result<UserRecord, OpenCompanyError> {
+    let id = runtime.id();
+    match runtime.users().upsert_user(id, &user).await {
+        Ok(()) => Ok(user),
+        Err(OpenCompanyError::Conflict(conflict)) => {
+            match runtime.users().find_user_by_email(id, &user.email).await? {
+                Some(winner) => {
+                    tracing::debug!(
+                        company = %id,
+                        email = %user.email,
+                        "adopted the user record that won the materialization race"
+                    );
+                    Ok(winner)
+                }
+                None => Err(OpenCompanyError::Conflict(conflict)),
+            }
+        }
+        Err(other) => Err(other),
+    }
+}
+
 /// Returns the existing user for `email`, or materializes one from their
 /// eligibility.
 ///
@@ -383,6 +463,7 @@ async fn upsert_from_eligibility(
         id: generate_id(),
         email: email.to_string(),
         display_name: None,
+        avatar: None,
         role,
         status: UserStatus::Active,
         password_hash: None,
@@ -391,7 +472,7 @@ async fn upsert_from_eligibility(
         last_seen_at_millis: Some(now),
         updated_at_millis: now,
     };
-    runtime.users().upsert_user(id, &user).await?;
+    let user = insert_or_adopt(runtime, user).await?;
     // Mark any real invite as redeemed. A manifest-bootstrapped admin has no
     // invite record, so this is a no-op for them.
     if let Some(mut invite) = runtime.users().find_invite_by_email(id, email).await? {
@@ -426,6 +507,7 @@ pub(crate) async fn local_owner_record(
         id: generate_id(),
         email: key,
         display_name: None,
+        avatar: None,
         role: UserRole::Admin,
         status: UserStatus::Active,
         // No password and no way to set one: `auth/password` refuses outside
@@ -436,8 +518,7 @@ pub(crate) async fn local_owner_record(
         last_seen_at_millis: Some(now),
         updated_at_millis: now,
     };
-    runtime.users().upsert_user(id, &user).await?;
-    Ok(user)
+    insert_or_adopt(runtime, user).await
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +589,7 @@ async fn mint_session(
     runtime: &CompanyRuntime,
     user: &UserRecord,
     headers: &HeaderMap,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let company = runtime.id();
     // A company whose id cannot safely name a cookie cannot hold a session;
     // refuse rather than emit a header its id could have chosen attributes for.
@@ -519,7 +600,8 @@ async fn mint_session(
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "this company's id cannot carry a session cookie".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     };
     let plaintext = create_session(
         runtime,
@@ -531,8 +613,7 @@ async fn mint_session(
             .and_then(|v| v.to_str().ok())
             .map(|v| v.chars().take(200).collect()),
     )
-    .await
-    .map_err(|e| ApiError(e).into_response())?;
+    .await?;
 
     // The header carrier hands the token to the client and sets **no** cookie.
     // Setting both would leave one session reachable two ways, and the cookie
@@ -544,7 +625,8 @@ async fn mint_session(
             return Err(ApiError(OpenCompanyError::InvalidRequest(
                 "this company's id cannot carry a session header".to_string(),
             ))
-            .into_response());
+            .into_response()
+            .into());
         };
         return Ok(Json(SignInResult {
             user: me_result(company, user),
@@ -572,6 +654,7 @@ fn me_result(company: &CompanyId, user: &UserRecord) -> MeResult {
         id: user.id.clone(),
         email: user.email.clone(),
         display_name: user.display_name.clone(),
+        avatar: user.avatar.clone(),
         role: user.role,
         company: company.as_ref().to_string(),
         has_password: user.password_hash.is_some(),
@@ -590,17 +673,15 @@ async fn request_code(
     company: PublicCompany,
     State(state): State<AppState>,
     Json(body): Json<RequestCode>,
-) -> Result<Json<RequestCodeResult>, Response> {
+) -> Result<Json<RequestCodeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let email = normalize_email(&body.email);
     let now = now_millis();
 
-    let eligible = eligibility(state.config(), &runtime, &email, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let eligible = eligibility(state.config(), &runtime, &email, now).await?;
     let Some(_role) = eligible else {
         // Unknown or uninvited: no code, no mail, same answer.
         return Ok(Json(RequestCodeResult {
@@ -624,8 +705,7 @@ async fn request_code(
         && let Some(previous) = runtime
             .login_codes()
             .latest_for_email(runtime.id(), &email)
-            .await
-            .map_err(|e| ApiError(e).into_response())?
+            .await?
         && now.saturating_sub(previous.created_at_millis) < RESEND_INTERVAL_MILLIS
     {
         tracing::debug!(company = %runtime.id(), "login link throttled");
@@ -649,17 +729,19 @@ async fn request_code(
     runtime
         .login_codes()
         .delete_for_email(runtime.id(), &email)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
-    runtime
-        .login_codes()
-        .create(runtime.id(), &record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
+    runtime.login_codes().create(runtime.id(), &record).await?;
 
     // Deliver. A send failure must not change the response — it would report
     // that the address exists.
-    let delivered = deliver_code(&state, &runtime, &email, &plaintext).await;
+    let delivered = deliver_code(
+        &state,
+        &runtime,
+        &email,
+        &plaintext,
+        body.redirect.as_deref(),
+    )
+    .await;
 
     // Echoing the code makes local development work with no mail server. It is
     // also, literally, returning a credential in an HTTP response — so it is
@@ -718,8 +800,53 @@ pub(crate) fn echoes_code_in_response(state: &AppState) -> bool {
     state.config().is_local_only() && !mail_transport_wired(state)
 }
 
+/// The safe subset of a URL fragment a mailed login link may carry.
+///
+/// Only the fragment part of a link is ever client-supplied, and a value that
+/// cannot be honoured is dropped rather than refused — a malformed redirect
+/// must not block sign-in. The set is deliberately small: fragment characters
+/// that route the console (`#/company`), with nothing that could break the
+/// link out of a mail client's linkification (`@`, whitespace, control
+/// characters).
+fn redirect_fragment(redirect: &str) -> Option<String> {
+    let safe = redirect.starts_with('#')
+        && redirect.len() <= 128
+        && redirect.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'#' | b'/' | b'?' | b'&' | b'=' | b'-' | b'_' | b'.')
+        });
+    safe.then(|| redirect.to_string())
+}
+
+/// The safe subset of a hub sign-in destination hint.
+///
+/// `from` is carried in the hub's return URI as a query parameter — a fragment
+/// would swallow the hub's own `token=` on the way back, which is why this is
+/// not a [`redirect_fragment`]. It is round-tripped through an external service
+/// and back into the console's address bar, so it is validated to a slug
+/// subset (`setup`, today): a value that cannot be honoured is dropped rather
+/// than refused, exactly like [`redirect_fragment`].
+fn redirect_from(from: &str) -> Option<&str> {
+    let safe = from.len() <= 32
+        && from
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    safe.then_some(from)
+}
+
 /// Mails the magic link. Returns whether it was actually sent.
-async fn deliver_code(state: &AppState, runtime: &CompanyRuntime, email: &str, code: &str) -> bool {
+///
+/// `redirect`, when present, is appended to the link so the console lands on
+/// the fragment the requester asked for (setup's `#/company`, for example)
+/// rather than its default view. Sanitized by [`redirect_fragment`]: an
+/// invalid value means the link is mailed without it, never refused.
+async fn deliver_code(
+    state: &AppState,
+    runtime: &CompanyRuntime,
+    email: &str,
+    code: &str,
+    redirect: Option<&str>,
+) -> bool {
     // Asked through the shared predicate so "can this host mail at all" has one
     // answer: the throttle and the dev echo both branch on it, and a second
     // spelling here is how those three drift apart.
@@ -731,7 +858,10 @@ async fn deliver_code(state: &AppState, runtime: &CompanyRuntime, email: &str, c
         return false;
     };
     let base = state.config().host_base_url();
-    let link = format!("{base}/login?company={}&code={code}", runtime.id().as_ref());
+    let mut link = format!("{base}/login?company={}&code={code}", runtime.id().as_ref());
+    if let Some(fragment) = redirect.and_then(redirect_fragment) {
+        link.push_str(&fragment);
+    }
     let company_name = load_manifest(runtime)
         .await
         .ok()
@@ -752,7 +882,10 @@ async fn deliver_code(state: &AppState, runtime: &CompanyRuntime, email: &str, c
         Ok(()) => true,
         Err(err) => {
             // Logged, not returned: the caller must not learn the address exists.
-            tracing::warn!(company = %runtime.id(), "login mail failed: {err}");
+            // `error!`, not `warn!`: without `RUST_LOG` the default
+            // `EnvFilter` shows errors only, and this is the sole record of why
+            // nobody can sign in.
+            tracing::error!(company = %runtime.id(), "login mail failed: {err}");
             false
         }
     }
@@ -764,10 +897,10 @@ async fn verify_code(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<VerifyCode>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let now = now_millis();
     // Single use is the store's guarantee, not a check here: `consume` matches
@@ -775,24 +908,18 @@ async fn verify_code(
     let consumed = runtime
         .login_codes()
         .consume(runtime.id(), &token::sha256_hex(&body.code), now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
     let Some(code) = consumed else {
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
 
     // The address comes from the *code*, never from the request: otherwise
     // anyone holding any valid link could name whoever they liked.
-    let Some(role) = eligibility(state.config(), &runtime, &code.email, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
-    else {
+    let Some(role) = eligibility(state.config(), &runtime, &code.email, now).await? else {
         // Eligibility can lapse between mailing and clicking.
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
-    let user = upsert_from_eligibility(&runtime, &code.email, role, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let user = upsert_from_eligibility(&runtime, &code.email, role, now).await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -825,9 +952,17 @@ fn hub_refused(code: &'static str, message: &'static str) -> Response {
 ///
 /// Carries `?company=` so the console lands scoped to the company it left from.
 /// The hub appends its own `token=…&key=auth` with `&`, so the two coexist.
-fn console_redirect_uri(state: &AppState, company: &CompanyId) -> String {
+///
+/// `from`, when the console asked for one, names the destination the sign-in
+/// should land on. It rides here as a query parameter (a fragment would capture
+/// the hub's `token=` on the way back) and is validated by [`redirect_from`].
+fn console_redirect_uri(state: &AppState, company: &CompanyId, from: Option<&str>) -> String {
     let origin = state.config().host_base_url();
-    format!("{}/?company={}", origin.trim_end_matches('/'), company)
+    let mut uri = format!("{}/?company={}", origin.trim_end_matches('/'), company);
+    if let Some(from) = from.and_then(redirect_from) {
+        uri.push_str(&format!("&from={from}"));
+    }
+    uri
 }
 
 /// `GET …/auth/hub` — the ecosystem sign-in buttons, ready to render.
@@ -839,6 +974,7 @@ fn console_redirect_uri(state: &AppState, company: &CompanyId) -> String {
 async fn hub_providers(
     company: PublicCompany,
     State(state): State<AppState>,
+    Query(query): Query<HubProvidersQuery>,
 ) -> Json<HubProvidersResult> {
     // No exchange means no way to check a token that came back, so there is no
     // honest button to offer. Refusing here — rather than at redemption — is
@@ -854,7 +990,7 @@ async fn hub_providers(
             providers: Vec::new(),
         });
     }
-    let redirect_uri = console_redirect_uri(&state, company.runtime.id());
+    let redirect_uri = console_redirect_uri(&state, company.runtime.id(), query.from.as_deref());
     // The same judgement one step earlier in the flow. A hosted console's
     // `https` origin is refused by the hub's redirect gate with a `400` raised
     // before the provider handshake begins (issue #512), so the button is not
@@ -910,10 +1046,10 @@ async fn hub_sign_in(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<HubToken>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     // Refuse before going anywhere when this host has no hub to ask. Accepting
@@ -922,7 +1058,8 @@ async fn hub_sign_in(
         return Err(hub_refused(
             "hub_unavailable",
             "this host is not part of a TinyHumans ecosystem",
-        ));
+        )
+        .into());
     };
 
     // The hub answering is what proves the token was real — this tenant cannot
@@ -935,33 +1072,26 @@ async fn hub_sign_in(
         // error type otherwise maps to would tell the user the ecosystem is
         // down when all they need to do is sign in again.
         Err(OpenCompanyError::TinyHumans { code, .. }) if code.starts_with("http_4") => {
-            return Err(hub_refused(
-                "hub_rejected",
-                "that sign-in has expired — sign in again",
-            ));
+            return Err(
+                hub_refused("hub_rejected", "that sign-in has expired — sign in again").into(),
+            );
         }
         // Anything else really is the hub being unreachable or wrong, and keeps
         // its 502/503 so an operator can tell the two apart.
-        Err(err) => return Err(ApiError(err).into_response()),
+        Err(err) => return Err(ApiError(err).into_response().into()),
     };
 
     let email = normalize_email(&identity.email);
     let now = now_millis();
-    let Some(role) = eligibility(state.config(), &runtime, &email, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
-    else {
+    let Some(role) = eligibility(state.config(), &runtime, &email, now).await? else {
         // Signed in to the ecosystem, but not a person this company knows. A
         // distinct code so the console can say "ask an admin to invite you"
         // instead of "that sign-in is dead".
-        return Err(hub_refused(
-            "not_a_member",
-            "that account has no access to this company",
-        ));
+        return Err(
+            hub_refused("not_a_member", "that account has no access to this company").into(),
+        );
     };
-    let user = upsert_from_eligibility(&runtime, &email, role, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let user = upsert_from_eligibility(&runtime, &email, role, now).await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -971,10 +1101,10 @@ async fn login_password(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<LoginPassword>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let email = normalize_email(&body.email);
     let now = now_millis();
@@ -982,26 +1112,25 @@ async fn login_password(
     let user = runtime
         .users()
         .find_user_by_email(runtime.id(), &email)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
 
     // Every path with no hash to check burns equivalent work first, so an
     // unknown address costs the same wall-clock as a wrong password.
     let Some(user) = user else {
         password::dummy_verify(&body.password);
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
     if user.status != UserStatus::Active {
         password::dummy_verify(&body.password);
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     }
     let Some(hash) = user.password_hash.as_deref() else {
         // Magic-link-only account.
         password::dummy_verify(&body.password);
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
     if !password::verify(&body.password, hash) {
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     }
 
     let mut user = user;
@@ -1017,18 +1146,18 @@ async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // Nothing to revoke where nothing was minted. A `none`-mode principal is
     // resolved from the request, not from a stored session, so "log out" has no
     // meaning there and quietly succeeding would tell the console it had signed
     // someone out when the very next request is authenticated again.
     if let Some(refusal) = wrong_mode_for_login(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let insecure = !state.config().host_base_url().starts_with("https://");
     let Some(name) = cookie::session_cookie_name(runtime.id()) else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
 
     // Revoke server-side when the cookie names a real session; clearing the
@@ -1056,17 +1185,150 @@ async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<MeResult>, Response> {
+) -> Result<Json<MeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
     let user = runtime
         .users()
         .get_user(runtime.id(), &principal.user_id)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(no_session)?;
+    Ok(Json(me_result(runtime.id(), &user)))
+}
+
+/// What a person may change about themselves.
+///
+/// Both fields are **double options**, the same three-state contract the
+/// team-edit routes use:
+///
+/// | body | parses as | means |
+/// |---|---|---|
+/// | `{}` | `None` | leave it alone |
+/// | `{"avatar": null}` | `Some(None)` | back to the default |
+/// | `{"avatar": "tiny:teal"}` | `Some(Some(…))` | this one |
+///
+/// Collapsing the first two would make every partial save erase the field it
+/// did not mention, which on a two-field profile form means saving a name wipes
+/// the face.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditMe {
+    #[serde(default, deserialize_with = "crate::server::ops::team::double_option")]
+    display_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::server::ops::team::double_option")]
+    avatar: Option<Option<String>>,
+}
+
+/// `PATCH …/auth/me` — change your own name or face.
+///
+/// # Why this is not the admin route
+///
+/// `PATCH …/users/{id}` can already set somebody's `displayName`, and it is
+/// admin-only — correct for an admin making a roster of raw addresses legible,
+/// and useless for the case this route exists for. Naming yourself and choosing
+/// your own face are not administrative acts, and gating them behind an admin
+/// would mean a member's own identity in the company is something they have to
+/// ask for. So this route authorises on **being** the user rather than on a
+/// role: there is no `user_id` in the path at all, which is what makes it
+/// impossible to point at somebody else.
+///
+/// Every sign-in mode has it, including `none`: the single local owner of a
+/// company with no sign-in is still a person with a name and a face.
+async fn edit_me(
+    company: PublicCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    Json(body): Json<EditMe>,
+) -> Result<Json<MeResult>, crate::server::Rejection> {
+    let runtime = company.runtime.clone();
+    let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
+        return Err(no_session().into());
+    };
+    // A temporary password is for replacing itself, not for spending on the
+    // account's public name or face. An admin who reset a password knows the
+    // value, so a session opened with one must not be able to change what the
+    // rest of the company sees before the user has chosen a private one; the
+    // deliberately-public `GET` stays open so they can still read who they are
+    // and land on the set-password route. Same refusal
+    // [`refuse_until_password_changed`](crate::server::platform_auth::refuse_until_password_changed)
+    // returns for the routes that go through the extractors.
+    if principal.must_change_password {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "set a new password before continuing",
+                "code": "password_change_required",
+            })),
+        )
+            .into_response()
+            .into());
+    }
+    // The avatar resolve is the one slow part of this handler — a workspace
+    // read of an uploaded image — and `upsert_user` below replaces the *entire*
+    // record with whatever `get_user` returned. Resolving the face before that
+    // read keeps the record we persist from being loaded ahead of a long await:
+    // a `status`, `role` or `password_hash` an admin changed while the image was
+    // being looked up is read, not resurrected. (The residual read-to-write gap
+    // is systemic — every user write in this store replaces the whole record —
+    // and closing it for good is a store-level partial update, not something a
+    // route can do alone.)
+    let avatar = match body.avatar {
+        // Field absent — leave the face alone. `Some` here means "the body spoke
+        // about the avatar"; the inner value is the stored reference (`None`
+        // clears back to the hashed default).
+        None => None,
+        Some(inner) => Some(
+            match inner
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                // Validated against what this host holds before it is stored — the
+                // value ends up in an `src=` on every surface that draws this
+                // person's face. See `crate::company::avatar`.
+                Some(value) => Some(
+                    crate::company::avatar::resolve(
+                        runtime.workspace().as_ref(),
+                        runtime.id(),
+                        &value,
+                    )
+                    .await
+                    .map_err(crate::server::Rejection::from)?,
+                ),
+                None => None,
+            },
+        ),
+    };
+    let mut user = runtime
+        .users()
+        .get_user(runtime.id(), &principal.user_id)
+        .await
+        .map_err(crate::server::Rejection::from)?
+        .ok_or_else(no_session)?;
+
+    // A blank name is not a name: an emptied field is the person asking for the
+    // derived one back, which is the same intent `null` carries, so the two
+    // normalize to one stored state rather than to a name that renders as a gap.
+    if let Some(name) = body.display_name {
+        let name = name
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        if let Some(name) = &name {
+            super::validate_display_name(name)?;
+        }
+        user.display_name = name;
+    }
+    if let Some(avatar) = avatar {
+        user.avatar = avatar;
+    }
+    user.updated_at_millis = now_millis();
+    runtime
+        .users()
+        .upsert_user(runtime.id(), &user)
+        .await
+        .map_err(crate::server::Rejection::from)?;
     Ok(Json(me_result(runtime.id(), &user)))
 }
 
@@ -1081,37 +1343,31 @@ async fn set_password(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<SetPassword>,
-) -> Result<Json<MeResult>, Response> {
+) -> Result<Json<MeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     // A password is an alternative to a mailbox round trip, so it only exists
     // where the mailbox does. In wallet mode the key is the credential; in
     // `none` mode there is nobody to distinguish from anybody.
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
-        return Err(no_session());
+        return Err(no_session().into());
     };
     let mut user = runtime
         .users()
         .get_user(runtime.id(), &principal.user_id)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(no_session)?;
 
-    password::validate(&body.password, &user.email).map_err(|e| ApiError(e).into_response())?;
-    let hash = password::hash(&token::OsTokens, &body.password)
-        .map_err(|e| ApiError(e).into_response())?;
+    password::validate(&body.password, &user.email)?;
+    let hash = password::hash(&token::OsTokens, &body.password)?;
     let now = now_millis();
     user.password_hash = Some(hash);
     // Whatever prompted the change is now satisfied.
     user.must_change_password = false;
     user.updated_at_millis = now;
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    runtime.users().upsert_user(runtime.id(), &user).await?;
 
     // Every *other* session is revoked: changing a password is what someone
     // does when they think a session is stolen, so leaving the others live
@@ -1151,10 +1407,10 @@ async fn wallet_challenge(
     company: PublicCompany,
     State(state): State<AppState>,
     Json(body): Json<wallet::ChallengeRequest>,
-) -> Result<Json<wallet::ChallengeResult>, Response> {
+) -> Result<Json<wallet::ChallengeResult>, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_wallet(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let now = now_millis();
 
@@ -1171,9 +1427,7 @@ async fn wallet_challenge(
     };
 
     let identity = LoginIdentity::Wallet(address.clone()).key();
-    let eligible = eligibility(state.config(), &runtime, &identity, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let eligible = eligibility(state.config(), &runtime, &identity, now).await?;
     if eligible.is_none() {
         return Ok(Json(wallet::unpersisted_challenge(
             runtime.id(),
@@ -1186,7 +1440,7 @@ async fn wallet_challenge(
     wallet::issue_challenge(&runtime, &token::OsTokens, &address, now)
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `POST …/auth/wallet/verify` — answer a challenge and receive a session.
@@ -1200,30 +1454,25 @@ async fn wallet_verify(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<wallet::VerifyRequest>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_wallet(&runtime) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     let now = now_millis();
 
     let Some(address) = wallet::verify_challenge(&runtime, &body, now).await else {
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
 
     // The address comes from the challenge record, never from this request, so
     // eligibility is re-checked against the wallet that actually signed.
     let identity = LoginIdentity::Wallet(address).key();
-    let Some(role) = eligibility(state.config(), &runtime, &identity, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
-    else {
+    let Some(role) = eligibility(state.config(), &runtime, &identity, now).await? else {
         // Eligibility can lapse between the challenge and the answer.
-        return Err(invalid_login());
+        return Err(invalid_login().into());
     };
-    let user = upsert_from_eligibility(&runtime, &identity, role, now)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let user = upsert_from_eligibility(&runtime, &identity, role, now).await?;
     mint_session(&state, &runtime, &user, &headers).await
 }
 

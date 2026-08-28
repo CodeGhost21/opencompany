@@ -1,0 +1,46 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup an accelerator is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-application-bar"
+title = "Set up the application bar"
+priority = "high"
+note = """
+Decide what `applications` are scored on before the first batch arrives, \
+and record it. A bar set during review is a bar set by whoever reviewed \
+first.
+
+Done when the criteria are a `decisions` row and applications are scored \
+on them.\
+"""
+
+[[task]]
+id = "set-up-the-cohort-programme"
+title = "Set up the cohort programme"
+priority = "high"
+note = """
+Get the programme onto `cohort`: what happens each week, who runs it, and \
+what a company is meant to leave with.
+
+Done when the weeks are laid out and each has an owner.\
+"""
+
+[[task]]
+id = "set-up-the-introduction-flow"
+title = "Set up the introduction flow"
+priority = "medium"
+note = """
+Decide how an `introductions` row is opened and what makes an introduction \
+worth making — the currency an accelerator actually runs on, and the one \
+it can spend badly.
+
+Done when the rule is recorded.\
+"""

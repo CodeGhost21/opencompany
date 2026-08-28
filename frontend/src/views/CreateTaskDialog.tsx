@@ -49,6 +49,10 @@ import { AssigneeSelect } from "./AssigneeSelect";
 /** How long a derived title may run before the full prompt moves to the note. */
 const TITLE_CAP = 80;
 
+/** The card priorities the host and its edit dialog support. */
+const PRIORITIES = ["low", "medium", "high"] as const;
+type TaskPriority = (typeof PRIORITIES)[number];
+
 /**
  * Splits a prompt into the card's `{title, note}` (issue #301).
  *
@@ -75,10 +79,11 @@ export function derivePromptCard(prompt: string): { title: string; note?: string
  * there is no title to create from.
  *
  * Extracted for the same reason {@link derivePromptCard} is: the rule worth
- * pinning is what the dialog *omits*. Both optional fields are sent only when
- * they differ from the host's own default — `"once"` and unassigned are sent as
- * nothing rather than as `"once"` and `""` — so a card created without touching
- * either control posts the body it posted before those controls existed. That is
+ * pinning is what the dialog *omits*. Optional fields are sent only when they
+ * differ from the host's own default — `"once"`, `"medium"`, and unassigned are
+ * sent as nothing rather than as `"once"`, `"medium"`, and `""` — so a card
+ * created without touching the controls posts the body it posted before they
+ * existed. That is
  * what keeps `column`'s deliberate absence (issue #301) meaningful: the server's
  * intake default decides where the card lands, and nothing here widens the body
  * far enough to start deciding for it.
@@ -86,10 +91,12 @@ export function derivePromptCard(prompt: string): { title: string; note?: string
 export function newTaskBody({
   prompt,
   deliverable,
+  priority,
   assignee,
 }: {
   prompt: string;
   deliverable: TaskDeliverable;
+  priority: TaskPriority;
   /** The wire value: `""` (unassigned), a desk id, or a teammate id. */
   assignee: string;
 }): CreateTask | null {
@@ -97,6 +104,7 @@ export function newTaskBody({
   if (!title) return null;
   const body: CreateTask = { title, note };
   if (deliverable === "workflow") body.deliverable = "workflow";
+  if (priority !== "medium") body.priority = priority;
   // Issue #1106. Sent verbatim — a desk stays a desk, exactly as
   // `AssigneeSelect` submits it; resolving one to its lead is the host's call
   // and only for the surfaces that are allowed to make it.
@@ -121,19 +129,22 @@ export const DELIVERABLE_OPTIONS: { value: TaskDeliverable; label: string; hint:
 /**
  * New work enters the board through one prompt box (issue #301).
  *
- * Title/Note/Priority used to be collected up front. They are not gone, only
- * moved: priority defaults on the host (`medium`) and is edited on the card
- * afterwards, where #278 put the picker. `column` is omitted on purpose so the
+ * Title/Note are derived from the prompt. Priority is an explicit choice here
+ * and remains editable on the card. `column` is omitted on purpose so the
  * *server's* intake default decides where the card lands — the same spend gate
  * the transcript's "Add to board" relies on, keeping the human drag into In
  * progress the only thing that spends an agent turn.
  *
- * Two fields are collected beyond the prompt.
+ * Three fields are collected beyond the prompt.
  *
  * The **deliverable** (issue #580): once versus workflow is a decision about
  * *what kind of thing* the card produces, not a default the host can pick, so
  * the operator states it here. It still lands in To-do like any card — the
  * builder pass fires only on the drag into In progress.
+ *
+ * The **priority** (issue #1357): a card's priority is its most prominent
+ * visual signal, so an operator who knows the urgency states it when creating
+ * the card. It defaults to medium, preserving the host's historical default.
  *
  * The **owner** (issue #1106). Assignee was moved out by #301 on the reasoning
  * that the host defaults it and the card edits it. What that missed is what the
@@ -160,6 +171,7 @@ export function CreateTaskDialog({
 }) {
   const [prompt, setPrompt] = useState("");
   const [deliverable, setDeliverable] = useState<TaskDeliverable>("once");
+  const [priority, setPriority] = useState<TaskPriority>("medium");
   // The wire value, verbatim: `""` (unassigned), a desk id, or a teammate id.
   // `AssigneeSelect` never resolves a desk to its lead, and neither does this.
   const [assignee, setAssignee] = useState("");
@@ -175,6 +187,7 @@ export function CreateTaskDialog({
     if (open) {
       setPrompt("");
       setDeliverable("once");
+      setPriority("medium");
       setAssignee("");
     }
   }, [open]);
@@ -182,7 +195,7 @@ export function CreateTaskDialog({
   if (!open) return null;
 
   async function create() {
-    const body = newTaskBody({ prompt, deliverable, assignee });
+    const body = newTaskBody({ prompt, deliverable, priority, assignee });
     if (!body) return;
     setBusy(true);
     try {
@@ -259,11 +272,35 @@ export function CreateTaskDialog({
           </p>
         </div>
 
+        <div className="grid gap-1.5">
+          <Label htmlFor="new-priority">Priority</Label>
+          <Select
+            value={priority}
+            onValueChange={(v) => setPriority((v as TaskPriority) ?? "medium")}
+            disabled={busy}
+          >
+            <SelectTrigger id="new-priority" data-testid="create-priority">
+              <SelectValue className="capitalize" />
+            </SelectTrigger>
+            <SelectContent>
+              {PRIORITIES.map((value) => (
+                <SelectItem key={value} value={value} className="capitalize">
+                  {value}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={() => void create()} disabled={busy || !prompt.trim()}>
+          <Button
+            variant={prompt.trim() ? "default" : "secondary"}
+            onClick={() => void create()}
+            disabled={busy || !prompt.trim()}
+          >
             {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
             Create
           </Button>

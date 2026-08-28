@@ -184,6 +184,14 @@ enum NodeProgress {
         status: WorkflowNodeStatus,
         elapsed_ms: u64,
         output: Value,
+        /// What the harness did inside this node, in order — empty for every
+        /// non-agent node and for a turn with no steps to fold.
+        ///
+        /// Rides this channel exactly as `output` does, and for the same reason:
+        /// it is per-node content the run response and the output snapshot want,
+        /// not a scalar the journal carries. Bounded per entry by the engine's
+        /// `TranscriptEntry::bounded` before it ever reaches here.
+        transcript: Vec<tinyflows::transcript::TranscriptEntry>,
         /// Issue #1014: the config paths of this node's null-resolved
         /// `=`-expressions — the engine's own broken-wiring list, lifted off
         /// `ExecutionStep.diagnostics`. Paths only (each
@@ -256,6 +264,10 @@ impl tinyflows::observability::RunObserver for ProgressObserver {
             // `Value::Null`. This clone rides the same channel as the scalars
             // and never touches the journal.
             output: step.output.clone(),
+            // The engine copied this off the `AgentRunOutcome` the harness
+            // returned. Cloned like `output` beside it; the observer must stay
+            // allocation-cheap but must not borrow past the callback.
+            transcript: step.transcript.clone(),
         });
     }
 }
@@ -400,6 +412,25 @@ async fn run_workflow_inner(
     // run that ended badly must still be able to say it opened one.
     let blocks = super::caps::RunBlocks::default();
     let approvals = super::caps::RunApprovals::default();
+    // Card-less files written by agent nodes. Kept outside the capability
+    // bundle so a failed/blocked engine future cannot drop the capture before
+    // the durable run-output snapshot is assembled.
+    let run_artifacts = super::caps::RunArtifacts::default();
+    // Owned out here like `blocks` and `approvals`: the journal write that needs
+    // it happens in the collector task, which outlives the capability bundle the
+    // engine future drops.
+    let attempts = super::caps::RunAttempts::default();
+    // Read before `deps` moves into the builder below. A dry run records
+    // nothing: it makes no effects, so an attempt row would be a receipt for
+    // work that never happened.
+    let attempt_runs = (!dry_run).then(|| deps.workflow_runs.clone()).flatten();
+    let attempt_deep = (!dry_run).then(|| deps.deep_trace.clone()).flatten();
+    // Issue #617: one per-run record of every child the resolver gates. The
+    // resolver (invoked by the engine mid-run) writes it; the parking path
+    // (after the engine returns) reads it to name a child pause. Created out
+    // here and owned past the engine call — the engine future and the
+    // capability bundle drop before parking runs.
+    let child_gates = Arc::new(super::caps::resolver::ChildGateRegistry::default());
     let capabilities = super::caps::build_capabilities(
         turn,
         deps,
@@ -413,6 +444,13 @@ async fn run_workflow_inner(
             board: board.clone(),
             blocks: blocks.clone(),
             approvals: approvals.clone(),
+            artifacts: run_artifacts.clone(),
+            // A dry run records nothing: it makes no effects, so an attempt row
+            // for it would be a receipt for work that never happened.
+            runs: attempt_runs,
+            deep: attempt_deep,
+            attempts: attempts.clone(),
+            child_gates: child_gates.clone(),
         },
     )
     .await?;
@@ -467,12 +505,16 @@ async fn run_workflow_inner(
         let company = record.id.clone();
         let workflow_id = workflow.id.clone();
         let run_id = run_id.clone();
+        let collector_attempts = attempts.clone();
         async move {
             let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
             // Issue #1008: node_id -> `{ "items": [ … ] }`, canonical-shaped so
             // the console's `parseNodeMessages` reads it exactly like a clean
             // run's `outcome.output["nodes"]`.
             let mut partial_nodes = serde_json::Map::new();
+            let attempts = collector_attempts;
+            // node_id -> the ordered transcript entries that node produced.
+            let mut node_transcripts = serde_json::Map::new();
             while let Some(progress) = rx.recv().await {
                 match progress {
                     // Issue #382: the node's opening bracket. Journaled only when
@@ -504,6 +546,7 @@ async fn run_workflow_inner(
                         status,
                         elapsed_ms,
                         output,
+                        transcript,
                         diagnostics,
                     } => {
                         if let Some(events) = journal_nodes.as_ref() {
@@ -518,6 +561,10 @@ async fn run_workflow_inner(
                                 // from the journal) shows the same diagnostics
                                 // the synchronous response did.
                                 diagnostics: diagnostics.clone(),
+                                // The join, on the durable event: a console
+                                // folding this run from the journal reaches the
+                                // node's step trace without a second lookup.
+                                agent_run_id: attempts.get(&node_id),
                             };
                             if let Err(err) = events.append(&company, event).await {
                                 tracing::warn!(
@@ -543,6 +590,18 @@ async fn run_workflow_inner(
                         };
                         partial_nodes
                             .insert(node_id.clone(), serde_json::json!({ "items": items }));
+                        // Kept beside the output map rather than inside it: a
+                        // clean settle persists the ENGINE's `outcome.output`,
+                        // not this map, so the transcripts have to survive
+                        // separately and be merged in at each persist site.
+                        // Folding them in here would land them on the failure
+                        // arms only — which is the whole bug this avoids.
+                        if !transcript.is_empty() {
+                            node_transcripts.insert(
+                                node_id.clone(),
+                                serde_json::to_value(&transcript).unwrap_or(Value::Null),
+                            );
+                        }
                         // Collected for the response on every path — status is
                         // `Copy`, `node_id` moves in after its clone (if any)
                         // went to the event.
@@ -559,7 +618,7 @@ async fn run_workflow_inner(
                     }
                 }
             }
-            (rows, partial_nodes)
+            (rows, partial_nodes, node_transcripts)
         }
     });
 
@@ -655,8 +714,9 @@ async fn run_workflow_inner(
     // on the failure/blocked arms below; `nodes` stays the output-free row list
     // the journal and `WorkflowRun.nodes` carry. A drain failure yields an empty
     // map, so a persist on that path simply records "produced none".
-    let (nodes, partial_nodes): (
+    let (nodes, partial_nodes, node_transcripts): (
         Vec<crate::ports::WorkflowRunNodeRow>,
+        serde_json::Map<String, Value>,
         serde_json::Map<String, Value>,
     ) = match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
         Ok(Ok(collected)) => collected,
@@ -668,7 +728,7 @@ async fn run_workflow_inner(
                 %err,
                 "workflow: the node-progress collector did not shut down cleanly"
             );
-            (Vec::new(), serde_json::Map::new())
+            (Vec::new(), serde_json::Map::new(), serde_json::Map::new())
         }
         Err(_) => {
             tracing::warn!(
@@ -678,9 +738,14 @@ async fn run_workflow_inner(
                 "workflow: node progress events did not drain in time; the run's finished \
                  record may be journaled ahead of them"
             );
-            (Vec::new(), serde_json::Map::new())
+            (Vec::new(), serde_json::Map::new(), serde_json::Map::new())
         }
     };
+    // The post-turn capture is a sideways channel because failed and blocked
+    // agent nodes return no engine output. Drain it only after the engine and
+    // progress collector are gone, then fold the same rows into every settle
+    // arm below.
+    let captured_artifacts = run_artifacts.take();
 
     // Resolved only AFTER the drain above, so a cancelled run's completed nodes
     // are journaled exactly like a completed run's before the caller writes the
@@ -708,7 +773,10 @@ async fn run_workflow_inner(
             // genuine-failure and the blocked branches — before #1008 both threw
             // it away, so the inspector wrongly reported "this run predates output
             // capture" for every failed or blocked run.
-            let partial_output = Value::Object(partial_nodes);
+            let partial_output = merge_run_artifacts(
+                merge_transcripts(&Value::Object(partial_nodes), &node_transcripts),
+                &captured_artifacts,
+            );
             if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
                 // A genuine failure. Persist the partial capture so the inspector
                 // shows what the nodes that ran produced.
@@ -768,7 +836,11 @@ async fn run_workflow_inner(
             // node; letting it ride the run inspector as the node's product would
             // re-open the same lie one surface over. The node's `blocked` chip and
             // the run's notice already say what happened.
-            let partial_output = without_nodes(partial_output, &blocked);
+            // Remove the blocked node's refusal prose, then restore only the
+            // files it actually wrote. A partial artifact is a deliverable; an
+            // apology about why the turn stopped is not.
+            let partial_output =
+                merge_run_artifacts(without_nodes(partial_output, &blocked), &captured_artifacts);
             // A blocked run DOES return a `WorkflowRun`, so a failed persist adds
             // an operator-facing notice rather than only a log line (Part 6).
             if !persist_run_output(
@@ -841,6 +913,13 @@ async fn run_workflow_inner(
         // fall back to the observer's accumulated capture. A failed write adds an
         // operator notice (Part 6), since this arm returns a `WorkflowRun`.
         let raw_nodes = outcome.output.get("nodes").cloned().unwrap_or(Value::Null);
+        // The transcripts the observer collected are not in the engine's run state,
+        // so a clean settle would otherwise persist a snapshot that says what every
+        // node emitted and nothing about what its agent did.
+        let raw_nodes = merge_run_artifacts(
+            merge_transcripts(&raw_nodes, &node_transcripts),
+            &captured_artifacts,
+        );
         if !persist_run_output(
             run_output_store.as_deref(),
             &record.id,
@@ -854,7 +933,7 @@ async fn run_workflow_inner(
             notices.push(run_output_persist_failed_notice());
         }
         return Ok(WorkflowRun {
-            output: outcome.output,
+            output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: true,
@@ -985,11 +1064,25 @@ async fn run_workflow_inner(
     // Only when the run actually paused: a run that reached the end has no
     // continuation coming, so there is nothing to guard against and nothing to
     // warn about.
-    let (performed, unreplayable) = if outcome.pending_approvals.is_empty() {
+    let (performed, mut unreplayable) = if outcome.pending_approvals.is_empty() {
         (Vec::new(), Vec::new())
     } else {
         super::replay::outward_calls_performed(&graph, &outcome.output, workflow)
     };
+    // Issue #617: a child that paused namespaced gates (`sub::work`) will
+    // restart when its gate is approved, and a restart re-runs the child's
+    // ungated outward calls. Their results are not carried up when the child
+    // pauses, so nothing can be replayed — report them exactly like the
+    // top-level unreplayable calls above, so the operator is warned that
+    // approving restarts the child from the top.
+    if !outcome.pending_approvals.is_empty() {
+        unreplayable.extend(super::replay::child_calls_to_repeat(
+            &graph,
+            &outcome.pending_approvals,
+            &child_gates,
+            &trigger_input,
+        ));
+    }
     for call in &unreplayable {
         tracing::warn!(
             company = %record.id,
@@ -1020,6 +1113,9 @@ async fn run_workflow_inner(
             // sign-off.
             output: &outcome.output,
             edges: &workflow.edges,
+            // Issue #617: the resolver's per-child gate record, so a namespaced
+            // child gate's card can name the child's tool and reason.
+            child_gates: &child_gates,
         },
     )
     .await;
@@ -1033,6 +1129,7 @@ async fn run_workflow_inner(
     // persists that canonical map with `partial = false`; a failed write adds an
     // operator notice (Part 6) since this arm returns a `WorkflowRun`.
     let raw_nodes = outcome.output.get("nodes").cloned().unwrap_or(Value::Null);
+    let raw_nodes = merge_run_artifacts(raw_nodes, &captured_artifacts);
     if !persist_run_output(
         run_output_store.as_deref(),
         &record.id,
@@ -1076,7 +1173,7 @@ async fn run_workflow_inner(
     }
 
     Ok(WorkflowRun {
-        output: outcome.output,
+        output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
         pending_approvals,
         deliveries,
         cancelled: false,
@@ -1327,6 +1424,80 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
 /// `WorkflowRun`) use `false` to add an operator-facing notice; the genuine-`Err`
 /// caller has no `WorkflowRun` to hang one on and lets the `warn!` stand alone
 /// (issue #1008, Part 3).
+/// Folds the observer's per-node transcripts into a run-output `nodes` map.
+///
+/// The two halves arrive from different places and only meet here. A clean
+/// settle's `nodes` map is the ENGINE's own run state (`outcome.output`), which
+/// knows what each node emitted but nothing about what a harness did inside one;
+/// the transcripts come off `ExecutionStep.transcript`, which the progress
+/// observer collected. Merging at the persist site is what puts them on the same
+/// record on every arm — a clean run, a failed one, and a blocked one alike.
+///
+/// Non-destructive by construction: it only ever adds a `transcript` key to a
+/// node object that already exists in `nodes`, so a node the engine did not
+/// report cannot be invented here, and nothing the engine wrote is overwritten.
+/// A non-object `nodes` (or a node whose slot is not an object) passes through
+/// untouched rather than being coerced into one.
+fn merge_transcripts(nodes: &Value, transcripts: &serde_json::Map<String, Value>) -> Value {
+    if transcripts.is_empty() {
+        return nodes.clone();
+    }
+    let Value::Object(map) = nodes else {
+        return nodes.clone();
+    };
+    let mut merged = map.clone();
+    for (node_id, transcript) in transcripts {
+        let Some(Value::Object(slot)) = merged.get_mut(node_id) else {
+            continue;
+        };
+        slot.insert("transcript".to_string(), transcript.clone());
+    }
+    Value::Object(merged)
+}
+
+/// Adds card-less run artifacts to their node slots without changing items.
+///
+/// Unlike transcripts, artifacts may legitimately belong to a node that ended
+/// in error and therefore has no engine output slot. Such a slot is created
+/// with an empty `items` array so the inspector can surface the files while
+/// still truthfully showing no reply text.
+fn merge_run_artifacts(nodes: Value, artifacts: &serde_json::Map<String, Value>) -> Value {
+    if artifacts.is_empty() {
+        return nodes;
+    }
+    let mut nodes = match nodes {
+        Value::Object(nodes) => nodes,
+        _ => serde_json::Map::new(),
+    };
+    for (node_id, rows) in artifacts {
+        let slot = nodes
+            .entry(node_id.clone())
+            .or_insert_with(|| serde_json::json!({ "items": [] }));
+        if let Value::Object(slot) = slot {
+            slot.insert("artifacts".to_string(), rows.clone());
+        }
+    }
+    Value::Object(nodes)
+}
+
+/// Applies [`merge_run_artifacts`] to a full engine output envelope.
+fn merge_run_artifacts_envelope(
+    mut output: Value,
+    artifacts: &serde_json::Map<String, Value>,
+) -> Value {
+    if artifacts.is_empty() {
+        return output;
+    }
+    let Value::Object(envelope) = &mut output else {
+        return serde_json::json!({
+            "nodes": merge_run_artifacts(Value::Null, artifacts),
+        });
+    };
+    let nodes = envelope.remove("nodes").unwrap_or(Value::Null);
+    envelope.insert("nodes".to_string(), merge_run_artifacts(nodes, artifacts));
+    output
+}
+
 async fn persist_run_output(
     store: Option<&dyn crate::ports::run_output::WorkflowRunOutputStore>,
     company: &CompanyId,
@@ -1401,6 +1572,10 @@ struct PausedGates<'a> {
     /// untouched.
     output: &'a Value,
     edges: &'a [crate::company::WorkflowEdgeDef],
+    /// Issue #617: the resolver's per-child gate record, so a namespaced child
+    /// gate (`sub::work`) is described from what the gate pass classified
+    /// rather than falling back to an unclassified parent-graph lookup.
+    child_gates: &'a super::caps::resolver::ChildGateRegistry,
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -1490,6 +1665,9 @@ async fn park_pending_gates(
         // gate's card can carry the verbatim upstream content awaiting sign-off.
         output,
         edges,
+        // Issue #617: the resolver's per-child gate record, for a namespaced
+        // child gate's card.
+        child_gates,
     } = paused;
     if pending.is_empty() {
         return;
@@ -1545,7 +1723,24 @@ async fn park_pending_gates(
         let gate = match gated.iter().find(|gate| gate.node_id == *node_id) {
             Some(gate) => Some(gate),
             None => {
-                described = super::gate::describe_call(graph, node_id);
+                // Issue #617: a namespaced id (`sub::work`, nested one level
+                // per child as `sub::nested::work`) names a gate inside a child
+                // the resolver ran. The parent graph has no node with that id,
+                // so describe it from the child's own gate record, descending
+                // the registry through the `sub_workflow` nodes — resolving an
+                // expression-bound `workflow_id` against the trigger input
+                // where the engine's `once` scope allows — so the child's tool
+                // and reason reach the card the way a top-level policy gate's
+                // do. Falls back to the parent-graph read for every other gate
+                // (an authored child gate, which the registry never sees, keeps
+                // its pre-existing behaviour).
+                described = super::caps::resolver::child_gate_call(
+                    child_gates,
+                    graph,
+                    node_id,
+                    Some(trigger_input),
+                )
+                .or_else(|| super::gate::describe_call(graph, node_id));
                 described.as_ref()
             }
         };
@@ -1704,6 +1899,10 @@ fn map_engine_error(err: tinyflows::error::EngineError) -> OpenCompanyError {
 pub struct HarnessWorkflowRunner {
     turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
+    /// The company record as of this runner's construction (runtime build /
+    /// rebuild). The run re-reads the live record from the store so a console
+    /// policy PUT since then reaches the run's gate; this snapshot is the
+    /// fallback when the store is unwired or the row is gone.
     record: CompanyRecord,
 }
 
@@ -1717,6 +1916,26 @@ impl HarnessWorkflowRunner {
     ) -> Self {
         Self { turn, deps, record }
     }
+
+    /// The effective record for a run: the store's current one when it can be
+    /// read, the build-time snapshot otherwise.
+    ///
+    /// Issue #1455: the snapshot this runner was built with carries the policy
+    /// as of runtime build / rebuild. The cycle refreshes its record at the top
+    /// of every cycle, but a workflow run is dispatched outside that cadence —
+    /// an operator who tightens the spend cap and then starts an authored
+    /// workflow without rebuilding the runtime would otherwise have the run's
+    /// tool-call gate classified under the *old* cap, auto-approving what the
+    /// new cap would park. Re-reading here keeps the graph-level gate on the
+    /// same policy the roster rebuilds against. A store fault falls back to the
+    /// snapshot rather than failing the run, preserving the pre-#1455
+    /// behaviour of never touching the store on this path.
+    async fn effective_record(&self) -> Result<CompanyRecord> {
+        Ok(match self.deps.store.load(&self.record.id).await {
+            Ok(Some(record)) => record,
+            Ok(None) | Err(_) => self.record.clone(),
+        })
+    }
 }
 
 #[async_trait]
@@ -1728,16 +1947,20 @@ impl WorkflowRunner for HarnessWorkflowRunner {
         input: Value,
         ctx: &WorkflowRunContext,
     ) -> Result<WorkflowRun> {
+        // Issue #1455: a console policy PUT/DELETE since this runner was built
+        // must reach this run's gate and the roster it warms. The store's live
+        // record carries the current overlay; the snapshot is only the fallback.
+        let record = self.effective_record().await?;
         // Idempotent: builds the roster on first use, a no-op after. Warmed
         // through the router so every lane's pool — not just the default's — is
         // populated before a node addresses it. The run addresses the record's
         // own company; `_company` is the routed scope, which the runtime
         // resolves to this same record.
-        self.turn.ensure(&self.record).await?;
+        self.turn.ensure(&record).await?;
         run_workflow_lane_aware(
             self.turn.clone(),
             self.deps.clone(),
-            &self.record,
+            &record,
             workflow,
             input,
             ctx,
@@ -1769,6 +1992,194 @@ mod tests {
                 seen: std::sync::Mutex::new(Vec::new()),
             })
         }
+    }
+
+    /// A full workflow-node turn double that writes a real sandbox file before
+    /// either failing or parking an approval. It drives the real engine,
+    /// capability, mirror, output-store, and workspace-store seams; only model
+    /// inference is replaced.
+    struct ArtifactWritingTurn {
+        workspace_root: std::path::PathBuf,
+        approvals: crate::harness::policy::ApprovalRequestQueue,
+        blocked: bool,
+    }
+
+    impl ArtifactWritingTurn {
+        async fn execute(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+        ) -> Result<crate::harness::TurnOutcome> {
+            let workspace =
+                crate::harness::build::agent_workspace(&self.workspace_root, company, agent_id);
+            let report = workspace.join("reports/partial.md");
+            tokio::fs::create_dir_all(report.parent().expect("report parent")).await?;
+            tokio::fs::write(&report, b"# Partial report\n\nCaptured before settle.\n").await?;
+
+            if !self.blocked {
+                return Err(OpenCompanyError::Harness(
+                    "synthetic node failure after writing its file".to_string(),
+                ));
+            }
+
+            self.approvals
+                .push(crate::harness::policy::ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "synthetic approval after writing".to_string(),
+                    effect: crate::ports::types::Effect {
+                        kind: "shell".to_string(),
+                        group: crate::ports::types::EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: serde_json::json!({ "command": "finish-report" }),
+                        agent: Some(agent_id.to_string()),
+                        run_id: None,
+                    },
+                });
+            Ok(crate::harness::TurnOutcome {
+                reply: "Waiting for approval.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                halted_for_spend: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for ArtifactWritingTurn {
+        async fn run(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+    }
+
+    fn artifact_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "artifact_capture"
+name = "Artifact capture"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "work"
+kind = "agent"
+name = "Work"
+summary = "Write a report."
+agent = "ceo"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "work"
+[[edge]]
+from = "work"
+to = "done"
+"#,
+        )
+        .expect("artifact graph parses")
+    }
+
+    async fn assert_partial_run_artifact(blocked: bool) {
+        use crate::ports::workspace::WorkspaceStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(FsOps::new(dir.path()));
+        let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        deps.workspace = Some(store.clone());
+        deps.run_output_store = Some(store.clone());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ArtifactWritingTurn {
+            workspace_root: deps.workspace_root.clone(),
+            approvals: deps.approval_requests.clone(),
+            blocked,
+        });
+        let ctx = WorkflowRunContext::new(false);
+
+        let result = run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &artifact_graph(),
+            serde_json::json!({ "request": "make the report" }),
+            &ctx,
+        )
+        .await;
+        if blocked {
+            let run = result.expect("an approval-blocked run settles successfully");
+            assert!(
+                run.blocked_nodes.iter().any(|node| node.node_id == "work"),
+                "the synthetic approval must block work: {run:?}"
+            );
+        } else {
+            assert!(result.is_err(), "the synthetic failure must fail the run");
+        }
+
+        let stored = store
+            .get_run_output(&record.id, &ctx.run_id)
+            .await
+            .expect("run-output read")
+            .expect("failed and blocked runs both persist partial output");
+        assert!(stored.partial, "capture must be marked partial: {stored:?}");
+        let artifact = &stored.nodes["work"]["artifacts"][0];
+        assert_eq!(artifact["source"], "reports/partial.md");
+        let node_id = artifact["workspaceNodeId"]
+            .as_str()
+            .expect("capture links a workspace node");
+        let (node, body) = WorkspaceStore::read(store.as_ref(), &record.id, node_id)
+            .await
+            .expect("workspace read")
+            .expect("mirrored run artifact exists");
+        assert_eq!(node.name, "partial.md");
+        assert!(
+            body.contains("Captured before settle"),
+            "the mirrored node keeps the written body: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_agent_node_keeps_the_file_it_wrote_as_a_run_artifact() {
+        assert_partial_run_artifact(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_blocked_agent_node_keeps_the_file_it_wrote_as_a_run_artifact() {
+        assert_partial_run_artifact(true).await;
     }
 
     #[async_trait]
@@ -1843,10 +2254,13 @@ description = "Runs Acme."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -1862,6 +2276,7 @@ description = "Runs Acme."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -1898,10 +2313,10 @@ description = "Runs Acme."
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         }
     }
 
@@ -1951,10 +2366,13 @@ allow = ["*"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -2697,6 +3115,51 @@ to = "done"
         .await
         .expect("workflow runs");
         assert!(run.output.to_string().contains("hello-marker"));
+    }
+
+    /// Issue #1455 — a workflow run classifies its tool-call gate under the
+    /// store's *current* policy, not the build-time snapshot. An operator who
+    /// moves a policy axis on the console and then starts an authored workflow
+    /// without rebuilding the runtime must have the run honour the new value.
+    #[tokio::test]
+    async fn workflow_run_gate_reads_live_policy_not_the_build_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let deps = deps(dir.path());
+        let snapshot = record(); // build-time view: overlay_policy: None
+
+        // The console wrote a policy override since the runtime was built:
+        // every spend now parks (`auto_approve_under_usd` lowered to 0), a
+        // change the run's gate must classify under.
+        let live = CompanyRecord {
+            overlay_policy: Some(crate::ports::PolicyOverride {
+                mode: None,
+                always_approve: None,
+                auto_approve_under_usd: Some(Some(0.0)),
+                approval_ttl_hours: None,
+                set_by: crate::ports::Actor {
+                    kind: crate::ports::ActorKind::User,
+                    id: "console-operator".to_string(),
+                },
+                at_millis: 1_700_000_000_000,
+            }),
+            ..snapshot.clone()
+        };
+        deps.store
+            .save(&live)
+            .await
+            .expect("store accepts the live record");
+
+        let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            Arc::new(HarnessPool::new()),
+            Arc::new(deps.clone()),
+        ));
+        let runner = HarnessWorkflowRunner::new(turn, deps, snapshot.clone());
+
+        let effective = runner.effective_record().await.expect("effective record");
+        assert_eq!(
+            effective.overlay_policy, live.overlay_policy,
+            "the run must gate against the store's policy, not the snapshot's"
+        );
     }
 
     /// The workflow port keeps the lane-aware router intact: an agent bound to
@@ -4248,6 +4711,7 @@ to = "gate"
                     id: "u1".to_string(),
                     email: "ada@acme.test".to_string(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Active,
                     password_hash: None,
@@ -4274,7 +4738,7 @@ to = "gate"
                     port: 587,
                     security: crate::server::ops::smtp::SmtpSecurity::Starttls,
                     username: "acme".into(),
-                    password: "hunter2".into(),
+                    password: crate::ports::types::SecretValue("hunter2".into()),
                     from_name: "Acme".into(),
                     from_email: "acme@opencompany.test".into(),
                 },
@@ -5752,5 +6216,87 @@ to = "done"
             journal.is_empty(),
             "a dry run journals nothing at all: {journal:?}"
         );
+    }
+
+    // ---- merging harness transcripts into the run-output snapshot ----------
+
+    mod transcript_merge {
+        use super::super::merge_transcripts;
+        use serde_json::{Map, Value, json};
+
+        fn transcripts(pairs: &[(&str, Value)]) -> Map<String, Value> {
+            pairs
+                .iter()
+                .map(|(id, v)| ((*id).to_string(), v.clone()))
+                .collect()
+        }
+
+        #[test]
+        fn no_transcripts_leaves_the_map_identical() {
+            // The overwhelmingly common case — every workflow with no agent node.
+            let nodes = json!({ "cost": { "items": [] } });
+            assert_eq!(merge_transcripts(&nodes, &Map::new()), nodes);
+        }
+
+        #[test]
+        fn a_transcript_lands_beside_the_nodes_items() {
+            let nodes = json!({ "solve": { "items": [{ "json": { "answer": 837799 } }] } });
+            let merged = merge_transcripts(
+                &nodes,
+                &transcripts(&[(
+                    "solve",
+                    json!([{ "atMs": 0, "kind": "tool_call", "text": "shell" }]),
+                )]),
+            );
+            // The engine's own data survives untouched...
+            assert_eq!(merged["solve"]["items"][0]["json"]["answer"], 837799);
+            // ...and the transcript joins it.
+            assert_eq!(merged["solve"]["transcript"][0]["kind"], "tool_call");
+        }
+
+        #[test]
+        fn only_the_named_nodes_are_touched() {
+            let nodes = json!({
+                "restate": { "items": [1] },
+                "solve": { "items": [2] },
+            });
+            let merged =
+                merge_transcripts(&nodes, &transcripts(&[("solve", json!([{ "kind": "x" }]))]));
+            assert!(merged["restate"].get("transcript").is_none());
+            assert!(merged["solve"].get("transcript").is_some());
+        }
+
+        #[test]
+        fn a_transcript_for_an_unknown_node_is_dropped() {
+            // Never invent a node the engine did not report: the snapshot is a
+            // record of the run, and a node that appears only because a stray
+            // transcript named it would be a lie about what executed.
+            let nodes = json!({ "solve": { "items": [] } });
+            let merged =
+                merge_transcripts(&nodes, &transcripts(&[("ghost", json!([{ "kind": "x" }]))]));
+            assert!(merged.get("ghost").is_none());
+            assert_eq!(merged.as_object().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn a_non_object_nodes_map_passes_through() {
+            // A failed drain yields `Value::Null`; coercing it into an object
+            // here would fabricate a snapshot for a run that captured none.
+            for nodes in [Value::Null, json!([]), json!("nope")] {
+                assert_eq!(
+                    merge_transcripts(&nodes, &transcripts(&[("solve", json!([]))])),
+                    nodes
+                );
+            }
+        }
+
+        #[test]
+        fn a_non_object_node_slot_is_left_alone() {
+            let nodes = json!({ "solve": "not-an-object" });
+            assert_eq!(
+                merge_transcripts(&nodes, &transcripts(&[("solve", json!([]))])),
+                nodes
+            );
+        }
     }
 }

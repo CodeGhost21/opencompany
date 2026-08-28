@@ -314,6 +314,7 @@ fn brain_with(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
         workspace_root: dir.to_path_buf(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
@@ -351,10 +352,10 @@ fn brain_with(
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
+        tenant_search: None,
+        workflow_runs: None,
+        deep_trace: None,
     };
     let record = CompanyRecord {
         overlay_retired_agents: Vec::new(),
@@ -370,10 +371,13 @@ fn brain_with(
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     };
     (
         // Issue #339: the run store is wired here so a dispatch carrying a
@@ -441,6 +445,7 @@ fn dispatch_run(task_id: &str, run_id: Option<&str>) -> CycleRequest {
             run_id: run_id.map(str::to_string),
         }],
         event_seqs: Vec::new(),
+        policy: None,
     }
 }
 
@@ -1183,13 +1188,16 @@ fn chat(text: &str) -> CycleRequest {
         cycle_id: "cycle-1".to_string(),
         company_id: company(),
         events: vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: text.to_string(),
             by: None,
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         }],
         event_seqs: Vec::new(),
+        policy: None,
     }
 }
 

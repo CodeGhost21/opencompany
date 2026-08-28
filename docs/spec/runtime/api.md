@@ -19,11 +19,14 @@ POST   /api/v1/companies                       boot from an uploaded manifest (p
 GET    /api/v1/companies/{id}                  status: charter, roster, budget burn,
                                                lifecycle state, tiny.place state
 POST   /api/v1/companies/{id}/chat             operator message → event; SSE reply stream
+POST   /api/v1/companies/{id}/chat/upload      multipart file → attachment reference (#1682)
 GET    /api/v1/companies/{id}/chat/history     one desk's transcript (?desk=<thread>)
 POST   /api/v1/companies/{id}/chat/messages/{seq}/reactions
                                                { "emoji": "👍", "on": true } → 204
 GET    /api/v1/companies/{id}/events?since=SEQ SSE stream of events/effects (work feed)
 GET    /api/v1/companies/{id}/approvals        pending approvals
+GET    /api/v1/companies/{id}/notifications  unread notifications for the signed-in person
+PUT    /api/v1/companies/{id}/notifications  mark notifications read (`{ "ids": [...] }`; empty body or null ids marks all)
 POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…",
                                                "detach": false }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
@@ -36,12 +39,29 @@ GET    .../feedback/board/{item}               one board item + its comments
 POST   .../feedback/board/{item}/vote          { "value": 1 | -1 | 0 }
 POST   .../feedback/board/{item}/comments      { "body": "…" }
 GET    /api/v1/companies/{id}/memory/traces    inspect working memory (debug)
+GET    .../memory/archives                    traces retained on eviction
+                                             (provider-backed engines only; 404
+                                             when the engine keeps no archive)
 POST   /api/v1/companies/{id}/export           export bundle (tar)
 POST   /api/v1/companies/{id}/pause            pause / resume lifecycle transitions
+GET    /api/v1/companies/{id}/desks            the company's desks and channels
+POST   /api/v1/companies/{id}/desks            create one ({ name, description?, id?,
+                                               members?, responder? })
+DELETE /api/v1/companies/{id}/desks/{desk}     delete an overlay desk
+POST   /api/v1/companies/{id}/desks/{desk}/members         add a member
+DELETE /api/v1/companies/{id}/desks/{desk}/members/{agent} remove an overlay member
+PUT    /api/v1/companies/{id}/desks/{desk}/order           reorder (hierarchy)
 ```
 
 Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
 with no `{id}`.
+
+`GET …/notifications` returns only unread `mention` notifications addressed to the
+signed-in human, newest first. Each row includes its subject, title, creation
+ time, and optional chat context; `unread` is the returned count. Machine
+credentials, which have no person identity, receive `401`. `PUT` accepts an
+optional `ids` array and returns the remaining unread count. An omitted or null
+`ids` value marks all notifications for that person; an empty array marks none.
 
 The `/feedback/board/...` routes are a **proxy** of the TinyHumans hub's shared
 board, spent with this instance's credential so a browser never holds one. An
@@ -65,6 +85,61 @@ on its own task, so it is no longer cancelled when a client or a reverse proxy
 gives up mid-turn. `detach` removes the *wait*; it is not what provides the
 drop-safety. See
 [company-brain/approvals.md](../company-brain/approvals.md#settling-the-verdict-is-not-running-the-follow-up).
+
+## Desks and channels: the `responder` mode
+
+A desk row carries `responder: "lead" | "auto"` (issue #1835), **omitted when
+`lead`** — which is every manifest `[[group_chat]]` (the blueprint syntax has
+no such field) and every desk created before the field existed, so old
+consoles and old wire shapes are byte-for-byte unchanged.
+
+`"lead"` is the standing model: `members[0]` leads, and an unmentioned message
+addressed to the desk is answered by that lead. `"auto"` is a **channel**: no
+lead exists — the org chart crowns nobody, the members pane badges nobody, and
+`delegate_to_desk` refuses it with a reason — and an unmentioned message's
+answerer is picked **per message**, by a single tool-less model call over the
+channel's own membership (id, role, description), clamped to that membership.
+An `@`-mention outranks the pick everywhere, and wherever selection cannot run
+— the default build (the selector compiles under the harness feature), the
+small-talk fast path, a failure, a timeout — the answer is the channel's first
+roster member: exactly what a lead desk would have answered, so the worst case
+of the new mode is the old mode. Selection spend is metered under its own
+usage kind (`selectorCall`), charged to the whole-company bucket.
+
+
+### Chat attachments (issue #1682)
+
+```text
+POST   …/chat/upload                          multipart file → { nodeId, name, mime, size }
+POST   …/chat                                  { "message": "…", "attachments": ["<nodeId>", …] }
+```
+
+Two steps, deliberately not one: the byte-transfer half is decoupled from the
+synchronous, turn-running `/chat` POST, so a large upload never blocks the
+turn and a turn never blocks on bytes. `/chat/upload` is a **binary-only**
+sibling of the workspace's `POST …/workspace` create — a chat attachment is a
+file hung on a message, not a document someone maintains, so it always stores
+bytes and is served back through the existing hardened
+`GET …/workspace/blob/{nodeId}` (no second blob route). It shares
+`admit_upload`'s size/quota gate and the workspace's filename sanitizer with
+that route, and is subject to the same sibling-name collision rule a
+workspace create enforces — two attachments in different messages sharing an
+exact filename would collide there, so this route retries once, transparently,
+under a name disambiguated from the upload's own id rather than surfacing the
+`409`.
+
+`/chat`'s `attachments` field is **node ids only**. The host re-resolves each
+id against the sending company's own workspace tree and takes the name / mime
+/ size from the store — never the client's claim — the same discipline a
+`parent` thread reference gets; an id that resolves to no binary node in this
+company is a `400`, on the same terms a bad `parent` is. Server-side, the host
+also extracts each attachment's text where the format and size allow it (PDF,
+DOCX, PPTX, XLSX, plain text — the same `ingest::extract` pipeline
+`POST …/memory/ingest` runs; see [memory.md](../company-brain/memory.md)) and
+carries it in the journaled event, capped, so a brain that later reads the
+message off the wire has the attachment's actual words rather than only a
+node id it has no tool to resolve. An image or a scan with no text layer
+carries no extracted text; the reference alone still rides the wire.
 
 ### Running and stopping a workflow (issue #383)
 

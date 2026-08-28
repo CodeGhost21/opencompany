@@ -308,6 +308,7 @@ mod test {
             status: WorkflowNodeStatus::Ok,
             elapsed_ms: 1,
             diagnostics: Vec::new(),
+            agent_run_id: None,
         }
     }
 
@@ -496,13 +497,17 @@ mod test {
         // tombstone. Pruning any of them dangles a stored pointer.
         for event in [
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 text: "hi".into(),
                 by: None,
                 chat: None,
                 parent: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 chat_id: "desk".into(),
                 agent_id: "ceo".into(),
                 text: "hello".into(),

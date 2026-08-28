@@ -12,13 +12,14 @@
 // conversations, and the strip above the composer steers named in-flight runs
 // (issue #111) rather than cancelling the last reply.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { TurnStep } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { useIsMobile } from "@/hooks/use-mobile";
 import type { ChatMessage } from "@/lib/chat";
 import type { OpenTurn } from "@/lib/live-reply";
 import type { Thread } from "@/lib/threads";
@@ -35,6 +36,19 @@ interface Props {
   threads: Thread[];
   activeId: string;
   onSelect: (id: string) => void;
+  /**
+   * Reports the active thread as viewed, with the ids of its loaded messages.
+   *
+   * The mention badge is keyed to the Chat rail's channels, but the `main`
+   * thread (and every desk thread) renders here too — and a company's main
+   * conversation lives *only* here once it has real desks, never in a rail
+   * channel. So this surface has to report its own views, or a mention whose
+   * subject sits in the main thread could never be cleared: the rail's channel
+   * it badges never renders that thread. The loaded ids gate the clear exactly
+   * the way ChatView's do — the mention clears only once the message it names
+   * is actually on screen.
+   */
+  onThreadViewed?: (threadId: string, loadedMessageIds: ReadonlySet<string>) => void;
   setMessages: (threadId: string, updater: (m: ChatMessage[]) => ChatMessage[]) => void;
   /** Called after a reply lands, so the parent can refresh approvals/status. */
   onReply?: () => void;
@@ -84,13 +98,31 @@ export function Conversation({
   onSendDetached,
   onSendFailed,
   openTurns,
+  onThreadViewed,
 }: Props) {
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
   // On mobile, the list and the chat share the pane — track which is showing.
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("chat");
+  // The transcript is on screen on desktop (both panes render side by side)
+  // and on mobile only while the chat pane is the active one. A view report
+  // from a hidden pane — the operator opened the thread list, or resized down
+  // after selecting one — would clear a mention whose text was never visible.
+  const isMobile = useIsMobile();
+  const chatVisible = !isMobile || mobilePane === "chat";
+
+  // A thread view is the mention-badge's read path on this surface (see the
+  // prop doc): report it when the thread changes and as its transcript grows,
+  // so a mention whose subject just loaded can clear the moment it is on
+  // screen rather than waiting for another visit. Never report a thread whose
+  // transcript is hidden (Codex P1).
+  useEffect(() => {
+    if (!chatVisible) return;
+    onThreadViewed?.(active.id, new Set(active.messages.map((m) => m.id)));
+  }, [active.id, active.messages.length, onThreadViewed, chatVisible]);
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
+      <h1 className="sr-only">Conversation</h1>
       <ThreadList
         threads={threads}
         activeId={active.id}

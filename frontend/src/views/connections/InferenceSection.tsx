@@ -18,6 +18,16 @@ import { ApiError } from "@/api/types";
 import { classifyLoadFailure } from "@/lib/section-load";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { Badge } from "@/components/ui/badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -69,7 +79,17 @@ const PROVIDERS: Record<
     label: "Managed (TinyHumans)",
     acceptsKey: true,
     requiresBaseUrl: false,
-    keyKind: "a TinyHumans API key",
+    // The managed brain is OpenRouter with the platform paying: the host treats
+    // `managed` as a legacy alias for `openrouter` (`LEGACY_MANAGED`, since
+    // OpenCompany stopped exposing its own model SKUs), so a key saved here is
+    // resolved onto OpenRouter's own endpoint and sent there.
+    //
+    // This line used to read "a TinyHumans API key" — true when `managed` was a
+    // provider of its own, and never updated when it stopped being one. It is
+    // what issue #1737 actually cost: the operator was asked for one vendor's
+    // key on a card that stored it against another, and every turn and every
+    // Test since has presented it to OpenRouter, which rejects it (issue #1737).
+    keyKind: "an OpenRouter key (`sk-or-…`) — the managed brain is OpenRouter, so that is where a key set here is sent",
     preset: { baseUrl: "", models: {} },
   },
   openrouter: {
@@ -172,10 +192,68 @@ export function InferenceSection({
   const [baseUrl, setBaseUrl] = useState("");
   const [models, setModels] = useState<Partial<Record<Tier, string>>>({});
   const [key, setKey] = useState("");
+  const [pendingProvider, setPendingProvider] = useState<InferenceProvider | null>(null);
+  /**
+   * The values the form last started from — a provider's preset, or what the
+   * host actually holds. Anything differing from this is something the operator
+   * typed, which is the only thing the destructive-draft dialog exists to
+   * protect (issue #1474).
+   *
+   * Kept as state rather than recomputed from `presetFor(provider)` because the
+   * form no longer always starts at a preset: seeding it from the stored
+   * configuration means the baseline can be a saved endpoint and model table
+   * that no preset matches, and comparing those against the preset would ask an
+   * operator to confirm discarding a draft nobody wrote.
+   */
+  const [baseline, setBaseline] = useState<{
+    baseUrl: string;
+    models: Partial<Record<Tier, string>>;
+  }>({ baseUrl: "", models: {} });
+
+  /**
+   * Point the switch form at what the host actually holds.
+   *
+   * Without this the Provider select was a constant: `useState("managed")` and
+   * nothing ever wrote it back, so the card opened on "Managed (TinyHumans)"
+   * whatever was stored — on first load, after a Save, and after a full process
+   * restart, which re-runs the same initializer. The header beside it renders
+   * the *host's* provider, so the two named different providers on the same
+   * card at the same moment, and an operator could store a key against a
+   * provider they never chose without anything on screen saying so (#1737).
+   *
+   * Seeded from `status.provider` verbatim, never from a mapping of our own:
+   * that value is what the header renders, so taking it as-is is what makes
+   * "the header and the select can never disagree" structural rather than
+   * something to keep in step by hand.
+   *
+   * `baseUrl` is seeded only for the providers that require one. `managed` and
+   * `openrouter` resolve theirs from the environment or a well-known default,
+   * and putting the *resolved* value in the form would pin the company to it on
+   * the next Save — silently overriding `OPENCOMPANY_INFERENCE_URL`. Same
+   * reasoning as `removeKey` below.
+   */
+  const seedFromStatus = useCallback((next: InferenceStatus) => {
+    const seeded = (
+      next.provider in PROVIDERS ? next.provider : "openrouter"
+    ) as InferenceProvider;
+    const nextBaseUrl = PROVIDERS[seeded].requiresBaseUrl
+      ? next.baseUrl
+      : presetFor(seeded).baseUrl;
+    const nextModels = next.models as Partial<Record<Tier, string>>;
+    setProvider(seeded);
+    setBaseUrl(nextBaseUrl);
+    setModels(nextModels);
+    setBaseline({ baseUrl: nextBaseUrl, models: nextModels });
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
-      setStatus(await getInferenceStatus(client, company));
+      const next = await getInferenceStatus(client, company);
+      setStatus(next);
+      // Safe to reseed on every refresh because `refresh` runs on mount and
+      // after a *completed* mutation only — there is no poll here, so this can
+      // never pull a draft out from under someone mid-edit.
+      seedFromStatus(next);
       setLoad("ready");
     } catch (err) {
       // A 404 is a host with no inference plane; anything else is a host that
@@ -184,7 +262,7 @@ export function InferenceSection({
       // likely and disappearing is least helpful (issue #1470).
       setLoad(classifyLoadFailure(err));
     }
-  }, [client, company]);
+  }, [client, company, seedFromStatus]);
 
   useEffect(() => {
     setLoad("loading");
@@ -196,7 +274,37 @@ export function InferenceSection({
     const preset = presetFor(next);
     setBaseUrl(preset.baseUrl);
     setModels(preset.models);
+    setBaseline({ baseUrl: preset.baseUrl, models: preset.models });
     setTest({ kind: "idle" });
+  }
+
+  /**
+   * Whether the operator has typed anything into the Base URL or model fields
+   * since the form last started from a known baseline.
+   *
+   * The destructive-draft dialog exists to protect values the operator typed —
+   * the copy promises "confirmation is only required for values the operator
+   * typed", and neither a provider's *preset* nor the configuration the host
+   * already holds is a typed draft. OpenRouter pre-fills model ids and Ollama a
+   * local base URL, so switching away from either without editing anything must
+   * not ask to discard a draft nobody wrote (issue #1474) — and since the form
+   * is now seeded from the stored configuration, a saved endpoint and model
+   * table must not either.
+   */
+  function hasTypedDraft(): boolean {
+    return (
+      baseUrl !== baseline.baseUrl ||
+      TIERS.some((tier) => (models[tier] ?? "") !== (baseline.models[tier] ?? ""))
+    );
+  }
+
+  function requestProvider(next: InferenceProvider) {
+    if (next === provider) return;
+    if (hasTypedDraft()) {
+      setPendingProvider(next);
+      return;
+    }
+    pickProvider(next);
   }
 
   function setModel(tier: Tier, value: string) {
@@ -296,6 +404,11 @@ export function InferenceSection({
    * The resulting status is read from the response rather than assumed. A host
    * that wired no rebuilder genuinely cannot do this and says so, and reporting
    * success there would replace a visible dead end with an invisible one.
+   *
+   * Since #1736 the button is only rendered where `canRebuildInPlace` holds, so
+   * that arm is defence in depth rather than the everyday path: the capability
+   * is read at load and the rebuilder could still be absent by the time the
+   * click lands.
    */
   async function restartNow() {
     if (busy) return;
@@ -321,10 +434,19 @@ export function InferenceSection({
     if (busy) return;
     setBusy("reset");
     try {
-      await revertInference(client, company);
-      toast.success("Reverted to the managed configuration.");
-      pickProvider("managed");
+      const result = await revertInference(client, company);
+      // The host names what the company actually falls back to: its committed
+      // manifest `[inference]`, or the platform default when the manifest
+      // declares none. Claiming "managed" here would be wrong for a company
+      // whose manifest names its own provider (issue #1474).
+      toast.success(result.note);
       setKey("");
+      setTest({ kind: "idle" });
+      // The form is not reset to a guess here: `refresh` reseeds it from what
+      // the host holds after the revert, which for a company whose manifest
+      // names its own provider is not `managed` (issue #1474). Assuming a
+      // provider here is what put a value in the select that the header
+      // disagreed with (issue #1737).
       await refresh();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Couldn't revert inference.");
@@ -361,9 +483,9 @@ export function InferenceSection({
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <BrainCircuit className="size-4 text-muted-foreground" />
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Inference (BYOK)
-        </h3>
+        </h2>
         {/* Mirrors the Company credential card's own subtitle. Two cards in
             Connections accept a key and one of them accepts a TinyHumans key,
             so each says in one line which it is — the distinction is otherwise
@@ -411,6 +533,12 @@ export function InferenceSection({
                     Test
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Test sends one real message to this provider using its stored key, and your provider
+                  may charge for it; it does not change the saved configuration. A company with no
+                  custom inference configured stays on the managed brain, and Test just reports that
+                  instead of sending anything.
+                </p>
                 <p className="truncate text-xs text-muted-foreground">{status.baseUrl}</p>
                 {/* Issue #174: config resolving to a provider does not mean the
                     company booted onto it. Say which cognition path is live and
@@ -446,22 +574,53 @@ export function InferenceSection({
                           so this rebuilds the runtime in place instead (#290).
                           Only rendered for an admin, matching the route's own
                           authority check, so a member is not shown a control
-                          that can only 403. */}
-                      {canManage && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={busy !== null}
-                          data-testid="inference-restart-now"
-                          onClick={() => void restartNow()}
-                        >
-                          {busy === "restart" ? (
-                            <Loader2 className="size-3.5 animate-spin" />
-                          ) : (
-                            <RotateCcw className="size-3.5" />
-                          )}
-                          Restart now
-                        </Button>
+                          that can only 403.
+
+                          And only on a host that can honour it. `POST
+                          …/inference/restart` needs a `RuntimeRebuilder` wired
+                          into the host; where none is, it fails
+                          unconditionally with "this host cannot rebuild a
+                          company runtime in place". This card used to render
+                          the button anyway, so the operator was told a restart
+                          was required, handed the control for it, and the
+                          control could only ever fail (#1736). */}
+                      {status.canRebuildInPlace ? (
+                        canManage && (
+                          <div className="space-y-1">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={busy !== null}
+                              data-testid="inference-restart-now"
+                              onClick={() => void restartNow()}
+                            >
+                              {busy === "restart" ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <RotateCcw className="size-3.5" />
+                              )}
+                              Restart now
+                            </Button>
+                            <p className="text-xs">
+                              The current turn finishes; journals, parked approvals, and single-use grants
+                              carry over to the replacement runtime.
+                            </p>
+                          </div>
+                        )
+                      ) : (
+                        /* Named for everyone, admin or not: it is the only
+                           thing that changes this state, and it is not an
+                           action the console can take on anyone's behalf.
+                           Both spellings are given because the host reports
+                           the capability, not the shell it is packaged in —
+                           and a desktop console can be pointed at a remote
+                           host, so guessing from the window would name the
+                           wrong one. */
+                        <p className="text-xs" data-testid="inference-restart-manual">
+                          This host cannot restart a company on its own, so the saved configuration
+                          is picked up the next time OpenCompany starts: quit and reopen the app, or
+                          restart the server process it runs on.
+                        </p>
                       )}
                     </div>
                   </div>
@@ -503,7 +662,7 @@ export function InferenceSection({
                     </Label>
                     <Select
                       value={provider}
-                      onValueChange={(v) => pickProvider(v as InferenceProvider)}
+                      onValueChange={(v) => requestProvider(v as InferenceProvider)}
                       items={PROVIDER_LABEL_ITEMS}
                     >
                       <SelectTrigger id="inference-provider" className="w-full">
@@ -517,6 +676,10 @@ export function InferenceSection({
                         ))}
                       </SelectContent>
                     </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Choosing a provider applies its Base URL and model defaults. If you have typed
+                      either, we ask before replacing them; your API key stays in this form.
+                    </p>
                   </div>
                   {PROVIDERS[provider].requiresBaseUrl && (
                     <div className="space-y-1">
@@ -599,7 +762,7 @@ export function InferenceSection({
                   </Button>
                   <Button variant="outline" disabled={busy !== null} onClick={() => void reset()}>
                     {busy === "reset" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
-                    Reset to managed
+                    Reset to default
                   </Button>
                   {status?.keyConfigured && (
                     <Button
@@ -618,11 +781,41 @@ export function InferenceSection({
                     </Button>
                   )}
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Reset removes this company&apos;s provider override, endpoint, model choices, and stored
+                  key, then falls back to the committed manifest configuration — or the platform
+                  default when the manifest declares none. Remove key keeps the displayed
+                  provider, endpoint, and models as a runtime override, but clears only its stored key.
+                  Both changes apply on teammates&apos; next turn unless this card says a restart is required.
+                </p>
               </div>
             )}
           </CardContent>
         </Card>
       )}
+      <AlertDialog open={pendingProvider !== null} onOpenChange={(open) => !open && setPendingProvider(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace the provider draft?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Choosing {pendingProvider ? PROVIDERS[pendingProvider].label : "this provider"} replaces
+              the typed Base URL and model fields with that provider&apos;s defaults. Your API key stays in
+              the form until you save or leave this page.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep draft</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingProvider) pickProvider(pendingProvider);
+                setPendingProvider(null);
+              }}
+            >
+              Replace fields
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

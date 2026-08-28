@@ -572,8 +572,9 @@ export function CopilotPanel({
             <AlertDescription>{historyError}</AlertDescription>
           </Alert>
         )}
-        {/* What it can see and what it cannot do, stated before the first
-            question rather than discovered after it.
+        {/* Lead with the work this copilot can help with. Its boundaries still
+            need to be easy to find, but they answer a question that usually
+            comes later than the operator's first one.
 
             This block is a claim about the host, so it changes only when the
             host does. #405 had to *withdraw* a confinement claim: the thread
@@ -584,43 +585,56 @@ export function CopilotPanel({
             and a turn that says which part of a question it could not answer
             rather than reaching for the rest of the company. See the header of
             `@/api/workflow-copilot`, and `harness::confine` host-side. */}
-        <div className="rounded-lg border bg-muted/30 p-2 text-2xs leading-snug text-muted-foreground">
+        <div
+          className="rounded-lg border bg-muted/30 p-2 text-2xs leading-snug text-muted-foreground"
+          data-testid="workflow-copilot-introduction"
+        >
           <p>
-            Answers are grounded in{" "}
-            <span className="font-medium text-foreground">{graph.name}</span>: its steps and
-            its recorded runs are what gets sent with your question.
+            Ask what <span className="font-medium text-foreground">{graph.name}</span> does,
+            why a run failed, or what to change.
           </p>
-          <p className="mt-1.5">
-            That is also all the answer is drawn from. This turn runs{" "}
-            <span className="font-medium text-foreground">confined to this workflow</span>: no
-            tools, no company memory, and no reach into the board, your teammates or another
-            workflow. Ask something that needs the wider company and it will say so rather
-            than guess.
-          </p>
-          <p className="mt-1.5">
-            The conversation stays here too: it isn&apos;t in the company chat, and another
-            workflow&apos;s copilot can&apos;t see it.
-          </p>
-          <p className="mt-1.5">
-            {sourceDefined ? (
-              <>
-                It can explain and suggest, but{" "}
-                <span className="font-medium text-foreground">
-                  it can&apos;t change the workflow
-                </span>
-                . This one is defined by a file in the company source tree, so changes belong in
-                the company repository.
-              </>
-            ) : (
-              <>
-                Ask for a change and it{" "}
-                <span className="font-medium text-foreground">proposes one you review</span>: you
-                see the diff and decide. Nothing is written until you press Apply, and it goes
-                through the same save the editor uses, which refuses a workflow that moved while
-                you were reading.
-              </>
-            )}
-          </p>
+          <details className="mt-1.5">
+            <summary className="cursor-pointer font-medium text-foreground">
+              How this copilot works
+            </summary>
+            <div className="mt-1.5">
+              <p>
+                Answers are grounded in <span className="font-medium text-foreground">{graph.name}</span>
+                : its steps and its recorded runs are what gets sent with your question.
+              </p>
+              <p className="mt-1.5">
+                That is also all the answer is drawn from. This turn runs{" "}
+                <span className="font-medium text-foreground">confined to this workflow</span>:
+                no tools, no company memory, and no reach into the board, your teammates or
+                another workflow. Ask something that needs the wider company and it will say so
+                rather than guess.
+              </p>
+              <p className="mt-1.5">
+                The conversation stays here too: it isn&apos;t in the company chat, and another
+                workflow&apos;s copilot can&apos;t see it.
+              </p>
+              <p className="mt-1.5">
+                {sourceDefined ? (
+                  <>
+                    It can explain and suggest, but{" "}
+                    <span className="font-medium text-foreground">
+                      it can&apos;t change the workflow
+                    </span>
+                    . This one is defined by a file in the company source tree, so changes belong
+                    in the company repository.
+                  </>
+                ) : (
+                  <>
+                    Ask for a change and it{" "}
+                    <span className="font-medium text-foreground">proposes one you review</span>:
+                    you see the diff and decide. Nothing is written until you press Apply, and it
+                    goes through the same save the editor uses, which refuses a workflow that
+                    moved while you were reading.
+                  </>
+                )}
+              </p>
+            </div>
+          </details>
         </div>
 
         {echoing && (
@@ -735,7 +749,7 @@ export function CopilotPanel({
         />
         <Button
           size="sm"
-          className="w-full"
+          className="w-full disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100"
           onClick={() => void send()}
           disabled={sending || echoing || !ready || !draft.trim()}
           data-testid="workflow-copilot-send"

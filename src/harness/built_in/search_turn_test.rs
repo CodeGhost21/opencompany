@@ -272,6 +272,7 @@ async fn harness(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(meter.clone()),
         workspace_root: dir.to_path_buf(),
+        mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
@@ -318,13 +319,13 @@ async fn harness(
             Credential::from_value("stub-platform-token"),
             daily_calls,
         )),
+        tenant_search: None,
         // Issue #237's workspace tools are off in this fixture: the turn under
         // test exercises the #238 search path only, and an unwired store is the
         // fail-closed default everywhere but the runtime builder.
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: crate::harness::repo::CheckoutLedger::default(),
+        workflow_runs: None,
+        deep_trace: None,
     };
 
     let record = CompanyRecord {
@@ -341,10 +342,13 @@ async fn harness(
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     };
 
     let pool = HarnessPool::new();

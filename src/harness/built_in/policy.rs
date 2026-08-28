@@ -134,7 +134,7 @@ use crate::company::Policy;
 use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
 use crate::policy::{CallPath, McpReadSet};
 use crate::ports::UsageMeter;
-use crate::ports::types::{CompanyId, Effect, EffectGroup};
+use crate::ports::types::{CompanyId, Effect, EffectGroup, Verdict};
 use crate::runtime::grants::{GrantSet, GrantSubject, GrantedCall};
 
 /// The name openhuman knows this policy by, and the name it stamps into the
@@ -167,12 +167,15 @@ pub enum PolicyMode {
     Readonly,
     /// Supervised: external-effect tools require operator approval.
     Supervised,
-    /// Auto: the agent's own sandbox writes and outward reads run unattended;
-    /// anything that leaves the company or spends money still parks.
+    /// Auto: the agent's own sandbox writes, outward reads, and workspace
+    /// mutations confined to nodes the calling agent created and last wrote run
+    /// unattended; anything that leaves the company or spends money still parks.
     ///
     /// The tier line itself is
     /// [`Consequence::parks_under_auto`](crate::policy::Consequence::parks_under_auto),
-    /// which reads the existing declaration table rather than adding a list.
+    /// which reads the existing declaration table rather than adding a list; the
+    /// workspace exception is graded at the policy seam before the table verdict
+    /// is taken (issue #877).
     Auto,
     /// Full autonomy: tools run without approval (except `always_approve`).
     Full,
@@ -797,6 +800,15 @@ pub struct ApprovalPolicy {
     /// arrives here and the gate applies it through
     /// [`mcp_call_reach`](crate::policy::consequence::mcp_call_reach).
     mcp_reads: McpReadSet,
+    /// The shared workspace, when this harness has one. It is queried only for
+    /// the four mutation tools' authorship-aware auto-tier exception.
+    workspace: Option<WorkspaceReader>,
+}
+
+#[derive(Clone)]
+struct WorkspaceReader {
+    store: Arc<dyn crate::ports::WorkspaceStore>,
+    company: CompanyId,
 }
 
 /// Where the per-agent daily spend cap reads today's spend from (issue #304):
@@ -840,6 +852,7 @@ impl ApprovalPolicy {
             // No read declaration by default, so every MCP bridge call gates
             // exactly as before — see `with_mcp_reads`.
             mcp_reads: McpReadSet::default(),
+            workspace: None,
         }
     }
 
@@ -879,6 +892,18 @@ impl ApprovalPolicy {
     /// pure `consequence_of` cannot see.
     pub fn with_mcp_reads(mut self, reads: McpReadSet) -> Self {
         self.mcp_reads = reads;
+        self
+    }
+
+    /// Installs the company workspace for authorship-aware mutation grading.
+    /// Without it, or without an agent identity, every workspace mutation keeps
+    /// the conservative per-call verdict.
+    pub fn with_workspace(
+        mut self,
+        store: Arc<dyn crate::ports::WorkspaceStore>,
+        company: CompanyId,
+    ) -> Self {
+        self.workspace = Some(WorkspaceReader { store, company });
         self
     }
 
@@ -1092,10 +1117,11 @@ impl ApprovalPolicy {
         // effect's payload — one function, so the two answers cannot drift into
         // a grant that never matches its own tool.
         let scope = crate::policy::consequence::standing_scope_of(tool, args);
-        let Some(grant) = self.requests.grants().match_standing(
+        let Some(grant) = self.requests.grants().match_standing_with_verdict(
             &subject,
             tool,
             scope.as_deref(),
+            Verdict::Approve,
             crate::ports::now_millis(),
         ) else {
             return false;
@@ -1108,6 +1134,30 @@ impl ApprovalPolicy {
             grant.expires_at_millis
         );
         true
+    }
+
+    fn standing_deny_applies(&self, tool: &str, args: &serde_json::Value) -> bool {
+        // Agents only, on purpose: a standing denial is only *enforced* on the
+        // agent turn path, where openhuman treats a `Deny` verdict as
+        // fail-closed. The workflow gate deliberately does not honour `Deny`
+        // (see `src/workflows/gate.rs`), so minting a standing denial for a
+        // workflow would advertise a refusal nothing ever enforces. The mint
+        // side refuses those too; this keeps the check from ever *advertising*
+        // one even if a stale deny were already in the set.
+        let Some(agent) = self.agent.as_deref() else {
+            return false;
+        };
+        let scope = crate::policy::consequence::standing_scope_of(tool, args);
+        self.requests
+            .grants()
+            .match_standing_with_verdict(
+                &GrantSubject::Agent(agent.to_string()),
+                tool,
+                scope.as_deref(),
+                Verdict::Deny,
+                crate::ports::now_millis(),
+            )
+            .is_some()
     }
 
     /// Does this tool call **spend money**? The predicate the daily budget arm
@@ -1304,11 +1354,50 @@ impl ApprovalPolicy {
     /// gated base otherwise — so an undeclared server, an unreadable argument, or
     /// a policy with no declaration all keep the parking verdict this arm read
     /// before.
-    fn consequence_for(&self, tool: &str, args: &serde_json::Value) -> crate::policy::Consequence {
+    async fn consequence_for(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> crate::policy::Consequence {
         if crate::policy::consequence::is_mcp_bridge_tool(tool) {
             return crate::policy::consequence::mcp_call_reach(tool, args, &self.mcp_reads);
         }
-        crate::policy::consequence_of(tool, args)
+        let consequence = crate::policy::consequence_of(tool, args);
+        // Only `auto` consumes the ownership downgrade: `full` ignores the
+        // consequence entirely and `supervised`/`readonly` read only `reach`.
+        // Reading the whole workspace tree to grade authorship in those modes
+        // is pure cost, so the lookup is gated on the one mode that uses it
+        // (issue #877).
+        if self.mode != PolicyMode::Auto {
+            return consequence;
+        }
+        let Some(workspace) = self.workspace.as_ref() else {
+            return consequence;
+        };
+        let Some(agent) = self.agent.as_deref() else {
+            return consequence;
+        };
+        if !matches!(
+            tool.to_ascii_lowercase().as_str(),
+            "workspace_create" | "workspace_write" | "workspace_delete" | "workspace_rename"
+        ) {
+            return consequence;
+        }
+        if crate::harness::built_in::workspace_tools::mutation_is_owned_by_agent(
+            &workspace.store,
+            &workspace.company,
+            agent,
+            tool,
+            args,
+        )
+        .await
+        {
+            return crate::policy::Consequence {
+                standing: crate::policy::Standing::Grantable,
+                ..consequence
+            };
+        }
+        consequence
     }
 }
 
@@ -1381,6 +1470,12 @@ impl ToolPolicy for ApprovalPolicy {
                 grant.agent
             );
             return ToolPolicyDecision::Allow;
+        }
+
+        if self.standing_deny_applies(tool, &request.arguments) {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' is denied by a standing permission; it will ask again when that refusal expires or is revoked"
+            ));
         }
 
         // 2b. A live STANDING grant: the operator opened this tool up for this
@@ -1456,17 +1551,20 @@ impl ToolPolicy for ApprovalPolicy {
         // operator who does want a per-call gate has
         // `[policy].always_approve = ["web_search"]`, which wins over every
         // tier including `full`.
-        let consequence = self.consequence_for(tool, &request.arguments);
+        let consequence = self.consequence_for(tool, &request.arguments).await;
         let reach = consequence.reach;
         let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
             // `auto` sits between the two (issue #560): the agent's own sandbox
-            // writes and its outward reads run unattended, and anything that
-            // leaves the company or spends on submit still parks. The line is
-            // drawn by `parks_under_auto`, which reads the same declaration
-            // table this arm's neighbours read — see there for why it reuses
-            // `Standing` rather than introducing a second list, and for the two
-            // boundaries it deliberately does not draw.
+            // writes, its outward reads, and workspace mutations confined to its
+            // own nodes run unattended, and anything that leaves the company or
+            // spends on submit still parks. The line is drawn by
+            // `parks_under_auto`, which reads the same declaration table this
+            // arm's neighbours read — see there for why it reuses `Standing`
+            // rather than introducing a second list, and for the two boundaries
+            // it deliberately does not draw. The workspace exception is the one
+            // company-context downgrade, graded by `consequence_for` before the
+            // table verdict is taken (issue #877).
             PolicyMode::Auto => {
                 if consequence.parks_under_auto() {
                     self.require_approval(
@@ -1611,6 +1709,8 @@ fn classify_group(tool_name: &str, args: &serde_json::Value) -> EffectGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+    use crate::store::FsOps;
     use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 
     // Issue #470: the `composio_execute` fixtures are built here, from the same
@@ -1960,11 +2060,6 @@ mod tests {
             ("mcp_registry_tool_call", serde_json::json!({})),
             ("run_workflow", serde_json::json!({})),
             ("composio_authorize", serde_json::json!({})),
-            // Issue #245: a checkout writes a tree of third-party source into a
-            // sandbox this agent may also hold `shell` over, and both tools
-            // reach the forge under the company's credential.
-            ("repo_checkout", serde_json::json!({})),
-            ("repo_pr", serde_json::json!({})),
             (
                 "composio_execute",
                 serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
@@ -2543,59 +2638,335 @@ mod tests {
         }
     }
 
-    /// The repository pair across all four tiers (issue #245), asserted as a
-    /// line rather than as four independent facts.
-    ///
-    /// `readonly` **denies** rather than parks, and that is the one verdict here
-    /// worth arguing: both names read like reads. `repo_checkout` writes
-    /// thousands of files into the agent's sandbox, which a tier whose whole
-    /// contract is "nothing changes" cannot admit; `repo_pr` reaches a third
-    /// party under the company's credential, which is the other half of the same
-    /// contract. Parking either under `readonly` would be worse than denying,
-    /// because openhuman resolves a `RequireApproval` inline and never
-    /// re-dispatches — the operator would approve a call that then does not run.
-    ///
-    /// The parked request's `kind` is checked too, because the console's plain
-    /// language table is keyed on exactly that string: a `kind` that is not the
-    /// tool name silently falls through to "Use one of its tools".
+    /// The policy asks whose node a workspace mutation targets, not merely
+    /// which workspace tool the agent selected. Only a node both created and
+    /// last written by that agent runs under `auto`; an operator, a teammate,
+    /// a missing lookup, or an unfamiliar create path keeps the gate.
     #[tokio::test]
-    async fn the_repository_pair_parks_under_supervision_and_is_denied_read_only() {
-        let args = serde_json::json!({ "repo": "acme/widgets" });
-        for mode in ["supervised", "auto"] {
-            let p = policy(mode, &[], None);
-            for tool in ["repo_checkout", "repo_pr"] {
-                let decision = p.check(&request(tool, args.clone())).await;
-                let ToolPolicyDecision::RequireApproval { .. } = decision else {
-                    panic!("{tool} must park under {mode}, got {decision:?}");
-                };
-                assert_eq!(
-                    p.effect_for(tool, &args).kind,
-                    tool,
-                    "the approval card's kind must be the tool name, or the console \
-                     cannot label it"
-                );
-            }
-        }
+    async fn auto_allows_only_mutations_of_the_callers_own_workspace_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let node = |id: &str, name: &str, origin: WorkspaceOrigin| WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: origin.clone(),
+            updated_by: origin,
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        store
+            .create(&company, &node("own", "own.md", own), Some("draft"))
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("operator", "operator.md", WorkspaceOrigin::Operator),
+                Some("guidance"),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "teammate",
+                    "teammate.md",
+                    WorkspaceOrigin::Agent {
+                        id: "cmo".to_string(),
+                    },
+                ),
+                Some("brief"),
+            )
+            .await
+            .unwrap();
 
-        let readonly = policy("readonly", &[], None);
-        for tool in ["repo_checkout", "repo_pr"] {
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
+        for (tool, args) in [
+            ("workspace_write", serde_json::json!({ "id": "own" })),
+            ("workspace_delete", serde_json::json!({ "id": "own" })),
+            ("workspace_rename", serde_json::json!({ "id": "own" })),
+            (
+                "workspace_create",
+                serde_json::json!({ "path": "agents/ceo/draft.md" }),
+            ),
+        ] {
+            assert_eq!(
+                policy.check(&request(tool, args)).await,
+                ToolPolicyDecision::Allow,
+                "{tool}"
+            );
+        }
+        for args in [
+            serde_json::json!({ "id": "operator" }),
+            serde_json::json!({ "id": "teammate" }),
+            serde_json::json!({ "id": "missing" }),
+        ] {
+            assert!(matches!(
+                policy.check(&request("workspace_write", args)).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ));
+        }
+        assert!(matches!(
+            policy
+                .check(&request(
+                    "workspace_create",
+                    serde_json::json!({ "path": "standards/new.md" })
+                ))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    }
+
+    /// Authorship narrows the auto tier only. Even an agent's own note is a
+    /// state change, so supervised still presents it and readonly still denies
+    /// it; `always_approve` remains the operator's explicit override.
+    #[tokio::test]
+    async fn ownership_never_relaxes_supervised_or_readonly_workspace_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        store
+            .create(
+                &company,
+                &WorkspaceNode {
+                    id: "own".to_string(),
+                    name: "own.md".to_string(),
+                    kind: NodeKind::File,
+                    parent_id: None,
+                    updated_at_millis: 1,
+                    created_by: own.clone(),
+                    updated_by: own,
+                    mime: None,
+                    size: None,
+                    sha256: None,
+                },
+                Some("draft"),
+            )
+            .await
+            .unwrap();
+        for mode in ["supervised", "readonly"] {
+            let policy = policy(mode, &[], None)
+                .with_agent("ceo")
+                .with_workspace(store.clone(), company.clone());
+            let decision = policy
+                .check(&request(
+                    "workspace_write",
+                    serde_json::json!({ "id": "own" }),
+                ))
+                .await;
             assert!(
                 matches!(
-                    readonly.check(&request(tool, args.clone())).await,
-                    ToolPolicyDecision::Deny { .. }
+                    decision,
+                    ToolPolicyDecision::RequireApproval { .. } | ToolPolicyDecision::Deny { .. }
                 ),
-                "{tool} must be denied under readonly, not parked"
+                "{mode}"
             );
         }
+    }
 
-        let full = policy("full", &[], None);
-        for tool in ["repo_checkout", "repo_pr"] {
-            assert_eq!(
-                full.check(&request(tool, args.clone())).await,
-                ToolPolicyDecision::Allow,
-                "{tool} under full mode"
-            );
-        }
+    /// A folder rename re-renders the path of every node inside it, so the
+    /// auto-tier exception for `workspace_rename` is not target-only: an
+    /// agent-created folder that has since gained an operator- or teammate-
+    /// authored node must restore the approval gate, while a folder holding
+    /// only the agent's own work still runs unattended.
+    #[tokio::test]
+    async fn auto_rename_of_a_folder_checks_every_descendants_authorship() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        let node = |id: &str,
+                    name: &str,
+                    kind: NodeKind,
+                    parent: Option<&str>,
+                    origin: WorkspaceOrigin| {
+            WorkspaceNode {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind,
+                parent_id: parent.map(str::to_string),
+                updated_at_millis: 1,
+                created_by: origin.clone(),
+                updated_by: origin,
+                mime: None,
+                size: None,
+                sha256: None,
+            }
+        };
+        store
+            .create(
+                &company,
+                &node("own", "own", NodeKind::Folder, None, own.clone()),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("mixed", "mixed", NodeKind::Folder, None, own.clone()),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "own-note",
+                    "own-note.md",
+                    NodeKind::File,
+                    Some("own"),
+                    own.clone(),
+                ),
+                Some("mine"),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node(
+                    "operator-note",
+                    "operator-note.md",
+                    NodeKind::File,
+                    Some("mixed"),
+                    WorkspaceOrigin::Operator,
+                ),
+                Some("theirs"),
+            )
+            .await
+            .unwrap();
+
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
+        assert_eq!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({ "id": "own" })
+                ))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+        assert!(matches!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({ "id": "mixed" })
+                ))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    }
+
+    /// A rename that *moves* a node has the same landing-zone rule
+    /// `workspace_create` applies to minting one: an agent-owned note moved
+    /// into an operator-authored folder inside the agent's home must restore
+    /// the approval gate, or the operator-created folder becomes an unreviewed
+    /// collection point. The home root keeps the exception — it is the agent's
+    /// own space whatever its stored origin.
+    #[tokio::test]
+    async fn auto_rename_into_a_foreign_folder_inside_the_home_parks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let own = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        let node =
+            |id: &str, name: &str, parent: Option<&str>, origin: WorkspaceOrigin| WorkspaceNode {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind: if id.starts_with("n-") {
+                    NodeKind::File
+                } else {
+                    NodeKind::Folder
+                },
+                parent_id: parent.map(str::to_string),
+                updated_at_millis: 1,
+                created_by: origin.clone(),
+                updated_by: origin,
+                mime: None,
+                size: None,
+                sha256: None,
+            };
+        store
+            .create(&company, &node("agents", "agents", None, own.clone()), None)
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("home", "ceo", Some("agents"), own.clone()),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("inbox", "inbox", Some("home"), WorkspaceOrigin::Operator),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &node("n-own", "own.md", Some("home"), own.clone()),
+                Some("mine"),
+            )
+            .await
+            .unwrap();
+
+        let policy = policy("auto", &[], None)
+            .with_agent("ceo")
+            .with_workspace(store, company);
+
+        // Into the operator-authored folder: the approval gate comes back.
+        assert!(matches!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({
+                        "path": "agents/ceo/own.md",
+                        "new_parent": "agents/ceo/inbox"
+                    })
+                ))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        // Into the home root: the agent's own space, no approval needed.
+        assert_eq!(
+            policy
+                .check(&request(
+                    "workspace_rename",
+                    serde_json::json!({
+                        "path": "agents/ceo/own.md",
+                        "new_parent": "agents/ceo"
+                    })
+                ))
+                .await,
+            ToolPolicyDecision::Allow
+        );
     }
 
     /// The operator's escape hatch: `always_approve` wins over every tier, so a
@@ -3588,6 +3959,51 @@ mod tests {
         ));
     }
 
+    /// Issue #1458: a standing denial is only **enforced** on the agent turn
+    /// path, where openhuman treats a `Deny` verdict as fail-closed. The
+    /// workflow gate deliberately does not honour `Deny`
+    /// (`src/workflows/gate.rs`), so this policy must not advertise one for a
+    /// workflow subject — even if a stale denial is sitting in the set — or the
+    /// gate would be handed a verdict it is documented to ignore and the
+    /// operator's "don't ask again" would be silently dropped on the next run.
+    #[tokio::test]
+    async fn a_standing_deny_is_not_advertised_for_a_workflow_subject() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("deny-1"),
+            agent: String::new(),
+            workflow: Some("sports_digest".to_string()),
+            tool: "web_fetch".to_string(),
+            verdict: Verdict::Deny,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        });
+
+        let p = policy("full", &["web_fetch"], None)
+            .with_requests(queue)
+            .with_workflow("sports_digest");
+        let decision = p
+            .check(&request(
+                "web_fetch",
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a workflow standing denial must not be advertised on the gate path: {decision:?}"
+        );
+    }
+
     // --- The per-agent daily spend cap (issue #304) ---------------------------
 
     use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
@@ -3667,6 +4083,7 @@ mod tests {
             cost_usd: usd,
             kind: SampleKind::Inference,
             run_id: None,
+            model: None,
         }
     }
 
@@ -4067,6 +4484,7 @@ mod tests {
             agent: agent.to_string(),
             workflow: None,
             tool: tool.to_string(),
+            verdict: crate::ports::types::Verdict::Approve,
             granted_by: crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::User,
                 id: "user-1".to_string(),
@@ -4303,8 +4721,6 @@ mod tests {
             "mcp_call_tool",
             // Third-party source and diffs, fetched under the operator's
             // credential (issue #245).
-            "repo_checkout",
-            "repo_pr",
             // Named consequences, unchanged.
             "composio_authorize",
             "pay_invoice",
@@ -4360,6 +4776,70 @@ mod tests {
             ),
             EffectGroup::Send
         );
+    }
+
+    /// **Issue #1818, end to end at the gate.** The live evidence from the
+    /// issue: an agent's `composio_execute` to fetch GitHub issues was blocked
+    /// under `opencompany-approval` — *"leaves the company or spends money"* —
+    /// for what is a read.
+    ///
+    /// `GITHUB_ISSUES_LIST_FOR_REPO` is Composio's own spelling of the
+    /// operation the curated catalogue calls `GITHUB_LIST_REPOSITORY_ISSUES`.
+    /// The catalogue miss used to make it a `Send`, which parks under both
+    /// `supervised` and `auto` and — being `PerCall` — could not be unblocked
+    /// by granting standing either, so the desk stopped for good.
+    ///
+    /// Both unattended tiers are asserted, not just `auto`: the symptom in the
+    /// issue is a park, and a park is what `supervised` does too. `readonly` is
+    /// asserted from the other side — it is the one tier whose promise is that
+    /// the desk reaches into nobody's account, and a drifted slug is no reason
+    /// to break it.
+    #[tokio::test]
+    #[cfg(feature = "openhuman")]
+    async fn a_drifted_composio_read_no_longer_parks_as_spend() {
+        let drifted = || serde_json::json!({ "tool": "GITHUB_ISSUES_LIST_FOR_REPO" });
+        for mode in ["supervised", "auto"] {
+            let p = policy(mode, &[], None).with_agent("ops");
+            assert_eq!(
+                p.check(&request("composio_execute", drifted())).await,
+                ToolPolicyDecision::Allow,
+                "under `{mode}` a GitHub issue read must run, not park behind a card \
+                 that says it spends money"
+            );
+        }
+        // The card never says spend, whatever tier is asking.
+        assert_eq!(
+            classify_group("composio_execute", &drifted()),
+            EffectGroup::Other,
+        );
+        // …and the two boundaries the fix does not move. `readonly` still
+        // refuses: this reaches a third party's account with the company's
+        // credential, which is exactly what that tier promises not to do.
+        let ro = policy("readonly", &[], None).with_agent("ops");
+        assert!(matches!(
+            ro.check(&request("composio_execute", drifted())).await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        // And an inferred read is not mintable: a verb is evidence, and a
+        // standing grant outlives the call it was cut from.
+        assert!(!grantable("composio_execute", &drifted()));
+        // The control, in the same tiers: a send that merely misses the
+        // catalogue is still a send. `GITHUB_INVENT_A_NEW_VERB` names no verb
+        // this layer knows, so nothing about #1818 rescues it.
+        for mode in ["supervised", "auto"] {
+            let p = policy(mode, &[], None).with_agent("ops");
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "composio_execute",
+                        serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "under `{mode}` an action nobody has classified must still park"
+            );
+        }
     }
 
     /// The grantability answer and the parking answer are read from one

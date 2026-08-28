@@ -8,6 +8,7 @@ import { ApiError } from "@/api/types";
 import { grantStanding } from "@/lib/provider-grid";
 import { classifyLoadFailure } from "@/lib/section-load";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
+import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -125,7 +126,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       setToken("");
       // Clearing an override falls back to whatever tier remains — the status
       // the host just returned says which, and the grid re-probes for itself.
-      toast.success("Composio token cleared.");
+      toast.success(res.note);
       onChanged();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not clear the token.");
@@ -162,9 +163,9 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <Plug className="size-4 text-muted-foreground" />
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Composio credential
-        </h3>
+        </h2>
       </div>
       <p className="text-sm text-muted-foreground">
         {!canManage
@@ -214,11 +215,18 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
               already be set, off a field that was never read, is the same false
               confidence the badge above used to show. */}
           {grant === "not-granted" && (
-            <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-              This company does not grant the <span className="font-mono">composio</span> tool
-              namespace, so teammates will not receive Composio tools even once connected. Add
-              <span className="font-mono"> composio</span> to the company&apos;s tool grants first.
-            </p>
+            <GrantNamespace
+              client={client}
+              company={company}
+              namespace="composio"
+              explanation="Teammates will not receive Composio tools even once connected."
+              canManage={canManage}
+              onGranted={async () => {
+                await refresh();
+                onChanged();
+              }}
+              testId="composio-not-granted"
+            />
           )}
 
           {/* Gated on `credentialed`, not `attested`: a company brokered through

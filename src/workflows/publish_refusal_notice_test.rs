@@ -32,8 +32,11 @@
 //! credential: the model's *choices*, via the scripted endpoint
 //! [`gated_tool_turn_test`](crate::workflows::gated_tool_turn_test) established.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
+use axum::Json;
+use axum::routing::post;
 use serde_json::json;
 
 use crate::company::{CompanyManifest, parse_workflow};
@@ -60,7 +63,7 @@ id = "work"
 kind = "agent"
 name = "Work"
 summary = "Draft the launch spec."
-agent = "ceo"
+agent = "ceo-a"
 [[node]]
 id = "done"
 kind = "output"
@@ -94,8 +97,13 @@ mode = "full"
 allow = ["files"]
 
 [[agent]]
-id = "ceo"
-role = "Chief Executive"
+id = "ceo-a"
+role = "Chief Executive A"
+tier = "orchestrator"
+
+[[agent]]
+id = "ceo-b"
+role = "Chief Executive B"
 tier = "orchestrator"
 "#,
     )
@@ -117,10 +125,13 @@ fn record() -> CompanyRecord {
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     }
 }
 
@@ -171,6 +182,82 @@ async fn run_publishing(dir: &std::path::Path) -> crate::ports::WorkflowRun {
     )
     .await
     .expect("the run settles — a refused publish is not a failed run")
+}
+
+/// A scripted endpoint whose per-lane responses let two runs overlap while
+/// they share one publish queue. Each run receives a refused publish before it
+/// completes; a two-lane barrier holds each run's final response until both
+/// have executed their `publish_artifact`, so either drain is guaranteed to
+/// meet both refusals — the exact cross-run schedule the shared bucket got
+/// wrong.
+async fn spawn_interleaved_publish_script() -> String {
+    let steps = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let app = axum::Router::new().route(
+        "/chat/completions",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let steps = Arc::clone(&steps);
+            let barrier = Arc::clone(&barrier);
+            async move {
+                let rendered = body.to_string();
+                let (lane, source) = if rendered.contains("run-a") {
+                    ("run-a", "run-a.md")
+                } else if rendered.contains("run-b") {
+                    ("run-b", "run-b.md")
+                } else {
+                    panic!("scripted workflow request did not name a lane: {rendered}");
+                };
+                let step = {
+                    let mut guard = steps.lock().expect("script steps");
+                    let step = guard.entry(lane.to_string()).or_default();
+                    let current = *step;
+                    *step += 1;
+                    current
+                };
+                let message = match step {
+                    0 => json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": format!("write-{lane}"),
+                            "type": "function",
+                            "function": { "name": "file_write", "arguments": json!({ "path": source, "content": "draft" }).to_string() }
+                        }]
+                    }),
+                    1 => json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": format!("publish-{lane}"),
+                            "type": "function",
+                            "function": { "name": "publish_artifact", "arguments": json!({ "path": source }).to_string() }
+                        }]
+                    }),
+                    2 => {
+                        // Both tool calls have executed and their refusals are
+                        // queued; releasing one run before the other would let
+                        // the first drain a bucket that had only one entry, and
+                        // a reverted shared-bucket implementation would pass.
+                        barrier.wait().await;
+                        json!({ "role": "assistant", "content": "could not publish" })
+                    }
+                    _ => json!({ "role": "assistant", "content": "done" }),
+                };
+                Json(json!({
+                    "choices": [{ "index": 0, "message": message }],
+                    "usage": { "prompt_tokens": 12, "completion_tokens": 4 }
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind scripted provider");
+    let addr = listener.local_addr().expect("scripted provider address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
 }
 
 /// **The headline.** A refused publish reaches the operator as a run notice that
@@ -235,6 +322,63 @@ async fn a_workflow_node_whose_publish_was_refused_says_so_on_the_run() {
         "the apology is still the node's text — this test asserts the notice is ADDITIONAL, \
          not that the prose was suppressed: {output}"
     );
+}
+
+/// Concurrent runs keep their refused-publish notices separate even though both
+/// dispatch through one cached roster and its one queue handle.
+#[tokio::test]
+async fn concurrent_workflow_runs_do_not_take_each_others_publish_refusals() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base_url = spawn_interleaved_publish_script().await;
+    let (mut deps, _journal) = deps(base_url, dir.path());
+    deps.artifacts = Some(Arc::new(FsOps::new(dir.path())));
+    let record = record();
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps)
+        .await
+        .expect("roster builds once");
+    let file_a = parse_workflow(AGENT_GRAPH).expect("graph parses");
+    let graph_b = AGENT_GRAPH.replace("agent = \"ceo-a\"", "agent = \"ceo-b\"");
+    let file_b = parse_workflow(&graph_b).expect("graph parses");
+    let a = WorkflowRunContext::new(false);
+    let b = WorkflowRunContext::new(false);
+
+    let (run_a, run_b) = tokio::join!(
+        super::runner::run_workflow(
+            Arc::clone(&pool),
+            deps.clone(),
+            &record,
+            &file_a,
+            json!({ "request": "run-a" }),
+            &a,
+        ),
+        super::runner::run_workflow(
+            Arc::clone(&pool),
+            deps.clone(),
+            &record,
+            &file_b,
+            json!({ "request": "run-b" }),
+            &b,
+        ),
+    );
+    let run_a = run_a.expect("run A settles");
+    let run_b = run_b.expect("run B settles");
+
+    for (run, own, sibling) in [
+        (run_a, "run-a.md", "run-b.md"),
+        (run_b, "run-b.md", "run-a.md"),
+    ] {
+        assert!(
+            run.notices.iter().any(|notice| notice.contains(own)),
+            "the run must report its own refused publish: {:?}",
+            run.notices
+        );
+        assert!(
+            !run.notices.iter().any(|notice| notice.contains(sibling)),
+            "the run must not report its sibling's refused publish: {:?}",
+            run.notices
+        );
+    }
 }
 
 /// The run's notice does not come at the cost of the #244 unpublished-work scan:

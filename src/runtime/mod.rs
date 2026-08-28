@@ -84,16 +84,14 @@ pub mod mailbox_poller;
 /// expired approvals, expired grants and stale fire claims for EVERY registered
 /// company, not only those with a manifest `[[schedule]]`. See [`maintenance`].
 pub mod maintenance;
+/// Resolving `@name` in chat to a teammate, a person, a desk, or the whole
+/// room — and deciding what that addresses. Pure and brain-agnostic, for the
+/// same reason [`delegation_tools`] is. See [`mentions`].
+pub mod mentions;
 /// Issue #290: replacing a registered company's runtime in place, so first-time
 /// BYOK setup takes effect without a process restart. See [`rebuild`].
 pub mod rebuild;
 pub mod registry;
-/// Issue #245 (operator half): [`RepoManager`] — binding real repositories to a
-/// company and keeping a host-side bare mirror of each one, with the credential
-/// path complete and **no agent surface at all**. Compiled in every build; the
-/// forge REST seam it takes is optional, so the default build makes no network
-/// call of its own. See [`repo_manager`].
-pub mod repo_manager;
 /// Issue #383: [`RunSupervisor`] — the live set of workflow runs an operator can
 /// still stop, so `POST …/workflows/runs/{runId}/cancel` has something to reach.
 /// Compiled in every build: it is a plain map of stop signals and touches no
@@ -101,9 +99,6 @@ pub mod repo_manager;
 pub mod run_events;
 pub mod run_supervisor;
 pub mod scheduler;
-/// Issue #203: the Telegram `getUpdates` long-polling listener — the inbound
-/// path that needs no public URL, mirroring OpenHuman. See [`telegram_poller`].
-pub mod telegram_poller;
 pub mod tools;
 /// Issue #983: settling chat turns a previous host process left open, the
 /// transcript-side twin of the run reaper. See [`turn_sweep`].
@@ -149,9 +144,6 @@ pub use handover::RuntimeHandover;
 pub use maintenance::MaintenanceTicker;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;
-#[cfg(feature = "github")]
-pub use repo_manager::HttpRepoHost;
-pub use repo_manager::RepoManager;
 pub use run_supervisor::{RunGuard, RunSupervisor};
 pub use scheduler::{
     CATCHUP_WINDOW_MINUTES, Clock, CompanyScheduler, FakeClock, PRUNE_CUTOFF_MINUTES, SystemClock,

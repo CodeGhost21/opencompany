@@ -52,10 +52,6 @@ const COPY: Record<string, FieldCopy> = {
     label: "Total workspace size",
     unit: "GB",
   },
-  github_token: {
-    label: "GitHub token",
-    hint: "Lets agents read and open pull requests on repositories you bind.",
-  },
   tinyhumans_api_key: {
     label: "TinyHumans API key",
     hint: "What your teammates think with.",

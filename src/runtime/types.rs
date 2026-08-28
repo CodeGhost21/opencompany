@@ -244,6 +244,34 @@ pub struct ApprovalSummary {
     /// behind this card", which is the truth for every chat and scheduler park.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
+    /// Which workflow the parked [`workflow.approve`] gate is asking about
+    /// (issue #395), when the effect is one.
+    ///
+    /// The console's run address needs **both** halves — a run id alone cannot
+    /// name a page, so this sits beside [`workflow_run_id`](Self::workflow_run_id)
+    /// as the second half of the join.
+    ///
+    /// # Why this is a top-level field and not read from the payload
+    ///
+    /// The id also appears in the parked effect's payload (the `workflow_id`
+    /// key), but [`payload`](Self::payload) is a redacted *rendering*
+    /// (`approval_display`), and role redaction (issue #618) strips it from a
+    /// member reader entirely. [`workflow_run_id`](Self::workflow_run_id)
+    /// survives that redaction, and this must too, or the member holding up a
+    /// stalled workflow would lose the one address that says where it is —
+    /// exactly the stalled-work visibility issue #468 exists to protect.
+    ///
+    /// Projected from the raw parked effect
+    /// ([`gate_workflow_id`](crate::runtime::workflow_resume::gate_workflow_id)),
+    /// never from the display payload, for the same reason the projection's own
+    /// comment gives: a fact must be read as a fact, not as a rendering that
+    /// redaction rules could silently change.
+    ///
+    /// Absent on every non-gate approval (a chat turn, a scheduler tick) and on
+    /// a tool call parked *by* a workflow — only native `workflow.approve`
+    /// effects carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
     /// Whether the operator may grant this tool **broadly** — one standing
     /// permission covering any arguments until a deadline (issue #374).
     ///
@@ -268,6 +296,10 @@ pub struct ApprovalSummary {
     /// approve-once behaviour by construction.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub broadly_grantable: bool,
+    /// Whether this tool may be denied standing. Unlike a grant, a refusal is
+    /// safe for every agent or workflow tool because it can only narrow access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub broadly_deniable: bool,
     /// Whether [`payload`](Self::payload) and [`amount_usd`](Self::amount_usd)
     /// were withheld from *this reader* because of their role (issue #618).
     ///

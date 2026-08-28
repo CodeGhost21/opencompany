@@ -111,14 +111,31 @@ describe("planLabels", () => {
     );
   });
 
-  it("collides on the rendered width, so a long name costs its neighbour", () => {
-    const neighbour = cand({ id: "neighbour", x: 100, priority: LABEL_PRIORITY.worker });
+  it("costs task labels at their full rendered width", () => {
+    const neighbour = cand({ id: "neighbour", x: 80, priority: LABEL_PRIORITY.worker });
     const short = cand({ id: "named", x: 0, text: "A", priority: LABEL_PRIORITY.hovered });
-    const long = { ...short, text: "A".repeat(40) };
+    const long = {
+      ...short,
+      text: "Draft Q3 pricing experiment",
+    };
     expect(idSet(planLabels([short, neighbour], { x: 0, y: 0, w: W }, W))).toEqual(
       new Set(["named", "neighbour"]),
     );
     expect(ids(planLabels([long, neighbour], { x: 0, y: 0, w: W }, W))).toEqual(["named"]);
+  });
+
+  it("accounts for the 10px floor when deciding which dense labels survive", () => {
+    const pair = [
+      cand({ id: "priority", x: 0, priority: LABEL_PRIORITY.hovered }),
+      cand({ id: "neighbour", x: 29, priority: LABEL_PRIORITY.worker }),
+    ];
+    // The former 9px label boxes fit at this gap. At the design system floor,
+    // the planner drops the quieter one instead of letting the rendered names
+    // overlap.
+    expect(idSet(planLabels(pair.map((c) => ({ ...c, fontPx: 9 })), { x: 0, y: 0, w: W }, W))).toEqual(
+      new Set(["priority", "neighbour"]),
+    );
+    expect(ids(planLabels(pair, { x: 0, y: 0, w: W }, W))).toEqual(["priority"]);
   });
 
   it("separates labels that share an x but sit on different rows", () => {

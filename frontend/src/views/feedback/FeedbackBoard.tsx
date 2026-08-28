@@ -168,14 +168,17 @@ export function FeedbackBoard({ client, company, refreshKey, onAvailability }: P
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="flex items-center gap-2 text-base font-semibold">
+        {/* `h2`, one level under FeedbackView's `h1`: this board is the page's
+            other top-level section, beside the "Flag something" card, not a
+            subsection of anything (issue #1392). */}
+        <h2 className="flex items-center gap-2 text-base font-semibold">
           What everyone's asking for
           {total > 0 && (
             <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground">
               {total}
             </span>
           )}
-        </h3>
+        </h2>
 
         <div className="inline-flex rounded-lg border bg-muted/40 p-0.5">
           {BOARD_SORTS.map((option) => (

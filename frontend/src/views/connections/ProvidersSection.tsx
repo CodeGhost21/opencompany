@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, ChevronRight, Loader2, LogIn, Search, Unplug } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  ChevronRight,
+  Loader2,
+  LogIn,
+  Search,
+  ShieldCheck,
+  Unplug,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -56,6 +65,18 @@ interface Props {
   degraded: string | null;
   /** The host has not answered yet. */
   loading: boolean;
+  /**
+   * Grant the `composio` tool namespace (issue #1796).
+   *
+   * A callback rather than a write of its own, for the reason stated below: this
+   * grid decides nothing and calls nothing. What it contributes is the *place* —
+   * the operator reading "connected" next to a tile is the one who needs to know
+   * their agents still cannot use it, and the fix belongs where the complaint
+   * is, not only in a section further up the page.
+   */
+  onGrant?: () => void;
+  /** Whether that grant is in flight, so the control can say so. */
+  granting?: boolean;
   onConnect: (provider: GridProvider) => void;
   onDisconnect: (provider: GridProvider) => void;
   /** Open a connected provider's detail view (issue #404). */
@@ -64,7 +85,7 @@ interface Props {
 }
 
 /**
- * The Connections page's one provider grid (issue #582).
+ * The OAuth page's one provider grid (issue #582).
  *
  * The page used to carry two: this tile grid (then inside `ComposioSection`,
  * fed by `GET …/composio/connections`) and a categorised grid of eleven
@@ -95,6 +116,8 @@ export function ProvidersSection({
   openMode,
   degraded,
   loading,
+  onGrant,
+  granting = false,
   onConnect,
   onDisconnect,
   onOpen,
@@ -149,15 +172,37 @@ export function ProvidersSection({
             // still cannot use it. The connection itself is real — the grant
             // governs the tool belt, not the handshake (issue #582). Fires only
             // on an explicit not-granted, never on an unchecked grant (#1478).
-            <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-              <AlertTriangle className="mt-px size-3 shrink-0" />
-              <span>
-                These accounts are connected, but this company does not grant the{" "}
-                <span className="font-mono">composio</span> tool namespace, so its teammates will
-                not receive their tools yet. Add <span className="font-mono">composio</span> to the
-                company&apos;s tool grants.
+            <div
+              className="flex flex-col gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground"
+              data-testid="providers-not-granted"
+            >
+              <span className="flex items-start gap-2">
+                <AlertTriangle className="mt-px size-3 shrink-0" />
+                <span>
+                  These accounts are connected, but this company does not grant the{" "}
+                  <span className="font-mono">composio</span> tool namespace, so its teammates will
+                  not receive their tools yet.
+                </span>
               </span>
-            </p>
+              {canManage && onGrant ? (
+                <div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={granting}
+                    onClick={onGrant}
+                    data-testid="providers-not-granted-action"
+                  >
+                    {granting ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="size-4" />
+                    )}
+                    Grant composio
+                  </Button>
+                </div>
+              ) : null}
+            </div>
           )}
           {grant === "unknown" && connectedCount > 0 && (
             // Couldn't read the grant (issue #1478). Neither assert it is granted
@@ -234,9 +279,10 @@ export function ProvidersSection({
             className="grid gap-2"
             style={{
               // Uniform rows so a grid of 123 tiles reads as a grid and not as
-              // ragged masonry — the tile is a fixed slot, and the label clamps.
+              // ragged masonry — the tile is a fixed slot, and both the label
+              // and the access disclosure clamp (issue #1474).
               gridTemplateColumns: "repeat(auto-fill, minmax(8.5rem, 1fr))",
-              gridAutoRows: "5.5rem",
+              gridAutoRows: "8.5rem",
             }}
           >
             {visible.map((row) => (
@@ -344,9 +390,9 @@ export function ProvidersSection({
 function SectionHeading({ count }: { count: number | null }) {
   return (
     <div className="space-y-1">
-      <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+      <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
         Providers
-      </h3>
+      </h2>
       <p className="text-sm text-muted-foreground">
         Every account this company can act through, and which are wired.
         {count !== null && count > 0 && ` ${count} connected.`}
@@ -560,7 +606,7 @@ function ProviderTile({
           type="button"
           onClick={onOpen}
           title={title}
-          aria-label={`Open ${row.label}. ${state}.`}
+          aria-label={`Open ${row.label}. ${state}. Typical access: ${permissionHint(row.category)}.`}
           // Deliberately NOT prefixed `provider-`: `connections-one-list.spec.ts`
           // counts `[data-testid^='provider-']` nodes to prove a provider
           // renders exactly one tile, and a nested node sharing that prefix
@@ -581,6 +627,14 @@ function ProviderTile({
           )}
         >
           {body}
+          {/* The hint is a broad category-derived guess — Composio decides the
+              real consent scopes and does not publish them here. Saying
+              "Permission requested" would present that guess as the actual
+              grant; "Typical access" labels it as the general shape instead
+              (issue #1474). */}
+          <p className="mt-2 line-clamp-2 text-left text-xs text-muted-foreground">
+            Typical access: {permissionHint(row.category)}.
+          </p>
         </button>
       ) : connectable ? (
         <button
@@ -588,7 +642,7 @@ function ProviderTile({
           disabled={anyBusy || (row.route.kind === "composio" && noCredential)}
           onClick={onConnect}
           title={row.description || undefined}
-          aria-label={`Connect ${row.label}. ${state}. Authorises: ${permissionHint(row.category)}.`}
+          aria-label={`Connect ${row.label}. ${state}. Typical access: ${permissionHint(row.category)}.`}
           className={cn(
             shell,
             "transition-colors hover:border-foreground/20 hover:bg-accent",

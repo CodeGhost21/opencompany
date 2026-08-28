@@ -1,0 +1,47 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a property company is defined by —
+# the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-underwriting-standard"
+title = "Set up the underwriting standard"
+priority = "high"
+note = """
+State what a `deals` row must carry before it is called underwritten: the \
+assumptions, the numbers they produce, and the sensitivity that says how \
+wrong they can be.
+
+Deals underwritten to no standard cannot be compared, and the one that \
+looked best was usually the one with the most optimistic assumptions.
+
+Done when the standard is a `decisions` row and live deals are held to it.\
+"""
+
+[[task]]
+id = "set-up-the-property-record"
+title = "Set up the property record"
+priority = "high"
+note = """
+Get the portfolio onto `properties`, each with its key dates, its \
+condition and who is responsible for it.
+
+Done when every owned or managed property has a row.\
+"""
+
+[[task]]
+id = "set-up-the-tenant-matter-flow"
+title = "Set up the tenant matter flow"
+priority = "medium"
+note = """
+Decide what opens a `tenant-matters` row, how fast each kind is answered, \
+and what has a legal deadline attached.
+
+Done when the flow is written and open matters have rows.\
+"""

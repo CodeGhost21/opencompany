@@ -30,7 +30,6 @@ use oh::mcp::registry::types::{ConnStatus, InstalledServer, McpTool};
 use oh::security::{SecurityPolicy, ToolOperation};
 use oh::tools::traits::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 
-use crate::company::Agent as ManifestAgent;
 use crate::company::mcp::{AuthMaterial, McpServerDecl, stdio_install_refusal};
 use crate::error::OpenCompanyError;
 use crate::harness::mcp_probe::{
@@ -38,7 +37,7 @@ use crate::harness::mcp_probe::{
 };
 use crate::ports::types::CompanyId;
 use crate::ports::usage::UsageMeter;
-use crate::runtime::tools::{grant_matches, grants_cover_server};
+use crate::runtime::tools::grants_cover_server;
 
 /// Builds a registry from a set of decls, keeping only the enabled ones.
 ///
@@ -57,7 +56,10 @@ pub fn registry_from_decls(decls: &[McpServerDecl]) -> McpServerRegistry {
         .filter(|decl| decl.enabled)
         .map(server_config)
         .collect();
-    McpServerRegistry::from_config(&config)
+    // `from_config` takes `tinymcp`'s own client config now, not OpenHuman's
+    // `Config`. `host::static_registry` is the conversion, and it already
+    // degrades an unbuildable set to an empty one rather than failing.
+    oh::mcp::host::static_registry(&config)
 }
 
 /// The MCP registry scoped to one agent, or `None` when the agent is granted no
@@ -90,22 +92,18 @@ pub fn registry_for_agent(
     }
 }
 
-/// Whether `agent`'s tool grants reach the MCP server named `name`, using the
-/// same glob semantics as every other tool grant (`mcp:*` = all, `mcp:notion` =
-/// exact).
-fn agent_grants_server(agent: &ManifestAgent, name: &str) -> bool {
-    let want = format!("mcp:{name}");
-    agent.tools.iter().any(|grant| grant_matches(grant, &want))
-}
-
 /// The credential substrings from the (enabled, grant-matched) servers this
 /// agent reaches — the known-secret set fed to
 /// [`scrub`](crate::harness::mcp_probe::scrub) so no configured credential can
-/// survive into an agent-visible error. Never serialized anywhere.
-pub fn granted_secrets(decls: &[McpServerDecl], agent: &ManifestAgent) -> Vec<String> {
+/// survive into an agent-visible error. `grants` must be the same effective
+/// grants passed to [`registry_for_agent`], rather than the raw manifest
+/// request, because an empty request inherits the company belt and therefore
+/// reaches every server that belt grants.
+/// Never serialized anywhere.
+pub fn granted_secrets(decls: &[McpServerDecl], grants: &[String]) -> Vec<String> {
     decls
         .iter()
-        .filter(|decl| decl.enabled && agent_grants_server(agent, &decl.name))
+        .filter(|decl| decl.enabled && grants_cover_server(grants, &decl.name))
         .flat_map(|decl| decl.auth.secret_values())
         .collect()
 }
@@ -257,7 +255,7 @@ impl Tool for OcMcpListServersTool {
                     "allowed_tools": server.allowed_tools,
                     "disallowed_tools": server.disallowed_tools,
                     // Non-secret status ONLY — the credential is never emitted.
-                    "auth_configured": !matches!(server.auth, McpAuthConfig::None),
+                    "auth_configured": !matches!(server.auth, tinymcp::McpAuthConfig::None),
                 })
             })
             .collect::<Vec<_>>();
@@ -269,9 +267,15 @@ impl Tool for OcMcpListServersTool {
             for server in self.registry.list() {
                 let source = match server.source {
                     McpRegistrySource::Config => "config",
-                    McpRegistrySource::LegacyGitbooks => "legacy_gitbooks",
+                    // Renamed upstream: the host-seeded source is no longer
+                    // gitbooks-specific. The wire value is unchanged so an
+                    // operator's existing filters keep matching.
+                    McpRegistrySource::Host => "legacy_gitbooks",
+                    // `#[non_exhaustive]`: a source this build does not know
+                    // still has to render as something.
+                    _ => "unknown",
                 };
-                let auth = if matches!(server.auth, McpAuthConfig::None) {
+                let auth = if matches!(server.auth, tinymcp::McpAuthConfig::None) {
                     "none"
                 } else {
                     "configured"
@@ -385,7 +389,7 @@ impl OcMcpCallTool {
     fn auth_configured(&self, server: &str) -> bool {
         self.registry
             .get(server)
-            .map(|s| !matches!(s.auth, McpAuthConfig::None))
+            .map(|s| !matches!(s.auth, tinymcp::McpAuthConfig::None))
             .unwrap_or(false)
     }
 
@@ -490,13 +494,13 @@ impl Tool for OcMcpCallTool {
                     )
                     .await;
                 }
-                let mut result = result.rendered;
+                let mut result: ToolResult = result.rendered.into();
                 if options.prefer_markdown && result.markdown_formatted.is_none() {
                     result.markdown_formatted = Some(result.output());
                 }
                 Ok(result)
             }
-            Err(err) => Ok(self.handle_failure(&server, &tool, &err)),
+            Err(err) => Ok(self.handle_failure(&server, &tool, &anyhow::Error::new(err))),
         }
     }
 
@@ -545,37 +549,43 @@ pub struct McpRuntime {
 impl McpRuntime {
     /// Creates a runtime whose MCP SQLite store lives beneath `workspace_dir`.
     pub fn new(workspace_dir: PathBuf) -> Self {
-        let config = oh::config::Config {
+        Self {
+            config: Self::config_for(workspace_dir),
+        }
+    }
+
+    /// The config that selects the MCP store beneath `workspace_dir`.
+    ///
+    /// Public because the agent toolbelt needs the *same* one: OpenHuman's
+    /// `mcp_registry_*` tools take a config now rather than reading a process
+    /// global, and a tool built over a different config would quietly read a
+    /// different SQLite store than REST does — the installs would be there in
+    /// the console and absent from the turn.
+    #[must_use]
+    pub fn config_for(workspace_dir: PathBuf) -> oh::config::Config {
+        oh::config::Config {
             workspace_dir,
             ..Default::default()
-        };
-        Self { config }
+        }
     }
 
-    /// This runtime's config with the company's Smithery key applied, for the
-    /// three calls that reach an upstream **directory** (issue #1287).
+    /// The config the three **directory** calls run against.
     ///
-    /// Per call, not stored on the runtime, and that is the point: the key lives
-    /// in the tenant's secret store and an admin can rotate it from the console
-    /// at any moment. A copy cached here at construction would keep serving the
-    /// previous key until the company runtime was rebuilt, so a rotation would
-    /// appear to do nothing.
-    ///
-    /// `None` leaves the field unset, which is not the same as disabling
-    /// Smithery by hand: upstream's `smithery_api_key` then falls back to the
-    /// host's `SMITHERY_API_KEY`, exactly the tier
-    /// [`smithery::resolve`](crate::company::smithery::resolve) reports as
-    /// `environment`. Passing the resolved value straight through keeps one
-    /// precedence chain rather than two that can disagree.
-    fn directory_config(&self, smithery_key: Option<String>) -> oh::config::Config {
-        let mut config = self.config.clone();
-        config.mcp_client.registry_auth.smithery_api_key = smithery_key;
-        config
+    /// Upstream carries a `registry_auth.smithery_api_key`, and this deployment
+    /// deliberately never sets one. A per-company Smithery key was a credential
+    /// slot on a console tab — to store, rotate, revoke and explain — and what
+    /// it bought was one vendor's hosted listings; the open
+    /// `modelcontextprotocol/registry` is queried without any credential at all.
+    /// Left unset, upstream still falls back to the host's `SMITHERY_API_KEY`
+    /// where an operator has set one on the process, which is the whole of the
+    /// Smithery story now.
+    fn directory_config(&self) -> oh::config::Config {
+        self.config.clone()
     }
 
-    /// Search the upstream MCP directories — Smithery.ai and the official
-    /// `modelcontextprotocol/registry` — merged, paged, and SQLite-cached
-    /// upstream (issue #1270).
+    /// Search the upstream MCP directory — the official
+    /// `modelcontextprotocol/registry` — paged and SQLite-cached upstream
+    /// (issue #1270).
     ///
     /// The console's only way to answer "what could I add?". The static server
     /// list cannot: an operator has to arrive already knowing an endpoint, so
@@ -585,13 +595,12 @@ impl McpRuntime {
     /// as a parameter — see that constant for why.
     pub async fn search(
         &self,
-        smithery_key: Option<String>,
         query: Option<String>,
         page: Option<u32>,
         page_size: Option<u32>,
     ) -> crate::Result<serde_json::Value> {
         oh::mcp::registry::ops::mcp_clients_registry_search(
-            &self.directory_config(smithery_key),
+            &self.directory_config(),
             query,
             Some(HOSTED_TRANSPORT.to_string()),
             page,
@@ -603,18 +612,11 @@ impl McpRuntime {
     }
 
     /// One directory entry in full, routed back to the registry it came from.
-    pub async fn registry_get(
-        &self,
-        smithery_key: Option<String>,
-        qualified_name: String,
-    ) -> crate::Result<serde_json::Value> {
-        oh::mcp::registry::ops::mcp_clients_registry_get(
-            &self.directory_config(smithery_key),
-            qualified_name,
-        )
-        .await
-        .map(|outcome| outcome.value)
-        .map_err(|e| OpenCompanyError::Harness(format!("mcp registry lookup failed: {e}")))
+    pub async fn registry_get(&self, qualified_name: String) -> crate::Result<serde_json::Value> {
+        oh::mcp::registry::ops::mcp_clients_registry_get(&self.directory_config(), qualified_name)
+            .await
+            .map(|outcome| outcome.value)
+            .map_err(|e| OpenCompanyError::Harness(format!("mcp registry lookup failed: {e}")))
     }
 
     /// Installs a directory entry by qualified name and returns the resulting
@@ -632,12 +634,11 @@ impl McpRuntime {
     /// that was already on disk is left alone, since it is not ours to remove.
     pub async fn install_from_directory(
         &self,
-        smithery_key: Option<String>,
         qualified_name: String,
         env: HashMap<String, String>,
     ) -> crate::Result<InstalledServer> {
         let outcome = oh::mcp::registry::ops::mcp_clients_install(
-            &self.directory_config(smithery_key),
+            &self.directory_config(),
             qualified_name.clone(),
             env,
             None,
@@ -684,9 +685,23 @@ impl McpRuntime {
         oh::mcp::registry::boot::spawn_installed_servers(&self.config).await;
     }
 
+    /// The `tinymcp` service backing this runtime's registry.
+    ///
+    /// The store and connection map used to be reachable as free functions on
+    /// `oh::mcp::registry`; the registry moved into `tinymcp` and both are now
+    /// accessors on the one service the process holds for a config. Opening is
+    /// per-config and cached upstream, so this is a lookup rather than a build.
+    fn host(&self) -> crate::Result<std::sync::Arc<oh::mcp::host::McpHost>> {
+        oh::mcp::host::for_config(&self.config).map_err(store_error)
+    }
+
     /// Returns every persisted install without loading secret environment values.
     pub fn list(&self) -> crate::Result<Vec<InstalledServer>> {
-        oh::mcp::registry::store::list_servers(&self.config).map_err(store_error)
+        self.host()?
+            .dynamic()
+            .store()
+            .list_servers()
+            .map_err(store_error)
     }
 
     /// Persists an install and its write-only environment values.
@@ -695,11 +710,14 @@ impl McpRuntime {
         server: &InstalledServer,
         env: &HashMap<String, String>,
     ) -> crate::Result<()> {
-        oh::mcp::registry::store::insert_server(&self.config, server).map_err(store_error)?;
-        if let Err(error) =
-            oh::mcp::registry::store::set_env_values(&self.config, &server.server_id, env)
-        {
-            let _ = oh::mcp::registry::store::delete_server(&self.config, &server.server_id);
+        let store = self.host()?;
+        let store = store.dynamic().store();
+        store.insert_server(server).map_err(store_error)?;
+        // `set_env_values` takes an ordered map now; the write is the same one.
+        let env: std::collections::BTreeMap<String, String> =
+            env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        if let Err(error) = store.set_env_values(&server.server_id, &env) {
+            let _ = store.delete_server(&server.server_id);
             return Err(store_error(error));
         }
         Ok(())
@@ -708,8 +726,19 @@ impl McpRuntime {
     /// Loads an installed server, establishing the company-store membership
     /// check before touching OpenHuman's process-global connection registry.
     pub fn get(&self, server_id: &str) -> crate::Result<InstalledServer> {
-        oh::mcp::registry::store::get_server(&self.config, server_id)
-            .map_err(|_| OpenCompanyError::McpServerNotFound(server_id.to_string()))
+        self.host()?
+            .dynamic()
+            .store()
+            .get_server(server_id)
+            // Only a genuinely absent install is "not found". A store that
+            // fails to read must not be reported as a missing server — the
+            // caller would be told to reinstall something that is there.
+            .map_err(|error| match error {
+                tinymcp::Error::UnknownServer { .. } => {
+                    OpenCompanyError::McpServerNotFound(server_id.to_string())
+                }
+                other => store_error(other),
+            })
     }
 
     /// Connects an installed server and returns its advertised tools.
@@ -721,27 +750,62 @@ impl McpRuntime {
     }
 
     /// Disconnects an installed server after verifying it belongs to this store.
+    ///
+    /// Goes through this runtime's own service rather than the
+    /// `oh::mcp::registry::connections` free function, which reads the
+    /// *process-global* one. `connect` above is per-config, so the free
+    /// function would look for the connection in a service that never holds it
+    /// — this runtime never calls `host::init` — and answer a truthful-looking
+    /// `false` for a server that is in fact connected.
     pub async fn disconnect(&self, server_id: &str) -> crate::Result<bool> {
         self.get(server_id)?;
-        Ok(oh::mcp::registry::connections::disconnect(server_id).await)
+        Ok(self
+            .host()?
+            .dynamic()
+            .connections()
+            .disconnect(server_id)
+            .await)
     }
 
     /// Disconnects and deletes an installed server and its environment values.
     pub async fn uninstall(&self, server_id: &str) -> crate::Result<bool> {
         self.get(server_id)?;
-        oh::mcp::registry::connections::disconnect(server_id).await;
-        oh::mcp::registry::store::delete_server(&self.config, server_id).map_err(store_error)
+        // Same per-config service as `disconnect`, for the same reason.
+        let host = self.host()?;
+        host.dynamic().connections().disconnect(server_id).await;
+        host.dynamic()
+            .store()
+            .delete_server(server_id)
+            .map_err(store_error)
     }
 
     /// Returns connection state joined by OpenHuman against this runtime's store.
+    ///
+    /// Reporting status must not fail a caller that is only rendering it, so a
+    /// service that will not open — or a store that will not list — reports
+    /// "nothing installed" rather than an error, which is what the free
+    /// function this replaced did.
     pub async fn status(&self) -> Vec<ConnStatus> {
-        oh::mcp::registry::connections::all_status(&self.config).await
+        let Ok(host) = self.host() else {
+            return Vec::new();
+        };
+        let registry = host.dynamic();
+        match registry.connections().all_status(registry.store()).await {
+            Ok(statuses) => statuses,
+            Err(error) => {
+                log::warn!("[mcp] could not summarize connection status: {error}");
+                Vec::new()
+            }
+        }
     }
 
     /// Returns the cached tool list for a connected installed server.
     pub async fn tools(&self, server_id: &str) -> crate::Result<Vec<McpTool>> {
         self.get(server_id)?;
-        oh::mcp::registry::connections::tools_for(server_id)
+        self.host()?
+            .dynamic()
+            .connections()
+            .tools_for(server_id)
             .await
             .ok_or_else(|| {
                 OpenCompanyError::InvalidRequest(format!(
@@ -758,13 +822,19 @@ impl McpRuntime {
         arguments: Value,
     ) -> crate::Result<Value> {
         self.get(server_id)?;
-        oh::mcp::registry::connections::call_tool(server_id, tool_name, arguments)
+        // The transport returns a structured result now; the raw JSON payload
+        // is the field this surface has always handed back.
+        self.host()?
+            .dynamic()
+            .connections()
+            .call_tool(server_id, tool_name, arguments)
             .await
+            .map(|result| result.raw_result)
             .map_err(harness_error)
     }
 }
 
-fn store_error(error: anyhow::Error) -> OpenCompanyError {
+fn store_error(error: impl std::fmt::Display) -> OpenCompanyError {
     OpenCompanyError::Store(format!("MCP registry: {error}"))
 }
 
@@ -793,28 +863,6 @@ mod tests {
 
     fn grants(g: &[&str]) -> Vec<String> {
         g.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn agent(grants: &[&str]) -> ManifestAgent {
-        ManifestAgent {
-            global: false,
-            id: "ceo".into(),
-            role: "Chief".into(),
-            name: None,
-            description: None,
-            tier: None,
-            harness: None,
-            tools: grants.iter().map(|g| g.to_string()).collect(),
-            delegates_to: vec![],
-            context: None,
-            budget_usd_daily: None,
-            prompt: None,
-            prompt_files: Vec::new(),
-            prompt_files_resolved: Vec::new(),
-            classes: Vec::new(),
-            ledgers: None,
-            can_declare_ledgers: true,
-        }
     }
 
     #[test]
@@ -1008,6 +1056,21 @@ mod tests {
         assert!(result.output().contains("remote ran ok"));
     }
 
+    /// An empty raw request inherits the company belt at the builder seam. The
+    /// scrubber must receive those effective grants too, or an MCP credential
+    /// echoed by a server can reach the agent-visible failure even though the
+    /// registry correctly wires that server.
+    #[test]
+    fn granted_secrets_follows_effective_grants() {
+        let mut server = decl("fixture", "http://127.0.0.1:1/mcp");
+        server.auth = AuthMaterial::Bearer("inherited-canary".into());
+        let inherited = granted_secrets(std::slice::from_ref(&server), &grants(&["*", "mcp:*"]));
+        assert_eq!(inherited, vec!["inherited-canary"]);
+
+        let omitted = granted_secrets(std::slice::from_ref(&server), &grants(&["*"]));
+        assert!(omitted.is_empty());
+    }
+
     /// SECURITY CANARY: a server that **reflects the submitted credential** in a
     /// non-401 error body must not leak it anywhere the `OcMcpCallTool` decorator
     /// surfaces — not the agent-visible result, and not the drained failure. This
@@ -1072,8 +1135,7 @@ mod tests {
         let endpoint = format!("http://{addr}/mcp");
         let mut d = decl("fixture", &endpoint);
         d.auth = AuthMaterial::Bearer(CANARY.into());
-        let agent = agent(&["mcp:*"]);
-        let secrets = granted_secrets(std::slice::from_ref(&d), &agent);
+        let secrets = granted_secrets(std::slice::from_ref(&d), &grants(&["mcp:*"]));
         let registry = registry_for_agent(&[d], &grants(&["mcp:*"])).expect("registry");
 
         let queue = McpFailureQueue::default();
@@ -1415,5 +1477,46 @@ rl.on('line', (line) => {
                 .expect("uninstall")
         );
         assert!(runtime.list().expect("list").is_empty());
+    }
+
+    /// `get` on an install that was never persisted reports `McpServerNotFound`
+    /// — the "genuinely absent" half of the store-error split.
+    #[test]
+    fn get_on_an_absent_server_reports_not_found() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = McpRuntime::new(temp.path().join("workspace"));
+        let error = runtime
+            .get("no-such-server")
+            .expect_err("an absent install must not resolve");
+        assert!(
+            matches!(error, OpenCompanyError::McpServerNotFound(ref id) if id == "no-such-server"),
+            "absent install must be McpServerNotFound, got: {error:?}"
+        );
+    }
+
+    /// `get` on a store that fails to read must NOT be reported as a missing
+    /// server — the caller would be told to reinstall something that is there.
+    /// Truncating the SQLite file beneath the runtime's open connection forces
+    /// the next `get_server` read to fail, and the error must surface as a
+    /// `Store` error rather than the blanket `McpServerNotFound` the pre-split
+    /// code produced for every failure.
+    #[test]
+    fn get_on_a_store_that_fails_to_read_reports_store_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let runtime = McpRuntime::new(workspace.clone());
+        // Open the host so the store and its schema exist on disk.
+        runtime.list().expect("open the mcp store");
+        // Corrupt the file beneath the open connection: the query can no longer
+        // be satisfied, so `get_server` must fail with a store error.
+        let db = workspace.join("mcp_clients").join("mcp_clients.db");
+        std::fs::write(&db, b"this is not a sqlite database").expect("corrupt the store file");
+        let error = runtime
+            .get("some-server")
+            .expect_err("a store that cannot read must not resolve");
+        assert!(
+            matches!(error, OpenCompanyError::Store(_)),
+            "a failing store read must surface as Store, got: {error:?}"
+        );
     }
 }

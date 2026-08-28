@@ -153,9 +153,9 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
       <section className="space-y-3" data-testid="account-choice">
         <div className="flex items-center gap-2">
           <Users className="size-4 text-muted-foreground" />
-          <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
             Which account teammates act as
-          </h3>
+          </h2>
         </div>
         <SectionUnreachable label="Couldn't read this company's connected accounts" />
       </section>
@@ -167,9 +167,9 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
     <section className="space-y-3" data-testid="account-choice">
       <div className="flex items-center gap-2">
         <Users className="size-4 text-muted-foreground" />
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Which account teammates act as
-        </h3>
+        </h2>
       </div>
       <p className="text-sm text-muted-foreground">
         {canManage

@@ -62,6 +62,14 @@ function createButton(): HTMLButtonElement {
   return match as HTMLButtonElement;
 }
 
+function rosterButton(name: string): HTMLButtonElement {
+  const match = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('[data-slot="dialog-content"] [aria-pressed]'),
+  ).find((button) => button.textContent?.includes(name));
+  expect(match, `no roster button for ${name}`).toBeTruthy();
+  return match as HTMLButtonElement;
+}
+
 /** Sets a controlled input the way a keystroke would: through the native value
  * setter, so React's own descriptor sees the change and `onChange` fires. */
 function type(input: HTMLInputElement, value: string) {
@@ -204,5 +212,41 @@ describe("the desk creator when the host refuses", () => {
     expect(nameInput().value).toBe("Engineering");
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(createButton().disabled).toBe(false);
+  });
+});
+
+describe("the desk creator teammate picker", () => {
+  it("filters a long roster and makes the chosen order visible", async () => {
+    await open(stubClient(() => Promise.reject(new Error("must not be called"))));
+
+    const filter = inDialog<HTMLInputElement>('[data-testid="desk-member-filter"]');
+    expect(filter, "long rosters need a name filter").toBeTruthy();
+    expect(rosterButton("Teammate 0").getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => {
+      rosterButton("Teammate 0").click();
+      rosterButton("Teammate 2").click();
+    });
+
+    const lead = rosterButton("Teammate 0");
+    const second = rosterButton("Teammate 2");
+    expect(lead.getAttribute("aria-pressed")).toBe("true");
+    // The lead carries the "Lead" badge (a row sibling of the toggle), the
+    // non-lead carries a "Make lead" promote control instead.
+    expect(lead.parentElement!.querySelector('[data-testid="desk-lead-badge"]')).toBeTruthy();
+    expect(lead.querySelector(".lucide-check")).toBeTruthy();
+    expect(second.getAttribute("aria-pressed")).toBe("true");
+    expect(second.parentElement!.querySelector('[data-testid="desk-make-lead"]')).toBeTruthy();
+
+    await act(async () => {
+      type(filter!, "Teammate 2");
+    });
+
+    expect(rosterButton("Teammate 2")).toBeTruthy();
+    expect(
+      Array.from(document.querySelectorAll('[data-slot="dialog-content"] [aria-pressed]')).some((button) =>
+        button.textContent?.includes("Teammate 0"),
+      ),
+    ).toBe(false);
   });
 });

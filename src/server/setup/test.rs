@@ -14,7 +14,7 @@ use tower::ServiceExt;
 use crate::app::config::MapEnv;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
 use crate::runtime::RuntimeBuilder;
 use crate::server::ops::ConnectionsRuntime;
 use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
@@ -52,7 +52,7 @@ fn state_with_mail(home: &std::path::Path) -> AppState {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "u".into(),
-            password: "p".into(),
+            password: SecretValue("p".into()),
             from_name: "Acme".into(),
             from_email: "noreply@acme.test".into(),
         }));
@@ -82,6 +82,7 @@ async fn with_company(state: &AppState, home: &std::path::Path) -> CompanyId {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_tool_grants: None,
             overlay_desk_tools: std::collections::BTreeMap::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
@@ -91,6 +92,8 @@ async fn with_company(state: &AppState, home: &std::path::Path) -> CompanyId {
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -213,9 +216,9 @@ async fn the_payload_lists_the_shipped_templates() {
     );
 }
 
-/// ACP is a cargo feature whose transport is not mounted in this tree, so the
-/// flow reports build state rather than offering a switch. A flag that claimed
-/// otherwise would send a client to an endpoint that 404s.
+/// ACP is a cargo feature whose transport is mounted under that feature, so
+/// the flow reports build state rather than offering a switch. A flag that
+/// claimed otherwise would send a client to an endpoint that 404s.
 #[tokio::test]
 async fn the_payload_reports_acp_as_build_state_not_a_setting() {
     let home_dir = home();
@@ -223,8 +226,9 @@ async fn the_payload_reports_acp_as_build_state_not_a_setting() {
 
     assert_eq!(dto["build"]["acp_in_build"], cfg!(feature = "acp"));
     assert_eq!(
-        dto["build"]["acp_transport_mounted"], false,
-        "no /acp handler is mounted anywhere in this tree"
+        dto["build"]["acp_transport_mounted"],
+        cfg!(feature = "acp"),
+        "the flag must match whether the /acp handler is actually mounted"
     );
     assert!(
         !dto["fields"]
@@ -1193,6 +1197,72 @@ async fn an_apply_seeds_the_company_the_wizard_designed() {
         manifest.policy.mode,
         crate::company::PROVISIONED_POLICY_MODE
     );
+}
+
+#[tokio::test]
+async fn onboarding_persists_the_local_model_it_tested() {
+    let home = home();
+    let state = fresh_state(home.path());
+    let mut company = designed_company(None);
+    company["inference"] = serde_json::json!({
+        "provider": "ollama",
+        "baseUrl": "localhost:6969",
+        "model": "qwen3:8b"
+    });
+
+    let (status, body) = post_setup(state.clone(), serde_json::json!({ "company": company })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded = body["seeded_company"].as_str().expect("seeded");
+    let manifest = seeded_manifest(home.path(), seeded).await;
+    assert_eq!(manifest.inference.provider.as_deref(), Some("ollama"));
+    assert_eq!(
+        manifest.inference.base_url.as_deref(),
+        Some("http://localhost:6969/v1")
+    );
+    for tier in crate::company::INFERENCE_TIERS {
+        assert_eq!(
+            manifest.inference.models.get(*tier).map(String::as_str),
+            Some("qwen3:8b")
+        );
+    }
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn local_model_probe_normalizes_the_address_and_detects_its_model() {
+    let app = axum::Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "data": [{ "id": "qwen3:8b" }] }))
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "choices": [{ "message": { "content": "pong" } }]
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "ollama".to_string(),
+            base_url: Some(address.to_string()),
+            ..Default::default()
+        },
+        &MapEnv::default(),
+    )
+    .await;
+    server.abort();
+
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.base_url, format!("http://{address}/v1"));
+    assert_eq!(result.model.as_deref(), Some("qwen3:8b"));
 }
 
 /// A designed company beats a template slug. An operator who answered three

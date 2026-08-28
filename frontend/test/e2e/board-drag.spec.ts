@@ -111,12 +111,42 @@ const column = (page: Page, index: number) => board(page).getByTestId("board-col
  */
 async function expandAll(page: Page) {
   const rails = board(page).locator("button[aria-label^='Expand ']");
+  const collapsed = board(page).locator('[data-collapsed="true"]');
   // Bounded: each click removes one rail, and the board has three phases.
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    if ((await rails.count()) === 0) return;
+  //
+  // The loop exits on COLLAPSED COLUMNS, not on rails. Those are different
+  // conditions, and the difference is why this helper used to return with the
+  // board still collapsed: a column carries `data-collapsed` while its Expand
+  // rail is a separate element that need not be rendered in the same frame.
+  // Waiting for the rails to disappear therefore said "expanded" one render too
+  // early, and the caller's own `[data-collapsed="true"]` assertion failed five
+  // seconds later and forty lines away from the cause — intermittently, on pull
+  // requests that touched none of this.
+  // Bounded twice, because two different things can go wrong and one bound
+  // cannot cover both. The click budget counts CLICKS: each one removes a rail
+  // and the board has three phases, so eight is already generous. Counting
+  // loop passes instead would let a run that never clicked anything exhaust
+  // the budget — eight transient 100 ms waits are eight passes and zero
+  // progress, and the assertion below would then fail on columns this helper
+  // had no chance to expand, which is the same intermittent shape it exists to
+  // remove. The deadline covers what the click budget then cannot: a rail that
+  // never arrives at all, which would otherwise spin here forever.
+  const deadline = Date.now() + 10_000;
+  let clicks = 0;
+  while (clicks < 8 && Date.now() < deadline) {
+    if ((await collapsed.count()) === 0) return;
+    if ((await rails.count()) === 0) {
+      // Collapsed with nothing to click: the render is mid-flight. Give it the
+      // turn it needs rather than spending click budget on nothing.
+      await page.waitForTimeout(100);
+      continue;
+    }
     await rails.first().click();
+    clicks += 1;
   }
-  await expect(rails).toHaveCount(0);
+  // The postcondition callers actually depend on, so a genuine failure names
+  // the board's state rather than the rails' absence.
+  await expect(collapsed).toHaveCount(0);
 }
 
 /** Opens the board and waits for the host's columns to arrive. */
@@ -220,6 +250,17 @@ test("a card drags from Working to Done, and the board scrolls to get there", as
   // below turns on that measurement — which columns collapse, and by how much
   // the board overflows — so wait for it rather than for a timeout.
   await expect.poll(pane).toBeLessThan(wide);
+  // The width poll passes as soon as CSS narrows the board, which is one
+  // frame before the ResizeObserver's `setViewport` has re-rendered it — and
+  // the collapse decision lands in that re-render. `expandAll` below must run
+  // against the settled board: run early, it sees a board that has not decided
+  // to collapse anything, returns without pinning a single rail, and the empty
+  // Done column folds itself into one on the next commit — failing the
+  // `toHaveCount(0)` below on a board this test never pinned. So wait for the
+  // fold to land before offering it a pin.
+  await expect
+    .poll(async () => (await board(page).locator('[data-collapsed="true"]').count()) > 0)
+    .toBe(true);
 
   // And expand *again*, because narrowing the window is what created the rails.
   // `openBoard` ran `expandAll` at 1280px, where three phases fit and the board

@@ -315,6 +315,7 @@ mod test {
         // drain) takes them the same way, so an accessor here would be a public
         // surface that exists only for this assertion.
         assert!(Arc::ptr_eq(&before.serial, &after.serial));
+        assert!(Arc::ptr_eq(&before.per_agent, &after.per_agent));
         assert!(Arc::ptr_eq(&before.task_writes, &after.task_writes));
     }
 

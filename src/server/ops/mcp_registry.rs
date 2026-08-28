@@ -74,7 +74,6 @@ pub(super) fn router() -> Router<AppState> {
         ))
         .merge(scoped("/mcp/registry/{server_id}/env", put(update_env)))
         .merge(scoped("/mcp/registry/{server_id}", delete(uninstall)))
-        .merge(credential::router())
 }
 
 // ---------------------------------------------------------------------------
@@ -384,11 +383,6 @@ pub(super) fn removal_for(had_index_entry: bool, backed_by_install: bool) -> Rem
 /// directory payload, and a build without `mcp` has no directory to project.
 #[cfg(any(feature = "mcp", test))]
 pub(in crate::server::ops) mod catalogue;
-
-/// The company's Smithery key (issue #1287). **Always** compiled, unlike the
-/// routes above it: the credential is a secret slot and a console field, and an
-/// unwired build still has to let an admin set the key a wired one will spend.
-mod credential;
 
 #[cfg(feature = "mcp")]
 mod wired;

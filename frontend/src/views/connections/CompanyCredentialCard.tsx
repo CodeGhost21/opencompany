@@ -144,9 +144,9 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <Wallet className="size-4 text-muted-foreground" />
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Company credential
-        </h3>
+        </h2>
         <span className="text-xs text-muted-foreground">
           for connecting providers — not the model key
         </span>

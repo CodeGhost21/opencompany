@@ -67,10 +67,37 @@ export interface MemoryStats {
    * for any company whose operator has not hand-authored a fact.
    */
   lastUpdatedAtMillis: number;
-  /** Total agent-accessible context chunks (learned context + outcomes + mirrors). */
-  agentChunks: number;
-  /** Of those, how many are stored task outcomes. */
+  /** All displayable memory: facts plus non-mirrored context chunks. */
+  totalItems: number;
+  /** Context written by teammates, excluding outcomes, documents, and mirrors. */
+  teammateMemory: number;
+  /** Context chunks from operator-dropped documents/links, disjoint from teammate memory. */
+  documentMemory: number;
+  /** Stored task outcomes, disjoint from teammate memory. */
   taskOutcomes: number;
+}
+
+/**
+ * `GET /memory` — the rows plus the context-truncation metadata for the SAME
+ * read, so the "showing the newest N of M" notice never compares the capped
+ * rows against a count taken at a different moment. The metadata describes the
+ * unqueried browse list; a `?query=` request reports it as not applicable.
+ */
+export interface MemoryList {
+  /** The rows: operator facts, then the newest non-mirror context chunks. */
+  items: MemoryEntry[];
+  /**
+   * The non-mirror context chunk population before the 500-row display cap —
+   * the "M" in the notice. Facts are never capped, so they are not counted.
+   * `0` for `?query=` requests, whose rows are search matches the metadata
+   * does not describe.
+   */
+  totalContext: number;
+  /**
+   * Whether `items` dropped context rows to the cap, from this same read.
+   * Always `false` for `?query=` requests.
+   */
+  contextTruncated: boolean;
 }
 
 /** The kinds in display order, for filters and the add form. */
@@ -120,17 +147,20 @@ export const ORIGIN_STYLES: Record<Exclude<MemoryOrigin, "fact">, string> = {
   document: "border-tone-2/30 bg-tone-2/10 text-tone-2-text",
 };
 
-/** The company's durable facts, newest-first, optionally filtered server-side. */
+/**
+ * The company's memory, newest-first, optionally filtered server-side. The
+ * rows come back wrapped with the truncation metadata for the same read.
+ */
 export function listMemory(
   client: OpenCompanyClient,
   company: string | null,
   opts?: { query?: string; kind?: MemoryKind },
-): Promise<MemoryEntry[]> {
+): Promise<MemoryList> {
   const params = new URLSearchParams();
   if (opts?.query) params.set("query", opts.query);
   if (opts?.kind) params.set("kind", opts.kind);
   const qs = params.toString();
-  return client.get<MemoryEntry[]>(`${client.scopeFor(company)}/memory${qs ? `?${qs}` : ""}`);
+  return client.get<MemoryList>(`${client.scopeFor(company)}/memory${qs ? `?${qs}` : ""}`);
 }
 
 /** Add a durable fact (also mirrored into the agents' recallable context). */

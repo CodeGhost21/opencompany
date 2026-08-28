@@ -20,6 +20,11 @@ import {
   type BoardQuery,
   type BoardVote,
   type ReadMarker,
+  type ChatMentionInput,
+  type MarkNotificationsReadResponse,
+  type NotificationFeedResponse,
+  type MentionablesResponse,
+  type PresenceListResponse,
   type ReadStateResponse,
   type ApiErrorBody,
   type WorkflowProblem,
@@ -39,6 +44,7 @@ import {
   type FeedbackSummary,
   type FinancesDto,
   type GrantScope,
+  type HarnessDto,
   type InboxDto,
   type InboxMessageDto,
   type PageManifestDto,
@@ -275,7 +281,7 @@ export class OpenCompanyClient {
    * lifetime — an object URL leaks until it is revoked, and only the component
    * holding it knows when that is.
    */
-  async getBlob(path: string): Promise<Blob> {
+  async getBlob(path: string, signal?: AbortSignal): Promise<Blob> {
     const headers: Record<string, string> = {};
     Object.assign(headers, this.authHeaders());
 
@@ -285,8 +291,14 @@ export class OpenCompanyClient {
         method: "GET",
         headers,
         credentials: "include",
+        signal,
       });
-    } catch {
+    } catch (err) {
+      // An aborted fetch is the caller's own doing — a preview that scrolled
+      // out of view tore the request down deliberately — not a connection
+      // failure. Let the `AbortError` through so the caller can tell
+      // "cancelled" from "couldn't reach the host" (codex review finding).
+      if (err instanceof Error && err.name === "AbortError") throw err;
       throw new ApiError(
         0,
         "network_error",
@@ -454,12 +466,12 @@ export class OpenCompanyClient {
      * `"workflow"` say what the card it opens produces, `"chat"` says it is not
      * a request for work and no card should be opened for it.
      *
-     * Everything except `"once"` reaches the wire; `"once"` and the default are
-     * sent as *nothing at all*. That is what keeps "Do it once" the default: an
-     * unmarked message posts the exact body shape it posted before any of these
-     * controls existed, so the host cannot tell one from a pre-#580 client —
-     * the same omitted-field compatibility rule the deliverable field follows
-     * everywhere (see `CreateTask.deliverable`).
+     * Everything except `"once"` reaches the wire; `"once"` and no selection
+     * are sent as *nothing at all*. That preserves the historical wire shape:
+     * an unmarked message posts exactly what it did before any of these controls
+     * existed, so the host can apply its normal triage without a browser-asserted
+     * override — the same omitted-field compatibility rule the deliverable field
+     * follows everywhere (see `CreateTask.deliverable`).
      *
      * One key, not two. `"chat"` rides `deliverable` rather than arriving as a
      * second `intent` field, so a body cannot claim "build me the workflow" and
@@ -477,6 +489,29 @@ export class OpenCompanyClient {
      * is exactly why this returns a union rather than the detached type.
      */
     detach?: boolean,
+    /**
+     * Workspace node ids of files attached to this message (issue #1682).
+     *
+     * Ids only — each was returned by `uploadChatAttachment` after the file's
+     * bytes were uploaded. The host re-resolves every id within this company's
+     * own workspace and takes the name / mime / size from the store, so the
+     * client neither can nor needs to send those. Sent only when non-empty, so
+     * a message with no attachment keeps the exact pre-#1682 body shape — the
+     * same omitted-field rule `deliverable` and `detach` follow.
+     */
+    attachments?: string[],
+    /**
+     * Who this message names, as the picker resolved them.
+     *
+     * Sent only when the picker actually resolved something, so an ordinary
+     * post keeps the exact body shape it had before mentions existed — the
+     * same omitted-field rule `deliverable` and `detach` follow.
+     *
+     * The host re-validates every entry against the live roster and demotes
+     * what no longer resolves, so this is a suggestion, not an instruction.
+     * Omitting it entirely asks the host to extract from the text instead.
+     */
+    mentions?: ChatMentionInput[],
   ): Promise<ChatPostResult> {
     const body: {
       text: string;
@@ -484,6 +519,8 @@ export class OpenCompanyClient {
       parent?: string;
       deliverable?: MessageIntent;
       detach?: boolean;
+      attachments?: string[];
+      mentions?: ChatMentionInput[];
     } = {
       text,
     };
@@ -493,6 +530,11 @@ export class OpenCompanyClient {
     // Sent only when asked for, so an ordinary post keeps the exact body shape
     // it had before #983 — the same omitted-field rule `deliverable` follows.
     if (detach) body.detach = detach;
+    if (attachments && attachments.length > 0) body.attachments = attachments;
+    // `undefined` means the client has no directory and asks the host to
+    // extract mentions. An explicit empty list means the loaded directory
+    // resolved none and must suppress fallback extraction.
+    if (mentions !== undefined) body.mentions = mentions;
     return this.request<ChatPostResult>("POST", `${this.scope(company)}/chat`, body);
   }
 
@@ -628,6 +670,143 @@ export class OpenCompanyClient {
   }
 
   /**
+   * This person's notification feed — today, their mentions.
+   *
+   * The durable half of a mention: the live feed only reaches an open browser,
+   * so a mention that landed overnight is here and nowhere else.
+   *
+   * A host that predates this route answers 404; callers treat that as an empty
+   * feed and simply show no mention badges, rather than throwing on load.
+   */
+  notifications(company?: string | null): Promise<NotificationFeedResponse> {
+    return this.request<NotificationFeedResponse>(
+      "GET",
+      `${this.scope(company)}/notifications`,
+    );
+  }
+
+  /**
+   * Mark notifications read for this person.
+   *
+   * Omitting `ids` marks everything they can see — what "clear the badge"
+   * means. An explicitly empty array marks nothing, which is a different
+   * instruction and is honoured as one.
+   *
+   * Answers with what is *actually* still unread rather than what the caller
+   * expects, because marking is a latch and two tabs race constantly.
+   */
+  markNotificationsRead(
+    ids?: string[],
+    company?: string | null,
+  ): Promise<MarkNotificationsReadResponse> {
+    return this.request<MarkNotificationsReadResponse>(
+      "PUT",
+      `${this.scope(company)}/notifications`,
+      ids ? { ids } : {},
+    );
+  }
+
+  /**
+   * Everything an `@` can name: teammates, people, desks, and the broadcast
+   * token's spellings.
+   *
+   * A host that predates this route answers 404; the caller treats that as
+   * "no picker" and typing an `@` stays plain text, which the host still
+   * extracts what it can from. So an older host degrades to the previous
+   * behaviour rather than throwing on load.
+   */
+  mentionables(company?: string | null): Promise<MentionablesResponse> {
+    return this.request<MentionablesResponse>(
+      "GET",
+      `${this.scope(company)}/chat/mentionables`,
+    );
+  }
+
+  /** Who is present on this replica right now. */
+  presence(company?: string | null): Promise<PresenceListResponse> {
+    return this.request<PresenceListResponse>("GET", `${this.scope(company)}/presence`);
+  }
+
+  /**
+   * A heartbeat, and what to appear as.
+   *
+   * The body deliberately carries **no user id**: the host takes the subject
+   * from the session, so no caller can move somebody else's dot. `consoleId`
+   * is not an identity either — it is this tab's opaque lease key, so closing
+   * one of several open tabs drops only that tab's lease rather than logging
+   * every tab for this person out (see `usePresence`'s `consoleId`).
+   */
+  announcePresence(
+    status: "online" | "away" | "offline",
+    company?: string | null,
+    consoleId?: string,
+  ): Promise<void> {
+    return this.request<void>("PUT", `${this.scope(company)}/presence`, {
+      status,
+      ...(consoleId ? { consoleId } : {}),
+    });
+  }
+
+  /**
+   * Clear this console's dot on the way out.
+   *
+   * Goes through `this.transport`, the same seam every other call on this
+   * class uses — **not** a direct `fetch`, which this used to be. A desktop
+   * console's webview cannot satisfy this route on its own even with the
+   * right headers: it is cross-origin with the host (so a direct request
+   * needs CORS the host does not grant it) and the device credential lives
+   * only in the Rust core's keychain, never in JS. `ProxyTransport` is what
+   * gets both right, and only routing through `this.transport` reaches it.
+   *
+   * The one thing this needs beyond an ordinary request — surviving the
+   * document going away, since this fires from `pagehide` — is
+   * `keepalive: true`, threaded through `TransportRequest` for exactly this
+   * call. `BrowserTransport` forwards it to `fetch`'s own `keepalive` option;
+   * `ProxyTransport` ignores it, because a Tauri `invoke` is core-process IPC
+   * with no equivalent teardown-survival problem. `sendBeacon` would be the
+   * usual browser-only tool here but cannot issue a `DELETE` or run through
+   * the desktop bridge at all.
+   *
+   * Carries the same session and bearer headers `request` would attach —
+   * `credentials: "include"` alone (still set unconditionally inside
+   * `BrowserTransport`) only carries a same-origin cookie, and a console
+   * authenticated cross-origin holds its session in
+   * `x-opencompany-session`/`authorization` instead.
+   *
+   * Best-effort by design, and allowed to fail silently: if it does not land,
+   * the host's lease expires the dot within a few minutes anyway. That is the
+   * whole reason presence is a lease — no disconnect path has to be correct.
+   */
+  disconnectPresenceBeacon(company?: string | null, consoleId?: string): void {
+    const query = consoleId ? `?consoleId=${encodeURIComponent(consoleId)}` : "";
+    void this.transport
+      .request({
+        method: "DELETE",
+        url: `${this.baseUrl}${this.scope(company)}/presence${query}`,
+        headers: this.authHeaders(),
+        keepalive: true,
+      })
+      .catch(() => {
+        // Best-effort by design; see this method's doc comment.
+      });
+  }
+
+  /**
+   * Say this console is typing. Fire-and-forget: an undelivered ping is not
+   * worth a retry, and the indicator expires on its own regardless.
+   */
+  typing(
+    chatId: string,
+    parentId?: string,
+    company?: string | null,
+  ): Promise<void> {
+    return this.request<void>("POST", `${this.scope(company)}/chat/typing`, {
+      chatId,
+      ...(parentId ? { parentId } : {}),
+    });
+  }
+
+  /**
    * Moves one channel's read floor forward.
    *
    * The host's write is monotonic, and it answers with where the marker
@@ -673,18 +852,16 @@ export class OpenCompanyClient {
   async resolveApproval(
     approvalId: string,
     verdict: Verdict,
-    note?: string,
+    _note?: string,
     company?: string | null,
     options: { detach?: boolean; scope?: GrantScope } = {},
   ): Promise<ChatResponse | ResolveReceipt> {
     const body: {
       verdict: Verdict;
-      note?: string;
       detach?: boolean;
       scope?: "once" | "tool";
       expires_in_millis?: number;
     } = { verdict };
-    if (note) body.note = note;
     if (options.detach) body.detach = true;
     // Issue #374. The `once` scope is sent as *nothing at all*, not as
     // `scope: "once"`: the omitted-field form is what an old host understands,
@@ -813,6 +990,14 @@ export class OpenCompanyClient {
        * collect instructions changes nothing.
        */
       instructions?: string;
+      /**
+       * The job shape that decides this teammate's tool belt (issue #1674),
+       * carried by the first-run setup build-out. Sent as the validated wire
+       * spelling the roster proposal returned (`research`, `writing`, …); the
+       * host derives the belt from it, so the console never chooses a
+       * permission boundary. Omitted on every other add path.
+       */
+      focus?: string;
     },
     company?: string | null,
   ): Promise<TeamMemberDto> {
@@ -836,6 +1021,17 @@ export class OpenCompanyClient {
       "GET",
       `${this.scope(company)}/team/${encodeURIComponent(agentId)}`,
     );
+  }
+
+  /**
+   * Every harness this company has declared (issue #1245's harness-picker
+   * follow-up): what Settings' Harnesses card and an agent's Harness picker
+   * both read, so the two cannot disagree about what the company has
+   * declared. Read-only — hosts predating the route 404, which callers should
+   * treat as "this host can't list harnesses yet" rather than as an empty set.
+   */
+  listHarnesses(company?: string | null): Promise<HarnessDto[]> {
+    return this.request<HarnessDto[]>("GET", `${this.scope(company)}/harnesses`);
   }
 
   /**

@@ -120,6 +120,8 @@ async function mockCompanySwitchApi(page: Page) {
     }
     if (path.endsWith("/team")) return json([]);
     if (path.endsWith("/users")) return json([]);
+    if (path.endsWith("/me"))
+      return json({ id: "op", email: "op@example.com", role: "member" });
     if (path.endsWith("/events"))
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     return json([]);

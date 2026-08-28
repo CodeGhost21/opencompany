@@ -11,7 +11,7 @@ use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::TaskRecord;
-use crate::ports::types::{CompanyId, CompanyRecord, ContextChunk};
+use crate::ports::types::{CompanyId, CompanyRecord, CompressedTrace, ContextChunk};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
@@ -110,10 +110,13 @@ async fn state_with(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -873,6 +876,41 @@ async fn memory_create_and_delete_journals_event() {
 }
 
 #[tokio::test]
+async fn memory_traces_are_inspectable_newest_last() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    for (cycle_id, summary, at_millis) in [
+        ("cycle-1", "first completed cycle", 1_000),
+        ("cycle-2", "second completed cycle", 2_000),
+    ] {
+        runtime
+            .memory
+            .save_trace(
+                runtime.id(),
+                CompressedTrace {
+                    cycle_id: cycle_id.into(),
+                    summary: summary.into(),
+                    at_millis,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, traces) = send(&state, "GET", "/api/v1/company/memory/traces", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let traces = traces.as_array().unwrap();
+    assert_eq!(traces.len(), 2);
+    assert_eq!(traces[0]["cycleId"], "cycle-1");
+    assert_eq!(traces[0]["summary"], "first completed cycle");
+    assert_eq!(traces[0]["atMillis"], 1_000);
+    assert_eq!(traces[1]["cycleId"], "cycle-2");
+}
+
+#[tokio::test]
 async fn memory_list_filters_stats_and_dual_write() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
@@ -909,7 +947,7 @@ async fn memory_list_filters_stats_and_dual_write() {
     // List reflects the store, newest-first.
     let (status, rows) = send(&state, "GET", "/api/v1/company/memory", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = rows.as_array().unwrap();
+    let rows = rows["items"].as_array().unwrap();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], "f-new");
     assert_eq!(rows[2]["id"], "f-old");
@@ -923,25 +961,27 @@ async fn memory_list_filters_stats_and_dual_write() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let pref = pref.as_array().unwrap();
+    let pref = pref["items"].as_array().unwrap();
     assert_eq!(pref.len(), 1);
     assert_eq!(pref[0]["id"], "f-mid");
 
     // `?query=` is a case-insensitive substring over title + body.
     let (status, hit) = send(&state, "GET", "/api/v1/company/memory?query=priya", None).await;
     assert_eq!(status, StatusCode::OK);
-    let hit = hit.as_array().unwrap();
+    let hit = hit["items"].as_array().unwrap();
     assert_eq!(hit.len(), 1);
     assert_eq!(hit[0]["id"], "f-new");
 
-    // Stats over the seeded facts: 3 facts, freshest timestamp, no agent chunks
-    // yet (seeding bypassed the mirror), 0 task outcomes.
+    // Stats over the seeded facts: 3 display items, freshest timestamp, no
+    // teammate memory yet (seeding bypassed the mirror), and 0 task outcomes.
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 3);
     assert_eq!(stats["factsUpdatedAtMillis"], 3_000);
-    assert_eq!(stats["agentChunks"], 0);
+    assert_eq!(stats["totalItems"], 3);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
+    assert_eq!(stats["documentMemory"], 0);
     // Nothing but facts so far, so "Last updated" tracks the newest fact.
     assert_eq!(stats["lastUpdatedAtMillis"], 3_000);
 
@@ -966,12 +1006,15 @@ async fn memory_list_filters_stats_and_dual_write() {
         "an operator fact must be mirrored into the ContextStore for agent recall"
     );
 
-    // Stats now count that mirror as an agent chunk (not a task outcome).
+    // The mirror stays agent-recallable but is not a display item of teammate
+    // memory — the fact is the one row the operator sees.
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 4);
-    assert_eq!(stats["agentChunks"], 1);
+    assert_eq!(stats["totalItems"], 4);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
+    assert_eq!(stats["documentMemory"], 0);
 }
 
 /// The Brain's "Last updated" stat must move when *agents* write memory, not
@@ -993,7 +1036,8 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 0);
-    assert_eq!(stats["agentChunks"], 0);
+    assert_eq!(stats["totalItems"], 0);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(
         stats["lastUpdatedAtMillis"], 0,
         "no memory of any kind yet, so the stat has nothing to report"
@@ -1022,8 +1066,10 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 0, "still no operator facts");
-    assert_eq!(stats["agentChunks"], 2);
+    assert_eq!(stats["totalItems"], 2);
+    assert_eq!(stats["teammateMemory"], 1);
     assert_eq!(stats["taskOutcomes"], 1);
+    assert_eq!(stats["documentMemory"], 0);
     assert_eq!(
         stats["factsUpdatedAtMillis"], 0,
         "the facts-only figure is unchanged — it is simply not the whole story"
@@ -1057,12 +1103,13 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
         last_updated + 60_000,
         "the stat is the max across every memory source, whichever is freshest"
     );
+    assert_eq!(stats["totalItems"], 3);
 
     // The list surfaces the same stamps per row, so a context card no longer
     // renders "—" while the header claims recent activity.
     let (status, rows) = send(&state, "GET", "/api/v1/company/memory", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = rows.as_array().unwrap();
+    let rows = rows["items"].as_array().unwrap();
     let context_rows: Vec<&Value> = rows.iter().filter(|r| r["origin"] != "fact").collect();
     assert_eq!(context_rows.len(), 2);
     assert!(
@@ -1173,7 +1220,7 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list_b.as_array().unwrap().len(), 0);
+    assert_eq!(list_b["items"].as_array().unwrap().len(), 0);
 
     // A's own memory holds exactly the one fact.
     let (status, list_a) = send_auth(
@@ -1185,7 +1232,7 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list_a.as_array().unwrap().len(), 1);
+    assert_eq!(list_a["items"].as_array().unwrap().len(), 1);
 
     // A's token may not address B's memory at all — 403 (scoped auth).
     let (status, _) = send_auth(
@@ -3274,10 +3321,13 @@ async fn state_with_manifest_and_defaults(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3319,10 +3369,13 @@ async fn state_with_manifest_and_overlays(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3534,14 +3587,14 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
 
 /// Issue #568: each listed server carries the agents whose *effective* grants
 /// reach it — over the full runtime roster, manifest agents plus overlay
-/// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
-/// (and every overlay teammate, which has no tools row) inherits the wildcard and
-/// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
-/// that server.
+/// teammates. With a company `allow = ["*", "mcp:*"]`, an agent that declares
+/// no `tools` (and every overlay teammate, which has no tools row) inherits the
+/// wildcard and explicit MCP grant and reaches every server; an agent that
+/// narrows itself to `mcp:notion` reaches only that server.
 #[tokio::test]
 async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
          [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
@@ -3558,6 +3611,8 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
         role: "Assistant".to_string(),
         description: None,
         tools: Vec::new(),
+        model: None,
+        harness: None,
     };
     let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
 
@@ -3661,7 +3716,7 @@ async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
 #[tokio::test]
 async fn mcp_reachability_is_empty_for_a_disabled_server() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
     )
@@ -3879,10 +3934,13 @@ async fn state_with_source_dir(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -4240,344 +4298,6 @@ async fn mcp_add_probes_without_rollback_and_persists_health() {
     );
 }
 
-// -- Telegram channel (issue #31) -------------------------------------------
-
-use crate::company::telegram::RecordingTelegramApi;
-
-/// A running "acme" company whose host has a recording Telegram transport
-/// injected, so the inbound webhook can actually deliver a reply offline. The
-/// host is loopback-only (no `public_url`) — the local/self-host shape of issue
-/// #203.
-async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) -> AppState {
-    state_with_telegram_at(home, api, None).await
-}
-
-/// As [`state_with_telegram`], but with `public_url` set — the hosted shape,
-/// where Telegram can actually deliver to the `/hooks/...` route.
-async fn state_with_telegram_at(
-    home: &std::path::Path,
-    api: RecordingTelegramApi,
-    public_url: Option<&str>,
-) -> AppState {
-    use crate::ports::CompanyStore;
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest(),
-            ledger: Vec::new(),
-            lifecycle: "running".to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    let connections =
-        crate::server::ops::ConnectionsRuntime::new().with_telegram(std::sync::Arc::new(api));
-    let state = AppState::new(AppConfig {
-        public_url: public_url.map(str::to_string),
-        ..AppConfig::default()
-    })
-    .with_connections(connections);
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
-
-/// Posts a raw Telegram update to the inbound webhook (no session; the secret
-/// header is the only credential), returning the status and JSON body.
-async fn telegram_hook(
-    state: &AppState,
-    secret_header: Option<&str>,
-    body: Value,
-) -> (StatusCode, Value, String) {
-    let mut request = Request::builder()
-        .method("POST")
-        .uri("/hooks/acme/telegram")
-        .header("content-type", "application/json");
-    if let Some(secret) = secret_header {
-        request = request.header("x-telegram-bot-api-secret-token", secret);
-    }
-    let request = request.body(Body::from(body.to_string())).unwrap();
-    let response = router(state.clone()).oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let raw = String::from_utf8_lossy(&bytes).to_string();
-    let value = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-    };
-    (status, value, raw)
-}
-
-const BOT_TOKEN: &str = "7654321:AAExampleBotTokenNeverLeaks";
-const WEBHOOK_SECRET: &str = "wh-secret-abc123";
-
-fn telegram_update(chat_id: i64, text: &str) -> Value {
-    json!({
-        "update_id": 1,
-        "message": {
-            "message_id": 7,
-            "from": { "id": 999, "username": "bob" },
-            "chat": { "id": chat_id, "type": "private" },
-            "text": text,
-        }
-    })
-}
-
-#[tokio::test]
-async fn telegram_config_is_write_only_and_status_reads_back() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home).await;
-
-    // Nothing configured yet. This host binds loopback with no `public_url`, so
-    // it never offers a webhook URL (issue #203) — Telegram could not deliver
-    // to one, and inbound rides `getUpdates` polling instead.
-    let (status, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(cfg["configured"], false);
-    assert_eq!(cfg["tokenSet"], false);
-    assert!(cfg["webhookUrl"].is_null(), "unreachable host: {cfg}");
-
-    // Store both credentials (write-only).
-    let (status, cfg) = send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(cfg["configured"], true);
-    assert_eq!(cfg["tokenSet"], true);
-    assert_eq!(cfg["secretSet"], true);
-    // Neither secret is ever echoed back.
-    let body = cfg.to_string();
-    assert!(
-        !body.contains(BOT_TOKEN),
-        "bot token leaked into PUT status"
-    );
-    assert!(
-        !body.contains(WEBHOOK_SECRET),
-        "secret leaked into PUT status"
-    );
-
-    // A partial write rotates the secret without re-sending the token.
-    let (status, _) = send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "webhookSecret": "rotated" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
-    assert_eq!(cfg["tokenSet"], true, "token survived a secret-only PUT");
-
-    // DELETE clears both.
-    let (status, cfg) = send(&state, "DELETE", "/api/v1/company/channels/telegram", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(cfg["configured"], false);
-    assert_eq!(cfg["tokenSet"], false);
-}
-
-#[tokio::test]
-async fn telegram_webhook_rejects_an_unverified_post() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    // No secret header at all.
-    let (status, _, _) = telegram_hook(&state, None, telegram_update(1, "hi")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    // Wrong secret.
-    let (status, _, _) = telegram_hook(&state, Some("nope"), telegram_update(1, "hi")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let api = RecordingTelegramApi::new();
-    let state = state_with_telegram(&home, api.clone()).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    // A verified inbound update runs one cycle; the echo brain replies and the
-    // reply is delivered back to the ORIGIN chat (555), not any other.
-    let (status, body, raw) = telegram_hook(
-        &state,
-        Some(WEBHOOK_SECRET),
-        telegram_update(555, "status?"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["ok"], true);
-    assert_eq!(body["delivered"], 1);
-    assert_eq!(api.sent(), vec![(555, "You said: status?".to_string())]);
-    // The bot token never appears in the webhook response.
-    assert!(
-        !raw.contains(BOT_TOKEN),
-        "token leaked into webhook response"
-    );
-}
-
-#[tokio::test]
-async fn telegram_set_webhook_registers_the_public_url() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let api = RecordingTelegramApi::new();
-    // The hosted shape: a real public https URL Telegram can deliver to.
-    let state = state_with_telegram_at(&home, api.clone(), Some("https://acme.example")).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    // The status advertises the webhook only on such a host.
-    let (_, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
-    assert_eq!(
-        cfg["webhookUrl"],
-        "https://acme.example/hooks/acme/telegram"
-    );
-
-    let (status, res) = send(
-        &state,
-        "POST",
-        "/api/v1/company/channels/telegram/webhook",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["ok"], true);
-    let webhooks = api.webhooks();
-    assert_eq!(webhooks.len(), 1);
-    assert_eq!(webhooks[0], "https://acme.example/hooks/acme/telegram");
-}
-
-/// Issue #203: on a host with no public https URL, registering a webhook is
-/// refused outright. Accepting it would be actively harmful — Telegram could
-/// never deliver to the URL *and* a registration blocks `getUpdates`, so it
-/// would take down the one inbound path that does work.
-#[tokio::test]
-async fn telegram_set_webhook_is_refused_on_a_host_telegram_cannot_reach() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let api = RecordingTelegramApi::new();
-    let state = state_with_telegram(&home, api.clone()).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    let (status, res) = send(
-        &state,
-        "POST",
-        "/api/v1/company/channels/telegram/webhook",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        res.to_string().contains("OPENCOMPANY_PUBLIC_URL"),
-        "the refusal must say how to fix it: {res}"
-    );
-    assert!(
-        api.webhooks().is_empty(),
-        "no loopback URL was ever handed to Telegram"
-    );
-}
-
-/// The channel is usable with a bot token alone: no webhook secret, no public
-/// URL, no `setWebhook` — the polling listener covers inbound.
-#[tokio::test]
-async fn telegram_is_configured_by_a_bot_token_alone() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let api = RecordingTelegramApi::new();
-    let state = state_with_telegram(&home, api).await;
-
-    let (status, cfg) = send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(cfg["configured"], true, "a token is the whole setup: {cfg}");
-    assert_eq!(cfg["secretSet"], false);
-    assert!(cfg["webhookUrl"].is_null());
-    // The host has a transport wired, so it long-polls for inbound.
-    assert_eq!(cfg["polling"], true);
-}
-
-#[tokio::test]
-async fn telegram_token_never_leaks_even_when_delivery_fails() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    // A transport that fails with an error embedding the bot token.
-    let api = RecordingTelegramApi::failing_with_token_echo();
-    let state = state_with_telegram(&home, api).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    // The turn still runs; a delivery failure never fails the webhook and never
-    // surfaces the token in the response body.
-    let (status, body, raw) =
-        telegram_hook(&state, Some(WEBHOOK_SECRET), telegram_update(42, "ping")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["delivered"], 0);
-    assert!(
-        !raw.contains(BOT_TOKEN),
-        "token leaked on a failed delivery"
-    );
-}
-
 /// #187: the Artifacts tab's full loop — an agent draft, a human edit appended
 /// as a new version, and the diff between them.
 ///
@@ -4760,6 +4480,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to this task — admitted.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-1".into(),
             agent_id: "ceo".into(),
@@ -4769,6 +4491,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // An ordinary chat reply — excluded.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "General".into(),
             agent_id: "ceo".into(),
@@ -4778,6 +4502,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to a different task — excluded.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-other".into(),
             agent_id: "ceo".into(),
@@ -4987,7 +4713,7 @@ async fn a_withdrawn_discussion_message_stops_being_served() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(withdrawn["redacted"], true);
     assert_eq!(
-        withdrawn["redactedBy"], "harness-admin",
+        withdrawn["redactedBy"], "Harness Admin",
         "a withdrawal nobody's name is on is a message that can vanish quietly"
     );
     assert_eq!(
@@ -5002,9 +4728,9 @@ async fn a_withdrawn_discussion_message_stops_being_served() {
     assert_eq!(thread.len(), 2, "the row is withdrawn, not deleted: {body}");
     assert_eq!(thread[0]["seq"], seq);
     assert_eq!(thread[0]["redacted"], true);
-    assert_eq!(thread[0]["redactedBy"], "harness-admin");
+    assert_eq!(thread[0]["redactedBy"], "Harness Admin");
     assert_eq!(
-        thread[0]["author"], "harness-admin",
+        thread[0]["author"], "Harness Admin",
         "the poster is still named"
     );
     assert_eq!(
@@ -5233,7 +4959,7 @@ async fn task_discussion_posts_persist_and_are_scoped_to_their_card() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(posted["text"], "blocked on the API key");
-    assert_eq!(posted["author"], "harness-admin");
+    assert_eq!(posted["author"], "Harness Admin");
 
     for (task, text) in [
         ("t-1", "unblocked, the key was rotated"),
@@ -5615,6 +5341,8 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
             run_id: None,
         },
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-1".into(),
             agent_id: "writer".into(),
@@ -6964,14 +6692,6 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
             "/api/v1/company/domain",
             Some(json!({"domain": "x.test"})),
         ),
-        // The Telegram bot the company speaks as, and where its updates land.
-        (
-            "PUT",
-            "/api/v1/company/channels/telegram",
-            Some(json!({ "botToken": "x" })),
-        ),
-        ("DELETE", "/api/v1/company/channels/telegram", None),
-        ("POST", "/api/v1/company/channels/telegram/webhook", None),
         // Which tool servers exist, and the credentials they carry.
         (
             "POST",
@@ -7060,11 +6780,6 @@ async fn an_admin_is_refused_by_none_of_them() {
             "PUT",
             "/api/v1/company/domain",
             Some(json!({"domain": "x.test"})),
-        ),
-        (
-            "PUT",
-            "/api/v1/company/channels/telegram",
-            Some(json!({ "botToken": "x" })),
         ),
         (
             "POST",
@@ -9477,4 +9192,431 @@ async fn setup_is_reachable_under_both_scope_forms() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["template"], "software", "{body}");
+}
+
+// ---------------------------------------------------------------------------
+// Chat attachments (issue #1682)
+// ---------------------------------------------------------------------------
+
+/// Uploads one file to the chat-attachment route, hand-rolling the multipart
+/// body so the test drives the real `Multipart` extractor rather than a stub —
+/// the same shape as `upload_file`, pointed at `/chat/upload`.
+async fn chat_upload(
+    state: &AppState,
+    filename: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
+    const BOUNDARY: &str = "----opencompany1682boundary";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    if let Some(ct) = content_type {
+        body.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
+    }
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/chat/upload")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let out = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = if out.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&out).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+/// The upload half of #1682: a file posts to `/chat/upload`, comes back as a
+/// compact `AttachmentRef` with the store's own metadata, and lands in the
+/// workspace tree as a binary node the existing blob route can serve. This is
+/// the reference the send path then carries by id.
+#[tokio::test]
+async fn chat_upload_stores_binary_and_returns_ref() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Not valid UTF-8, so nothing on this path can be quietly routing it
+    // through a `String` and turning the attachment into a prose note.
+    let png: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00,
+    ];
+    let (status, reference) = chat_upload(&state, "hero.png", Some("image/png"), &png).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    assert_eq!(reference["name"], "hero.png");
+    assert_eq!(reference["mime"], "image/png");
+    assert_eq!(reference["size"], png.len() as u64);
+    let node_id = reference["nodeId"].as_str().expect("a node id").to_string();
+
+    // It is a real binary node in the tree, so it shares the workspace quota
+    // and the hardened blob serve rather than a parallel store.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == node_id.as_str())
+        .expect("the uploaded node is in the tree");
+    assert_eq!(listed["mime"], "image/png");
+    assert_eq!(listed["size"], png.len() as u64);
+
+    // And it streams back byte-exactly through the existing blob route — the
+    // download path #1682 reuses untouched.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{node_id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(got.to_vec(), png, "the bytes must survive the round trip");
+}
+
+/// A browser may send a full path as the filename; the route stores under the
+/// last segment only, named by the workspace rule — the same sanitizer the
+/// workspace upload applies, so no client string reaches a filesystem path.
+#[tokio::test]
+async fn chat_upload_sanitizes_pathy_filename() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let bytes: Vec<u8> = vec![0x00, 0x01, 0x02, 0xff];
+    let (status, reference) = chat_upload(
+        &state,
+        "../../etc/Secret Report.bin",
+        Some("application/octet-stream"),
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let name = reference["name"].as_str().unwrap();
+    assert!(
+        !name.contains('/') && !name.contains('\\'),
+        "the stored name kept a path separator: {name}"
+    );
+    assert_eq!(
+        name, "secret-report.bin",
+        "stored under the sanitized last segment"
+    );
+}
+
+/// Codex review finding on #1682: chat uploads all land at the workspace
+/// root, so a second message attaching a file under an earlier one's exact
+/// name — the common case of picking `image.png` twice — used to 409 rather
+/// than attach, since the only way to free the name was deleting the first
+/// upload and breaking its download. The route now retries once under a
+/// disambiguated name instead of failing the attach.
+#[tokio::test]
+async fn chat_upload_disambiguates_a_repeated_filename() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let first: Vec<u8> = vec![0x01, 0x02, 0x03];
+    let (status, first_ref) = chat_upload(&state, "image.png", Some("image/png"), &first).await;
+    assert_eq!(status, StatusCode::OK, "{first_ref}");
+    assert_eq!(first_ref["name"], "image.png");
+
+    // A later message attaches a *different* file under the same filename.
+    let second: Vec<u8> = vec![0x09, 0x08, 0x07, 0x06];
+    let (status, second_ref) = chat_upload(&state, "image.png", Some("image/png"), &second).await;
+    assert_eq!(status, StatusCode::OK, "{second_ref}");
+    let second_name = second_ref["name"].as_str().expect("a stored name");
+    assert_ne!(
+        second_name, "image.png",
+        "the second upload must not silently fail or overwrite the first"
+    );
+    assert!(
+        second_name.starts_with("image-") && second_name.ends_with(".png"),
+        "expected a disambiguated image-*.png name, got {second_name}"
+    );
+
+    // Both node ids are distinct, live in the tree, and stream back their own
+    // (not each other's) bytes — no data was lost or aliased on the collision.
+    let first_id = first_ref["nodeId"].as_str().unwrap();
+    let second_id = second_ref["nodeId"].as_str().unwrap();
+    assert_ne!(first_id, second_id);
+    for (node_id, want) in [(first_id, &first), (second_id, &second)] {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/company/workspace/blob/{node_id}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&got.to_vec(), want);
+    }
+}
+
+/// The headline of #1682 end-to-end: an operator attaches a file, the message
+/// carries it, and a reload projects the attachment back with the **store's**
+/// name / mime / size — never a client claim, because `/chat` was handed only
+/// the node id. This is the reload proof the whole two-step design exists for.
+#[tokio::test]
+async fn chat_message_with_attachment_journals_and_hydrates() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x01];
+    let (status, reference) = chat_upload(&state, "diagram.png", Some("image/png"), &png).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    // The send carries the id only — no name, mime or size the host could be
+    // tricked into trusting.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "here is the diagram", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The reload: the operator's own message comes back with the attachment,
+    // and every field is the store's.
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = history
+        .as_array()
+        .expect("history is a list")
+        .iter()
+        .find(|m| m["text"] == "here is the diagram")
+        .expect("the operator message survived the reload");
+    let attachments = mine["attachments"]
+        .as_array()
+        .expect("the message carries its attachment on reload");
+    assert_eq!(attachments.len(), 1, "exactly one attachment: {mine}");
+    let attachment = &attachments[0];
+    assert_eq!(attachment["nodeId"], node_id.as_str());
+    assert_eq!(attachment["name"], "diagram.png", "name is the store's");
+    assert_eq!(attachment["mime"], "image/png", "mime is the store's");
+    assert_eq!(attachment["size"], png.len() as u64, "size is the store's");
+}
+
+/// Codex review finding on #1682, round 2: a bare node id told a hosted or
+/// sidecar brain a file existed but gave it nothing to act on — no device
+/// tool bridges a `context_*` call into the workspace's binary store. The
+/// send route now extracts a readable attachment's text and journals it
+/// alongside the reference, so `wire_event` (`brain::medulla::effects`) has
+/// real content to put on the wire.
+///
+/// Reads the raw journal rather than `/chat/history` on purpose:
+/// `extracted_text` is an internal server-to-brain channel, not operator-
+/// facing data, so `ChatAttachmentDto` deliberately drops it — the console
+/// never sees it and must not.
+#[tokio::test]
+async fn chat_attachment_text_is_extracted_and_journaled_for_the_brain() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let text = b"Q3 revenue grew 12% year over year.".to_vec();
+    let (status, reference) = chat_upload(&state, "report.txt", Some("text/plain"), &text).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "summarize the attached report", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(
+        journaled[0].extracted_text.as_deref(),
+        Some("Q3 revenue grew 12% year over year."),
+        "a plain-text attachment's content must reach the durable event, \
+         not just its node id"
+    );
+}
+
+/// A binary attachment nothing here parses (an image) journals with no
+/// extracted text — the reference alone rides the wire, and honestly: no
+/// content is fabricated for a format extraction cannot read.
+#[tokio::test]
+async fn chat_attachment_with_no_readable_text_journals_none() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x01];
+    let (status, reference) = chat_upload(&state, "photo.png", Some("image/png"), &png).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "what's in this photo?", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(journaled[0].extracted_text, None);
+}
+
+/// The IDOR / phantom guard: a `node_id` that resolves to no binary node in
+/// this company's workspace refuses the send with a `400`, on the same terms a
+/// malformed thread `parent` does — so a stale or hostile client cannot attach
+/// another company's file, or a file that does not exist.
+#[tokio::test]
+async fn chat_message_rejects_foreign_node() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "trust me", "attachments": ["01JZZZNOTAREALNODE00000000"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // And nothing was journaled: the refusal is before the append, so the
+    // transcript does not hold a message pointing at a file this company lacks.
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        history
+            .as_array()
+            .expect("history is a list")
+            .iter()
+            .all(|m| m["text"] != "trust me"),
+        "a refused attachment message still reached the transcript: {history}"
+    );
+}
+/// Codex review finding: an unbounded attachment list turns one `/chat` POST
+/// into an attacker-controlled multiplier on `resolve_attachments`' tree scan
+/// and extraction work. Refused with a `400` before any of that work runs.
+#[tokio::test]
+async fn chat_message_rejects_too_many_attachments() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let ids: Vec<String> = (0..21).map(|n| format!("node-{n}")).collect();
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "too many", "attachments": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        history
+            .as_array()
+            .expect("history is a list")
+            .iter()
+            .all(|m| m["text"] != "too many"),
+        "a refused attachment message still reached the transcript: {history}"
+    );
+}
+
+/// Codex review finding: the same node id repeated in `attachments` used to
+/// resolve — and extract — once per repetition. A message attaching the same
+/// file three times over carries it exactly once.
+#[tokio::test]
+async fn chat_message_deduplicates_a_repeated_attachment_id() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let text = b"Q3 revenue grew 12%.".to_vec();
+    let (status, reference) = chat_upload(&state, "report.txt", Some("text/plain"), &text).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({
+            "message": "attached three times",
+            "attachments": [node_id.clone(), node_id.clone(), node_id],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = history
+        .as_array()
+        .expect("history is a list")
+        .iter()
+        .find(|m| m["text"] == "attached three times")
+        .expect("the message survived");
+    assert_eq!(
+        mine["attachments"].as_array().map(Vec::len),
+        Some(1),
+        "a repeated id must resolve to one attachment, not three: {mine}"
+    );
 }

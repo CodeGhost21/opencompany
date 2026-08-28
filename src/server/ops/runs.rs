@@ -313,11 +313,25 @@ struct RunDetail {
 // Routes
 // ---------------------------------------------------------------------------
 
-/// The `?task=` / `?status=` / `?limit=` selectors on the run list.
+/// The `?task=` / `?agent=` / `?status=` / `?limit=` selectors on the run list.
 #[derive(Debug, Deserialize)]
 struct RunsQuery {
     /// Only attempts at this card. Absent = every card.
     task: Option<String>,
+    /// Only attempts spawned by this workflow run's `agent` nodes. Absent =
+    /// every attempt, workflow-spawned or not.
+    ///
+    /// The join a run inspector needs: a workflow node's turn has neither a card
+    /// nor a conversation, so before this there was no selector that could
+    /// reach it.
+    workflow_run: Option<String>,
+    /// Only attempts dispatched to this desk/teammate. Absent = every desk.
+    ///
+    /// Not validated against the roster on purpose: a teammate can be removed
+    /// while its attempts remain, and refusing to show that history would erase
+    /// the record of work that did happen. An id nobody ran simply answers
+    /// `[]`, which is the truth about it.
+    agent: Option<String>,
     /// A comma-separated status list (`?status=failed,cancelled`). Absent =
     /// any status. An unknown word is a 400 rather than a silent empty page:
     /// a typo'd filter that returns `[]` looks exactly like "nothing matched".
@@ -350,6 +364,8 @@ impl RunsQuery {
         }
         Ok(RunFilter {
             task_id: self.task,
+            workflow_run_id: self.workflow_run,
+            agent_id: self.agent,
             statuses,
             limit: Some(match self.limit {
                 Some(0) | None => DEFAULT_RUN_LIMIT,
@@ -359,9 +375,10 @@ impl RunsQuery {
     }
 }
 
-/// `GET …/runs?task=&status=&limit=` — the company's attempts, newest first.
+/// `GET …/runs?task=&agent=&status=&limit=` — the company's attempts, newest
+/// first.
 ///
-/// An indexed store read: the `task`/`status`/`limit` predicates go to
+/// An indexed store read: the `task`/`agent`/`status`/`limit` predicates go to
 /// [`RunStore::list_runs`](crate::ports::RunStore::list_runs), which every
 /// backend answers from its own index, and the ordering is the port's shared
 /// [`sort_newest_first`](crate::ports::runs::sort_newest_first) so all three
@@ -487,11 +504,14 @@ mod tests {
                 overlay_desks: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 overlay_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -949,7 +969,9 @@ mod tests {
     fn the_limit_clamps_and_zero_means_default() {
         let filter = |limit: Option<usize>| {
             RunsQuery {
+                workflow_run: None,
                 task: None,
+                agent: None,
                 status: None,
                 limit,
             }
@@ -960,5 +982,47 @@ mod tests {
         assert_eq!(filter(Some(0)).limit, Some(DEFAULT_RUN_LIMIT));
         assert_eq!(filter(Some(5)).limit, Some(5));
         assert_eq!(filter(Some(10_000)).limit, Some(MAX_RUN_LIMIT));
+    }
+
+    /// `?agent=` reaches the store as a predicate rather than being dropped
+    /// (issue #1573).
+    ///
+    /// The failure this guards against is silent in the worst way: an
+    /// unrecognised selector on a `Deserialize` query struct is simply ignored,
+    /// so the console would ask for one teammate's history, get the *whole
+    /// company's* newest N attempts back, and render them under that teammate's
+    /// name. Every row would be real, and the page would still be a lie.
+    #[test]
+    fn the_agent_selector_becomes_a_store_predicate() {
+        let filter = RunsQuery {
+            task: Some("card-7".into()),
+            workflow_run: None,
+            agent: Some("engineer".into()),
+            status: None,
+            limit: None,
+        }
+        .into_filter()
+        .expect("filter");
+        assert_eq!(filter.agent_id.as_deref(), Some("engineer"));
+        assert_eq!(
+            filter.task_id.as_deref(),
+            Some("card-7"),
+            "the desk predicate does not displace the card one"
+        );
+
+        assert_eq!(
+            RunsQuery {
+                task: None,
+                workflow_run: None,
+                agent: None,
+                status: None,
+                limit: None,
+            }
+            .into_filter()
+            .expect("filter")
+            .agent_id,
+            None,
+            "no `?agent=` means every desk, not a desk named nothing"
+        );
     }
 }

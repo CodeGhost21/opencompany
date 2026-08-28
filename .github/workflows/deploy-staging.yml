@@ -29,12 +29,21 @@ name: Deploy tenant image to staging
 on:
   push:
     branches: [main]
+    # Every path the image is actually built from. A file that reaches the
+    # image but is absent here merges to main and changes nothing in staging
+    # until some unrelated selected path happens to move — so the rule for
+    # adding one is simply: is it `COPY`ed by the Dockerfile, or read by
+    # something that is?
     paths:
       - 'src/**'
       - 'frontend/**'
       - 'companies/**'
+      - 'skills/**' # COPYed into the runtime image (Dockerfile) as the shared library
+      - 'docker/**' # entrypoint.sh, which is COPYed and is the container's ENTRYPOINT
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'build.rs' # embeds the bundles and the globals, and stamps the build commit
+      - 'rust-toolchain.toml' # COPYed into the builder; it picks the compiler
       - 'Dockerfile'
       - '.dockerignore'
       - 'vendor/**'
@@ -65,20 +74,14 @@ env:
   # The feature set the hosted tenant ships with. Changing it changes what
   # every tenant can do, so treat edits here as a product change, not a CI
   # tweak. Full belt: adds mcp/media/composio (the credential/real-money tool
-  # families, fail-closed until their config exists), imap/telegram (channels),
-  # medulla (hosted brain transport), tinycortex (local memory backend), and
-  # sidecar. `sqlite` is intentionally omitted — its bundled rusqlite needs a C
+  # families, fail-closed until their config exists), imap (inbound mail),
+  # medulla (hosted brain transport), and sidecar. `sqlite` is intentionally omitted — its bundled rusqlite needs a C
   # compiler the slim build image lacks, and it is redundant on a mongodb tenant.
   #
   # `tinymemory` is the hosted-memory contract: `OPENCOMPANY_MEMORY=remote` +
   # `OPENCOMPANY_MEMORY_DRIVER=supermemory|mem0|cognee` (plus `null`), inert
-  # until an operator sets those. `tinymemory-embedded` is deliberately NOT
-  # here for the same two reasons `sqlite` isn't: tinymemory-core links a
-  # bundled rusqlite (the C compiler the slim image lacks), and its `namespace`
-  # store on a mongodb tenant is refused by the ephemeral-/data guard anyway.
-  # Self-hosters wanting the embedded contract driver compile it via
-  # OPENCOMPANY_FEATURES (deploy/README.md).
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,telegram,medulla,tinycortex,sidecar,chargebee,paypal,tinymemory
+  # until an operator sets those.
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory
 
 jobs:
   deploy:
@@ -119,8 +122,14 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          # `.dockerignore` excludes `.git` and `GITHUB_SHA` does not cross
+          # into a build context, so the build script has no way to work out
+          # which revision it is compiling — every hosted tenant would report
+          # `unknown` forever. `actions/checkout` checked out `github.sha`, so
+          # this names the commit that was actually built.
           build-args: |
             FEATURES=${{ env.TENANT_FEATURES }}
+            OPENCOMPANY_BUILD_COMMIT=${{ github.sha }}
           push: true
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}

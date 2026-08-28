@@ -30,7 +30,7 @@
 //! (openhuman's own `merge_openhuman_usage_meta` helper is `pub(crate)`, hence
 //! the local re-expression in [`inject_usage_meta`].)
 
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use async_trait::async_trait;
 
@@ -80,6 +80,47 @@ const OPENHUMAN_USAGE_META_KEY: &str = "openhuman_usage_meta";
 pub trait HarnessModel: ChatModel<()> {
     /// Stable provider slug attributed to usage samples (e.g. `managed`, `byok`).
     fn telemetry_provider_id(&self) -> String;
+
+    /// The model the most recent turn resolved to, folded onto the closed
+    /// [`ModelSlug`] vocabulary (issue #1749) — the model half of the same
+    /// attribution [`telemetry_provider_id`](Self::telemetry_provider_id)
+    /// answers the provider half of.
+    ///
+    /// A [`ModelSlug`] rather than a `String` because the model name on the
+    /// wire is operator-authored free text on any BYOK or `openai_compatible`
+    /// deployment; see the [`model`](crate::metering::model) module docs. The
+    /// raw name is classified **inside the implementation**, at the same place
+    /// it is put on the wire, and never leaves it.
+    ///
+    /// `None` before the first turn (nothing has been resolved yet) and for an
+    /// implementation with no model identity to give — which is why this has a
+    /// default: a test double that reports a provider has nothing useful to say
+    /// here, and `None` is the honest answer rather than a fabricated one.
+    ///
+    /// ## Read live, and therefore approximate under concurrency
+    ///
+    /// Read *after* the turn, exactly as `telemetry_provider_id` is, so a
+    /// console BYOK or model-table switch re-attributes the next turn without a
+    /// rebuild. The cost of that shape is the same one the provider slug already
+    /// pays and is worth stating plainly: one company's agents share one
+    /// provider, so when two agents on **different workload tiers** have turns
+    /// in flight at once, the sample recorded second can read the slug the first
+    /// one resolved. It mis-sorts tokens between two of that company's own
+    /// slugs; it never crosses a company boundary, never changes a total, and
+    /// never invents a model the company did not run. Making it exact needs the
+    /// turn's own requested tier carried from the roster to the cost hook, which
+    /// is a change to the agent record rather than to this seam.
+    ///
+    /// That bound — *two models the company actually ran* — is the whole reason
+    /// implementations publish only after their call succeeds. A cache written
+    /// before the request went out would widen the window to include a model
+    /// that produced no usage at all (a turn still in flight, or one rejected
+    /// with a 401), and a concurrent turn that *did* run would then be recorded
+    /// against it. That is a different and worse error than mis-sorting between
+    /// two live models, so it is one every implementation must not make.
+    fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
+        None
+    }
 }
 
 /// Resolve a [`HostedProvider`] configuration (and its default model) from the
@@ -444,6 +485,122 @@ fn attach_tools(
     body["tools"] = serde_json::Value::Array(tools);
 }
 
+// ## Guarding intra-turn history growth
+//
+// Turn limits bound how long a turn can run, but not how large its history can
+// grow. Each model call includes the preceding history again, so a turn that
+// runs many tool iterations can repeatedly resend an increasingly large input.
+//
+// openhuman already provides `ContextCompressionMiddleware` (summarization at
+// 90% of the window) and `ImageAwareMessageTrimMiddleware` (deterministic
+// trimming as a fallback), but installs them only behind this gate in
+// `vendor/openhuman/.../tinyagents/mod.rs:2216`:
+//
+// ```text
+// if let Some(window) = context_window.filter(|w| *w > 0) { … }
+// ```
+//
+// On this `direct_model` path, `effective_context_window` obtains that value as
+// `direct.profile().and_then(|p| p.max_input_tokens)`. `MANAGED_PROFILE` did not
+// set the field, so it returned `None` and neither middleware was installed.
+//
+// ### Failure mode observed at the provider boundary
+//
+// A large-context provider was measured on 2026-08-15, using one request per
+// measurement:
+//
+// ```text
+//  18,281 input tokens  → HTTP 200, finish_reason "stop",   response "1"
+// 245,781 input tokens  → HTTP 200, finish_reason "stop",   response "1"
+// 280,781 input tokens  → HTTP 200, finish_reason "stop",   response "1"
+// 350,781 input tokens  → HTTP 200, finish_reason "stop",   response "1"
+// ~438,000 input tokens → HTTP 200, finish_reason "failed", response "",
+//                         usage {prompt_tokens: 0, completion_tokens: 0}
+// ```
+//
+// This is silent failure rather than a provider error: HTTP remains successful,
+// the response is empty, and usage is zero. A generic empty-response path then
+// handles the failure, while a token budget cannot observe the oversized call.
+//
+// ### Default derivation
+//
+// The 240,000-token default is intended for large-context models and remains
+// configurable. A 272,000-token advertised window provides a representative
+// lower bound for a 272k-class combined model, rather than relying on whichever
+// backing model happens to accept a larger request.
+//
+// Two margins apply:
+//
+// 1. `estimate_text_tokens` estimates tokens as `bytes / 4`. In the measured
+//    sample, 61,299 bytes represented 18,281 tokens, or 3.35 bytes per token.
+//    `bytes / 4` estimates 15,325 tokens, 16% below the actual count; the actual
+//    count is therefore approximately 1.19 times the estimate.
+// 2. Compression and deterministic trimming activate at 90% of the configured
+//    window (`SUMMARIZE_THRESHOLD_FRACTION` and `window - window / 10`).
+//
+// 272,000 / 1.19 ≈ 228,000 tokens of safe estimated budget; dividing by 0.9
+// gives approximately 253,000. Rounding down to 240,000 starts compression at
+// approximately 216,000 estimated tokens, or approximately 258,000 actual
+// tokens under the measured ratio, about 5% below the advertised 272,000-token
+// window.
+
+/// Configurable context-window default, in tokens, for managed inference.
+///
+/// This default suits large-context models. Set `OPENCOMPANY_CONTEXT_WINDOW` to
+/// the provider's advertised window with an appropriate estimation margin when
+/// using a smaller model. Set it to `off` or `0` to restore the previous
+/// unbounded behavior.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 240_000;
+
+/// Read and trim an environment variable.
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+/// Return the context window advertised by the managed model profile, or
+/// `None` when context compression and trimming are disabled.
+///
+/// `MANAGED_PROFILE` is shared by `HostedProvider` and `TenantProvider`, so this
+/// is currently one value for every configured model. Per-model values would
+/// require `profile()` to know the asynchronously resolved `InferenceDecl` and
+/// are outside the scope of this fix.
+pub fn context_window() -> Option<u64> {
+    static VALUE: OnceLock<Option<u64>> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        let selected = match env_string("OPENCOMPANY_CONTEXT_WINDOW") {
+            None => Some(DEFAULT_CONTEXT_WINDOW),
+            Some(raw) if raw.eq_ignore_ascii_case("off") || raw == "0" => None,
+            Some(raw) => match raw.parse::<u64>() {
+                Ok(value) if value > 0 => Some(value),
+                _ => {
+                    eprintln!(
+                        "context window: OPENCOMPANY_CONTEXT_WINDOW='{raw}' is not a positive \
+                         integer; using the default of {DEFAULT_CONTEXT_WINDOW} tokens"
+                    );
+                    Some(DEFAULT_CONTEXT_WINDOW)
+                }
+            },
+        };
+        match selected {
+            // Compression starts at 90% of the advertised window. Reporting
+            // both values distinguishes the activation threshold from the hard
+            // model limit.
+            Some(value) => eprintln!(
+                "context window: {value} tokens; compression starts at approximately {} \
+                 estimated tokens",
+                value / 10 * 9
+            ),
+            None => eprintln!(
+                "context window: disabled; no compression or trimming, so a long turn may \
+                 grow until the provider rejects or silently fails it"
+            ),
+        }
+        selected
+    })
+}
+
 /// The capability profile the hosted / tenant managed inference surface
 /// advertises. `tool_calling: true` is the load-bearing bit: openhuman's turn
 /// loop derives `native_tools` from the injected model's profile
@@ -460,6 +617,18 @@ static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
     },
     tool_calling: true,
     parallel_tool_calls: true,
+    // This field activates both `ContextCompressionMiddleware` and
+    // `ImageAwareMessageTrimMiddleware`. `TurnModels::effective_context_window`
+    // reads `direct.profile().and_then(|p| p.max_input_tokens)`, and the turn
+    // harness installs those middlewares only for a positive value.
+    //
+    // Leaving this as `None` permits unbounded history growth during a turn that
+    // runs many tool iterations. The observed failure at approximately 438k
+    // input tokens was HTTP 200 with `finish_reason: "failed"`, an empty message,
+    // and zero usage rather than a diagnosable provider error. The configurable
+    // 240,000-token default and its 272,000/1.19/0.9 rationale are documented
+    // above; `OPENCOMPANY_CONTEXT_WINDOW=off` restores the previous behavior.
+    max_input_tokens: context_window(),
     ..ModelProfile::default()
 });
 
@@ -735,6 +904,21 @@ pub struct HostedProviderConfig {
 pub struct HostedProvider {
     config: HostedProviderConfig,
     client: reqwest::Client,
+    product_identity: bool,
+    telemetry_provider: &'static str,
+    /// The classified model of the most recent **successful** turn (issue
+    /// #1749), so the synchronous
+    /// [`telemetry_model`](HarnessModel::telemetry_model) reports what the last
+    /// call that actually reached the backend ran on.
+    ///
+    /// Written only after the request returns 2xx: a turn that failed produced
+    /// no usage, so publishing its model would name one that never ran for
+    /// whichever concurrent turn reads the cache next.
+    ///
+    /// Behind an [`Arc`] because this type derives `Clone` and a clone is the
+    /// same provider — a cloned handle must see the same last-turn model, not a
+    /// private copy that never updates.
+    telemetry_model: Arc<RwLock<Option<crate::metering::ModelSlug>>>,
 }
 
 impl HostedProvider {
@@ -743,6 +927,22 @@ impl HostedProvider {
         Self {
             config,
             client: reqwest::Client::new(),
+            product_identity: true,
+            telemetry_provider: "subscription",
+            telemetry_model: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Builds the short-lived direct provider used before a company exists in
+    /// onboarding. It speaks the same wire format without attaching the
+    /// TinyHumans product header to a third-party or local endpoint.
+    pub fn new_direct(config: HostedProviderConfig, provider: &str) -> Self {
+        Self {
+            config,
+            client: reqwest::Client::new(),
+            product_identity: false,
+            telemetry_provider: inference::provider_slug(provider),
+            telemetry_model: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -782,20 +982,14 @@ impl ChatModel<()> for HostedProvider {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let (product_header_name, product_header_value) = crate::product::product_identity_header();
-        let mut http = self
-            .client
-            .post(&url)
-            .json(&body)
-            // `HostedProvider` always speaks to the TinyHumans-owned managed
-            // endpoint (`DEFAULT_TINYHUMANS_INFERENCE_URL`), never a
-            // third-party BYOK host, so tagging it with our product identity
-            // is unconditional. This client is a bespoke `reqwest::Client`,
-            // not one built through `openhuman_core`'s `IntegrationClient`,
-            // so it does not inherit the header set by
-            // `set_product_identity` and must attach it itself — see
-            // `crate::product`.
-            .header(product_header_name, product_header_value);
+        let mut http = self.client.post(&url).json(&body);
+        if self.product_identity {
+            // The normal constructor is the managed TinyHumans path. The
+            // direct setup constructor deliberately skips this on local/BYOK
+            // endpoints, matching `request_plan`'s privacy boundary.
+            let (name, value) = crate::product::product_identity_header();
+            http = http.header(name, value);
+        }
         // Resolved per request, never captured: on the hosted platform this reads
         // a token file the cluster rewrites in place every few minutes.
         let bearer = self.config.credential.current().await.map_err(|e| {
@@ -826,6 +1020,19 @@ impl ChatModel<()> for HostedProvider {
             )));
         }
 
+        // Published only now, once *this* request has come back 2xx, and
+        // classified from the same `model` that went on the wire — so the raw
+        // string stops here and the cost hook reaches only a vocabulary member
+        // (#1749). The cache is shared by every clone of this handle, so a turn
+        // that never ran must not publish into it: a rejected request (a 401
+        // from an early-rotated bearer, say) produces no usage of its own, and
+        // writing before the call would let a *concurrent* agent's successful
+        // turn read this model and attribute its tokens to one that never ran.
+        // Leaving the last successful turn's model in place is the honest
+        // reading, and it keeps the documented approximation to what it says on
+        // the tin: two models that both actually ran.
+        *self.telemetry_model.write().unwrap() = Some(crate::metering::ModelSlug::classify(model));
+
         let payload: serde_json::Value = response.json().await.map_err(|e| {
             TinyAgentsError::Model(format!("hosted inference response was not JSON: {e}"))
         })?;
@@ -835,10 +1042,15 @@ impl ChatModel<()> for HostedProvider {
 
 impl HarnessModel for HostedProvider {
     fn telemetry_provider_id(&self) -> String {
-        // `HostedProvider` is the platform-credentialed path by construction —
-        // it exists only where the env default supplied both endpoint and key —
-        // so its spend is the subscription's.
-        "subscription".to_string()
+        // The normal constructor is the subscription path. First-run setup has
+        // no tenant store to hang `TenantProvider` from, so its direct
+        // constructor carries the selected provider's slug for that one
+        // unmetered roster-design call.
+        self.telemetry_provider.to_string()
+    }
+
+    fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
+        *self.telemetry_model.read().unwrap()
     }
 }
 
@@ -1000,6 +1212,18 @@ pub struct TenantProvider {
     /// the config the last turn actually used (cost attribution follows the
     /// switch).
     slug: RwLock<&'static str>,
+    /// The classified model of the most recently **completed** turn (issue
+    /// #1749), so the synchronous
+    /// [`telemetry_model`](HarnessModel::telemetry_model) reports the model the
+    /// last successful turn actually resolved to — which on this path means
+    /// *after* the tenant `[inference].models` table has been applied, so a
+    /// BYOK tenant's table switch re-attributes the next turn for the same
+    /// reason `slug` does.
+    ///
+    /// Written only once the request has come back 2xx, so a rejected turn —
+    /// which meters nothing — cannot name the model for a concurrent turn that
+    /// did run.
+    model: RwLock<Option<crate::metering::ModelSlug>>,
     /// Which harness's config and credential slots this provider resolves
     /// against. Two `built_in` harnesses on one company each get their own
     /// provider, differing only in this — which is what lets one ride the
@@ -1025,6 +1249,8 @@ impl TenantProvider {
             // Replaced by the resolved slug on the first turn; until then the
             // company is on the default it booted with.
             slug: RwLock::new("subscription"),
+            // No turn has been issued yet, so there is no model to name.
+            model: RwLock::new(None),
             scope: inference::HarnessScope::default(),
         }
     }
@@ -1097,6 +1323,22 @@ impl ChatModel<()> for TenantProvider {
         let payload = send_plan(&self.client, &plan, decl.credential())
             .await
             .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
+        // Classified from `plan.model` — the exact string that goes on the wire,
+        // *after* the tenant `[inference].models` table has been applied — so
+        // the sample names what actually ran rather than the tier that was
+        // asked for. `plan.model` is operator-authored text on a BYOK or
+        // `openai_compatible` tenant and stops here: the only model identity
+        // that leaves this method is the vocabulary member (issue #1749).
+        //
+        // Published *after* `send_plan` returns `Ok`, i.e. once this request has
+        // actually come back 2xx. The cache is read by whichever turn finishes
+        // next, and one provider is shared across concurrently running agents,
+        // so publishing before the call would let a request that is still in
+        // flight — or one that was rejected outright — name the model for
+        // another agent's successful turn. A failed turn produces no usage of
+        // its own, so keeping the last *successful* model is strictly more
+        // accurate than advertising one that never ran.
+        *self.model.write().unwrap() = Some(crate::metering::ModelSlug::classify(&plan.model));
         model_response_from_payload(payload)
     }
 }
@@ -1104,6 +1346,10 @@ impl ChatModel<()> for TenantProvider {
 impl HarnessModel for TenantProvider {
     fn telemetry_provider_id(&self) -> String {
         (*self.slug.read().unwrap()).to_string()
+    }
+
+    fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
+        *self.model.read().unwrap()
     }
 }
 
@@ -1706,6 +1952,56 @@ mod tests {
         );
     }
 
+    /// The profile must advertise a context window because it activates
+    /// `ContextCompressionMiddleware` and `ImageAwareMessageTrimMiddleware`.
+    /// A missing value leaves intra-turn history unbounded and can end in the
+    /// observed silent provider failure: HTTP 200, `finish_reason: "failed"`, an
+    /// empty response, and zero usage.
+    #[test]
+    fn both_providers_advertise_the_same_context_window() {
+        let expected = super::context_window();
+        // `OPENCOMPANY_CONTEXT_WINDOW=off|0` is the documented escape hatch that
+        // restores unbounded history, so `None` is legitimate only there; every
+        // other environment must still advertise a window.
+        let explicitly_disabled = std::env::var("OPENCOMPANY_CONTEXT_WINDOW")
+            .map(|raw| {
+                let raw = raw.trim();
+                raw.eq_ignore_ascii_case("off") || raw == "0"
+            })
+            .unwrap_or(false);
+        if explicitly_disabled {
+            assert_eq!(
+                expected, None,
+                "OPENCOMPANY_CONTEXT_WINDOW=off|0 must disable the window"
+            );
+        } else {
+            assert!(
+                expected.is_some(),
+                "the default profile must advertise a context window"
+            );
+        }
+        let hosted = HostedProvider::new(HostedProviderConfig {
+            base_url: "https://example.test/v1".to_string(),
+            credential: Credential::None,
+            extra_headers: Vec::new(),
+        });
+        assert_eq!(
+            hosted
+                .profile()
+                .expect("hosted profile is advertised")
+                .max_input_tokens,
+            expected
+        );
+        // TenantProvider returns the same `MANAGED_PROFILE`, so tenant-provided
+        // credentials receive the same history protection as the hosted route.
+        assert_eq!(*MANAGED_PROFILE_WINDOW, expected);
+    }
+
+    /// Read the static profile directly to verify that both `profile()`
+    /// implementations draw from the same source.
+    static MANAGED_PROFILE_WINDOW: std::sync::LazyLock<Option<u64>> =
+        std::sync::LazyLock::new(|| super::MANAGED_PROFILE.max_input_tokens);
+
     /// A stub that records the `Authorization` header of every request it
     /// answers, so a test can prove which bearer actually went out.
     async fn spawn_auth_recorder() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -2249,6 +2545,91 @@ mod tests {
         );
     }
 
+    /// Issue #1749: the model half of the same live-attribution contract, and
+    /// the BYOK containment it exists for.
+    ///
+    /// A tenant `[inference].models` entry is **operator free text** — this one
+    /// is named after a customer, which is exactly the shape of the leak. The
+    /// provider must report a vocabulary member for it, and the raw name must
+    /// not appear anywhere in what the meter would persist.
+    #[tokio::test]
+    async fn a_tenant_model_is_reported_as_a_slug_and_never_as_the_operators_name() {
+        let url = spawn_stub("ok").await;
+        let company = CompanyId::new("acme");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url.clone());
+        let provider = TenantProvider::new(company.clone(), secrets.clone(), manifest, None);
+
+        assert_eq!(
+            provider.telemetry_model(),
+            None,
+            "no turn has run, so there is no model to name"
+        );
+
+        let save = |model: &str| {
+            let mut models = BTreeMap::new();
+            models.insert("chat-v1".to_string(), model.to_string());
+            let secrets = Arc::clone(&secrets);
+            let company = company.clone();
+            let url = url.clone();
+            async move {
+                inference::save_runtime_config(
+                    &company,
+                    secrets.as_ref(),
+                    &inference::RuntimeInference {
+                        provider: "openai_compatible".into(),
+                        base_url: Some(url),
+                        models,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        };
+
+        // A self-hosted model named after the customer it was built for.
+        save("northwind-legal-review-v2").await;
+        provider
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect("turn");
+        assert_eq!(
+            provider.telemetry_model(),
+            Some(crate::metering::ModelSlug::OTHER),
+            "a model this build cannot name reports the fallback"
+        );
+        let sample = crate::metering::inference_sample(
+            &crate::ports::types::TokenUsage {
+                input: 10,
+                output: 5,
+                cached_input: 0,
+                cost_usd: 0.01,
+            },
+            "ceo",
+            &provider.telemetry_provider_id(),
+            provider.telemetry_model(),
+        )
+        .expect("a real turn meters");
+        let persisted = serde_json::to_string(&sample).expect("serialize");
+        assert!(
+            !persisted.to_ascii_lowercase().contains("northwind"),
+            "the operator's model name reached what the meter persists: {persisted}"
+        );
+
+        // …and a model the vocabulary does know, through the same path.
+        save("anthropic/claude-sonnet-4-6").await;
+        provider
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect("turn");
+        assert_eq!(
+            provider.telemetry_model().map(|m| m.as_str()),
+            Some("anthropic-sonnet"),
+            "a table switch re-attributes the next turn, exactly as the provider slug does"
+        );
+    }
+
     #[tokio::test]
     async fn tenant_provider_errors_when_nothing_is_configured() {
         let company = CompanyId::new("acme");
@@ -2309,6 +2690,176 @@ mod tests {
             seen.lock().unwrap().as_deref(),
             Some(crate::product::PRODUCT_IDENTITY),
             "every hosted chat-completions request must attach the product identity header"
+        );
+    }
+
+    /// A stub that rejects every chat-completion with `status`, the way an
+    /// early-rotated bearer is rejected in production.
+    async fn spawn_rejecting_stub(status: axum::http::StatusCode) -> String {
+        use axum::Router;
+        use axum::routing::post;
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || async move { (status, "rejected") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Issue #1749, the concurrency half: a turn that **failed** must not
+    /// publish its model into the shared cache.
+    ///
+    /// One `TenantProvider` is shared by every agent on a company, and
+    /// `telemetry_model()` is read after a turn finishes — by whichever turn
+    /// finishes, not necessarily the one that wrote last. So publishing before
+    /// the request is issued lets a rejected turn (or one still in flight) name
+    /// the model for a *different* agent's successful turn, attributing real
+    /// tokens to a model that produced none. That is strictly worse than the
+    /// documented approximation, which is bounded to two models that both ran.
+    ///
+    /// A failed turn meters nothing of its own, so the honest state after one
+    /// is the last **successful** turn's model, unchanged.
+    #[tokio::test]
+    async fn a_rejected_tenant_turn_leaves_the_last_successful_model_in_place() {
+        let ok = spawn_stub("ok").await;
+        let rejecting = spawn_rejecting_stub(axum::http::StatusCode::UNAUTHORIZED).await;
+
+        let company = CompanyId::new("acme");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(ok.clone());
+        let provider = TenantProvider::new(company.clone(), secrets.clone(), manifest, None);
+
+        let point_at = |base_url: String, model: &str| {
+            let mut models = BTreeMap::new();
+            models.insert("chat-v1".to_string(), model.to_string());
+            let secrets = Arc::clone(&secrets);
+            let company = company.clone();
+            async move {
+                inference::save_runtime_config(
+                    &company,
+                    secrets.as_ref(),
+                    &inference::RuntimeInference {
+                        provider: "openai_compatible".into(),
+                        base_url: Some(base_url),
+                        models,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        };
+
+        // A turn that runs, on a model the vocabulary names.
+        point_at(ok.clone(), "anthropic/claude-sonnet-4-6").await;
+        provider
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect("the successful turn");
+        assert_eq!(
+            provider.telemetry_model().map(|m| m.as_str()),
+            Some("anthropic-sonnet"),
+            "a completed turn names its model"
+        );
+
+        // …then a turn on a *differently* named model that the endpoint
+        // rejects outright.
+        point_at(rejecting.clone(), "openai/gpt-5.2").await;
+        let err = provider
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect_err("the endpoint rejects this turn");
+        assert!(err.to_string().contains("401"), "{err}");
+
+        assert_eq!(
+            provider.telemetry_model().map(|m| m.as_str()),
+            Some("anthropic-sonnet"),
+            "a rejected turn produced no usage, so it must not overwrite the \
+             model of the turn that did run — a concurrent agent's cost hook \
+             reads this value"
+        );
+    }
+
+    /// The same contract on [`HostedProvider`], whose cache is behind an `Arc`
+    /// precisely so every clone of the handle shares it — which is what makes a
+    /// premature write observable by another agent's turn.
+    #[tokio::test]
+    async fn a_rejected_hosted_turn_leaves_the_last_successful_model_in_place() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Answers the first turn and rejects every one after it, so a single
+        // endpoint gives us one success followed by one 401.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Json(serde_json::json!({
+                            "choices": [{ "message": { "role": "assistant", "content": "ok" } }]
+                        }))
+                        .into_response()
+                    } else {
+                        (StatusCode::UNAUTHORIZED, "rotated").into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let provider = HostedProvider::new(HostedProviderConfig {
+            base_url: format!("http://{addr}"),
+            credential: Credential::None,
+            extra_headers: Vec::new(),
+        });
+
+        let asking_for = |model: &str| ModelRequest {
+            model: Some(model.to_string()),
+            ..user_request("hi")
+        };
+
+        provider
+            .invoke(&(), asking_for("anthropic/claude-sonnet-4-6"))
+            .await
+            .expect("the successful turn");
+        assert_eq!(
+            provider.telemetry_model().map(|m| m.as_str()),
+            Some("anthropic-sonnet"),
+            "a completed turn names its model"
+        );
+
+        let err = provider
+            .invoke(&(), asking_for("openai/gpt-5.2"))
+            .await
+            .expect_err("the endpoint rejects this turn");
+        assert!(err.to_string().contains("401"), "{err}");
+
+        assert_eq!(
+            provider.telemetry_model().map(|m| m.as_str()),
+            Some("anthropic-sonnet"),
+            "a rejected turn produced no usage, so it must not overwrite the \
+             model of the turn that did run — every clone of this handle shares \
+             the cache it would have overwritten"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "both turns reached the stub"
         );
     }
 }

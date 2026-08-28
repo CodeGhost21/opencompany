@@ -172,10 +172,13 @@ fn record() -> CompanyRecord {
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     }
 }
 
@@ -1244,6 +1247,7 @@ async fn planning_spend_lands_on_the_company_and_never_on_the_assignee() {
             cost_usd: 0.03,
         },
         "managed",
+        None,
         runtime.id(),
         runtime.store().as_ref(),
         runtime.usage().as_ref(),
@@ -1626,6 +1630,8 @@ async fn add_overlay_agent(runtime: &Arc<CompanyRuntime>, id: &str, role: &str, 
             role: role.to_string(),
             description: Some(description.to_string()),
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
     runtime.store().save(&record).await.expect("save");
 }
@@ -1656,6 +1662,7 @@ async fn the_prompt_carries_runtime_teammates_and_desks_not_just_manifest_ones()
         name: "Growth".to_string(),
         description: None,
         members: vec!["social_manager".to_string()],
+        responder: crate::ports::types::ResponderMode::default(),
     });
     runtime.store().save(&record).await.unwrap();
 

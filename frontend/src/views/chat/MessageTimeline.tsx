@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { Bot, CircleDot, Hash, Lock, UserPlus } from "lucide-react";
+import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
-import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
+import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } from "@/api/types";
+import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -54,6 +55,19 @@ interface Props {
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
   /**
+   * Resolves a stored attachment's bytes to an object URL for the transcript
+   * (issue #1682). Threaded from the shell, which holds the authenticated
+   * client the blob route needs. Absent where nothing renders attachments.
+   */
+  resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
+  /**
+   * Places a first brief into the composer on an empty channel.
+   * Optional so the thread panel — which renders no intro — need not pass it.
+   */
+  onStartBrief?: () => void;
+  /**
    * Opens the members pane, for the "Add people" card on an empty channel.
    * Optional so the thread panel — which renders no intro — need not pass it.
    */
@@ -62,11 +76,21 @@ interface Props {
   now?: number;
   /** Agent id → display name, for a card's "Asked by" line. */
   askerNames?: Map<string, string>;
+  /** Host thread id → console channel id, for a card's origin link. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
   /** The verdict each inline card is currently waiting on. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
   failedApprovals?: Record<string, string>;
   onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  /**
+   * Whether this company's teammates can think (issue #1735). On either echo
+   * state every company-side row below is a canned line rather than a
+   * teammate's answer (issue #1734). Passed straight through to `MessageRow`,
+   * which explains why this is a company-level fact and not a per-message one,
+   * and why it carries the cause rather than a boolean.
+   */
+  cognition?: CognitionState | null;
 }
 
 /**
@@ -109,12 +133,17 @@ export function MessageTimeline({
   onReact,
   onDismissCard,
   dismissingCardId,
+  resolveAttachmentUrl,
+  taskStatusByTaskId,
+  onStartBrief,
   onAddPeople,
   now,
   askerNames,
+  chatChannelByThread,
   decidingApprovals,
   failedApprovals,
   onDecideApproval,
+  cognition,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
@@ -264,6 +293,7 @@ export function MessageTimeline({
           channel={channel}
           empty={empty}
           loading={loading}
+          onStartBrief={onStartBrief}
           onAddPeople={onAddPeople}
         />
         {loading && <HistorySkeleton />}
@@ -278,6 +308,10 @@ export function MessageTimeline({
                 onReact={onReact}
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
+                resolveAttachmentUrl={resolveAttachmentUrl}
+                taskStatusByTaskId={taskStatusByTaskId}
+                now={now ?? Date.now()}
+                cognition={cognition}
               />
             </div>
           ) : (
@@ -286,6 +320,13 @@ export function MessageTimeline({
               approvals={item.approvals}
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
+              chatChannelByThread={chatChannelByThread}
+              compact
+              thread={
+                item.approvals[0]?.thread
+                  ? { channelId: channel.id, label: channelTitle(channel) }
+                  : null
+              }
               /* Narrowed to this card's own items (#842): a decision in flight
                  on another turn's batch is not this card's business, which is
                  the same rule #373 established one level down. */
@@ -363,11 +404,13 @@ function ChannelIntro({
   channel,
   empty,
   loading,
+  onStartBrief,
   onAddPeople,
 }: {
   channel: Channel;
   empty: boolean;
   loading: boolean;
+  onStartBrief?: () => void;
   onAddPeople?: () => void;
 }) {
   return (
@@ -387,7 +430,7 @@ function ChannelIntro({
           offering "add a teammate here" over a channel that turns out to be full
           of conversation reads as data loss. */}
       {empty && !loading && channel.kind === "channel" && (
-        <ActionCards onAddPeople={onAddPeople} />
+        <ActionCards onStartBrief={onStartBrief} onAddPeople={onAddPeople} />
       )}
     </div>
   );
@@ -468,14 +511,20 @@ function MarkTile({ icon: Icon, className }: { icon: typeof Hash; className?: st
  * exactly this, an icon circle — rather than on `muted`, which is the ground
  * for recessed *fills*.
  */
-function ActionCards({ onAddPeople }: { onAddPeople?: () => void }) {
+function ActionCards({
+  onStartBrief,
+  onAddPeople,
+}: {
+  onStartBrief?: () => void;
+  onAddPeople?: () => void;
+}) {
   return (
     <div className="mt-5 flex flex-wrap gap-4">
       <ActionCard
-        icon={Bot}
-        title="Create teammate"
-        hint="Add a teammate here."
-        href="#/company"
+        icon={Send}
+        title="Give the team a brief"
+        hint="Start with a first request."
+        onClick={onStartBrief}
       />
       <ActionCard
         icon={UserPlus}

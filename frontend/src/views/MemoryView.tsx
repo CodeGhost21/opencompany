@@ -1,7 +1,6 @@
-// Parked by issue #302, re-listed in `app-shell.tsx`'s `NAV` with the
-// memory-engine work: an operator choosing between engines needs somewhere to
-// see which one is bound, what it negotiated, and whether the boot probe
-// reached it — that is the engine panel below the header.
+// Brain lives under Settings (issue #1416): the memory browser and its engine
+// controls belong together, while the sidebar keeps its scarce permanent rows
+// for surfaces an operator works from every day.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -113,6 +112,12 @@ function formatUpdated(ms: number): string {
 export function MemoryView({ client, company }: Props) {
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
+  // The truncation metadata that rode in with the last list read, kept beside
+  // `entries` because the banner's "newest N of M" must describe the SAME read
+  // as the rows it counts — a write between two requests would let N and M
+  // silently disagree.
+  const [totalContext, setTotalContext] = useState(0);
+  const [contextTruncated, setContextTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -127,12 +132,14 @@ export function MemoryView({ client, company }: Props) {
       const mine = ++gen.current;
       if (!opts?.silent) setLoading(true);
       try {
-        const [rows, s] = await Promise.all([
+        const [list, s] = await Promise.all([
           listMemory(client, company),
           memoryStats(client, company),
         ]);
         if (mine !== gen.current) return;
-        setEntries(rows);
+        setEntries(list.items);
+        setTotalContext(list.totalContext);
+        setContextTruncated(list.contextTruncated);
         setStats(s);
         setError(null);
       } catch (e) {
@@ -147,6 +154,8 @@ export function MemoryView({ client, company }: Props) {
 
   useEffect(() => {
     setEntries([]);
+    setTotalContext(0);
+    setContextTruncated(false);
     setStats(null);
     void load();
     return () => {
@@ -181,6 +190,11 @@ export function MemoryView({ client, company }: Props) {
     return counts;
   }, [entries]);
 
+  const listedContextItems = useMemo(
+    () => entries.filter((entry) => entry.origin !== "fact").length,
+    [entries],
+  );
+
   // The one engine state the *writing* half of this page has to respect: the
   // null engine takes every write and throws it away, so a live "New memory"
   // button beside that warning invites work the host will silently drop
@@ -190,8 +204,15 @@ export function MemoryView({ client, company }: Props) {
 
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
-    await load({ silent: true });
+    // Close the moment the write is confirmed, then reload in the background.
+    // The dialog's catch owns the "could not save the memory" toast, so only
+    // createMemory — an actual save failure — may reach it. Awaiting the reload
+    // here instead would route a reload failure into that same catch (a false
+    // save error) and skip this close, stranding the dialog open so the operator
+    // retries and writes a duplicate. `void load` is fire-and-forget: load
+    // handles its own errors via the page banner and never leaks a rejection.
     setAddOpen(false);
+    void load({ silent: true });
   }
 
   async function remove(entry: MemoryEntry) {
@@ -220,7 +241,7 @@ export function MemoryView({ client, company }: Props) {
       <div className="mx-auto w-full max-w-5xl space-y-5 px-4 py-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Brain</h2>
+            <h1 className="text-2xl font-semibold tracking-tight">Brain</h1>
             <p className="text-sm text-muted-foreground">
               What your company remembers — facts, people, projects, and preferences your
               teammates can recall.
@@ -303,7 +324,14 @@ export function MemoryView({ client, company }: Props) {
           </Alert>
         )}
 
-        <HealthStrip loading={loading} stats={stats} total={entries.length} perType={perType} />
+        <HealthStrip loading={loading} stats={stats} perType={perType} />
+        {contextTruncated && (
+          <Alert>
+            <AlertDescription>
+              Showing the newest {listedContextItems} of {totalContext} context memory items.
+            </AlertDescription>
+          </Alert>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 sm:max-w-xs">
@@ -311,12 +339,13 @@ export function MemoryView({ client, company }: Props) {
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search memory"
               placeholder="Search memory…"
               className="pl-8"
             />
           </div>
           <Select value={kind} onValueChange={(v) => v && setKind(v)} items={TYPE_FILTER_LABELS}>
-            <SelectTrigger className="w-40">
+            <SelectTrigger className="w-40" aria-label="Filter by memory type">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -354,23 +383,20 @@ export function MemoryView({ client, company }: Props) {
 function HealthStrip({
   loading,
   stats,
-  total,
   perType,
 }: {
   loading: boolean;
   stats: MemoryStats | null;
-  total: number;
   perType: Record<string, number>;
 }) {
   if (loading && !stats) {
     return <Skeleton className="h-16 rounded-xl" />;
   }
   const tiles: { label: string; value: string }[] = [
-    { label: "Total items", value: String(total) },
-    // `agentChunks` minus the outcomes carved out of it — the two tiles are
-    // peers on screen, so they must be disjoint in fact. See
-    // `teammateMemoryCount` (issue #1402).
-    { label: "Teammate memory", value: String(teammateMemoryCount(stats)) },
+    { label: "Total items", value: String(stats?.totalItems ?? 0) },
+    { label: "Operator facts", value: String(stats?.facts ?? 0) },
+    { label: "Teammate memory", value: String(stats?.teammateMemory ?? 0) },
+    { label: "Document chunks", value: String(stats?.documentMemory ?? 0) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
     // Across every memory source, not just operator facts — teammates write only
     // context chunks, so a facts-only figure left this stat at "—" forever.
@@ -552,28 +578,4 @@ function AddMemoryDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-/**
- * How many context chunks are teammate memory rather than task outcomes.
- *
- * `/memory/stats` reports a superset and one of its own slices, not two
- * populations: `agentChunks` counts *every* chunk, and `taskOutcomes` is
- * carved out of it by label prefix — the backend says so where it computes
- * them ("the task-outcome prefix narrows to stored outcomes (a subset of the
- * total)", `src/server/ops/memory.rs`). Rendering both raw put a count and its
- * own subset side by side as peers, so a company whose every chunk was an
- * outcome read `Teammate memory 13 / Task outcomes 13` next to `Total items 13`
- * — thirteen teammate memories that do not exist, and a strip that adds up to
- * twice the company's memory (issue #1402).
- *
- * The cards below have always partitioned these correctly: `context_entries`
- * sorts each chunk into one of two **disjoint** buckets. This is that same
- * split, so the strip counts the way the list does.
- *
- * Clamped because the two figures are two reads of a live store and can cross
- * under a concurrent write; a negative tile is a worse lie than a stale one.
- */
-export function teammateMemoryCount(stats: MemoryStats | null): number {
-  return Math.max(0, (stats?.agentChunks ?? 0) - (stats?.taskOutcomes ?? 0));
 }

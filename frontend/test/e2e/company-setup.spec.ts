@@ -175,6 +175,13 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   const dialog = page.getByTestId("setup-dialog");
   await expect(dialog).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId("setup-question")).toContainText("What kind of company");
+  // This host has no model. Say what that changes before collecting answers,
+  // rather than after presenting a plausible but standard roster.
+  const modelNotice = page.getByTestId("setup-inference-notice");
+  await expect(modelNotice).toContainText("can't design your team with a model");
+  // A harness-less binary can never put a model on the design path, so the
+  // "Set up a model" CTA is a dead end here and is rightly omitted.
+  await expect(modelNotice.getByRole("link", { name: "Set up a model" })).toHaveCount(0);
 
   // The tour must be holding: a walkthrough of an unstaffed company is the
   // first impression this feature exists to replace.
@@ -194,14 +201,23 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   await expect(created.first()).toBeVisible({ timeout: 30_000 });
 
   // 4. It finishes, and says so as a starting point rather than a fait accompli.
-  await expect(page.getByTestId("setup-buildout-title")).toContainText("ready", {
+  await expect(page.getByTestId("setup-buildout-title")).toContainText("standard team", {
     timeout: 60_000,
   });
+  // Same no-CTA rule on completion: this binary cannot run the design pass, so
+  // "Add a model in Settings" would send the operator round a loop that cannot
+  // end — there is no model setting that helps.
+  await expect(page.getByTestId("setup-add-model")).toHaveCount(0);
   const names = await created.allInnerTexts();
   expect(names.length, `build-out listed ${names.length} agents`).toBeGreaterThanOrEqual(4);
 
   await page.getByTestId("setup-finish").click();
   await expect(dialog).toBeHidden();
+  await expect(page).toHaveURL(/#\/company$/);
+
+  // Setup's payoff is the roster, and its own build-out is the introduction;
+  // the first-run welcome must not immediately cover either one.
+  await expect(page.getByRole("button", { name: "Take the tour" })).toBeHidden();
 
   // 5. The host really holds them — not the console's fabricated starter team,
   //    and not the global baseline every company already had.
@@ -211,8 +227,7 @@ test("first-run setup builds a real team from three answers", async ({ page, req
     "the teammates setup created, over and above the baseline every company gets",
   ).toBeGreaterThanOrEqual(4);
 
-  // 6. And the Team page shows that roster, refreshed without a reload.
-  await page.goto("/#/company");
+  // 6. The arrival page shows that roster, refreshed without a reload.
   for (const member of designed.slice(0, 3)) {
     await expect(page.getByText(member.role, { exact: false }).first()).toBeVisible();
   }

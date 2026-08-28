@@ -36,13 +36,13 @@ use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
 use crate::ports::types::MessageIntent;
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
-    CycleRequest, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry, OutboundMessage,
-    PolicyDecision, TokenUsage, ToolCall, ToolResult, Verdict,
+    CycleRequest, CycleResult, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry,
+    OutboundMessage, PolicyDecision, TokenUsage, ToolCall, ToolResult, Verdict,
 };
 use crate::ports::{generate_id, now_millis};
 use crate::runtime::channel::OPERATOR_CHANNEL;
 use crate::runtime::delegation_tools::{
-    DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, desk_lead,
+    DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, chat_responder, desk_lead,
     unknown_desk_message,
 };
 use crate::runtime::grants::{GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant};
@@ -59,17 +59,6 @@ use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 /// recognise on approval: a duplicated `"email.send"` literal over there would
 /// park cards that silently do nothing when approved.
 pub(crate) const EMAIL_SEND_KIND: &str = "email.send";
-
-/// The effect kind a `repo_publish` approval performs (issue #735) — the
-/// host-side push to the real remote.
-///
-/// `pub(crate)` and defined here, in the always-compiled runtime, rather than in
-/// the `openhuman`-gated `harness::repo` that builds it: `perform_effect` below
-/// matches on it in the default build, where `crate::harness` does not exist. The
-/// tool references it through `crate::runtime::cycle::REPO_PUBLISH_EFFECT`, the
-/// same shape `workflows::delivery` uses for [`EMAIL_SEND_KIND`], so the producer
-/// and this consumer key off one literal.
-pub(crate) const REPO_PUBLISH_EFFECT: &str = "repo.publish";
 
 /// The `error` the terminality backstop stamps on an attempt row whose cycle
 /// ended without settling it (issue #242) — a brain that ignored the dispatch,
@@ -241,6 +230,148 @@ pub struct CycleRunner<'a> {
     rt: &'a CompanyRuntime,
 }
 
+/// The single agent this cycle is addressed to, if there is exactly one.
+///
+/// `None` means "touches the whole company" and yields the company-wide
+/// [`serial`](crate::company::runtime::CompanyRuntime::serial) lock. That is the
+/// safe side: better to serialize a cycle that could have run beside another
+/// than to let two turns that write each other's state overlap.
+///
+/// A batch naming two different agents is deliberately whole-company — that one
+/// cycle runs both turns, so it must serialize against each of them.
+fn single_agent(events: &[(Option<EventSeq>, CompanyEvent)]) -> Option<String> {
+    let mut found: Option<&str> = None;
+    for (_, event) in events {
+        let chat = match event {
+            CompanyEvent::OperatorMessage { chat, .. } => chat.as_deref(),
+            // Any other event kind may touch the whole company and so takes the
+            // wide lock. If a second per-agent event kind is ever added, it
+            // belongs here explicitly.
+            _ => return None,
+        };
+        // A message with no `chat` is routed to the orchestrator, which may
+        // drive the whole company.
+        let name = chat?;
+        match found {
+            None => found = Some(name),
+            Some(prev) if prev == name => {}
+            Some(_) => return None,
+        }
+    }
+    found.map(str::to_owned)
+}
+
+/// The answer to a bare pleasantry, when this batch is one (issue #1725) — and
+/// `None` whenever anything about it says a real turn is owed.
+///
+/// # Why the runtime answers this itself
+///
+/// On staging, "hi" ran the full agentic pipeline: memory retrieval, a tool
+/// step, and a long analysis belonging to a task nobody had asked about in that
+/// turn. Two things produced that, and only one of them is in this repository.
+/// The vendored turn re-injects an uncompleted per-thread goal on **every**
+/// turn (`threads::goals::runtime::load_for_current_thread`, which also
+/// *resumes* a paused one), and the pooled agent's transcript is keyed by agent
+/// id alone, so a prior task's fetched page is still in the context window. A
+/// greeting therefore did not merely cost a model call — it inherited somebody
+/// else's objective and continued it.
+///
+/// Both of those are properties of a turn that runs. The one fix available on
+/// this side of the seam, and the one that holds regardless of what the vendored
+/// runtime does with its goals, is not to run the turn: no model call, no tool,
+/// no memory read, no goal to inherit, and nothing written back for a later turn
+/// to retrieve.
+///
+/// # The conditions are narrow on purpose
+///
+/// A fast path that fires on a message that *was* work is a far worse bug than
+/// the one it fixes — the operator's request is answered with a canned
+/// pleasantry and silently dropped. So every arm here is a reason NOT to
+/// short-circuit:
+///
+/// * **One event, and an operator message.** A batch is a scheduler tick, a
+///   dispatch, or several messages at once; none of those are small talk.
+/// * **Nothing attached.** A file with "hi" over it is a request to look at the
+///   file.
+/// * **No explicit work choice.** The composer's "Build me the workflow" /
+///   "one-off" is a positive statement by the person who wrote the message
+///   (issue #845's reasoning, in the other direction), and it outranks anything
+///   read out of the words. Only an absent choice and "Just chatting" reach
+///   here.
+/// * **Not a workflow copilot thread**, whose turns are confined and answered
+///   by an ephemeral agent this has no way to speak as (issue #416).
+/// * **A pleasantry, by [`small_talk`](crate::company::task_intent::small_talk)** —
+///   which is narrower than the triage's greeting list, and excludes every
+///   acknowledgement, because "yes" answering *"shall I ship it?"* is an
+///   instruction.
+/// * **Somebody to say it.** A company whose roster resolves to nobody has no
+///   voice to answer in, and an unattributed bubble is journaled under the
+///   operator (issue #885).
+fn small_talk_result(record: &CompanyRecord, events: &[CompanyEvent]) -> Option<CycleResult> {
+    let [
+        CompanyEvent::OperatorMessage {
+            text,
+            chat,
+            deliverable,
+            attachments,
+            ..
+        },
+    ] = events
+    else {
+        return None;
+    };
+    if !attachments.is_empty() {
+        return None;
+    }
+    if !matches!(deliverable, None | Some(MessageIntent::Chat)) {
+        return None;
+    }
+    if crate::company::copilot::is_copilot_thread(chat.as_deref()) {
+        return None;
+    }
+    let talk = crate::company::task_intent::small_talk(text)?;
+
+    // Who speaks. The same resolution the harness brain's `responder_for` runs,
+    // so the greeting comes back in the voice the turn it replaced would have
+    // used.
+    //
+    // A company with nobody to speak as declines the fast path rather than
+    // answering anonymously: `agent: None` is read by `journal_chat_replies` as
+    // the destination channel, so an unattributed bubble on the operator
+    // channel is filed as though the operator had written it — permanently, and
+    // in the transcript rather than only on screen (issue #885). Better to run
+    // the turn a roster-less company was always going to run.
+    let responder = chat
+        .as_deref()
+        .and_then(|chat| chat_responder(record, chat))
+        .or_else(|| {
+            crate::company::orchestrator_id(&record.effective_agents()).map(str::to_string)
+        })?;
+
+    Some(CycleResult {
+        channel_responses: vec![OutboundMessage {
+            message_id: None,
+            task_id: None,
+            channel: OPERATOR_CHANNEL.to_string(),
+            agent: Some(responder),
+            text: talk.reply().to_string(),
+            // No tool ran, so the timeline is empty rather than the "1 step"
+            // the console showed for a greeting.
+            steps: Vec::new(),
+            reply_to: None,
+            mentions: Vec::new(),
+        }],
+        // Nothing is written back to memory. A pleasantry is not something a
+        // later turn should retrieve, and the whole point of skipping the turn
+        // is that this exchange leaves no context behind it.
+        new_traces: Vec::new(),
+        ledger_deltas: Vec::new(),
+        // No model was called. A zero here is the truth, and `record_cycle_usage`
+        // meters it as such.
+        token_usage: TokenUsage::default(),
+    })
+}
+
 impl<'a> CycleRunner<'a> {
     /// Binds a runner to a runtime.
     pub fn new(rt: &'a CompanyRuntime) -> Self {
@@ -348,7 +479,36 @@ impl<'a> CycleRunner<'a> {
             );
         }
 
-        let guard = self.rt.serial.lock().await;
+        // Which agent is this cycle addressed to?
+        //
+        // If it is exactly one, take only that agent's slot so two operators
+        // talking to two different agents run side by side. If the cycle touches
+        // the whole company (a scheduler tick, an unaddressed message routed to
+        // the orchestrator, or a batch naming more than one agent), take
+        // `serial` and serialize against everything — including every in-flight
+        // agent turn.
+        //
+        // The per-agent slot is looked up (or created) under a short-lived lock
+        // on the map, which is released immediately: holding the map for the
+        // whole turn would reintroduce exactly the serialization this lifts. The
+        // guard chosen below outlives the bracket close, so neither lock can be
+        // released before the critical section it describes ends.
+        // Both branches yield the same guard type — an owned guard over an
+        // `Arc<tokio::sync::Mutex<()>>` — so the choice of which lock to hold does not
+        // leak into the rest of this function.
+        let guard = match single_agent(&events) {
+            Some(agent) => {
+                let slot = {
+                    let mut slots = self.rt.per_agent.lock().await;
+                    slots
+                        .entry(agent)
+                        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                        .clone()
+                };
+                slot.lock_owned().await
+            }
+            None => self.rt.serial.clone().lock_owned().await,
+        };
         let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
@@ -462,22 +622,56 @@ impl<'a> CycleRunner<'a> {
         // still written below — only the read was dead.
         let record = self.rt.store.load(&company).await?;
 
-        // Issue #176 (handed-task awareness): when an operator message is
-        // addressed to a desk/agent that already has open work handed to it,
-        // fold a briefing of that work into the message the brain sees — so a
-        // direct "what are you working on?" surfaces the handed task truthfully.
-        // Brain-agnostic (both brains read `req.events`); mutates only the
-        // in-memory copy handed to the brain, never the durable log persisted
-        // above.
-        if let Some(record) = &record {
-            self.inject_handed_task_awareness(record, &mut events).await;
+        // Issue #1455: a console policy PUT/DELETE persisted the override but
+        // must not reach the live native gate mid-turn — an in-flight turn
+        // finishes under the snapshot it started with. The start of a cycle,
+        // holding the serial lock with the freshly-loaded record in hand, is
+        // that safe boundary: re-apply the effective policy (mode, always-ask
+        // list, spend cap) so this turn's native effects evaluate against what
+        // the console reports, even on a company that has not been rebuilt. The
+        // deadline half is immediate already (the ops handler writes the TTL
+        // right after save); re-applying it here costs nothing and keeps a
+        // boot/rebuild-created runtime consistent. A test-injected gate carries
+        // its own policy on purpose and is exempt.
+        if !self.rt.gate_injected
+            && let Some(record) = &record
+        {
+            self.rt
+                .approval_gate
+                .apply_effective_policy(record.effective_policy());
         }
-        // Issue #845: and when the operator asked for a workflow rather than a
-        // one-off, tell the turn that the builder pass owns authoring it — so it
-        // answers the substance instead of denying a capability that is being
-        // exercised on this very message. Same terms as the injection above:
-        // brain-agnostic, in-memory only, never journaled.
-        Self::inject_workflow_builder_awareness(&mut events);
+
+        // Issue #1725: is this batch a bare pleasantry? Decided HERE — before
+        // the injections below and before any brain — because both of those
+        // are how "hi" turned into a full agentic turn on staging.
+        //
+        // Ordering, not tidiness: `inject_handed_task_awareness` appends a
+        // briefing of the desk's open work to the message text, so a "hi" sent
+        // to a desk that is mid-task stops looking like "hi" one statement
+        // later. Reading the events first is what makes the fast path fire on
+        // exactly the messages it is for.
+        let small_talk = record
+            .as_ref()
+            .and_then(|record| small_talk_result(record, &events));
+
+        if small_talk.is_none() {
+            // Issue #176 (handed-task awareness): when an operator message is
+            // addressed to a desk/agent that already has open work handed to it,
+            // fold a briefing of that work into the message the brain sees — so a
+            // direct "what are you working on?" surfaces the handed task truthfully.
+            // Brain-agnostic (both brains read `req.events`); mutates only the
+            // in-memory copy handed to the brain, never the durable log persisted
+            // above.
+            if let Some(record) = &record {
+                self.inject_handed_task_awareness(record, &mut events).await;
+            }
+            // Issue #845: and when the operator asked for a workflow rather than a
+            // one-off, tell the turn that the builder pass owns authoring it — so it
+            // answers the substance instead of denying a capability that is being
+            // exercised on this very message. Same terms as the injection above:
+            // brain-agnostic, in-memory only, never journaled.
+            Self::inject_workflow_builder_awareness(&mut events);
+        }
 
         // Issue #390: `cycle_id` is now minted by `run` before the serial lock,
         // so the journal's bracket can cover the wait on that lock. Nothing
@@ -493,6 +687,21 @@ impl<'a> CycleRunner<'a> {
             company_id: company.clone(),
             events,
             event_seqs,
+            // The same snapshot the native gate was re-applied from above: the
+            // harness rebuilds its roster against it, so a console override
+            // that lands mid-turn (between this load and the harness's own
+            // refresh) reaches neither gate until the next cycle boundary.
+            //
+            // A test-injected gate carries its own policy on purpose — the
+            // reason the re-apply above is exempted — so the roster must pin
+            // THAT policy, not the persisted record's effective one, or the
+            // harness gate and the native gate would disagree about which tier
+            // is live (issue #1455).
+            policy: if self.rt.gate_injected {
+                Some(self.rt.approval_gate.policy())
+            } else {
+                record.as_ref().map(|record| record.effective_policy())
+            },
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.
@@ -517,7 +726,21 @@ impl<'a> CycleRunner<'a> {
                 self.rt.journal.approval_conversation(id)
             }),
         );
-        let result = self.rt.brain.run_cycle(request, &host).await;
+        // Issue #1725: a bare pleasantry answers from here and the brain is
+        // never called. Everything below — metering, response routing, the
+        // terminality backstop — runs exactly as it does for a real turn, so
+        // the reply is journaled, delivered and settled by one code path; what
+        // is skipped is the thinking, which is the whole of the bug.
+        let result = match small_talk {
+            Some(result) => {
+                tracing::debug!(
+                    company = %company,
+                    "[small-talk] answered a bare pleasantry without a turn"
+                );
+                Ok(result)
+            }
+            None => self.rt.brain.run_cycle(request, &host).await,
+        };
         // Issue #242: the terminality backstop. Whatever the brain did — settled
         // the run richly (the harness path), ignored `TaskDispatched` entirely
         // (the echo brain), or errored out — no attempt row may be left claiming
@@ -751,6 +974,7 @@ impl<'a> CycleRunner<'a> {
             usage,
             crate::metering::UNATTRIBUTED_AGENT,
             cognition.provider,
+            cognition.model,
             company,
             self.rt.store.as_ref(),
             self.rt.usage().as_ref(),
@@ -911,7 +1135,7 @@ approval.]"
         // request changes nothing at all: the approval stays parked, no verdict
         // is journaled, and the operator can simply approve it "once" instead.
         if let GrantScope::Tool { .. } = scope {
-            self.check_broadly_grantable(id)?;
+            self.check_broadly_scoped(id, verdict)?;
         }
         let outcome = self
             .rt
@@ -946,9 +1170,22 @@ approval.]"
         // deny nothing does, so its held checkout becomes sweepable.
         self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
-        if let ResolveOutcome::Approved(effect) = outcome {
-            self.settle_approved_effect(id, effect, by.clone(), scope)
-                .await?;
+        match outcome {
+            ResolveOutcome::Approved(effect) => {
+                self.settle_approved_effect(id, effect, by.clone(), scope)
+                    .await?;
+            }
+            // Issue #1458: a standing denial is minted from the effect the
+            // resolve carried, not `journal.approval_effect` — the journal keeps
+            // a payload-scrubbed copy (issue #351), and `standing_scope_of` read
+            // against a scrubbed payload answers `None`, which `admits_scope`
+            // treats as a wildcard. A refusal prompted by one web origin would
+            // then block every origin for that teammate.
+            ResolveOutcome::Denied(effect) if matches!(scope, GrantScope::Tool { .. }) => {
+                self.mint_standing_deny(id, effect, by.clone(), scope)
+                    .await?;
+            }
+            _ => {}
         }
         // The follow-up event, so the brain learns the verdict. Returning it
         // (rather than appending it here) keeps the event logged exactly once:
@@ -1015,7 +1252,7 @@ approval.]"
     /// An unknown or already-resolved id falls through to the ordinary
     /// already-resolved path rather than erroring here — a double-click on the
     /// scoped button must stay the no-op it is on the plain one.
-    fn check_broadly_grantable(&self, id: &ApprovalId) -> Result<()> {
+    fn check_broadly_scoped(&self, id: &ApprovalId, verdict: Verdict) -> Result<()> {
         let Some(effect) = self.rt.approval_gate.parked_effect(id) else {
             return Ok(());
         };
@@ -1030,14 +1267,54 @@ approval.]"
                 effect.kind
             )));
         }
-        if !effect.may_be_granted_standing() {
+        if verdict == Verdict::Approve && !effect.may_be_granted_standing() {
             return Err(OpenCompanyError::InvalidRequest(format!(
                 "'{}' cannot be granted for a period — it can reach further than a standing \
                  permission can describe, so it stays a per-call decision; approve it once instead",
                 effect.kind
             )));
         }
+        // Issue #1458: a standing DENY is only enforced on the agent turn path,
+        // where openhuman treats a `Deny` verdict as fail-closed. The workflow
+        // gate deliberately does not honour `Deny` (`src/workflows/gate.rs`), so
+        // minting one for a workflow would advertise a refusal no run ever
+        // enforces — the operator clicks "don't ask again" and the next
+        // scheduled run sails through the gate. A workflow refusal stays a
+        // per-call decision until the gate learns to enforce the verdict.
+        if verdict == Verdict::Deny
+            && matches!(
+                crate::runtime::grants::subject_of(&effect),
+                Some(GrantSubject::Workflow(_))
+            )
+        {
+            // Name the real call a gate is stopping, not the `workflow.approve`
+            // wrapper — the same inner call the card showed the operator.
+            let call = crate::runtime::workflow_resume::gate_inner_call(&effect)
+                .map(|(tool, _)| tool)
+                .unwrap_or(&effect.kind);
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "'{call}' is a workflow call, and the workflow path does not enforce a \
+                 standing refusal yet; deny it once instead",
+            )));
+        }
         Ok(())
+    }
+
+    async fn mint_standing_deny(
+        &self,
+        id: &ApprovalId,
+        effect: Effect,
+        by: Actor,
+        scope: GrantScope,
+    ) -> Result<()> {
+        let GrantScope::Tool { expires_at_millis } = scope else {
+            unreachable!()
+        };
+        let Some(subject) = crate::runtime::grants::subject_of(&effect) else {
+            unreachable!()
+        };
+        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Deny)
+            .await
     }
 
     async fn settle_approved_effect(
@@ -1110,6 +1387,19 @@ approval.]"
         by: Actor,
         expires_at_millis: u64,
     ) -> Result<()> {
+        self.mint_standing_policy(id, subject, effect, by, expires_at_millis, Verdict::Approve)
+            .await
+    }
+
+    async fn mint_standing_policy(
+        &self,
+        id: &ApprovalId,
+        subject: GrantSubject,
+        effect: Effect,
+        by: Actor,
+        expires_at_millis: u64,
+        verdict: Verdict,
+    ) -> Result<()> {
         let conversation = self
             .rt
             .journal
@@ -1131,9 +1421,9 @@ approval.]"
         // Computed here rather than inline in the literal below, which would
         // borrow `tool` after the field above has moved it.
         let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
-        let (agent, workflow) = match subject {
-            GrantSubject::Agent(agent) => (agent, None),
-            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow)),
+        let (agent, workflow) = match &subject {
+            GrantSubject::Agent(agent) => (agent.clone(), None),
+            GrantSubject::Workflow(workflow) => (String::new(), Some(workflow.clone())),
         };
         let grant = StandingGrant {
             id: GrantId::generate(),
@@ -1142,7 +1432,8 @@ approval.]"
             // The tool, and nothing about the arguments. A standing grant has no
             // `args` field to copy them into — that is the type's whole point.
             tool,
-            granted_by: by,
+            verdict,
+            granted_by: by.clone(),
             approval_id: id.clone(),
             at_millis: now_millis(),
             expires_at_millis,
@@ -1161,6 +1452,50 @@ approval.]"
             // permission that never matches its own call.
             scope,
         };
+        // Issue #1458: newest standing decision wins. `ApprovalPolicy` checks
+        // a standing denial above a standing grant, so an approval minted while
+        // a denial of the same scope was still live would sit listed but never
+        // admit a call — the operator's later "yes" silently inert until the
+        // older refusal expired or was revoked. Revoke the shadowed
+        // opposite-polarity policy before arming the new one, journaled as a
+        // revocation by the same resolving actor, so replay reconstructs the
+        // same single-policy state. Scoped to what would actually shadow (either
+        // scope overlapping the other), so a denial of one host leaves a grant
+        // for another alone while a wildcard policy supersedes scoped
+        // opposite-polarity ones in both directions.
+        //
+        // The reconcile is not itself atomic: the snapshot below, the journal
+        // appends, and the insert are separate steps, and the journal appends
+        // are awaited. Two concurrent resolutions of the same scope with
+        // opposite verdicts — an approve and a deny landing within a few
+        // milliseconds from separate console surfaces — could both snapshot an
+        // empty opposite set before either inserts, leaving the deny shadowing
+        // the approve whatever the operator's true order. Holding the grant
+        // set's reconcile lock for the whole sequence makes the second mint see
+        // the first's policy and supersede it, which is the same single-policy
+        // state the sequential path already reconstructs on replay.
+        let _reconcile = self.rt.grants.standing_reconcile().await;
+        for old in self.rt.grants.opposite_polarity(
+            &subject,
+            &grant.tool,
+            grant.scope.as_deref(),
+            verdict,
+            now_millis(),
+        ) {
+            self.rt
+                .journal
+                .record_standing_revoked(&old.id, by.clone(), now_millis())
+                .await?;
+            self.rt.grants.revoke_standing(&old.id);
+            tracing::debug!(
+                grant_id = %old.id,
+                tool = %old.tool,
+                agent = %old.agent,
+                "[approval] minting a {:?} supersedes the opposite-polarity \
+                 standing policy for the same scope",
+                verdict
+            );
+        }
         self.rt.journal.record_standing_granted(&grant).await?;
         tracing::debug!(
             approval_id = %id,
@@ -1298,6 +1633,7 @@ approval.]"
                 text: "This approval was already resolved.".to_string(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
                 message_id: None,
             }],
             executed_effects: Vec::new(),
@@ -1329,6 +1665,7 @@ approval.]"
                     .to_string(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
                 message_id: None,
             }],
             executed_effects: Vec::new(),
@@ -1596,6 +1933,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                         text: text.to_string(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     })
                     .await?;
                 break;
@@ -1640,200 +1978,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
     if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND {
         crate::runtime::workflow_resume::on_gate_approved(rt, effect).await?;
     }
-    // Issue #735: an approved `repo_publish`. `execute` already staged the agent's
-    // commits onto the mirror's `oc/<company>/<task>` ref (the reversible half);
-    // this is the irreversible half — the host-side push to the real remote, done
-    // only now that the operator has approved. At-most-once comes free from the
-    // `approval:<id>` key the caller holds; a denied or expired approval never
-    // reaches here, which is exactly what leaves the remote untouched.
-    if effect.kind == REPO_PUBLISH_EFFECT {
-        let repo = effect
-            .payload
-            .get("repo")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let branch = effect
-            .payload
-            .get("branch")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        // The exact commit the approval was bound to at stage time. Pushing this
-        // SHA — not whatever the mirror's branch ref points at now — is what stops
-        // a second publish on the same task from riding in on this approval.
-        let head = effect
-            .payload
-            .get("head")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        // The card this publish belongs to, so a host-side failure can be reported
-        // on it.
-        let task = effect
-            .payload
-            .get("task")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let agent = effect
-            .payload
-            .get("agent")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let message = effect
-            .payload
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let Some(repos) = rt.repos() else {
-            return Err(crate::error::OpenCompanyError::Unimplemented(
-                "a repository publish was approved but this host has no repository manager \
-                 configured to perform it",
-            ));
-        };
-        // The push is the irreversible half, and it fails the effect — but never
-        // silently (issue #815). A failed push leaves the effect recorded as
-        // executed (the at-most-once guard), so re-approving is a no-op; the
-        // operator has to KNOW it failed and re-run the task, or the publish
-        // vanishes with the change staged in the mirror and nothing on the remote.
-        if let Err(err) = repos.push_published(repo, branch, head).await {
-            // The diagnosis — which can name the remote URL and host paths — stays
-            // in the log; the durable, company-readable note carries a classified
-            // sentence instead (issue #815, the rule #614/#688 set).
-            tracing::warn!(branch, "[repo] could not publish the branch: {err}");
-            note_publish_failure_on_card(
-                rt,
-                task,
-                format!(
-                    "Could not publish `{branch}` to the remote. Nothing reached the remote, and \
-                     this approval will not retry on its own \u{2014} re-run the task to publish \
-                     again."
-                ),
-            )
-            .await;
-            return Err(err);
-        }
-
-        // Issue #736: open a pull request for the pushed branch, best-effort. The
-        // push has landed, so a PR failure must NOT fail the effect — the branch
-        // is on the remote regardless. It is reported instead: the operator is
-        // told, on the task itself, that the branch is up but the PR did not open.
-        let title = repo_publish_pr_title(message);
-        let body = repo_publish_pr_body(agent, task, message);
-        match repos.open_pull_request(repo, branch, &title, &body).await {
-            Ok(pr) => tracing::info!(
-                number = pr.number,
-                url = %pr.html_url,
-                branch,
-                "[repo] opened a pull request for the published branch"
-            ),
-            Err(err) => {
-                // Same division as the push failure: the raw error to the log,
-                // a classified sentence to the durable note (issue #815).
-                tracing::warn!(
-                    branch,
-                    "[repo] pushed the branch but could not open a pull request: {err}"
-                );
-                note_publish_failure_on_card(
-                    rt,
-                    task,
-                    format!(
-                        "Published `{branch}` to the remote, but the pull request could not be \
-                         opened. The branch is on the remote \u{2014} open a PR from it by hand, or \
-                         approve another publish to retry."
-                    ),
-                )
-                .await;
-            }
-        }
-    }
     Ok(())
-}
-
-/// Whether `task` names a real card in `cards` (issue #815).
-///
-/// The guard that keeps a DM's `dm-*` work key — which `repo_publish` stamps as
-/// the effect's `task`, and which no card owns — from filing a publish-failure
-/// note under a phantom card. The empty id, an unknown id, and a work key all
-/// resolve to nothing.
-fn task_names_a_card(cards: &[TaskRecord], task: &str) -> bool {
-    !task.is_empty() && cards.iter().any(|card| card.id == task)
-}
-
-/// Records a host-side `repo_publish` failure where the operator will see it,
-/// but **only when the work unit is a real card** (issue #815).
-///
-/// A DM's `repo_publish` stamps its `dm-*` work key as the effect's `task`, and
-/// no card owns that id — a [`TaskDiscussionPosted`](CompanyEvent::TaskDiscussionPosted)
-/// under it would file the note against a phantom card. When the id does not
-/// resolve to a card the board post is skipped: the failure is already in the
-/// operator log (the `tracing::warn` at the call site), which is where a `git`
-/// error that can name host paths and the remote URL belongs, rather than in a
-/// durable, company-readable record (the rule #614/#688 set). `text` is a fixed,
-/// classified sentence carrying none of the raw error.
-async fn note_publish_failure_on_card(rt: &CompanyRuntime, task: &str, text: String) {
-    if task.is_empty() {
-        return;
-    }
-    // Resolve to a live card; a `dm-*` work key or an unknown id resolves to
-    // nothing, and the note stays in the log rather than misfiling. A store error
-    // is treated the same way — better a logged-only note than one on a card that
-    // may not exist.
-    let is_card = match rt.tasks().list(&rt.id).await {
-        Ok(cards) => task_names_a_card(&cards, task),
-        Err(err) => {
-            tracing::warn!("[repo] could not resolve the task for a publish-failure note: {err}");
-            false
-        }
-    };
-    if !is_card {
-        return;
-    }
-    if let Err(err) = rt
-        .events
-        .append(
-            &rt.id,
-            CompanyEvent::TaskDiscussionPosted {
-                task_id: task.to_string(),
-                text,
-                by: None,
-            },
-        )
-        .await
-    {
-        tracing::warn!("[repo] could not record the publish failure on the task: {err}");
-    }
-}
-
-/// The title of the pull request a `repo_publish` opens (issue #736): the first
-/// line of the agent's message, bounded, or a plain fallback when it said
-/// nothing.
-fn repo_publish_pr_title(message: &str) -> String {
-    let first = message.trim().lines().next().unwrap_or("").trim();
-    if first.is_empty() {
-        "Published by an OpenCompany agent".to_string()
-    } else {
-        first.chars().take(72).collect()
-    }
-}
-
-/// The body of that pull request (issue #736): the agent's message, then task
-/// and agent linkage so an operator landing on the PR can get back to the card
-/// and the seat that produced it.
-fn repo_publish_pr_body(agent: &str, task: &str, message: &str) -> String {
-    let mut body = String::new();
-    let message = message.trim();
-    if !message.is_empty() {
-        body.push_str(message);
-        body.push_str("\n\n");
-    }
-    body.push_str("---\n");
-    body.push_str("Opened host-side by an OpenCompany agent");
-    if !agent.is_empty() {
-        body.push_str(&format!(" (`{agent}`)"));
-    }
-    if !task.is_empty() {
-        body.push_str(&format!(" for task `{task}`"));
-    }
-    body.push('.');
-    body
 }
 
 /// Sends an `email.send` effect via the company's own outbound-mail handle
@@ -2121,7 +2266,13 @@ fn cycle_task_id(
             // write is made by this very cycle, so treating it as a stimulus
             // would let a run re-trigger itself on every transition it makes.
             | CompanyEvent::RunStatusChanged { .. }
-            | CompanyEvent::DeskTaskCompleted { .. } => continue,
+            | CompanyEvent::DeskTaskCompleted { .. }
+            // Issue #1843: both are records of the activation funnel moving,
+            // best-effort journaled after the fact by
+            // `crate::company::activation`. Neither names a card nor competes
+            // with one, exactly like the other audit-trail arms above.
+            | CompanyEvent::OnboardingStepCompleted { .. }
+            | CompanyEvent::OnboardingCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
         match &found {
@@ -2306,7 +2457,14 @@ fn cycle_conversation(
             // write is made by this very cycle, so treating it as a stimulus
             // would let a run re-trigger itself on every transition it makes.
             | CompanyEvent::RunStatusChanged { .. }
-            | CompanyEvent::DeskTaskCompleted { .. } => continue,
+            | CompanyEvent::DeskTaskCompleted { .. }
+            // Issue #1843: both are records of the activation funnel moving,
+            // best-effort journaled after the fact by
+            // `crate::company::activation`. Neither names a conversation nor
+            // competes with one, exactly like the other audit-trail arms
+            // above.
+            | CompanyEvent::OnboardingStepCompleted { .. }
+            | CompanyEvent::OnboardingCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
         match &mut found {
@@ -2712,6 +2870,26 @@ impl<'a> CycleHostImpl<'a> {
                 }),
             });
         };
+        // An `auto` channel is refused here even though an ordinary leadless
+        // desk is not (issue #1835, codex on #1872). The carve-out above is
+        // about a desk that has no lead *yet* — a card on the board is visible
+        // work either way. An auto channel has no lead by design and never
+        // will, so accepting one wrote a card noting "no lead member on the
+        // roster yet": false about a staffed channel, and permanently so. The
+        // reason comes from `reject_auto_channel_target`, the same definition
+        // the harness tool refuses through, so the two paths cannot drift.
+        if let Some(reason) = record
+            .as_ref()
+            .and_then(|r| crate::runtime::delegation_tools::reject_auto_channel_target(r, &desk_id))
+        {
+            return Ok(ToolResult {
+                ok: false,
+                output: serde_json::json!({
+                    "status": "no_lead",
+                    "error": reason,
+                }),
+            });
+        }
         // The desk's lead, when it has a roster-backed one, is recorded in the
         // note; the card is assigned to the DESK so an operator asking the desk
         // directly (chat targets the desk) sees the hand-off.
@@ -2865,6 +3043,57 @@ impl CycleHost for CycleHostImpl<'_> {
 mod test {
     use super::*;
 
+    /// `single_agent` picks an agent slot only when the batch is one addressed
+    /// operator message, and falls back to the whole-company lock otherwise —
+    /// the invariant the per-agent lock leans on (issue: parallel agent turns).
+    #[test]
+    fn single_agent_picks_one_addressee_and_falls_back_otherwise() {
+        fn op(chat: Option<&str>) -> (Option<EventSeq>, CompanyEvent) {
+            (
+                None,
+                CompanyEvent::OperatorMessage {
+                    text: "hi".to_string(),
+                    by: None,
+                    chat: chat.map(str::to_string),
+                    parent: None,
+                    deliverable: None,
+                    mentions: Vec::new(),
+                    attachments: Vec::new(),
+                },
+            )
+        }
+
+        // One message addressed to one agent -> that agent's slot.
+        assert_eq!(
+            single_agent(&[op(Some("frits"))]),
+            Some("frits".to_string())
+        );
+        // Several messages, all the same agent -> still that agent's slot.
+        assert_eq!(
+            single_agent(&[op(Some("frits")), op(Some("frits"))]),
+            Some("frits".to_string())
+        );
+        // Two different agents in one batch -> whole company.
+        assert_eq!(single_agent(&[op(Some("frits")), op(Some("sjaan"))]), None);
+        // Unaddressed message (routed to the orchestrator) -> whole company.
+        assert_eq!(single_agent(&[op(None)]), None);
+        // A non-operator event in the batch -> whole company.
+        assert_eq!(
+            single_agent(&[(
+                None,
+                CompanyEvent::TurnStarted {
+                    turn_id: "t1".to_string(),
+                    chat_id: "frits".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )]),
+            None
+        );
+        // Empty batch -> whole company.
+        assert_eq!(single_agent(&[]), None);
+    }
+
     /// Issue #845: a `workflow` message reaches the brain carrying the builder
     /// briefing, and nothing else does.
     ///
@@ -2882,11 +3111,13 @@ mod test {
     #[test]
     fn only_a_workflow_message_gets_the_builder_briefing() {
         let msg = |deliverable| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "set up a weekly AEO audit".to_string(),
             by: None,
             chat: None,
             parent: None,
             deliverable,
+            attachments: Vec::new(),
         };
         let text_of = |event: &CompanyEvent| match event {
             CompanyEvent::OperatorMessage { text, .. } => text.clone(),
@@ -2932,6 +3163,248 @@ mod test {
         assert!(matches!(events[4], CompanyEvent::ScheduleFired { .. }));
     }
 
+    // ── Issue #1725: a bare greeting must not run the agentic loop ──
+
+    /// The reported bug, end to end and at the level that costs money: "hi"
+    /// reaches the cycle, an answer comes back, and **the brain is never
+    /// called**.
+    ///
+    /// A turn count rather than a reply assertion, deliberately. The observed
+    /// failure was not "the wording is wrong" — it was a greeting spending a
+    /// full agentic turn (memory retrieval, a tool step, a long answer carried
+    /// over from a task nobody had asked about). `CountingBrain` bills 4,500
+    /// tokens and writes a memory trace per call, so a regression shows up as a
+    /// call count, a metered spend and a trace that should not exist.
+    #[tokio::test]
+    async fn a_bare_greeting_answers_without_calling_the_brain() {
+        let home_dir = tmp_home();
+        let brain = Arc::new(CountingBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "hi".into(),
+                by: Some(operator()),
+                chat: None,
+                parent: None,
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            brain.calls(),
+            0,
+            "a greeting must not spend a turn: the brain was called"
+        );
+        assert_eq!(
+            report.responses.len(),
+            1,
+            "the operator still gets an answer"
+        );
+        let reply = &report.responses[0];
+        assert_eq!(
+            reply.text,
+            crate::company::task_intent::SmallTalk::Hello.reply()
+        );
+        assert!(
+            reply.steps.is_empty(),
+            "no tool ran, so the timeline is empty: {:?}",
+            reply.steps
+        );
+        // Issue #885: the reply is the company's, not the operator's.
+        assert_eq!(
+            reply.agent.as_deref(),
+            Some("ceo"),
+            "the greeting comes back in the voice the turn would have used"
+        );
+        // Nothing was written back for a later turn to retrieve.
+        assert!(
+            rt.memory
+                .recent_traces(rt.id(), 8)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a pleasantry must leave no memory behind it"
+        );
+    }
+
+    /// The other half, and the one that matters more: everything that is not a
+    /// bare pleasantry still runs the full turn.
+    ///
+    /// A fast path that swallowed a real request would answer "Hey! What can I
+    /// help you with?" to "build the landing page" and drop the work on the
+    /// floor — worse than the bug it fixes. Each case here is one of the
+    /// conditions in `small_talk_result`, driven through the real cycle.
+    #[tokio::test]
+    async fn everything_that_is_not_a_pleasantry_still_runs_the_turn() {
+        let home_dir = tmp_home();
+        let brain = Arc::new(CountingBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let message =
+            |text: &str, deliverable, attachments: Vec<crate::ports::types::Attachment>| {
+                CompanyEvent::OperatorMessage {
+                    text: text.into(),
+                    by: Some(operator()),
+                    chat: None,
+                    parent: None,
+                    deliverable,
+                    mentions: Vec::new(),
+                    attachments,
+                }
+            };
+        let attached = vec![crate::ports::types::Attachment {
+            node_id: "node-1".into(),
+            name: "brief.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 12,
+            extracted_text: None,
+        }];
+
+        let cases = vec![
+            (
+                "a real request",
+                message("build the landing page", None, Vec::new()),
+            ),
+            // A greeting with an ask under it is an ask.
+            (
+                "a greeting with an ask",
+                message("hi, build the landing page", None, Vec::new()),
+            ),
+            // "yes" answering a teammate's question is an instruction.
+            ("an acknowledgement", message("yes", None, Vec::new())),
+            // The operator said, positively, that this message asks for work.
+            (
+                "an explicit work choice",
+                message("hi", Some(MessageIntent::Once), Vec::new()),
+            ),
+            (
+                "an explicit workflow choice",
+                message("hi", Some(MessageIntent::Workflow), Vec::new()),
+            ),
+            // A file with "hi" over it is a request to look at the file.
+            ("an attachment", message("hi", None, attached)),
+        ];
+
+        for (i, (label, event)) in cases.into_iter().enumerate() {
+            rt.run_cycle(vec![event]).await.unwrap();
+            assert_eq!(brain.calls(), i + 1, "{label} must still run a full turn");
+        }
+    }
+
+    /// The conditions `small_talk_result` decides on its own, driven directly
+    /// so the ones a live cycle cannot easily reach are still pinned: a
+    /// confined workflow-copilot thread, a batch of more than one event, and
+    /// who the reply is attributed to on an addressed thread.
+    #[test]
+    fn the_fast_path_declines_a_copilot_thread_and_a_batch() {
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+
+[[group_chat]]
+id = "content"
+name = "Content desk"
+members = ["writer"]
+"#,
+        )
+        .expect("valid manifest");
+        let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+        let hi = |chat: Option<&str>| CompanyEvent::OperatorMessage {
+            text: "hi".into(),
+            by: None,
+            chat: chat.map(str::to_string),
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        };
+
+        // An addressed desk answers in that desk's lead's voice, not the
+        // orchestrator's — the same routing `responder_for` does.
+        let desk = small_talk_result(&record, &[hi(Some("content"))]).expect("a pleasantry");
+        assert_eq!(desk.channel_responses[0].agent.as_deref(), Some("writer"));
+        assert!(desk.token_usage.is_zero(), "no model was called");
+
+        // Unaddressed falls to the orchestrator.
+        let main = small_talk_result(&record, &[hi(None)]).expect("a pleasantry");
+        assert_eq!(main.channel_responses[0].agent.as_deref(), Some("ceo"));
+
+        // A workflow copilot thread is confined and answered by an ephemeral
+        // agent this cannot speak as, so it declines (issue #416).
+        assert!(
+            small_talk_result(&record, &[hi(Some("workflow-copilot:weekly-aeo-audit"))]).is_none(),
+            "a copilot thread keeps its confined turn"
+        );
+
+        // A batch is a scheduler tick or several messages at once; neither is
+        // small talk, even when one of its members looks like it.
+        assert!(small_talk_result(&record, &[hi(None), hi(None)]).is_none());
+        assert!(
+            small_talk_result(
+                &record,
+                &[CompanyEvent::ScheduleFired {
+                    cron: "0 6 * * 5".into(),
+                    prompt: "run the audit".into(),
+                }]
+            )
+            .is_none()
+        );
+        assert!(small_talk_result(&record, &[]).is_none());
+
+        // A company with nobody on the roster has no voice to answer in, so it
+        // declines rather than journaling an unattributed bubble (issue #885).
+        let mut empty = record.clone();
+        empty.manifest.agents.clear();
+        empty.manifest.group_chats.clear();
+        assert!(small_talk_result(&empty, &[hi(None)]).is_none());
+    }
+
     /// Issue #845, the wiring: the briefing actually reaches the brain.
     ///
     /// [`only_a_workflow_message_gets_the_builder_briefing`] pins what the
@@ -2965,11 +3438,13 @@ mod test {
         );
 
         let ask = |deliverable| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "set up a weekly AEO audit".into(),
             by: None,
             chat: None,
             parent: None,
             deliverable,
+            attachments: Vec::new(),
         };
 
         let workflow = rt
@@ -3040,43 +3515,6 @@ mod test {
         );
     }
 
-    fn card_record(id: &str) -> TaskRecord {
-        TaskRecord {
-            id: id.to_string(),
-            title: "t".to_string(),
-            note: None,
-            column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
-            priority: "medium".to_string(),
-            assignee: "ceo".to_string(),
-            updated_at_millis: 1,
-            origin_chat_id: None,
-            parent_task_id: None,
-            output: None,
-            plan: None,
-            planning_attempts: Vec::new(),
-            deliverable: crate::ports::tasks::TaskDeliverable::Once,
-            workflow_proposal: None,
-            origin_run_id: None,
-            origin_workflow_id: None,
-        }
-    }
-
-    /// A publish-failure note lands only on a real card — never on a DM's `dm-*`
-    /// work key, which no card owns (issue #815).
-    #[test]
-    fn a_publish_note_only_lands_on_a_real_card_not_a_dm_work_key() {
-        let cards = vec![card_record("019ff728-abcd"), card_record("another")];
-        // A real card id resolves.
-        assert!(task_names_a_card(&cards, "019ff728-abcd"));
-        // A DM work key — what `repo_publish` stamps for a DM — owns no card, so
-        // the failure note stays in the log rather than filing under a phantom
-        // card.
-        assert!(!task_names_a_card(&cards, "dm-coder-main"));
-        // An unknown id, the empty id, and an empty board all resolve to nothing.
-        assert!(!task_names_a_card(&cards, "ghost"));
-        assert!(!task_names_a_card(&cards, ""));
-        assert!(!task_names_a_card(&[], "019ff728-abcd"));
-    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3085,6 +3523,7 @@ mod test {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::ChannelAdapter;
     use crate::ports::brain::Brain;
+    use crate::ports::types::SecretValue;
     use crate::ports::types::{
         ActorKind, ChunkAddr, ChunkHit, ChunkMeta, CompressedTrace, ContextChunk, CycleResult,
         EffectGroup, EventSeq, EvictionPolicy, ReplyTo, TaskResult, TokenUsage,
@@ -3148,6 +3587,7 @@ mod test {
                         text: format!("handled: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -3156,6 +3596,47 @@ mod test {
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "effect cycle")],
                 ledger_deltas: Vec::new(),
                 token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// A brain that counts how many times it was asked to think, and bills for
+    /// it — the instrument for issue #1725, where the cost of a turn is the
+    /// thing under test.
+    #[derive(Default)]
+    struct CountingBrain {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingBrain {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Brain for CountingBrain {
+        async fn run_cycle(&self, req: CycleRequest, _host: &dyn CycleHost) -> Result<CycleResult> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CycleResult {
+                channel_responses: vec![OutboundMessage {
+                    message_id: None,
+                    task_id: None,
+                    channel: "operator".into(),
+                    agent: Some("ceo".into()),
+                    text: "a full turn ran".into(),
+                    steps: Vec::new(),
+                    reply_to: None,
+                    mentions: Vec::new(),
+                }],
+                new_traces: vec![CompressedTrace::now(&req.cycle_id, "a turn's memory")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage {
+                    input: 4_000,
+                    output: 500,
+                    cached_input: 0,
+                    cost_usd: 0.12,
+                },
             })
         }
     }
@@ -3182,6 +3663,7 @@ mod test {
                         text: format!("that needs your approval: {text}"),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     });
                 }
             }
@@ -3212,6 +3694,7 @@ mod test {
                         text: "orchestrator".into(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     },
                     OutboundMessage {
                         message_id: None,
@@ -3224,6 +3707,7 @@ mod test {
                         reply_to: Some(ReplyTo {
                             chat_id: "strategy".into(),
                         }),
+                        mentions: Vec::new(),
                     },
                 ],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "delegating cycle")],
@@ -3252,11 +3736,13 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hand it off".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -3326,6 +3812,7 @@ mod test {
                     text: "settled".into(),
                     steps: Vec::new(),
                     reply_to: None,
+                    mentions: Vec::new(),
                 }],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "settling cycle")],
                 ledger_deltas: Vec::new(),
@@ -3752,6 +4239,15 @@ mod test {
         async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool> {
             self.inner.delete(id, addr).await
         }
+
+        async fn delete_label(
+            &self,
+            id: &CompanyId,
+            addr: &ChunkAddr,
+            label: &str,
+        ) -> Result<bool> {
+            self.inner.delete_label(id, addr, label).await
+        }
     }
 
     /// Issue #1175: a cycle used to load 32 recent traces *and the whole context
@@ -3781,11 +4277,15 @@ mod test {
         context.lists.store(0, Ordering::SeqCst);
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
-            text: "hi".into(),
+            // Issue #1725: not "hi". A bare pleasantry is now answered without
+            // a turn at all, and this test is about what a turn costs.
+            text: "ship the landing page".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -3817,11 +4317,15 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
-                text: "hi".into(),
+                // Issue #1725: not "hi". A bare pleasantry never reaches the
+                // brain now, and the echo this asserts is the brain's.
+                text: "ship the landing page".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -3829,7 +4333,7 @@ mod test {
         // (a) an operator response came back.
         assert_eq!(report.responses.len(), 1);
         assert_eq!(report.responses[0].channel, "operator");
-        assert_eq!(report.responses[0].text, "You said: hi");
+        assert_eq!(report.responses[0].text, "You said: ship the landing page");
 
         // (b) the event was appended to the log.
         //
@@ -3849,11 +4353,13 @@ mod test {
         assert_eq!(
             operator[0].event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
-                text: "hi".into(),
+                text: "ship the landing page".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }
         );
 
@@ -3927,11 +4433,13 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -3988,11 +4496,13 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4053,11 +4563,13 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4365,11 +4877,13 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4410,11 +4924,13 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4742,11 +5258,13 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4822,11 +5340,13 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "send that email".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -4879,11 +5399,13 @@ mod test {
                 .unwrap();
             let report = rt
                 .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "file it".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }])
                 .await
                 .unwrap();
@@ -4940,11 +5462,13 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -5011,11 +5535,13 @@ mod test {
 
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "file it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
@@ -5063,6 +5589,7 @@ mod test {
                     text: "thought about it".into(),
                     steps: Vec::new(),
                     reply_to: None,
+                    mentions: Vec::new(),
                 }],
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "metered cycle")],
                 ledger_deltas: Vec::new(),
@@ -5074,6 +5601,7 @@ mod test {
             crate::ports::Cognition {
                 path: "test",
                 provider: "medulla",
+                model: None,
                 metering: self.metering,
             }
         }
@@ -5101,11 +5629,13 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "how are we doing".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -5386,11 +5916,13 @@ mod test {
         );
         assert_eq!(
             cycle_trigger(&[CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hello".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
             "operator-message"
         );
@@ -5413,18 +5945,22 @@ mod test {
 
         let (ra, rb) = tokio::join!(
             one.run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "a".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
             two.run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "b".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }]),
         );
         assert_eq!(ra.unwrap().responses.len(), 1);
@@ -5437,7 +5973,7 @@ mod test {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "user".into(),
-            password: "hunter2".into(),
+            password: SecretValue("hunter2".into()),
             from_name: "Acme".into(),
             from_email: from_email.into(),
         }
@@ -5471,11 +6007,13 @@ mod test {
             .unwrap();
 
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "send it".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -5795,11 +6333,13 @@ mod test {
             body: serde_json::json!({"text": "raw payload"}),
         };
         let operator = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "please do the thing".into(),
             by: Option::<Actor>::None,
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         // The company's own machinery stays Internal, event by event: a
         // payment landing is the company's ledger speaking, not third-party
@@ -5825,11 +6365,13 @@ mod test {
             task: serde_json::json!({"text": "do the thing"}),
         };
         let operator = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: "hi".into(),
             by: Option::<Actor>::None,
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(cycle_is_external(&[a2a()]));
         assert!(cycle_is_external(&[operator(), a2a()]));
@@ -6462,11 +7004,13 @@ mod test {
         };
 
         let chat = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
 
         // A dispatch names the card outright.
@@ -6668,18 +7212,22 @@ mod test {
             _ => None,
         };
         let addressed = |chat: &str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "pay the invoice".into(),
             by: None,
             chat: Some(chat.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         let unaddressed = || CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -6820,6 +7368,8 @@ mod test {
                 origin_chat_id: None,
             },
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 chat_id: "desk-ops".into(),
                 agent_id: "ops".into(),
@@ -6882,11 +7432,13 @@ mod test {
             _ => None,
         };
         let in_thread = |chat: &str, parent: Option<u64>| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: parent.map(EventSeq::new),
             text: "pay the invoice".into(),
             by: None,
             chat: Some(chat.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -7274,6 +7826,61 @@ mod test {
         assert_eq!(cards[0].column, COLUMN_TODO);
     }
 
+    /// Issue #1872 (codex): the hosted path refuses an `auto` channel, and
+    /// says why.
+    ///
+    /// This path deliberately does **not** refuse an ordinary leadless desk —
+    /// a hosted hand-off is a durable card, visible on the board whether or
+    /// not anyone leads the desk yet. An auto channel is different in kind: it
+    /// has no lead by design and never will, so accepting one wrote a card
+    /// noting "no lead member on the roster yet", which is false about a
+    /// staffed channel and permanently so — and it disagreed with the
+    /// built-in tool, which refuses. Remove the guard and this opens a card.
+    #[tokio::test]
+    async fn delegate_to_desk_refuses_an_auto_channel_on_the_hosted_path() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::new(home.clone(), desk_manifest())
+            .build()
+            .await
+            .unwrap();
+        let mut record = rt.store().load(rt.id()).await.unwrap().unwrap();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["eng1".to_string()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        rt.store().save(&record).await.unwrap();
+
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+        let refused = host
+            .delegate_to_desk(
+                serde_json::json!({ "desk": "launch", "instruction": "ship the launch" }),
+            )
+            .await
+            .unwrap();
+        assert!(!refused.ok, "{:?}", refused.output);
+        assert_eq!(refused.output["status"], "no_lead");
+        let error = refused.output["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("picked per message"),
+            "the refusal says why, rather than reusing the leadless-desk wording: {error}"
+        );
+        assert!(
+            rt.tasks().list(rt.id()).await.unwrap().is_empty(),
+            "a refused hand-off opens no card"
+        );
+    }
+
     #[tokio::test]
     async fn call_tool_dispatches_delegation_tools() {
         let home_dir = tmp_home();
@@ -7344,11 +7951,13 @@ mod test {
 
         // Asking the desk directly (by name) surfaces the handed task...
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "what are you working on?".into(),
             by: None,
             chat: Some("Engineering".into()),
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7356,11 +7965,13 @@ mod test {
         // ...and asking with no address (the orchestrator) does NOT get the
         // desk's briefing folded into it.
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "status?".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7417,11 +8028,13 @@ mod test {
             .await
             .unwrap();
         rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "what's up?".into(),
             by: None,
             chat: Some("eng".into()),
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -7496,17 +8109,57 @@ mod test {
         );
         let report = rt
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "do it".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
         assert_eq!(report.parked.len(), 1);
         let id = report.parked[0].clone();
         (rt, id)
+    }
+
+    /// Like [`park_one_blocked_tool_call`], but parks the same effect **twice**
+    /// — two cycles, two identical cards on one runtime.
+    ///
+    /// The ordering matters and is why this exists: the deny/grant reconcile
+    /// tests need both cards parked before either is resolved, because once a
+    /// standing deny is live the identical call is denied inline and never
+    /// parks again.
+    async fn park_two_blocked_tool_calls(
+        home: std::path::PathBuf,
+        effect: Effect,
+    ) -> (Arc<CompanyRuntime>, Vec<ApprovalId>) {
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(Arc::new(ParkingBrain { effect }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut ids = Vec::new();
+        for text in ["do it", "again"] {
+            let report = rt
+                .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: text.into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                    attachments: Vec::new(),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(report.parked.len(), 1);
+            ids.push(report.parked[0].clone());
+        }
+        (rt, ids)
     }
 
     /// The headline: approving with the broader scope arms a standing grant, and
@@ -7612,6 +8265,175 @@ mod test {
         );
     }
 
+    /// Issue #1458, from the deny side: a standing denial minted against a
+    /// scoped tool remembers **which slice** the operator refused.
+    ///
+    /// The mint used to re-read the journal's payload-scrubbed copy of the
+    /// effect (issue #351), whose `Null` payload made `standing_scope_of`
+    /// answer `None` — and a stored `None` is a wildcard in `admits_scope`, so
+    /// refusing one web origin blocked every origin for that teammate until
+    /// expiry. The resolve now carries the parked effect whole, so the deny
+    /// records the same scope the card showed.
+    #[tokio::test]
+    async fn a_standing_deny_on_a_scoped_tool_keeps_the_scope_it_was_shown_for() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+
+        let listed = rt.standing_grants();
+        assert_eq!(listed.len(), 1, "one standing denial is minted");
+        assert_eq!(listed[0].verdict, Verdict::Deny);
+        assert_eq!(
+            listed[0].scope.as_deref(),
+            Some("https://docs.rs"),
+            "the deny records the origin the operator refused, not a wildcard"
+        );
+    }
+
+    /// Issue #1458: when two identical cards park and the operator resolves the
+    /// first as a standing **denial** and the second as a standing **approval**,
+    /// the newer decision wins. `ApprovalPolicy` checks a deny above a standing
+    /// grant, so without reconciliation the approval would list as a live
+    /// permission and never admit a call until the refusal expired — the
+    /// operator's later "yes" silently inert.
+    #[tokio::test]
+    async fn a_new_standing_approval_revokes_an_older_standing_denial_for_the_same_scope() {
+        let home_dir = tmp_home();
+        let (rt, ids) = park_two_blocked_tool_calls(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&ids[0], Verdict::Deny, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+        assert_eq!(
+            rt.standing_grants()[0].verdict,
+            Verdict::Deny,
+            "the first resolution arms a standing denial"
+        );
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&ids[1], Verdict::Approve, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+
+        let listed = rt.standing_grants();
+        assert_eq!(listed.len(), 1, "the deny is revoked, not left shadowing");
+        assert_eq!(listed[0].verdict, Verdict::Approve);
+        assert_eq!(
+            listed[0].scope.as_deref(),
+            Some("https://docs.rs"),
+            "the surviving policy keeps the scope both were minted for"
+        );
+    }
+
+    /// The mirror direction: a standing **denial** minted after a standing
+    /// **approval** of the same scope revokes the grant. Enforcement would
+    /// already have the deny win, but a listed-but-dead grant is a wrong
+    /// contract for the operator who approved it.
+    #[tokio::test]
+    async fn a_new_standing_denial_revokes_an_older_standing_approval_for_the_same_scope() {
+        let home_dir = tmp_home();
+        let (rt, ids) = park_two_blocked_tool_calls(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+        assert_eq!(
+            rt.standing_grants()[0].verdict,
+            Verdict::Approve,
+            "the first resolution arms a standing grant"
+        );
+
+        let (_, follow_up) = rt
+            .resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope())
+            .await
+            .unwrap();
+        let _ = crate::company::runtime::join_follow_up(follow_up).await;
+
+        let listed = rt.standing_grants();
+        assert_eq!(listed.len(), 1, "the grant is revoked by the newer refusal");
+        assert_eq!(listed[0].verdict, Verdict::Deny);
+    }
+
+    /// Issue #1458 under concurrency: two opposite-polarity resolutions of the
+    /// **same** scope settled while both are in flight — the approve and the
+    /// deny each half-finished before either mints — must still leave a single
+    /// policy, not the deny permanently shadowing the approve.
+    ///
+    /// Before the reconcile lock this could interleave: the journal appends
+    /// between the [`opposite_polarity`] snapshot and the `grant_standing`
+    /// insert are awaited, so a concurrent settle gets polled in that window,
+    /// snapshots the same empty opposite set, and then both insert. Because
+    /// `ApprovalPolicy` matches a standing denial above a standing grant, the
+    /// approve then sits listed but never admits a call whatever the operator's
+    /// true order. The lock serialises the two mints, so the second observes
+    /// the first's policy and supersedes it — the same single-policy state the
+    /// sequential tests above assert.
+    #[tokio::test]
+    async fn concurrent_opposite_polarity_resolutions_leave_one_policy() {
+        let home_dir = tmp_home();
+        let (rt, ids) = park_two_blocked_tool_calls(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+
+        let (a, b) = tokio::join!(
+            rt.resolve_approval_spawned(&ids[0], Verdict::Approve, operator(), tool_scope()),
+            rt.resolve_approval_spawned(&ids[1], Verdict::Deny, operator(), tool_scope()),
+        );
+        let (_, follow_up_a) = a.unwrap();
+        let (_, follow_up_b) = b.unwrap();
+        let _ = tokio::join!(
+            crate::company::runtime::join_follow_up(follow_up_a),
+            crate::company::runtime::join_follow_up(follow_up_b),
+        );
+
+        let listed = rt.standing_grants();
+        assert_eq!(
+            listed.len(),
+            1,
+            "the concurrent resolutions must not leave both polarities live"
+        );
+    }
+
     /// A scope the runtime must not honour changes **nothing**: the approval is
     /// still parked and no verdict was journaled.
     ///
@@ -7669,6 +8491,122 @@ mod test {
         }
     }
 
+    /// Issue #1458: a standing **denial** for a workflow is refused at the
+    /// edge — the workflow gate does not enforce a `Deny` verdict
+    /// (`src/workflows/gate.rs`), so a time-bounded refusal would be a control
+    /// that never took effect. The card stays parked so the operator can still
+    /// deny it once.
+    #[tokio::test]
+    async fn a_standing_deny_on_a_workflow_gate_is_refused_and_mints_nothing() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "workflow_id": "sports_digest",
+                    "node_id": "fetch_bbc",
+                    "tool": "web_fetch",
+                    "args": { "url": "https://docs.rs/x" },
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        let err = match rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+        {
+            Ok(_) => panic!("a workflow standing denial must be refused at the edge"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(
+                err,
+                OpenCompanyError::InvalidRequest(ref msg)
+                    if msg.contains("'web_fetch' is a workflow call")
+                        && msg.contains("does not enforce a standing refusal")
+            ),
+            "{err:?}"
+        );
+
+        assert_eq!(
+            rt.pending_approvals().len(),
+            1,
+            "the card is still there to be denied once"
+        );
+        assert_eq!(rt.grants.standing_count(), 0, "no refusal is minted");
+        assert_eq!(rt.grants.live_count(), 0);
+
+        // And the operator can still deny it once — the refused request did not
+        // consume the card.
+        rt.resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+        assert!(rt.pending_approvals().is_empty());
+    }
+
+    /// Issue #1458, the console half: a workflow-gate card must not offer a
+    /// standing **denial**.
+    ///
+    /// `check_broadly_scoped` refuses a workflow standing denial with a 400 —
+    /// the gate does not enforce a `Deny` verdict — so a card that advertised
+    /// the control would let the operator click "don't ask again" and get an
+    /// error that leaves the approval parked. The grant half is still offered:
+    /// a workflow *can* hold a standing permission. Only the deny control is
+    /// withheld.
+    #[tokio::test]
+    async fn a_workflow_gate_card_is_not_advertised_as_broadly_deniable() {
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            Effect {
+                kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "workflow_id": "sports_digest",
+                    "node_id": "fetch_bbc",
+                    "tool": "web_fetch",
+                    "args": { "url": "https://docs.rs/x" },
+                }),
+                agent: None,
+                run_id: None,
+            },
+        )
+        .await;
+
+        assert!(
+            !rt.pending_approvals()[0].broadly_deniable,
+            "a workflow card must not advertise a standing refusal nothing enforces"
+        );
+        assert!(
+            rt.pending_approvals()[0].broadly_grantable,
+            "a workflow card can still hold a standing permission"
+        );
+
+        // The same tool, parked from an agent turn, offers the deny control.
+        let home_dir = tmp_home();
+        let (rt, _) = park_one_blocked_tool_call(
+            home_dir.path().to_path_buf(),
+            grantable_effect(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ),
+        )
+        .await;
+        assert!(rt.pending_approvals()[0].broadly_deniable);
+    }
+
     /// The default scope is byte-identical to pre-#374 behaviour.
     ///
     /// The existing suite passing untouched is the real proof; this pins the
@@ -7694,11 +8632,13 @@ mod test {
         for _ in 0..5 {
             let report = rt
                 .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "do it".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }])
                 .await
                 .unwrap();
@@ -7921,11 +8861,13 @@ mod test {
             .unwrap();
 
         let ask = |text: &str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             text: text.to_string(),
             by: None,
             chat: None,
             parent: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         let messages = |stored: &[crate::ports::types::StoredEvent]| -> Vec<String> {
             stored
@@ -8013,11 +8955,13 @@ mod test {
             .append(
                 rt.id(),
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "hello".into(),
                     by: None,
                     chat: None,
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -8026,11 +8970,13 @@ mod test {
             vec![(
                 seq,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "hello".into(),
                     by: None,
                     chat: None,
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )],
             Some("turn-1".to_string()),

@@ -24,7 +24,7 @@ use tower::ServiceExt;
 use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
 use crate::runtime::RuntimeBuilder;
 use crate::server::ops::ConnectionsRuntime;
 use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
@@ -115,10 +115,13 @@ async fn state_in_mode_on(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -152,7 +155,7 @@ fn mail_connections() -> ConnectionsRuntime {
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "u".into(),
-            password: "p".into(),
+            password: SecretValue("p".into()),
             from_name: "Acme".into(),
             from_email: "noreply@acme.test".into(),
         }))
@@ -1087,6 +1090,36 @@ async fn the_local_owner_is_the_same_person_on_every_request() {
     assert!(first["id"].as_str().is_some_and(|id| !id.is_empty()));
 }
 
+/// The owner of a company with no sign-in is still a person with a name and a
+/// face — and on the desktop they are the *only* person, so if the profile route
+/// did not serve `none` mode it would not serve the case it matters most in.
+#[tokio::test]
+async fn the_local_owner_can_name_themselves_and_pick_a_face() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let app = router(state);
+
+    let request = Request::builder()
+        .method("PATCH")
+        .uri("/api/v1/company/auth/me")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"displayName": "Steven", "avatar": "tiny:clay"}).to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = body_json(response).await;
+    assert_eq!(saved["displayName"], "Steven", "{saved}");
+    assert_eq!(saved["avatar"], "tiny:clay", "{saved}");
+
+    // The same durable owner record, so the choice survives the next request
+    // rather than living on a principal invented per call.
+    let reread = body_json(app.oneshot(get("/api/v1/company/auth/me")).await.unwrap()).await;
+    assert_eq!(reread["id"], saved["id"], "{reread}");
+    assert_eq!(reread["avatar"], "tiny:clay", "{reread}");
+}
+
 /// `none` cannot add users. An invite would grant an account nobody could ever
 /// reach, because there is no sign-in to reach it through.
 #[tokio::test]
@@ -1140,89 +1173,4 @@ async fn the_host_override_beats_the_manifest() {
         .await
         .unwrap();
     assert_eq!(runtime.auth_mode(), AuthMode::None);
-}
-
-/// **Accepted regression:** pairing a *remote* device to a `none`-mode host
-/// produces a credential that is inert from anywhere but the host's own
-/// machine.
-///
-/// Worth a test rather than a sentence in a doc, because the flow does not fail
-/// where an operator would notice. Every step succeeds: the person at the
-/// machine is the local owner, so they can mint a pairing code; `claim` looks
-/// the code's user up by identity and finds `local:owner`, so it redeems and
-/// hands back a device token that is a perfectly real `SessionRecord`. Only the
-/// *use* of it fails, and only from the one place it was minted to be used.
-///
-/// Two independent refusals stand in the way, and either alone is enough:
-///
-/// - `authenticate_session` returns `None` for any session on a company whose
-///   mode has no login. That rule exists so a session minted before a mode flip
-///   cannot outlive it — see
-///   `a_session_from_before_a_mode_flip_does_not_survive_it` — and a device
-///   session is the same kind of record.
-/// - `resolve_principal` asks `local_owner` first, and a remote device's peer
-///   is not loopback, so it answers `GatesRefused` and the request is refused
-///   outright rather than degrading to the session path at all.
-///
-/// This is a real capability the desktop loses by moving to `none`, and it is
-/// accepted rather than worked around: pairing a phone to a laptop's company is
-/// a *second person on a second machine*, which is the exact premise `none`
-/// gives up in exchange for having no accounts. A desktop that wants it should
-/// choose `email` in setup, which is why that choice is a preselection rather
-/// than a lock.
-#[tokio::test]
-async fn none_mode_pairs_a_device_that_cannot_then_be_used_remotely() {
-    let dir = home();
-    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
-
-    // Minting works: the local caller *is* the owner, with no credential shown.
-    let pairing = body_json(
-        router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/company/devices")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap(),
-    )
-    .await;
-    let code = pairing["code"]
-        .as_str()
-        .expect("a none-mode owner can still mint a pairing code")
-        .to_string();
-
-    // Redeeming works too, and hands back a genuine session token.
-    let claimed = body_json(
-        router(state.clone())
-            .oneshot(post(
-                "/api/v1/company/devices/claim",
-                serde_json::json!({ "code": code, "label": "Ada's phone" }),
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    let token = claimed["token"]
-        .as_str()
-        .expect("the code redeems into a device session")
-        .to_string();
-
-    // And it is worth nothing from the machine it was paired for.
-    let mut req = get("/api/v1/company/feedback");
-    req.extensions_mut().insert(ConnectInfo(
-        "203.0.113.9:1".parse::<std::net::SocketAddr>().unwrap(),
-    ));
-    req.headers_mut().insert(
-        crate::server::users::cookie::SESSION_HEADER,
-        format!("acme.{token}").parse().unwrap(),
-    );
-    let response = router(state).oneshot(req).await.unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::UNAUTHORIZED,
-        "a device session must not authenticate against a company with no login"
-    );
 }

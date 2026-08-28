@@ -13,6 +13,7 @@ import { signInWithHubToken, verifyCode } from "@/api/auth";
 import { isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
 import {
   createLocalInstance,
+  deleteLocalInstance,
   embeddedHost,
   localInstances,
   openSshTunnel,
@@ -40,6 +41,7 @@ import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsCon
 import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
 import { useHostAddress, useHostRoute } from "@/hooks/use-host-route";
+import { absorbHubSetupHandoff } from "@/setup/state";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 import { AddHostPage } from "@/views/setup/AddHostPage";
 import { cn } from "@/lib/utils";
@@ -388,7 +390,15 @@ function Console() {
   // Now that any credential is captured in state, take it out of the URL.
   useEffect(() => {
     if (magicLink) clearMagicLinkFromUrl();
-    if (hubToken || hubFailed) clearHubResultFromUrl();
+    if (hubToken || hubFailed) {
+      clearHubResultFromUrl();
+      // A hub sign-in that was asked to land on setup's destination carries it
+      // as a query parameter (`?from=setup`) — the host put it there so the
+      // OAuth round trip could carry it. Translate it into the hash marker the
+      // shell consumes, so the sign-in lands on the roster setup just built
+      // with the welcome suppressed, exactly as a setup link would have.
+      absorbHubSetupHandoff();
+    }
   }, [magicLink, hubToken, hubFailed]);
 
   /**
@@ -603,6 +613,25 @@ function Console() {
           await refreshLocal();
         }
       : undefined,
+    onDeleteLocal: isDesktopRuntime()
+      ? async (id) => {
+          const instance = embedded.instances.find((candidate) => candidate.id === id);
+          const connection = instance?.instanceId
+            ? listConnections().find(
+                (candidate) => candidate.identity?.instanceId === instance.instanceId,
+              )
+            : undefined;
+          await deleteLocalInstance(id);
+          await refreshLocal();
+
+          // A deleted local host is not somewhere Back can return to. The
+          // roster refresh prunes its connection; this keeps the selected host
+          // and address bar in step with that removal as one user action.
+          if (connection?.id === selected) {
+            resettleHost(listConnections()[0]?.id ?? null);
+          }
+        }
+      : undefined,
     hub: Boolean(config.hub),
   };
 
@@ -801,4 +830,3 @@ export function magicLinkNotice(err: unknown): string {
       return "That sign-in link didn't work. Request a new one below.";
   }
 }
-

@@ -1,0 +1,49 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a design studio is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-design-decision-record"
+title = "Set up the design decision record"
+priority = "high"
+note = """
+Write down what a `design-decisions` row must carry: what was decided, \
+what it rules out, and which research finding it rests on.
+
+Design decisions get re-opened by whoever joins next unless the reasoning \
+is recorded, and re-deciding a settled question is how a design system \
+becomes two design systems.
+
+Done when the rule is recorded and the standing decisions have rows.\
+"""
+
+[[task]]
+id = "set-up-the-research-intake"
+title = "Set up the research intake"
+priority = "medium"
+note = """
+Decide how a `research-findings` row is opened and what makes a finding \
+usable rather than an anecdote: what was observed, how many times, and by \
+whom.
+
+Done when the rule is a `decisions` row and the findings already in hand \
+are recorded.\
+"""
+
+[[task]]
+id = "set-up-the-project-slate"
+title = "Set up the project slate"
+priority = "medium"
+note = """
+Get every live project onto `projects`, each with its client, its stage \
+and the deliverable it ends at.
+
+Done when nothing is being worked on that does not have a row.\
+"""

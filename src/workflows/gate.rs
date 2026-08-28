@@ -130,12 +130,12 @@
 //! * **An authored `requires_approval = false` does not win.** The policy adds
 //!   a gate the author did not ask for; an author cannot opt their node out of
 //!   the company's approval policy.
-//! * **`sub_workflow` children are not gated.** tinyflows cannot resume a child
-//!   across the boundary (`nodes/integration/sub_workflow.rs`), and a paused
-//!   child *halts the parent* with an unresumable error. Gating a child would
-//!   convert a working run into a dead one with no card to decide, so children
-//!   keep today's behaviour. Filed as its own issue (#617) rather than left in
-//!   a merged PR body; it needs engine work to close.
+//! * **`sub_workflow` children are gated by their resolver.** The child is
+//!   translated inside tinyflows after this pass has handled the top-level
+//!   graph, so [`StoreWorkflowResolver`](super::caps::resolver::StoreWorkflowResolver)
+//!   applies the same policy and grants before returning it. tinyflows surfaces
+//!   the pause to the parent with a namespaced node id and forwards approval on
+//!   the continuation (issue #617).
 //! * **Dry runs are not gated.** Every effect is stubbed
 //!   ([`dry_run`](super::caps)), so there is nothing to approve, and pausing
 //!   would stop a dry run from walking the rest of the graph — which is the one
@@ -257,15 +257,33 @@ pub(crate) async fn apply_policy_gates(
     run_id: &str,
     grants: &GrantSet,
 ) -> Vec<GatedCall> {
-    let gated = policy_gates(
+    apply_policy_gates_with_policy(
         graph,
-        &record.manifest.policy,
+        &record.effective_policy(),
         &record.id,
         workflow_id,
         run_id,
-        Some(grants),
+        grants,
     )
-    .await;
+    .await
+}
+
+/// Applies the workflow policy gate using the effective policy already selected
+/// for this run.
+///
+/// A `sub_workflow` child is translated later by the resolver, after the
+/// top-level runner has applied its pass. The resolver has the run's effective
+/// policy and grants but not the original [`CompanyRecord`], so it uses this
+/// shared mutation half rather than reimplementing policy classification.
+pub(crate) async fn apply_policy_gates_with_policy(
+    graph: &mut WorkflowGraph,
+    policy: &Policy,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+    grants: &GrantSet,
+) -> Vec<GatedCall> {
+    let gated = policy_gates(graph, policy, company, workflow_id, run_id, Some(grants)).await;
 
     // Written LAST and unconditionally: the policy's gate outranks an authored
     // `requires_approval`, in both directions. An author may add a gate the
@@ -284,24 +302,10 @@ pub(crate) async fn apply_policy_gates(
 /// Which of `graph`'s nodes the company's policy would stop — **classification
 /// only**, no mutation.
 ///
-/// Split out from [`apply_policy_gates`] for issue #617's audit line: a
-/// `sub_workflow` child is resolved and run inside the engine, so its nodes
-/// never reach the gate pass and a call the policy would park at the top level
-/// runs unparked one level down. The resolver cannot *fix* that — the engine
-/// cannot resume across the boundary — but it can ask the same question and say
-/// what it found, so an operator reviewing what was approved is not left with a
-/// hole they cannot account for. One classifier, so the audit line and the gate
-/// can never disagree about the same call.
-///
-/// `grants` is the company's live permission set (issue #1098). `Some` on the
-/// gate path, so a standing permission the operator gave this workflow is
-/// honoured and the node does not park again. **`None` on the #617 audit line**,
-/// deliberately: that line discloses calls this run never offered for approval
-/// at all, and a permission is about not asking *again*. Passing the set there
-/// would suppress a disclosure on the grounds that a *different* question had
-/// once been answered. The two can only differ by the audit naming a call the
-/// gate would have let through, which over-discloses — the safe direction for a
-/// line that reports rather than enforces.
+/// `grants` is the company's live permission set (issue #1098). The top-level
+/// runner and the `sub_workflow` resolver both pass `Some`, so a standing
+/// permission the operator gave this workflow is honoured consistently at every
+/// nesting level.
 pub(crate) async fn policy_gates(
     graph: &WorkflowGraph,
     company_policy: &Policy,
@@ -654,10 +658,13 @@ description = "Runs Acme."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 

@@ -6,7 +6,9 @@
 //! applied by rewriting the log atomically, so the closing-the-loop poller can
 //! record where a filed issue stands.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use tokio::sync::Mutex as TokioMutex;
 
@@ -15,6 +17,48 @@ use crate::error::OpenCompanyError;
 use crate::feedback::types::FeedbackItem;
 use crate::ports::generate_id;
 use crate::store::paths::Bundle;
+
+/// Process-wide, per-item confirm locks.
+///
+/// Confirming one feedback item (Send after Preview) serialises on its id so
+/// two concurrent confirms of the same item cannot both observe
+/// `issue_status = None` and both file or forward: the loser blocks until the
+/// winner records its status, then re-reads the item and returns the recorded
+/// result. Keyed on the item id — not the store path — because the confirm
+/// surface holds the lock across the whole send; the path-keyed registry in
+/// `store::fs` (issue #388) is what the send's own status rewrite serialises
+/// on, and the two must not collide. The key being the item id also means two
+/// independently-constructed [`FeedbackStore`]s over one company meet here.
+struct ConfirmLocks {
+    inner: Arc<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
+}
+
+impl ConfirmLocks {
+    fn get(&self, id: &str) -> Arc<TokioMutex<()>> {
+        let mut map = self.inner.lock().expect("confirm-lock map poisoned");
+        map.entry(id.to_string()).or_default().clone()
+    }
+}
+
+static CONFIRM_LOCKS: LazyLock<ConfirmLocks> = LazyLock::new(|| ConfirmLocks {
+    inner: Arc::new(StdMutex::new(HashMap::new())),
+});
+
+/// The process-wide serialisation point for confirming feedback item `id`.
+pub(crate) fn confirm_lock(id: &str) -> Arc<TokioMutex<()>> {
+    CONFIRM_LOCKS.get(id)
+}
+
+/// Whether the confirm-lock registry holds an entry for `id`. Test-only: used
+/// to assert that a nonexistent confirm id never mints an un-evictable entry.
+#[cfg(test)]
+pub(crate) fn confirm_lock_holds(id: &str) -> bool {
+    CONFIRM_LOCKS
+        .inner
+        .lock()
+        .expect("confirm-lock map poisoned")
+        .contains_key(id)
+}
 
 /// A per-company append-only store of [`FeedbackItem`]s.
 ///
@@ -86,16 +130,42 @@ impl FeedbackStore {
         Ok(out)
     }
 
+    /// Loads one stored feedback item by id.
+    pub async fn get(&self, id: &str) -> Result<Option<FeedbackItem>> {
+        Ok(self.list().await?.into_iter().find(|item| item.id == id))
+    }
+
     /// Records a filed issue's URL and status against an item, rewriting the log
     /// atomically. Closing-the-loop uses this to track status changes.
     pub async fn update_status(&self, id: &str, url: &str, status: &str) -> Result<()> {
+        self.update(id, |item| {
+            item.filed_issue_url = Some(url.to_string());
+            item.issue_status = Some(status.to_string());
+        })
+        .await
+    }
+
+    /// Freezes the byte-exact final body a preview produced on an item, so a
+    /// later confirm of the same item posts exactly the bytes the operator
+    /// approved (see [`super::service::finalize`]).
+    pub async fn record_preview(&self, id: &str, body: &str) -> Result<()> {
+        self.update(id, |item| item.scrubbed_body = Some(body.to_string()))
+            .await
+    }
+
+    /// Applies `edit` to the stored item with `id` and rewrites the log
+    /// atomically, serialising on the path key's write lock so an append cannot
+    /// be erased by the read-modify-write (issue #388).
+    async fn update<F>(&self, id: &str, mut edit: F) -> Result<()>
+    where
+        F: FnMut(&mut FeedbackItem),
+    {
         let lock = self.write_lock();
         let _guard = lock.lock().await;
         let mut items = self.list_unlocked().await?;
         for item in &mut items {
             if item.id == id {
-                item.filed_issue_url = Some(url.to_string());
-                item.issue_status = Some(status.to_string());
+                edit(item);
             }
         }
         let mut body = String::new();
@@ -222,6 +292,44 @@ mod test {
         // The other item is untouched.
         let other = all.iter().find(|i| i.id == a.id).unwrap();
         assert!(other.filed_issue_url.is_none());
+        tokio::fs::remove_dir_all(bundle.dir()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn get_returns_the_named_item_or_none() {
+        let (_root, bundle) = tmp_bundle();
+        let store = FeedbackStore::new(&bundle);
+        let a = item("a");
+        let b = item("b");
+        store.append(&a).await.unwrap();
+        store.append(&b).await.unwrap();
+
+        assert_eq!(store.get(&a.id).await.unwrap(), Some(a));
+        assert_eq!(store.get(&b.id).await.unwrap(), Some(b));
+        assert!(store.get("ghost").await.unwrap().is_none());
+        tokio::fs::remove_dir_all(bundle.dir()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn record_preview_freeze_the_body_a_confirm_will_post() {
+        let (_root, bundle) = tmp_bundle();
+        let store = FeedbackStore::new(&bundle);
+        let it = item("a");
+        store.append(&it).await.unwrap();
+
+        store
+            .record_preview(&it.id, "**Category:** bug\n\nthe run crashed")
+            .await
+            .unwrap();
+
+        let stored = store.get(&it.id).await.unwrap().expect("item exists");
+        assert_eq!(
+            stored.scrubbed_body.as_deref(),
+            Some("**Category:** bug\n\nthe run crashed")
+        );
+        // The other fields are untouched.
+        assert!(stored.filed_issue_url.is_none());
+        assert_eq!(stored.operator_words, "a");
         tokio::fs::remove_dir_all(bundle.dir()).await.ok();
     }
 

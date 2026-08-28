@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 /**
  * Regression proof for issue #173: the Inbox surface must read the host's real
@@ -17,11 +17,10 @@ import { expect, test } from "@playwright/test";
  *
  * Runs against the same live host as `wiring.spec.ts` (see that file's header).
  *
- * Parked by issue #302: the console no longer lists Inbox, so `/#/inbox` now
- * canonicalizes to Overview and the assertions below cannot run. The host's
- * inbox routes and per-agent store are unchanged, so the #173 guarantee still
- * holds — this stays here verbatim to be un-skipped the day the surface is
- * relisted, rather than deleted and rewritten from memory.
+ * Inbox is parked rather than retired: it has no navigation row, but its direct
+ * URL remains an operator-facing route. The notice below keeps that distinction
+ * honest instead of presenting a complete mail client as a live console section
+ * (issue #1337).
  */
 
 /** All four senders the deleted fixture invented for every teammate. */
@@ -34,32 +33,68 @@ const FIXTURE_SENDERS = ["Priya Sharma", "Stripe", "Weekly Digest", "Figma"];
  */
 const FIXTURE_SUBJECTS = ["Re: Spring campaign timeline"];
 
-test.skip("Inbox reads the host's per-agent store, not a seeded fixture", async ({ page }) => {
+/** The first-run tour's overlay intercepts clicks on the roster beneath it. */
+async function dismissTour(page: Page) {
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  try {
+    await skip.waitFor({ state: "visible", timeout: 10_000 });
+  } catch {
+    return;
+  }
+  await skip.click();
+  await expect(skip).toBeHidden();
+}
+
+test("Inbox is reachable, explains that it is parked, and reads the host's per-agent store", async ({ page }) => {
   // Switch on the first teammate's inbox from that teammate's own page — the
   // control moved off the roster card in issue #1190. It writes to the host
   // keyed by agent id, the same key the ingest webhook files mail under.
   await page.goto("/#/company");
+  await dismissTour(page);
   await page.getByTestId("team-card-open").first().click();
   const toggle = page.getByTestId("agent-inbox-toggle");
   await expect(toggle).toBeVisible({ timeout: 30_000 });
-  const agentUrl = page.url();
   if (!(await toggle.isChecked())) {
     await toggle.click();
   }
   await expect(toggle).toBeChecked({ timeout: 30_000 });
+  // The switch's checked state is optimistic — `toggleInbox` flips it before
+  // the PUT lands and holds the switch disabled (`busy`) until the host
+  // acknowledges. Waiting for it to be enabled again is waiting for the write
+  // to actually reach the `InboxStore`; only then is a reload a meaningful
+  // persistence check.
+  await expect(toggle).toBeEnabled({ timeout: 30_000 });
 
   // Drop every client-side store, then reload: only host state can survive this.
   await page.evaluate(() => {
     localStorage.clear();
     sessionStorage.clear();
   });
-  await page.goto(agentUrl);
+  // A real reload, not `goto(agentUrl)`: navigating to the URL the page is
+  // already on is a same-document no-op in Chromium, so no reload fires, the
+  // optimistic toggle state survives, and the assertion below would prove
+  // nothing about the host.
+  await page.reload();
+  // Clearing storage also clears the tour's "seen" marker, so the first-run
+  // overlay is back. Dismiss it again rather than let it sit over the page.
+  await dismissTour(page);
   await expect(page.getByTestId("agent-inbox-toggle")).toBeChecked({ timeout: 30_000 });
 
   // The Inbox page lists that inbox and shows only real mail. With no ingested
   // mail this is the empty state — what matters is that it is never the fixture.
   await page.goto("/#/inbox");
+  await expect(page.getByTestId("inbox-parked-notice")).toContainText(
+    "Inbox is not in the console navigation right now",
+  );
   await expect(page.getByTestId("inbox-select")).toBeVisible({ timeout: 30_000 });
+  // The message pane is terminal only once the host's messages have rendered —
+  // either the real empty state or an actual row. Synchronize on that before
+  // asserting fixture absence, or the assertions below would pass against the
+  // loading skeletons and finish before a reintroduced fixture got a chance to
+  // appear.
+  await expect(
+    page.getByTestId("inbox-empty").or(page.getByTestId("inbox-message")),
+  ).toBeVisible({ timeout: 30_000 });
   for (const invented of [...FIXTURE_SENDERS, ...FIXTURE_SUBJECTS]) {
     await expect(page.getByText(invented, { exact: false })).toHaveCount(0);
   }

@@ -71,7 +71,7 @@
 
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -286,6 +286,19 @@ pub struct SetupCompany {
     /// which is the only reason a laptop operator who chose email sign-in is
     /// not locked out of the company they just made.
     admin_email: Option<String>,
+    /// The provider that passed the setup probe. Persisted with the company so
+    /// the first agent turn uses the same endpoint the operator tested.
+    inference: Option<SetupInference>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SetupInference {
+    provider: String,
+    base_url: Option<String>,
+    model: Option<String>,
+    /// Write-only credential. Never appears in a response or manifest.
+    key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -466,7 +479,7 @@ async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
-) -> Result<(), Response> {
+) -> Result<(), crate::server::Rejection> {
     if state.config().is_local_only()
         && (!state.setup_complete() || state.registry().is_empty())
         && crate::server::graphql::auth::request_looks_local(peer, headers)
@@ -497,11 +510,11 @@ async fn read(
     State(state): State<AppState>,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     headers: HeaderMap,
-) -> Result<Json<SetupDto>, Response> {
+) -> Result<Json<SetupDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
     snapshot(&state, &ProcessEnv)
         .map(Json)
-        .map_err(|e| ApiError::from(e).into_response())
+        .map_err(|e| ApiError::from(e).into_response().into())
 }
 
 /// The manifest the resolution pass runs against.
@@ -615,11 +628,7 @@ fn auth_modes(state: &AppState) -> Vec<&'static str> {
 fn build_flags() -> BuildDto {
     BuildDto {
         acp_in_build: cfg!(feature = "acp"),
-        // No `.route("/acp", …)` exists anywhere in this tree — only the session
-        // and permission model plus the reserved path. Hard-coded false until a
-        // handler is actually mounted; a flag that guessed from the feature
-        // would tell a client to dial an endpoint that 404s.
-        acp_transport_mounted: false,
+        acp_transport_mounted: cfg!(feature = "acp"),
         mcp_in_build: cfg!(feature = "mcp"),
         harness_in_build: cfg!(feature = "openhuman"),
         oauth_in_build: cfg!(feature = "oauth"),
@@ -681,12 +690,12 @@ async fn apply(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     headers: HeaderMap,
     Json(req): Json<SetupRequest>,
-) -> Result<Json<AppliedDto>, Response> {
+) -> Result<Json<AppliedDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
     apply_inner(&state, req, &ProcessEnv)
         .await
         .map(Json)
-        .map_err(|e| ApiError::from(e).into_response())
+        .map_err(|e| ApiError::from(e).into_response().into())
 }
 
 /// `+ Sync` so the returned future is `Send`, which axum requires of a handler:
@@ -770,6 +779,42 @@ async fn apply_inner(
         _ => None,
     };
 
+    // Validate the model choice before writing setup state. The endpoint that
+    // passed the probe is normalized once more at this trust boundary, then
+    // stored on the company rather than forgotten after the green tick.
+    let designed_inference = req
+        .company
+        .as_ref()
+        .and_then(|company| company.inference.as_ref())
+        .map(|input| {
+            let mut models = std::collections::BTreeMap::new();
+            if let Some(model) = input
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                for tier in crate::company::INFERENCE_TIERS {
+                    models.insert((*tier).to_string(), model.to_string());
+                }
+            }
+            let config = crate::company::inference::RuntimeInference {
+                provider: input.provider.trim().to_string(),
+                base_url: crate::company::inference::normalize_setup_base_url(
+                    &input.provider,
+                    input.base_url.as_deref(),
+                ),
+                models,
+            };
+            let problems = crate::company::inference::validate_runtime(&config);
+            if problems.is_empty() {
+                Ok(config)
+            } else {
+                Err(OpenCompanyError::InvalidRequest(problems.join(" ")))
+            }
+        })
+        .transpose()?;
+
     // Persist before anything live is mutated. The module doc promises "writes
     // it in one transaction" and `AppliedDto::complete` promises a partial
     // apply is an error, not a result — both break if a later step (auth
@@ -826,12 +871,27 @@ async fn apply_inner(
             // operator edited it, so neither the bounds nor the de-duplication
             // can be assumed to have survived.
             let agents = crate::company::setup::validate_roster(agents);
-            let manifest = crate::company::setup::manifest_from_setup(
+            let mut manifest = crate::company::setup::manifest_from_setup(
                 &answers,
                 &agents,
                 designed.admin_email.as_deref(),
             );
+            if let Some(inference) = &designed_inference {
+                manifest.inference.provider = Some(inference.provider.clone());
+                manifest.inference.base_url = inference.base_url.clone();
+                manifest.inference.models = inference.models.clone();
+            }
             let id = crate::desktop::seed_generated_company(state, manifest, Some(answers)).await?;
+            if let Some(key) = designed
+                .inference
+                .as_ref()
+                .and_then(|inference| inference.key.as_deref())
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                && let Some(runtime) = state.registry().get(&id)
+            {
+                crate::company::inference::store_key(&id, runtime.secrets().as_ref(), key).await?;
+            }
             Some(id.as_ref().to_string())
         }
         (None, Some(template), true) => {
@@ -951,10 +1011,15 @@ pub struct SetupRosterRequest {
     industry: String,
     team_hint: String,
     automate: String,
+    /// A shipped preset chosen explicitly in the wizard.
+    template: Option<String>,
     /// The inference credential from the wizard's own field, when the operator
     /// has just supplied one. Absent falls back to whatever the host already
     /// has; neither yielding one ships the curated team.
     inference_key: Option<String>,
+    inference_provider: Option<String>,
+    inference_base_url: Option<String>,
+    inference_model: Option<String>,
 }
 
 /// One proposed teammate, shaped for the wizard's review step.
@@ -986,9 +1051,10 @@ pub struct SetupRosterDto {
     /// The jobs no teammate owns. Non-empty only on the `model` path; a curated
     /// team makes no coverage claim about a list it never read.
     uncovered: Vec<String>,
-    /// Why this is the curated team: `no_model` or `not_designable`. Absent on
-    /// the `model` path. The review screen needs it because the operator's next
-    /// move differs — "add a key" versus "tell us more".
+    /// Why this is the curated team: `no_model`, `model_unreachable` or
+    /// `not_designable`. Absent on the `model` path. The review screen needs it
+    /// because the operator's next move differs — "add a key" versus "try
+    /// again" versus "tell us more".
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
 }
@@ -1020,6 +1086,9 @@ pub struct InferenceTestDto {
     /// An operator who mistypes a base URL and gets a tick from the *default*
     /// endpoint has been told the wrong thing.
     base_url: String,
+    /// Concrete model discovered from the endpoint catalog, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     /// Present only on failure, in the operator's language.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -1055,7 +1124,7 @@ async fn test_inference(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     headers: HeaderMap,
     Json(req): Json<InferenceTestRequest>,
-) -> Result<Json<InferenceTestDto>, Response> {
+) -> Result<Json<InferenceTestDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
     Ok(Json(probe_inference(&req, &ProcessEnv).await))
 }
@@ -1073,12 +1142,27 @@ async fn probe_inference<E: EnvSource + Sync>(
                 credential: config.credential,
             }
         });
-    let decl = crate::company::inference::decl_for_probe(
+    let normalized_base_url =
+        crate::company::inference::normalize_setup_base_url(&req.provider, req.base_url.as_deref());
+    let mut decl = crate::company::inference::decl_for_probe(
         &req.provider,
-        req.base_url.as_deref(),
+        normalized_base_url.as_deref(),
         req.key.as_deref(),
         env_default.as_ref(),
     );
+    let model = if matches!(
+        crate::company::inference::normalize_provider(&req.provider),
+        "ollama" | "openai_compatible"
+    ) {
+        discover_local_model(&decl).await
+    } else {
+        None
+    };
+    if let Some(model) = &model {
+        for tier in crate::company::INFERENCE_TIERS {
+            decl.models.insert((*tier).to_string(), model.clone());
+        }
+    }
     let base_url = decl.base_url.clone();
 
     // `openai_compatible` has no default endpoint, so a blank URL resolves to
@@ -1088,6 +1172,7 @@ async fn probe_inference<E: EnvSource + Sync>(
         return InferenceTestDto {
             ok: false,
             base_url,
+            model: None,
             error: Some("This provider needs an endpoint URL.".to_string()),
         };
     }
@@ -1096,6 +1181,7 @@ async fn probe_inference<E: EnvSource + Sync>(
         Ok(()) => InferenceTestDto {
             ok: true,
             base_url,
+            model,
             error: None,
         },
         Err(err) => {
@@ -1109,6 +1195,7 @@ async fn probe_inference<E: EnvSource + Sync>(
             InferenceTestDto {
                 ok: false,
                 base_url,
+                model,
                 error: Some(summarise_probe_failure(&err.to_string())),
             }
         }
@@ -1127,10 +1214,33 @@ async fn probe_inference<E: EnvSource + Sync>(
             &req.provider,
             req.base_url.as_deref(),
         ),
+        model: None,
         error: Some(
             "This build cannot reach a model — the agent harness is not compiled in.".to_string(),
         ),
     }
+}
+
+/// Reads the standard OpenAI-compatible model catalog and picks its first
+/// concrete model. Local servers generally require that id rather than the
+/// abstract `agentic-v1` tier OpenCompany uses internally.
+#[cfg(feature = "openhuman")]
+async fn discover_local_model(decl: &crate::company::inference::InferenceDecl) -> Option<String> {
+    let url = format!("{}/models", decl.base_url.trim_end_matches('/'));
+    let mut request = reqwest::Client::new().get(url);
+    if let Ok(Some(bearer)) = decl.bearer().await {
+        request = request.bearer_auth(bearer);
+    }
+    let response = request.send().await.ok()?.error_for_status().ok()?;
+    let payload: serde_json::Value = response.json().await.ok()?;
+    payload
+        .get("data")?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| entry.get("id")?.as_str())
+        .map(str::trim)
+        .find(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// Turns a provider failure into one line an operator can act on.
@@ -1174,15 +1284,38 @@ async fn propose_roster(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     headers: HeaderMap,
     Json(req): Json<SetupRosterRequest>,
-) -> Result<Json<SetupRosterDto>, Response> {
+) -> Result<Json<SetupRosterDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
 
+    let template_name = req
+        .template
+        .as_deref()
+        .map(|id| {
+            crate::desktop::preset(id)
+                .map(|preset| preset.name)
+                .ok_or_else(|| {
+                    OpenCompanyError::InvalidRequest(format!("unknown company template `{id}`"))
+                })
+        })
+        .transpose()?;
     let answers = crate::company::setup::SetupAnswers {
-        industry: req.industry,
+        industry: match template_name {
+            Some(name) if req.industry.trim().is_empty() => name.to_string(),
+            Some(name) if req.industry.trim().eq_ignore_ascii_case(name) => name.to_string(),
+            Some(name) => format!("{name} — {}", req.industry.trim()),
+            None => req.industry,
+        },
         team_hint: req.team_hint,
         automate: req.automate,
     };
-    let proposal = propose_for_setup(&answers, req.inference_key.as_deref()).await;
+    let proposal = propose_for_setup(
+        &answers,
+        req.inference_provider.as_deref(),
+        req.inference_base_url.as_deref(),
+        req.inference_key.as_deref(),
+        req.inference_model.as_deref(),
+    )
+    .await;
 
     tracing::info!(
         template = proposal.template_key,
@@ -1215,9 +1348,18 @@ async fn propose_roster(
 #[cfg(feature = "openhuman")]
 async fn propose_for_setup(
     answers: &crate::company::setup::SetupAnswers,
+    provider: Option<&str>,
+    base_url: Option<&str>,
     credential: Option<&str>,
+    model: Option<&str>,
 ) -> crate::company::setup::RosterProposal {
-    match crate::harness::roster_build::RosterBuilder::for_setup(&ProcessEnv, credential) {
+    match crate::harness::roster_build::RosterBuilder::for_setup(
+        &ProcessEnv,
+        provider,
+        base_url,
+        credential,
+        model,
+    ) {
         // Unmetered on purpose — there is no company to charge yet. See
         // `RosterBuilder::for_setup`.
         Some(builder) => builder.propose(answers).await.0,
@@ -1234,7 +1376,10 @@ async fn propose_for_setup(
 #[cfg(not(feature = "openhuman"))]
 async fn propose_for_setup(
     answers: &crate::company::setup::SetupAnswers,
+    _provider: Option<&str>,
+    _base_url: Option<&str>,
     _credential: Option<&str>,
+    _model: Option<&str>,
 ) -> crate::company::setup::RosterProposal {
     crate::company::setup::template_proposal(
         answers,

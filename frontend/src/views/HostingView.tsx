@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Globe, Loader2, TriangleAlert } from "lucide-react";
+import { Check, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -8,10 +8,23 @@ import {
   saveHosting,
   type HostingStatus,
 } from "@/api/hosting";
+import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -61,6 +74,15 @@ export function HostingView({ client, company }: Props) {
   const [status, setStatus] = useState<HostingStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Whether this viewer may widen the company's tool grants (issue #1796).
+  //
+  // Resolved the way `OAuthView` resolves the same question, and defaulted
+  // CLOSED for the same reason: every write behind the control is admin-only,
+  // so an unresolved role must not render an enabled button. Courtesy, not
+  // enforcement — the host refuses a non-admin's `PUT` whatever this says. What
+  // it prevents is offering an operator an action whose only possible outcome
+  // is a 403 toast, which on this page would replace one dead end with another.
+  const [canManage, setCanManage] = useState(false);
 
   const [apiKey, setApiKey] = useState("");
   const [team, setTeam] = useState("");
@@ -81,6 +103,22 @@ export function HostingView({ client, company }: Props) {
     } catch (err) {
       setLoadError(reason(err));
     }
+  }, [client, company]);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin.
+      }
+      if (live) setCanManage(admin);
+    })();
+    return () => {
+      live = false;
+    };
   }, [client, company]);
 
   useEffect(() => {
@@ -154,9 +192,7 @@ export function HostingView({ client, company }: Props) {
     <div className="flex-1 overflow-y-auto" data-testid="hosting-view">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
         <div>
-          <h1 className="flex items-center gap-2 text-lg font-medium">
-            <Globe className="size-5" /> Hosting
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Hosting</h1>
           <p className="text-sm text-muted-foreground">
             Connect a hosting provider so your teammates can put a site from this
             company&rsquo;s workspace on the internet — with a managed database
@@ -178,16 +214,15 @@ export function HostingView({ client, company }: Props) {
         ) : null}
 
         {status.inBuild && !status.granted ? (
-          <Alert data-testid="hosting-not-granted">
-            <TriangleAlert className="size-4" />
-            <AlertDescription>
-              This company does not grant <code>hosting</code>, so no teammate
-              will get the deployment tools even once a key is saved. Add{" "}
-              <code>hosting</code> to <code>[tools].allow</code> in the
-              company&rsquo;s manifest — a catch-all <code>*</code> deliberately
-              does not confer it, and it cannot be fixed from this page.
-            </AlertDescription>
-          </Alert>
+          <GrantNamespace
+            client={client}
+            company={company}
+            namespace="hosting"
+            canManage={canManage}
+            explanation="No teammate will get the deployment tools even once a key is saved."
+            onGranted={load}
+            testId="hosting-not-granted"
+          />
         ) : null}
 
         <Card>
@@ -252,14 +287,30 @@ export function HostingView({ client, company }: Props) {
                 Save
               </Button>
               {status.apiKeyConfigured ? (
-                <Button
-                  variant="outline"
-                  onClick={() => void onClear()}
-                  disabled={busy}
-                  data-testid="hosting-clear"
-                >
-                  Disconnect
-                </Button>
+                <AlertDialog>
+                  <AlertDialogTrigger
+                    render={
+                      <Button variant="outline" disabled={busy} data-testid="hosting-clear">
+                        Disconnect
+                      </Button>
+                    }
+                  />
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Disconnect {status.provider}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This clears the write-only hosting token and team setting. They cannot be
+                        recovered; reconnect with a new token before teammates can deploy again.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction variant="destructive" onClick={() => void onClear()}>
+                        Disconnect hosting
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
               ) : null}
             </div>
           </CardContent>

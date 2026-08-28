@@ -187,3 +187,14 @@ test("retiring a declared list asks before it deletes, then removes it everywher
     await request.delete(`${API}/ledgers/${slug}`);
   }
 });
+
+test("a managed list row opens that list", async ({ page }) => {
+  await openManageLists(page);
+
+  await page.getByTestId("managed-ledger-goals").click();
+
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/goals");
+  await expect(page.getByRole("heading", { name: "Goals" })).toBeVisible({
+    timeout: 15_000,
+  });
+});

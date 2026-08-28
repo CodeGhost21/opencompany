@@ -5,7 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { useHashView } from "@/hooks/use-hash-view";
-import { VIEWS, type View } from "@/lib/console-routes";
+import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
+import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 
 /**
  * Every surface the console renders has to answer at its own address.
@@ -32,8 +33,28 @@ describe("the console's route table", () => {
     expect(VIEWS).toContain("pages");
   });
 
+  it("retires #/memory from the table after Brain moves under Settings (#1416)", () => {
+    // The shell no longer renders a `view === "memory"` block — the browser
+    // lives at `#/settings/brain`. The legacy address still works, but it is
+    // served by the shell's `REWRITE_RETIRED` (which runs before the
+    // allow-list), not by a `memory` view: keeping a table entry for a surface
+    // the shell cannot render would break the #1311 invariant that every VIEWS
+    // member answers to a render block.
+    expect(VIEWS).not.toContain("memory");
+  });
+
   it("has no duplicate entries", () => {
     expect(new Set(VIEWS).size).toBe(VIEWS.length);
+  });
+});
+
+describe("sidebar navigation", () => {
+  it("keeps Work active while a task detail is open (#1354)", () => {
+    expect(isNavigationActive("ledgers", "tasks")).toBe(true);
+  });
+
+  it("does not make unrelated destinations active", () => {
+    expect(isNavigationActive("approvals", "tasks")).toBe(false);
   });
 });
 
@@ -41,13 +62,14 @@ describe("resolving an address", () => {
   let container: HTMLDivElement;
   let root: Root;
   let seen: [View, string | null];
+  let rewrite: typeof REWRITE_RETIRED | undefined;
 
-  // No `rewrite` argument: this asks what the allow-list alone resolves, which
-  // is the property #1311 broke. The shell's `REWRITE_RETIRED` — which sends
-  // bare `#/tasks` and `#/team` elsewhere before the allow-list is consulted —
-  // is `task-route.test.ts`'s subject, not this file's.
+  // Most assertions exercise the allow-list alone. The unknown-address case
+  // opts into the shell's policy below; bare Tasks and Team are deliberately
+  // rewritten retired routes, so applying it to every view would make this
+  // table assert the opposite of their contracts.
   function Probe() {
-    const [view, sub] = useHashView<View>(VIEWS, "overview");
+    const [view, sub] = useHashView<View>(VIEWS, "overview", rewrite);
     seen = [view, sub];
     return null;
   }
@@ -71,6 +93,7 @@ describe("resolving an address", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    rewrite = undefined;
   });
 
   afterEach(async () => {
@@ -96,10 +119,37 @@ describe("resolving an address", () => {
     expect(window.location.hash).toBe("#/team/agent-1");
   });
 
-  it("still collapses an address that names nothing onto Overview", async () => {
-    // The fallback is what makes a typo or a genuinely retired address safe;
-    // widening the allow-list must not have widened it into accepting anything.
+  it("explains an address that names nothing instead of silently showing Overview (#1417)", async () => {
+    // The route remains safe — an unknown head is never accepted as a real
+    // page — but it now reaches a named explanation rather than pretending the
+    // operator asked for Overview.
+    rewrite = REWRITE_RETIRED;
     await visit("#/nope");
+    expect(seen).toEqual(["not-found", "nope"]);
+    expect(window.location.hash).toBe("#/not-found/nope");
+  });
+
+  // Retired top-level addresses keep working through `REWRITE_RETIRED`. Each
+  // has a real replacement; asserting the replacement (and that the address bar
+  // follows it) is what keeps a bookmark or habit written before the move alive.
+  it.each([
+    ["#/connections", "settings", "oauth"],
+    ["#/memory", "settings", "brain"],
+    ["#/oauth", "settings", "oauth"],
+    ["#/mcp", "settings", "mcp"],
+    ["#/people", "settings", "people"],
+    ["#/settings/not-a-page", "settings", "general"],
+  ])("rewrites retired %s onto its replacement", async (hash, view, sub) => {
+    rewrite = REWRITE_RETIRED;
+    await visit(hash);
+    expect(seen).toEqual([view, sub]);
+    expect(window.location.hash).toBe(`#/${view}/${sub}`);
+  });
+
+  it("sends an empty address to the operator overview (#1321)", async () => {
+    rewrite = undefined;
+    await visit("/");
+
     expect(seen).toEqual(["overview", null]);
     expect(window.location.hash).toBe("#/overview");
   });

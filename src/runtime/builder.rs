@@ -23,7 +23,7 @@ use crate::brain::{EchoBrain, HostedMedullaBrain};
 #[cfg(feature = "openhuman")]
 use crate::company::inference::{self, EnvDefault};
 use crate::company::runtime::{CompanyMail, CompanyRuntime, OpsStores};
-use crate::company::{CompanyManifest, GroupChat, Policy};
+use crate::company::{CompanyManifest, GroupChat, Policy, Tools};
 use crate::feedback::github::{GitHubClient, RateLimiter};
 use crate::feedback::service::FeedbackFiler;
 use crate::feedback::store::FeedbackStore;
@@ -42,7 +42,8 @@ use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, OverlayWorkflow, PolicyOverride, SecretValue, TemplateProvenance,
+    AgentOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayWorkflow, PolicyOverride,
+    SecretValue, TemplateProvenance, ToolGrantsOverride, effective_policy, effective_tool_allow,
 };
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
@@ -202,8 +203,91 @@ pub(crate) fn agent_scoped_grants(
 /// uses. A catalog doing its own matching would be free to advertise a grant the
 /// gate does not honour — precisely the disagreement between what the console
 /// shows and what an agent can actually do that the catalog exists to end.
+///
+/// The metered, credentialed, and third-party namespaces are explicit opt-ins;
+/// a catch-all `*` never covers them here, even though [`grant_matches`] treats
+/// `*` as a generic match. MCP uses the same rule for `mcp:*`, so an agent belt
+/// cannot reintroduce a capability the company intentionally omitted.
 pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     let literal = tool.strip_suffix('*').unwrap_or(tool);
+
+    // These capabilities are intentionally opt-in: the generic matcher treats
+    // `*` as covering every literal, but these grants reach metered services,
+    // tenant credentials, third-party source, or operator-owned workspace
+    // guidance. Keep narrowing consistent with the wiring predicates so an
+    // agent cannot ask for one of them through a catch-all company grant.
+    //
+    // The request must also be a spelling the wiring predicate accepts when
+    // stored *verbatim*: the write path keeps the request intact in `effective`,
+    // so a glued-star request like `search*` or `workspace.write*` reaches the
+    // belt as `search*`/`workspace.write*` — which `grants_search_explicit` and
+    // `grants_workspace_write_explicit` both reject, even though their stripped
+    // forms would pass. Only the bare namespace, a separator-broken descendant
+    // (`search.*`, `search.web`), and the colon forms (`mcp:*`) are spellings
+    // the wiring can honour; anything else would render in the card as granted
+    // while the tools stay unwired. Each branch therefore asks the predicate on
+    // the allow-list *and* on the single request glob.
+    //
+    // Workspace writes are explicit-only in both spellings
+    // [`grants_workspace_write_explicit`](crate::company::grants_workspace_write_explicit)
+    // accepts: the bare `workspace` grant as well as `workspace.write`. A bare
+    // `workspace` *request* must be gated the same way, or an agent asking for
+    // it under a `["*"]` allow-list would hold the exact token the wiring
+    // predicate accepts and gain write tools the company withheld.
+    if literal == "workspace" || literal == "workspace.write" {
+        return crate::company::grants_workspace_write_explicit(allow)
+            && crate::company::grants_workspace_write_explicit(&[tool.to_string()]);
+    }
+
+    // The namespace predicates accept the bare namespace or any dotted
+    // descendant (`search` and `search.*` both satisfy them), so the request
+    // check must too — `search.*` or `media.image` is as much an opt-in ask as
+    // the bare namespace, and letting it fall through to the generic match
+    // below would hand a wildcard-only company the whole namespace on a
+    // sub-grant request.
+    if literal == "media" || literal.starts_with("media.") {
+        return crate::company::grants_media_explicit(allow)
+            && crate::company::grants_media_explicit(&[tool.to_string()]);
+    }
+    if literal == "composio" || literal.starts_with("composio.") {
+        return crate::company::grants_composio_explicit(allow)
+            && crate::company::grants_composio_explicit(&[tool.to_string()]);
+    }
+    if literal == "chargebee" || literal.starts_with("chargebee.") {
+        return crate::company::grants_chargebee_explicit(allow)
+            && crate::company::grants_chargebee_explicit(&[tool.to_string()]);
+    }
+    if literal == "hosting" || literal.starts_with("hosting.") {
+        return crate::company::grants_hosting_explicit(allow)
+            && crate::company::grants_hosting_explicit(&[tool.to_string()]);
+    }
+    if literal == "paypal" || literal.starts_with("paypal.") {
+        return crate::company::grants_paypal_explicit(allow)
+            && crate::company::grants_paypal_explicit(&[tool.to_string()]);
+    }
+    if literal == "search" || literal.starts_with("search.") {
+        return crate::company::grants_search_explicit(allow)
+            && crate::company::grants_search_explicit(&[tool.to_string()]);
+    }
+
+    // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for
+    // an agent asking for all company servers. A bare `*` must not confer it.
+    if literal == "mcp:" || literal.starts_with("mcp:") {
+        return allow
+            .iter()
+            .filter(|grant| grant.as_str() != "*")
+            .any(|grant| grant_matches(grant, literal));
+    }
+    // A delimiter-free MCP spelling (`mcp`, `mcp*`, `mcpfoo`) is not a form the
+    // MCP wiring can honour, so it must not fall through to the generic matcher
+    // below: under a wildcard-only allow-list that generic match would accept
+    // it, and the saved `mcp*` glob reads in `grants_cover_server` as covering
+    // every configured server — the explicit opt-in defeated. Only the colon
+    // forms wire; reject the rest of the family here.
+    if literal.starts_with("mcp") {
+        return false;
+    }
+
     allow.iter().any(|grant| grant_matches(grant, literal))
 }
 
@@ -341,6 +425,52 @@ fn carry_desk_tool_overrides(
         .collect()
 }
 
+/// Carries the operator's console-added `[tools].allow` grants across a
+/// rebuild, dropping them wholesale if the seed's `[tools]` was edited in
+/// version control (issue #1796).
+///
+/// The rule [`carry_policy_override`] applies to the approval gate, applied to
+/// the capability gate — and this layer needs it for the *stronger* of that
+/// function's two reasons. A console grant only ever **widens**, so one that
+/// outlived a seed edit would be a runtime grant surviving the operator
+/// revoking it in version control: precisely the harm the `[tools]`/`[policy]`
+/// seed-wins rule exists to prevent, and stated in those words at the record
+/// materialisation below.
+///
+/// Whole-block rather than per namespace, unlike [`carry_desk_tool_overrides`]:
+/// desks are independent of one another, but `[tools].allow` is a single list.
+/// An operator who edited it at all has turned their attention to the company's
+/// grant, and guessing which half of the edit was meant to win cannot silently
+/// pick right — so the console layer yields entirely and the operator re-grants
+/// from the connect page, which is now one click.
+///
+/// The comparison is against the **seed** on both sides, which is what
+/// `previous_seed` is: the record's manifest is materialised seed-plus-overlay
+/// below, so callers must subtract the held grants before comparing or a
+/// company would drop its own override on the very next rebuild. See
+/// [`seed_allow`].
+fn carry_tool_grants_override(
+    previous_seed: &Tools,
+    next_seed: &Tools,
+    held: Option<&ToolGrantsOverride>,
+) -> Option<ToolGrantsOverride> {
+    let held = held?;
+    (previous_seed == next_seed).then(|| held.clone())
+}
+
+/// Recovers the **seed's** `[tools]` block from a stored record's materialised
+/// one, so [`carry_tool_grants_override`] compares seed against seed.
+///
+/// A thin `Tools`-shaped wrapper over
+/// [`seed_tool_allow`](crate::ports::types::seed_tool_allow), which is where the
+/// subtraction lives and why: three callers need version control's own answer
+/// out of a folded list, and they must agree.
+fn seed_allow(stored: &Tools, held: Option<&ToolGrantsOverride>) -> Tools {
+    let mut seed = stored.clone();
+    seed.allow = crate::ports::types::seed_tool_allow(&stored.allow, held);
+    seed
+}
+
 fn merge_enabled_workflows(seed_enabled: &[String], overlays: &[OverlayWorkflow]) -> Vec<String> {
     let mut merged: Vec<String> = Vec::with_capacity(seed_enabled.len() + overlays.len());
     let mut seen = std::collections::HashSet::new();
@@ -382,6 +512,35 @@ pub struct RuntimeBuilder {
     /// the legacy engine overlay, which cannot represent taint — falls back
     /// to `context` at build time: today's exact behavior, no regression.
     inbound_context: Option<Arc<dyn ContextStore>>,
+    /// Provisional working context, isolated from durable recall by the
+    /// provider-backed memory decorator. Absent on base and embedded stores.
+    scratch_context: Option<Arc<dyn ContextStore>>,
+    /// Safe agent/desk partitions and archive access from that decorator.
+    memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
+    /// Whether the memory-engine selection has been (re)applied to this builder.
+    ///
+    /// Set by [`with_memory_overlay`](Self::with_memory_overlay) and
+    /// [`with_memory_overlay_cleared`](Self::with_memory_overlay_cleared).
+    /// When true, the builder's own memory-family ports are authoritative and
+    /// the handover's are ignored on a rebuild; when false (a rebuild that is
+    /// not about the memory engine, or a boot), the handover's ports are
+    /// inherited rather than duplicated (issue #290). The distinction is what
+    /// makes a live engine swap (`PUT …/memory/engine`) take effect: the new
+    /// overlay's ports must replace the outgoing engine's, never be outranked
+    /// by them.
+    memory_overlay_applied: bool,
+    /// The memory-engine selection this build's harness roster is bound to,
+    /// for `HarnessPool` invalidation on a live swap (issue #1113).
+    ///
+    /// `Some(fp)` when [`with_memory_overlay`](Self::with_memory_overlay)
+    /// bound a provider-backed engine — a fingerprint of its memory-family
+    /// ports — and `None` for the base backend: the two selections a company
+    /// can be rebuilt between. `build` compares this against the inherited
+    /// pool's recorded selection and drops the cached roster when they differ,
+    /// so a swap stops serving the deselected engine on the next turn instead
+    /// of at the next restart. Feature-gated with the harness pool it talks to.
+    #[cfg(feature = "openhuman")]
+    memory_engine: Option<u64>,
     tools: Option<Arc<dyn ToolProvider>>,
     channels: Option<Vec<Arc<dyn ChannelAdapter>>>,
     economy: Option<Arc<dyn AgentEconomy>>,
@@ -426,6 +585,7 @@ pub struct RuntimeBuilder {
     workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
     schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
     run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
+    deep_trace: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
@@ -443,6 +603,17 @@ pub struct RuntimeBuilder {
     /// the next container replacement.
     journal_store: Option<Arc<dyn crate::ports::journal::JournalStore>>,
     seed_dir: Option<PathBuf>,
+    /// Whether this company's board is seeded with setup cards on first boot.
+    ///
+    /// Off by default, and deliberately **not** inferred from `seed_dir` the way
+    /// workspace seeding is. Ledger seeding runs on every company because a
+    /// company that tracks nothing is broken; a company with an empty board is
+    /// merely new. Cards, meanwhile, are visible state that tests and fixtures
+    /// count — `tests/one_card_per_message.rs` asserts exact board sizes against
+    /// a company built straight from this builder — so an unconditional baseline
+    /// would quietly turn those assertions into statements about the baseline.
+    /// The product entry points turn it on; nothing else does.
+    seed_tasks: bool,
     /// The repo-level shared skill library, passed to the harness so a pre-fix
     /// registry install (whose stored `SKILL.md` is a one-line stub) is healed
     /// from the live library. Empty when no repo checkout backs the host.
@@ -523,6 +694,11 @@ impl RuntimeBuilder {
             memory: None,
             context: None,
             inbound_context: None,
+            scratch_context: None,
+            memory_scopes: None,
+            memory_overlay_applied: false,
+            #[cfg(feature = "openhuman")]
+            memory_engine: None,
             tools: None,
             channels: None,
             economy: None,
@@ -548,6 +724,7 @@ impl RuntimeBuilder {
             workflow_revisions: None,
             schedule_fires: None,
             run_output_store: None,
+            deep_trace: None,
             usage: None,
             skills: None,
             read_state: None,
@@ -557,6 +734,7 @@ impl RuntimeBuilder {
             login_codes: None,
             journal_store: None,
             seed_dir: None,
+            seed_tasks: false,
             skills_registry: Arc::from([]),
             template_provenance: None,
             feedback: None,
@@ -667,6 +845,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Swaps the isolated scratch context store.
+    pub fn with_scratch_context(mut self, scratch: Arc<dyn ContextStore>) -> Self {
+        self.scratch_context = Some(scratch);
+        self
+    }
+
+    /// Carries safe provider-only scoped context and archive access.
+    pub fn with_memory_scopes(mut self, scopes: Arc<dyn crate::store::MemoryScopes>) -> Self {
+        self.memory_scopes = Some(scopes);
+        self
+    }
+
     /// Swaps every durable port at once from one opened storage backend
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
@@ -679,6 +869,7 @@ impl RuntimeBuilder {
         self.workflow_revisions = Some(handles.workflow_revisions.clone());
         self.schedule_fires = Some(handles.schedule_fires.clone());
         self.run_output_store = Some(handles.run_outputs.clone());
+        self.deep_trace = Some(handles.deep_trace.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.read_state = Some(handles.read_state.clone());
@@ -708,7 +899,19 @@ impl RuntimeBuilder {
     /// while an engine bound through the `MemoryProvider` contract covers all
     /// three ports. Taking whichever the overlay offers is what keeps one
     /// company's memory on one engine instead of split across two (issue #914).
-    pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
+    pub fn with_memory_overlay(mut self, overlay: &crate::store::MemoryOverlay) -> Self {
+        // The engine selection is explicit here: on a live rebuild the overlay's
+        // ports must replace the outgoing engine's, never inherit them (see
+        // `memory_overlay_applied`).
+        self.memory_overlay_applied = true;
+        // Record the engine selection so a later rebuild can tell a live swap
+        // from a no-op and drop the inherited harness pool's cached roster
+        // accordingly — the roster's agents captured THIS overlay's ports
+        // (issue #1113).
+        #[cfg(feature = "openhuman")]
+        {
+            self.memory_engine = Some(Self::memory_engine_fingerprint(overlay));
+        }
         let mut builder = self
             .with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone());
@@ -718,10 +921,74 @@ impl RuntimeBuilder {
         if let Some(inbound) = &overlay.inbound_context {
             builder = builder.with_inbound_context(inbound.clone());
         }
+        if let Some(scratch) = &overlay.scratch {
+            builder = builder.with_scratch_context(scratch.clone());
+        }
+        if let Some(scopes) = &overlay.scopes {
+            builder = builder.with_memory_scopes(scopes.clone());
+        }
         match &overlay.facts {
             Some(facts) => builder.with_facts(facts.clone()),
             None => builder,
         }
+    }
+
+    /// Marks the memory engine for this build as the base backend (no overlay).
+    ///
+    /// The mirror of [`with_memory_overlay`](Self::with_memory_overlay) for a
+    /// rebuild that is switching TO the base backend (`store`): the overlay was
+    /// explicitly cleared, so the handover's provider-backed ports must not be
+    /// inherited. The builder's own memory-family ports (from
+    /// [`with_stores`](Self::with_stores) or the fs defaults) become
+    /// authoritative instead — a provider engine cannot be left serving a
+    /// company that has selected `store`.
+    pub fn with_memory_overlay_cleared(mut self) -> Self {
+        self.memory_overlay_applied = true;
+        // The base backend is a distinct engine selection: record it so a
+        // rebuild TO `store` drops the inherited pool's provider-built roster,
+        // exactly as the reverse swap does (issue #1113).
+        #[cfg(feature = "openhuman")]
+        {
+            self.memory_engine = None;
+        }
+        self
+    }
+
+    /// Fingerprints the memory-family ports of an overlay, so a build can record
+    /// which engine its harness roster is bound to (issue #1113).
+    ///
+    /// `HarnessPool::ensure` compares fingerprints covering the MCP, overlay,
+    /// capability, … families, but none of them cover the memory family — the
+    /// `context`/`facts`/`scratch`/`scopes` handles `build_agent` folds into
+    /// every roster agent's `OcMemory`. A live engine swap replaces those
+    /// handles, so the pool needs its own marker for them: this fingerprint.
+    ///
+    /// Port pointers (not just the descriptor) are included because they change
+    /// exactly when a swap replaces the overlay, and they are stable across
+    /// ordinary rebuilds — `AppState` stores one overlay clone and `build`
+    /// re-folds the same handles, so this is robust to the issue #290 fast path
+    /// and sensitive to a swap.
+    #[cfg(feature = "openhuman")]
+    fn memory_engine_fingerprint(overlay: &crate::store::MemoryOverlay) -> u64 {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write_u8(overlay.descriptor.backend as u8);
+        hasher.write(overlay.descriptor.driver_id.as_bytes());
+        hasher.write_u64(Arc::as_ptr(&overlay.context) as *const () as usize as u64);
+        hasher.write_u64(Arc::as_ptr(&overlay.memory) as *const () as usize as u64);
+        if let Some(facts) = &overlay.facts {
+            hasher.write_u64(Arc::as_ptr(facts) as *const () as usize as u64);
+        }
+        if let Some(inbound) = &overlay.inbound_context {
+            hasher.write_u64(Arc::as_ptr(inbound) as *const () as usize as u64);
+        }
+        if let Some(scratch) = &overlay.scratch {
+            hasher.write_u64(Arc::as_ptr(scratch) as *const () as usize as u64);
+        }
+        if let Some(scopes) = &overlay.scopes {
+            hasher.write_u64(Arc::as_ptr(scopes) as *const () as usize as u64);
+        }
+        hasher.finish()
     }
 
     /// Swaps just the runtime journal's durable sink (default: the company
@@ -737,6 +1004,19 @@ impl RuntimeBuilder {
         store: Arc<dyn crate::ports::journal::JournalStore>,
     ) -> Self {
         self.journal_store = Some(store);
+        self
+    }
+
+    /// Swaps the deep-trace store (default: fs-backed).
+    ///
+    /// The default is what every production host runs; a test swaps it for a
+    /// counting or in-memory store to observe whether the unredacted half was
+    /// actually read.
+    pub fn with_deep_trace(
+        mut self,
+        store: Arc<dyn crate::ports::deep_trace::DeepTraceStore>,
+    ) -> Self {
+        self.deep_trace = Some(store);
         self
     }
 
@@ -879,6 +1159,17 @@ impl RuntimeBuilder {
     /// tree is seeded from on first build. Without it, no seeding runs.
     pub fn with_seed_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.seed_dir = Some(dir.into());
+        self
+    }
+
+    /// Seeds the board with the baseline's setup cards, plus whatever the seed
+    /// directory's own `tasks.toml` adds, on this company's **first** boot.
+    ///
+    /// Opt-in, so a test or a fixture that boots a company gets the empty board
+    /// it is asserting about. Call it from a product entry point — where a real
+    /// operator is about to look at a real board — and nowhere else.
+    pub fn with_task_seeding(mut self, seed: bool) -> Self {
+        self.seed_tasks = seed;
         self
     }
 
@@ -1133,6 +1424,66 @@ impl RuntimeBuilder {
         Self::new(home, manifest).build().await
     }
 
+    /// Preserve the pre-upgrade scope of persisted overlay teammates whose
+    /// grant was left unstated.
+    ///
+    /// An empty `OverlayAgent.tools` means "inherit the whole company
+    /// allow-list", and it keeps tracking that list across rebuilds on purpose
+    /// — an operator who left the line empty asked for whatever the company
+    /// allows. When a manifest upgrade widens the allow-list into a BYO
+    /// real-money namespace (issue #788) that the previous manifest did not
+    /// grant, that tracking hands billing to a teammate that never asked for
+    /// it. Freeze such a teammate's pre-upgrade scope into an explicit line
+    /// instead: the previous allow-list. Only then, and only for those
+    /// teammates — a company that already granted the namespace keeps its
+    /// tracking, and one that still does not is untouched.
+    ///
+    /// The console's per-agent edit half ([`AgentOverride`]) is covered the
+    /// same way. `tools: Some([])` is its stored spelling of "give this
+    /// teammate the company's standard grant" — the same empty-means-standard
+    /// rule — and an override row is otherwise carried across a rebuild
+    /// verbatim, so a teammate an operator reset to the standard grant before
+    /// the upgrade would silently follow the widened allow-list into the new
+    /// namespace. Its empty line is frozen to the previous allow-list too.
+    fn preserve_pre_upgrade_grant_scope(
+        overlay_agents: Vec<OverlayAgent>,
+        overlay_agent_edits: Vec<AgentOverride>,
+        previous_manifest: Option<&CompanyManifest>,
+        manifest: &CompanyManifest,
+    ) -> (Vec<OverlayAgent>, Vec<AgentOverride>) {
+        let Some(previous) = previous_manifest else {
+            return (overlay_agents, overlay_agent_edits);
+        };
+        let newly_conferred = |detect: fn(&[String]) -> bool| {
+            detect(&manifest.tools.allow) && !detect(&previous.tools.allow)
+        };
+        if !(newly_conferred(crate::company::grants_chargebee_explicit)
+            || newly_conferred(crate::company::grants_paypal_explicit)
+            || newly_conferred(crate::company::grants_hosting_explicit))
+        {
+            return (overlay_agents, overlay_agent_edits);
+        }
+        let overlay_agents = overlay_agents
+            .into_iter()
+            .map(|mut agent| {
+                if agent.tools.is_empty() {
+                    agent.tools = previous.tools.allow.clone();
+                }
+                agent
+            })
+            .collect();
+        let overlay_agent_edits = overlay_agent_edits
+            .into_iter()
+            .map(|mut edit| {
+                if edit.tools.as_ref().is_some_and(Vec::is_empty) {
+                    edit.tools = Some(previous.tools.allow.clone());
+                }
+                edit
+            })
+            .collect();
+        (overlay_agents, overlay_agent_edits)
+    }
+
     /// Assembles the runtime, materializing `company.toml` and replaying the
     /// journal to rebuild the approval queue.
     pub async fn build(mut self) -> Result<CompanyRuntime> {
@@ -1152,7 +1503,36 @@ impl RuntimeBuilder {
         // `set_harness` wiring further down agree by construction.
         #[cfg(feature = "openhuman")]
         if let Some(pool) = handover.as_ref().and_then(|h| h.harness.clone()) {
+            // Issue #1113: a live memory-engine swap replaces the memory-family
+            // ports (context, facts, scratch, scopes) that `build_agent` folded
+            // into every roster agent's `OcMemory`, and none of the fingerprints
+            // `HarnessPool::ensure` compares cover that family. An inherited
+            // pool would therefore keep serving agents that read and write the
+            // engine the swap just deselected until a process restart. Drop the
+            // cached roster whenever the recorded engine selection differs from
+            // this build's; the next turn's `ensure` then rebuilds it over the
+            // replacement ports. When the selection is unchanged — the ordinary
+            // issue #290 fast path — this is a fingerprint read, no rebuild, and
+            // every agent's conversation history is preserved.
+            //
+            // Only a build that explicitly re-decided the engine
+            // (`memory_overlay_applied`) moves the marker: a rebuild about
+            // something else inherits the handover's memory-family ports
+            // unchanged (issue #290), so its engine selection is the recorded
+            // one by construction, and re-recording it would be a no-op at best
+            // and a spurious roster drop at worst.
+            if self.memory_overlay_applied {
+                pool.rebind_memory_engine(&id, self.memory_engine).await;
+            }
             self.harness = Some(pool);
+        } else if let Some(pool) = self.harness.as_ref() {
+            // Boot (no handover to inherit from): record this build's selection
+            // on the pool so the first rebuild can tell a live swap from a
+            // no-op. Skips the marker when no overlay was applied — a desktop
+            // boot, which stays on the base backend (`None`) by default.
+            if self.memory_overlay_applied {
+                pool.rebind_memory_engine(&id, self.memory_engine).await;
+            }
         }
 
         // Inherit-or-construct. The handover's handles outrank an explicitly
@@ -1168,25 +1548,123 @@ impl RuntimeBuilder {
             .map(|h| h.events.clone())
             .or(self.events)
             .unwrap_or_else(|| Arc::new(FsEventLog::new(home.clone())));
-        let memory: Arc<dyn MemoryStore> = handover
-            .as_ref()
-            .map(|h| h.memory.clone())
-            .or(self.memory)
-            .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())));
-        let context: Arc<dyn ContextStore> = handover
-            .as_ref()
-            .map(|h| h.context.clone())
-            .or(self.context)
-            .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())));
+        // Load the persisted record BEFORE constructing the brain so the brain's
+        // in-memory record carries the operator overlays (team, desk memberships,
+        // desk order/hierarchy, operator-created desks) rather than empty lists.
+        // The brain's `desk_lead` resolver reads `overlay_desk_order`, so seeding
+        // it from the persisted record is what makes a `/desks/{id}/order` reorder
+        // take effect on routing after the runtime is rebuilt — otherwise desk
+        // chats keep routing to the pre-reorder lead. `save` only writes
+        // company.toml + meta.json; the append-only ledger file is left untouched,
+        // so an existing ledger survives a rebuild.
+        //
+        // Read HERE, at the top of `build`, rather than beside the other overlay
+        // resolutions ~800 lines down (issue #1796). Nothing between the two
+        // points touches this store, so the value is identical; what moves is
+        // when the console's tool grants can be folded, and that has to happen
+        // before the first reader of `[tools].allow` rather than before most of
+        // them. The two readers that used to run ahead of the fold are the tool
+        // provider's grant list (`effective_grants` just below, which is what
+        // `call_tool` enforces against) and the hosted brain's `tool_catalog`.
+        // Both would have kept the seed's list forever — including across a
+        // restart, since a rebuild re-parses `company.toml` — so a granted
+        // integration would report "granted" on every console surface while the
+        // brain never advertised the tool and the provider refused the call.
+        let existing = store.load(&id).await?;
+
+        // Issue #1796: the namespaces an operator granted from a connect
+        // surface, carried across the rebuild under the same seed-wins rule as
+        // the policy override — and needing it most of the three, because this
+        // is the only overlay that *widens* `[tools]`. `seed_allow` recovers the
+        // seed's own list from the stored (seed-plus-grants) manifest first;
+        // comparing the materialised list would report an edit on every rebuild
+        // and make the layer inert.
+        //
+        // `self.manifest.tools` is still pristine at this point, which is what
+        // makes it the seed side of that comparison. The fold below is the last
+        // thing that may touch it.
+        let overlay_tool_grants = existing.as_ref().and_then(|r| {
+            let held = r.overlay_tool_grants.as_ref();
+            let carried = carry_tool_grants_override(
+                &seed_allow(&r.manifest.tools, held),
+                &self.manifest.tools,
+                held,
+            );
+            if carried.is_none() && held.is_some() {
+                tracing::info!(
+                    company = %id,
+                    "[tools] the seed `[tools]` changed, so the console tool grants \
+                     were cleared — version control wins when it speaks"
+                );
+            }
+            carried
+        });
+        // Fold into `self.manifest` itself, exactly as `[workflows].enabled` is
+        // merged further down and for the same stated reason: mutating the
+        // source keeps every reader in agreement by construction rather than by
+        // a duplicated line. A local clone folded only into the saved record was
+        // the first shape of this, and it left the two readers named above on
+        // the seed's list — the "console says Connected over a harness that
+        // wired nothing" failure this whole change exists to end.
+        self.manifest.tools.allow =
+            effective_tool_allow(&self.manifest.tools.allow, overlay_tool_grants.as_ref());
+
+        let memory: Arc<dyn MemoryStore> = if self.memory_overlay_applied {
+            self.memory
+                .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())))
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.memory.clone())
+                .or(self.memory)
+                .unwrap_or_else(|| Arc::new(FsMemoryStore::new(home.clone())))
+        };
+        let context: Arc<dyn ContextStore> = if self.memory_overlay_applied {
+            self.context
+                .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())))
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.context.clone())
+                .or(self.context)
+                .unwrap_or_else(|| Arc::new(FsContextStore::new(home.clone())))
+        };
         // Resolved to a real port here so nothing downstream carries the
         // Option: absent (base backends, legacy engine overlay) means the
         // plain context store — the write still lands, it is merely stamped
         // Internal, which is today's exact behavior on those backends.
-        let inbound_context: Arc<dyn ContextStore> = handover
-            .as_ref()
-            .map(|h| h.inbound_context.clone())
-            .or(self.inbound_context)
-            .unwrap_or_else(|| context.clone());
+        let inbound_context: Arc<dyn ContextStore> = if self.memory_overlay_applied {
+            self.inbound_context.unwrap_or_else(|| context.clone())
+        } else {
+            handover
+                .as_ref()
+                .map(|h| h.inbound_context.clone())
+                .or(self.inbound_context)
+                .unwrap_or_else(|| context.clone())
+        };
+        // A live engine swap replaces every memory-family port, not just the
+        // two the port contract names: the provider decorator's scratch and
+        // scope partitions must follow the selected engine, or the successor
+        // keeps reading agent/desk contexts and the archive from the engine the
+        // swap was replacing. When the selection was re-applied, the builder's
+        // own (new) handles win and the handover's are dropped; `store` clears
+        // them to `None` (the base backend has no decorator).
+        let scratch_context = if self.memory_overlay_applied {
+            self.scratch_context
+        } else {
+            handover
+                .as_ref()
+                .and_then(|h| h.scratch_context.clone())
+                .or(self.scratch_context)
+        };
+        let memory_scopes = if self.memory_overlay_applied {
+            self.memory_scopes
+        } else {
+            handover
+                .as_ref()
+                .and_then(|h| h.memory_scopes.clone())
+                .or(self.memory_scopes)
+        };
         // Effective grants narrow the company allow-list by per-agent tools.
         let grants = effective_grants(&self.manifest);
         let openhuman = self.openhuman;
@@ -1221,7 +1699,23 @@ impl RuntimeBuilder {
             // A rebuild inherits the ops it was handed, announcer and all — the
             // wrap below happens once, at first construction. Re-wrapping an
             // inherited board would announce every write twice.
-            Some(h) => h.ops.clone(),
+            Some(h) => {
+                let mut ops = h.ops.clone();
+                // A live engine swap replaces every memory-family port, facts
+                // included. The ops struct is inherited wholesale, so without
+                // this override `ops.facts` stays the outgoing engine's — a
+                // fact created after the swap would be written to the engine
+                // the swap was replacing while recall reads the new context
+                // store, leaving the company split across two engines. The
+                // builder's own facts handle (set by `with_memory_overlay`
+                // when the engine serves facts) is authoritative here, falling
+                // back to the base backend exactly as the first-construction
+                // branch below does for an engine that serves no facts.
+                if self.memory_overlay_applied {
+                    ops.facts = self.facts.clone().unwrap_or_else(|| fs_ops.clone());
+                }
+                ops
+            }
             None => OpsStores {
                 // Issue #464: the board announces its own writes. Wrapped here,
                 // at the single place the store is chosen, so *every* writer —
@@ -1267,6 +1761,7 @@ impl RuntimeBuilder {
                     self.runs.unwrap_or_else(|| fs_ops.clone()),
                     events.clone(),
                 )),
+                deep_trace: self.deep_trace.unwrap_or_else(|| fs_ops.clone()),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 workflow_run_outputs: self
@@ -1775,6 +2270,12 @@ impl RuntimeBuilder {
         // waiting on a person keeps its id, its parked effect and its TTL across
         // the swap, and rehydrating a fresh gate from the journal would resurrect
         // approvals the live gate has already resolved.
+        // `with_approvals` is a test seam: an injected gate carries its own
+        // policy/TTL on purpose, so the effective-policy application below must
+        // not clobber one. Record whether the gate came from `self.approvals`
+        // before the option is moved out. A handover gate is inherited runtime
+        // state, not an explicitly injected test gate.
+        let gate_injected = self.approvals.is_some() && handover.is_none();
         let gate = match handover.as_ref() {
             Some(h) => h.approval_gate.clone(),
             None => {
@@ -1914,24 +2415,55 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         let mut roster_builder: Option<Arc<crate::harness::roster_build::RosterBuilder>> = None;
 
-        // Load the persisted record BEFORE constructing the brain so the brain's
-        // in-memory record carries the operator overlays (team, desk memberships,
-        // desk order/hierarchy, operator-created desks) rather than empty lists.
-        // The brain's `desk_lead` resolver reads `overlay_desk_order`, so seeding
-        // it from the persisted record is what makes a `/desks/{id}/order` reorder
-        // take effect on routing after the runtime is rebuilt — otherwise desk
-        // chats keep routing to the pre-reorder lead. `save` only writes
-        // company.toml + meta.json; the append-only ledger file is left untouched,
-        // so an existing ledger survives a rebuild.
-        let existing = store.load(&id).await?;
+        // Boot lifecycle: the setup work this company starts with, put on the
+        // board once and never again.
+        //
+        // Gated on `existing.is_none()` — this `store.load` is the last moment a
+        // first boot is distinguishable, because the `store.save` at the end of
+        // this function makes every later boot a returning one. That is a
+        // stronger gate than "the board is empty", which the ledger seeder can
+        // afford and this cannot: clearing the board is routine, and a card an
+        // operator deleted coming back on the next restart is the runtime
+        // arguing with them.
+        //
+        // `handover` is the rebuild arm: a rebuilt company is already running
+        // and already has whatever board it has.
+        if self.seed_tasks
+            && handover.is_none()
+            && existing.is_none()
+            && ops.tasks.list(&id).await?.is_empty()
+        {
+            seed_tasks(&ops, &self.manifest, &id, self.seed_dir.as_deref()).await?;
+        }
         let lifecycle = existing
             .as_ref()
             .map(|r| r.lifecycle.clone())
             .unwrap_or_else(|| "running".to_string());
-        let overlay_agents = existing
-            .as_ref()
-            .map(|r| r.overlay_agents.clone())
-            .unwrap_or_default();
+        // Existing overlay teammates are carried across the rebuild verbatim —
+        // except when the upgraded manifest newly confers a BYO real-money
+        // namespace (issue #788): an empty `tools` line would silently hand it
+        // to a teammate that never asked. Preserve their pre-upgrade scope.
+        //
+        // The operator's per-agent edits (issue #1530) ride along for the same
+        // reason every overlay does — the manifest is a read-only boot snapshot
+        // on a hosted tenant, so dropping them would silently revert every
+        // console edit on the next restart. Their empty form is the same
+        // freeze: `AgentOverride.tools = Some([])` is the stored spelling of
+        // "give this teammate the company's standard grant", and copied
+        // verbatim it would replace the new manifest's explicit non-billing
+        // `tools` line with the widened allow-list.
+        let (overlay_agents, overlay_agent_edits) = Self::preserve_pre_upgrade_grant_scope(
+            existing
+                .as_ref()
+                .map(|r| r.overlay_agents.clone())
+                .unwrap_or_default(),
+            existing
+                .as_ref()
+                .map(|r| r.overlay_agent_edits.clone())
+                .unwrap_or_default(),
+            existing.as_ref().map(|r| &r.manifest),
+            &self.manifest,
+        );
         // The roster edits and removals an operator has made from the console.
         // Carried across the rebuild for the reason the overlay model exists at
         // all: neither is written back to `company.toml`, so the seed manifest
@@ -1984,10 +2516,16 @@ impl RuntimeBuilder {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            // Scratch record used only for desk resolution below — never
+            // saved, so the real (possibly back-filled) activation fields
+            // computed further down have nothing to feed here.
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let mut desk_ids = Vec::new();
         let candidates = desk_record
@@ -2032,15 +2570,6 @@ impl RuntimeBuilder {
         let overlay_budgets = existing
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
-            .unwrap_or_default();
-        // Issue #1530: the operator-set per-agent persona overrides. Carried
-        // across the rebuild for the same reason as the budget caps above — the
-        // manifest is a read-only boot snapshot on a hosted tenant, so dropping
-        // these would silently revert every console-edited persona to the text
-        // baked into the image on the next restart.
-        let overlay_agent_edits = existing
-            .as_ref()
-            .map(|r| r.overlay_agent_edits.clone())
             .unwrap_or_default();
         // Issue #562: the operator's `[policy]` override, carried across the
         // rebuild — but ONLY while the seed's `[policy]` has not itself changed.
@@ -2113,8 +2642,11 @@ impl RuntimeBuilder {
         // instead of by a duplicated line only one CI job type-checks.
         //
         // Every other `self.manifest` reader in `build` (grants, tool provider,
-        // channels, inference, MCP, plan, policy gate, place) reads fields this
-        // merge never touches.
+        // channels, inference, MCP, plan, policy gate, place) reads fields THIS
+        // merge never touches. `[tools].allow` is now merged the same way for
+        // the same reason (issue #1796), and it does not have that property —
+        // the grants and the tool provider read it — which is why its fold runs
+        // at the top of `build` rather than here.
         self.manifest.workflows.enabled =
             merge_enabled_workflows(&self.manifest.workflows.enabled, &overlay_workflows);
         // Issue #85: carry an existing record's source-template provenance
@@ -2129,115 +2661,38 @@ impl RuntimeBuilder {
         // above: a rebuild must not lose what the operator told us about their
         // business, or the workflow phase would have to ask again.
         let setup = existing.as_ref().and_then(|r| r.setup.clone());
-        let ledger = existing.map(|r| r.ledger).unwrap_or_default();
-
-        // Issue #752: a company whose roster holds `repo` does not come up on a
-        // backend that keeps secrets as plaintext on this container's disk.
+        // Issue #1843: back-fill the activation latch for a company that
+        // predates activation tracking. A company already `existing` at this
+        // boot has already been through — and presumably out of — whatever
+        // first-run flow this build offered; recomputing the three-step funnel
+        // retroactively would gate an operator who has been running the
+        // company for months behind an onboarding screen they have no memory
+        // of starting. A brand-new company (`existing` is `None`) gets no such
+        // grace: the real funnel applies from its first boot.
         //
-        // The bind-time refusal in `RepoManager::bind` covers new credentials.
-        // It cannot cover a company that bound one *before* this gate existed —
-        // that credential is already sitting on `/data`, and its agents would
-        // keep checking out under it forever. So the same condition is asked
-        // again here, where the answer is "this company does not start", and an
-        // operator restarting a tenant finds out at the moment they can still
-        // act on it.
-        //
-        // Read over the **effective roster**, not `[tools].allow` alone: an
-        // agent naming `tools = ["repo"]` under a company allow-list of `["*"]`
-        // holds an explicit `repo` grant that `grants_repo_explicit(&allow)`
-        // does not see, because the wildcard deliberately does not confer the
-        // namespace. Checking only the company line would miss exactly the
-        // configuration a wildcard company is most likely to have.
-        //
-        // NOT feature-gated, for the reason `build_agent` states about the repo
-        // tools themselves: a control compiled only under `openhuman` is a
-        // control most CI lanes never type-check.
-        if self.storage_kind.secrets_are_plaintext_on_disk() {
-            let roster_holds_repo =
-                crate::company::grants_repo_explicit(&self.manifest.tools.allow)
-                    || self
-                        .manifest
-                        .agents
-                        .iter()
-                        .map(|agent| {
-                            agent_effective_grants(&self.manifest.tools.allow, &agent.tools)
-                        })
-                        .chain(overlay_agents.iter().map(|overlay| {
-                            agent_effective_grants(&self.manifest.tools.allow, &overlay.tools)
-                        }))
-                        .any(|grants| crate::company::grants_repo_explicit(&grants));
-            if roster_holds_repo {
-                return Err(crate::error::OpenCompanyError::Config(
-                    crate::store::plaintext_secret_refusal(self.storage_kind),
-                ));
+        // `name_confirmed` is folded into the same back-fill for the same
+        // reason: a company already running plainly named itself at
+        // provisioning time, whether or not the console ever asked it to
+        // *confirm* that name through the later dedicated route.
+        let (name_confirmed, activation_completed_at) = match existing.as_ref() {
+            // Already latched — carry it forward untouched. Matches every
+            // other overlay above: a rebuild never re-derives a fact this
+            // field already answers.
+            Some(r) if r.activation_completed_at.is_some() => {
+                (r.name_confirmed, r.activation_completed_at)
             }
-        }
-
-        // Issue #245: the company's repository mirror cache, rooted at the same
-        // `companies/<slug>/` prefix the bundle uses so a company's whole
-        // footprint sits in one subtree — and therefore inside the one quota
-        // walk `DataLayout::usage_bytes` already does.
-        //
-        // Built here rather than lazily in the route because the location is a
-        // property of *this* runtime's home, and a route that had to derive it
-        // would be the second place that knows where a company's bytes live.
-        //
-        // The cache is capped by the same `tree_quota_bytes` that bounds the
-        // workspace tree: both answer "how much may one company hold on this
-        // host", and a mirror is company-held binary payload like any other. It
-        // needs no new knob, and a hosted tenant that already sets one gets the
-        // cache covered without touching its config.
-        let repos = {
-            let manager = crate::runtime::RepoManager::new(
-                id.clone(),
-                Bundle::new(home.clone(), &id).repos_dir(),
-                secrets.clone(),
-            )
-            .with_quota(self.workspace_quota.tree_quota_bytes)
-            // Issue #752: the manager refuses a bind when a credential would
-            // land as plaintext on this container's disk, so it has to be told
-            // which backend is actually serving secrets.
-            .with_storage_kind(self.storage_kind);
-            // The forge REST client (pull-request metadata + diff). Without the
-            // feature there is no HTTP client to give it, and the PR route says
-            // so rather than answering with an empty diff. Shadowed rather than
-            // reassigned, the same way `ops::router` folds in its feature-gated
-            // fragment.
-            #[cfg(feature = "github")]
-            let manager =
-                manager.with_host(std::sync::Arc::new(crate::runtime::HttpRepoHost::new()));
-            std::sync::Arc::new(manager)
+            // Running and unlatched: the grandfather case this migration
+            // exists for.
+            Some(r) if r.lifecycle == "running" => (true, Some(crate::ports::now_millis())),
+            // Existing but not running (paused/archived): left exactly as
+            // recorded rather than migrated, so pausing a company before this
+            // field existed cannot retroactively "activate" it via this path —
+            // its own next `running` boot does that instead.
+            Some(r) => (r.name_confirmed, r.activation_completed_at),
+            // A genuinely new company: the real funnel applies from boot one.
+            None => (false, None),
         };
-
-        // Issue #245, agent half: the bindings, read once here so the
-        // synchronous `build_agent` can name them in a tool description and
-        // resolve against them. Read only when the company explicitly grants
-        // `repo` — everything else has no repository tools to feed — and a
-        // read error degrades to empty with a warning rather than failing a
-        // boot over a capability the company may not even use.
-        // `HarnessPool::ensure` re-reads this every turn, so a bind, a rotation
-        // or a revoke lands without a restart; this is only the first value.
-        #[cfg(feature = "openhuman")]
-        let repo_bindings = if crate::company::grants_repo_explicit(&self.manifest.tools.allow) {
-            repos.list().await.unwrap_or_else(|err| {
-                tracing::warn!(
-                    company = %id,
-                    error = %err,
-                    "reading the repository bindings failed; agents start with none"
-                );
-                Vec::new()
-            })
-        } else {
-            Vec::new()
-        };
-
-        // Issue #245: a checkout's lifecycle is one turn's, and a host killed
-        // mid-turn ends no turn — so whatever the last process left under
-        // `<harness>/<company>/*/workspace/repos` is deleted before this one
-        // starts. Tenant-scoped (issue #664): it walks this company's subtree
-        // and nothing above it.
-        #[cfg(feature = "openhuman")]
-        crate::harness::repo::sweep_orphaned_checkouts(&home.join("harness"), &id).await;
+        let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
@@ -2425,6 +2880,28 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // The company's own search provider, resolved from
+                            // the same store for the same reason: a BYO search
+                            // key is billed to the company that pasted it, so
+                            // there is no environment fallback. Absent, the
+                            // agents search through the managed surface below.
+                            let tenant_search_config = if crate::company::grants_search_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::search_byo::TenantSearch::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[search] could not read the company's search \
+                                             provider at boot; falling back to managed search this \
+                                             turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2493,8 +2970,19 @@ impl RuntimeBuilder {
                                 serves: None,
                                 context: context.clone(),
                                 store: store.clone(),
-                                meter: Some(fs_ops.clone()),
+                                // The harness must write usage to the SELECTED
+                                // backend, not always the filesystem. The read
+                                // side (`company.usage`) reads `ops.usage` — the
+                                // selected backend — so on a non-fs store the
+                                // samples were written to disk while the console
+                                // read an empty table. Same handle the read side
+                                // resolves to (see the `usage:` field below).
+                                meter: Some(ops.usage.clone()),
                                 workspace_root: home.join("harness"),
+                                // The company's own MCP store, so the
+                                // registry tools on the belt read the same
+                                // installs REST does.
+                                mcp_home: Some(home.join("mcp")),
                                 workspace_git_enabled: self.workspace_git_enabled,
                                 // Issue #775: the shell audit sink is HOST-owned
                                 // and hangs off the data root, resolving to
@@ -2556,6 +3044,13 @@ impl RuntimeBuilder {
                                 // here so a past run is readable from the console.
                                 // `None` degrades to no-persist, like `events`.
                                 run_output_store: self.run_output_store.clone(),
+                                // The SAME run store the dispatch path uses
+                                // (`HarnessBrain::with_runs` below), so a
+                                // workflow node's attempt and a card's
+                                // attempt land in one place by construction
+                                // rather than by two call sites agreeing.
+                                workflow_runs: Some(ops.runs.clone()),
+                                deep_trace: Some(ops.deep_trace.clone()),
                                 // Issue #661 (M7): the SAME revision store the
                                 // console's workflow PUT/DELETE routes use, so
                                 // an agent edit snapshots the prior body and an
@@ -2628,6 +3123,7 @@ impl RuntimeBuilder {
                                 #[cfg(feature = "paypal")]
                                 paypal: paypal_config,
                                 hosting: hosting_config,
+                                tenant_search: tenant_search_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's
@@ -2708,18 +3204,6 @@ impl RuntimeBuilder {
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
                                 workspace: Some(ops.workspace.clone()),
-                                // Issue #245, agent half: the SAME manager the
-                                // console's bind/revoke routes write through
-                                // (wired onto the runtime below), so an operator
-                                // binding a repository is what the next turn's
-                                // `repo_checkout` resolves against — and the
-                                // one thing in this process holding the token.
-                                repos: Some(repos.clone()),
-                                repo_bindings,
-                                // One ledger per company runtime, shared by every
-                                // agent's tools and claimed per turn by the
-                                // brain's `CheckoutJanitor`.
-                                checkouts: crate::harness::repo::CheckoutLedger::default(),
                             };
                             workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
@@ -2747,10 +3231,13 @@ impl RuntimeBuilder {
                                 overlay_workflows: overlay_workflows.clone(),
                                 overlay_budgets: overlay_budgets.clone(),
                                 overlay_policy: overlay_policy.clone(),
+                                overlay_tool_grants: None,
                                 overlay_desk_tools: Default::default(),
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                                 setup: setup.clone(),
+                                name_confirmed,
+                                activation_completed_at,
                             };
                             // The company's other declared harnesses, each on
                             // its own pool and its own provider. Empty unless
@@ -2818,13 +3305,21 @@ impl RuntimeBuilder {
                                 (Some(engine), true, true) => engine.clone(),
                                 _ => {
                                     let default_harness = record.manifest.default_harness_id();
+                                    // Effective agents plus the overlay
+                                    // roster, matching `lanes::agents_on`.
+                                    // Reading the raw manifest here left the
+                                    // router treating a console-bound teammate
+                                    // as default-bound while the lane it was
+                                    // moved to had already excluded it — so
+                                    // the saved harness was ignored even after
+                                    // a restart.
                                     let bindings: HashMap<String, String> = record
-                                        .manifest
-                                        .agents
-                                        .iter()
-                                        .filter_map(|a| {
+                                        .effective_agents()
+                                        .into_iter()
+                                        .filter_map(|a| a.harness.clone().map(|h| (a.id, h)))
+                                        .chain(record.overlay_agents.iter().filter_map(|a| {
                                             a.harness.clone().map(|h| (a.id.clone(), h))
-                                        })
+                                        }))
                                         .collect();
                                     Arc::new(HarnessRouter::from_lanes(
                                         &default_harness,
@@ -2961,6 +3456,29 @@ impl RuntimeBuilder {
         // the seed wins, and for `[tools]` / `[policy]` that is a security property
         // — a record-wins merge would let a runtime grant outlive the operator
         // revoking it in version control.
+        //
+        // The effective policy (seed + carried override) is computed now, before
+        // `overlay_policy` is moved into the record, so it can be applied to the
+        // live gate after the save succeeds — see below.
+        let effective_policy = effective_policy(&self.manifest.policy, overlay_policy.as_ref());
+        // Issue #1796: `self.manifest.tools.allow` already carries the console
+        // grants — folded at the top of `build`, before the first reader — so the
+        // record picks them up through the ordinary `self.manifest.clone()`
+        // below, exactly as it picks up the `[workflows].enabled` merge.
+        //
+        // Folding into the source rather than resolving per reader is what makes
+        // this trustworthy: `[tools].allow` is read at some three dozen sites
+        // across the roster build, the workflow capability bundle, the harness
+        // tool wiring and every console status route. A parallel resolution
+        // would have to reach all of them, and the single site that got missed
+        // would be a company whose connect page says "Connected" over a harness
+        // that wired nothing — the exact failure #1796 is about, reintroduced by
+        // its own fix.
+        //
+        // The seed still wins when it speaks: `carry_tool_grants_override` drops
+        // the whole overlay the moment version control edits `[tools]`, and
+        // `seed_allow` is how the *next* rebuild still sees the seed's own list
+        // through this fold.
         store
             .save(&CompanyRecord {
                 overlay_retired_agents,
@@ -2976,12 +3494,36 @@ impl RuntimeBuilder {
                 overlay_workflows,
                 overlay_budgets,
                 overlay_policy,
+                overlay_tool_grants,
                 overlay_desk_tools,
                 disabled_workflows,
                 template_provenance,
                 setup,
+                name_confirmed,
+                activation_completed_at,
             })
             .await?;
+
+        // The gate above was built from the seed's `[policy]` alone, before the
+        // persisted record was read. Now that the carried override is known —
+        // and the record carrying it is durably saved — apply the effective
+        // policy to the live gate. It is deliberately after the last fallible
+        // build step: `gate` is the outgoing runtime's shared approval gate on a
+        // hot rebuild, so mutating it before the successor is committed would
+        // leave the still-live runtime enforcing a policy whose record and API
+        // still describe the old one if `store.save` above failed (a loosening
+        // override could then bypass approvals despite the failed deployment).
+        // Parked approvals and the emergency switch are untouched; only the
+        // evaluation policy and the derived deadline move.
+        //
+        // Otherwise `GET …/policy` reports the console's deadline/cap/tier while
+        // the gate enforces the manifest snapshot, and a persisted override
+        // silently reverts on every restart (issue #1455). A test-injected gate
+        // is exempt: it carries its own policy/TTL on purpose (e.g. a zero-TTL
+        // gate for expiry tests).
+        if !gate_injected {
+            gate.apply_effective_policy(effective_policy);
+        }
 
         // Economy: an injected economy wins; otherwise the `tinyplace` feature
         // auto-wires one for a discoverable company with a handle. Going-public
@@ -3025,11 +3567,16 @@ impl RuntimeBuilder {
             filer,
             grants,
         );
+        runtime.set_memory_decorators(scratch_context, memory_scopes);
 
         // The seed dir is the company's on-disk source directory
         // (`companies/<name>`); record it so read resolvers can find committed
         // skills/workflows content on the serve path.
         runtime.set_source_dir(self.seed_dir.clone());
+        // Issue #1455: the per-cycle effective-policy refresh and the ops
+        // handler's immediate TTL write must both skip a test-injected gate.
+        // Computed above, before `self.approvals` was moved out of the builder.
+        runtime.gate_injected = gate_injected;
         // How humans sign in, resolved once here rather than per request: the
         // host-wide override wins, else the manifest's `[users].mode`. An
         // unparseable manifest mode cannot reach this point — `validate` names it
@@ -3040,7 +3587,6 @@ impl RuntimeBuilder {
                 AuthMode::from_str(&self.manifest.users.mode).unwrap_or_default()
             }),
         );
-        runtime.set_repos(repos);
         // Install-wide MCP defaults (issue #527) — set before anything resolves
         // the effective server set, so the first resolution already sees them.
         runtime.set_default_mcp_servers(self.default_mcp_servers.clone());
@@ -3052,7 +3598,7 @@ impl RuntimeBuilder {
         // against a snapshot predating the other. Adopting them is also what
         // makes the quiesce drain mean something after the swap.
         if let Some(h) = handover.as_ref() {
-            runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
+            runtime.adopt_locks(h.serial.clone(), h.per_agent.clone(), h.task_writes.clone());
         }
         runtime.adopt_continuations(continuations);
         runtime.adopt_workflow_gates(workflow_gates);
@@ -3314,6 +3860,105 @@ async fn seed_ledgers(
     Ok(())
 }
 
+/// Seeds a company's board with the setup work it starts with: the global
+/// baseline ([`crate::globals::tasks`]) plus whatever its own bundle adds under
+/// `companies/<name>/tasks.toml`.
+///
+/// Runs only on a company's first boot, and only when the caller opted in — see
+/// the call site and [`RuntimeBuilder::with_task_seeding`].
+///
+/// # Why this cannot dispatch anything
+///
+/// Two independent reasons, because one would be a footgun:
+///
+/// * A seed card has no authorable column ([`crate::company::task_file`]), so
+///   every card written here is [`COLUMN_TODO`](crate::ports::tasks::COLUMN_TODO).
+/// * The write goes through `ops.tasks.upsert` — the plain store — and never
+///   through [`CompanyRuntime::upsert_task`](crate::company::CompanyRuntime::upsert_task),
+///   which is the single site that edge-fires a dispatch or a planning pass.
+///
+/// So a company can boot with fifty cards on it and spend nothing.
+///
+/// # Precedence and ordering
+///
+/// A company's own card **wins** on a shared id: bundle cards are applied after
+/// the baseline's, replacing rather than duplicating, which is how every other
+/// global surface resolves an id collision. A baseline card the manifest
+/// disables (`[globals] disable = ["task:<id>"]`) is dropped before either.
+///
+/// Timestamps are staggered **descending** so the authored order is the order
+/// the board shows. The board sorts by `updated_at_millis` descending, and cards
+/// written inside one millisecond tie — a tie the fs backend happens to break by
+/// insertion order and SQLite does not, which would make the board's reading
+/// order depend on which backend a tenant runs.
+///
+/// A malformed bundle file is a warning and not a boot failure, exactly as it is
+/// for a bundle ledger: `content_test` fails CI on a shipped template that has
+/// one, so this arm is for a hand-edited bundle, where reaching the console to
+/// fix it beats refusing to start.
+async fn seed_tasks(
+    ops: &OpsStores,
+    manifest: &CompanyManifest,
+    id: &CompanyId,
+    seed_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    let seeds = resolve_seed_cards(&manifest.globals.disable, seed_dir, |err| {
+        tracing::warn!(company = %id, "company setup cards not seeded ({err})");
+    });
+
+    // Descending from now, one millisecond apart, so the first card authored is
+    // the first card read.
+    let now = crate::ports::now_millis();
+    for (index, seed) in seeds.iter().enumerate() {
+        let at = now.saturating_sub(index as u64);
+        let card = seed.to_record(at);
+        debug_assert_eq!(card.column, crate::ports::tasks::COLUMN_TODO);
+        ops.tasks.upsert(id, &card).await?;
+    }
+
+    Ok(())
+}
+
+/// The cards a company would be seeded with: the baseline minus what the
+/// manifest disables, with the bundle's own applied over the top.
+///
+/// Split out from [`seed_tasks`] so the precedence and the opt-out are testable
+/// without standing up a store — the write loop above is the only part that
+/// needs one, and it does nothing a test could not read off this list.
+///
+/// `on_error` is called with a bundle file that would not load. It is a callback
+/// rather than a `Result` because a bad bundle file must not stop a boot: the
+/// company still gets the baseline, and `content_test` is what makes a shipped
+/// template's bad file fatal.
+fn resolve_seed_cards(
+    disable: &[String],
+    seed_dir: Option<&std::path::Path>,
+    on_error: impl FnOnce(crate::error::OpenCompanyError),
+) -> Vec<crate::company::TaskSeed> {
+    let mut seeds: Vec<crate::company::TaskSeed> = crate::globals::tasks()
+        .iter()
+        .filter(|seed| !crate::globals::disabled(disable, "task", &seed.id))
+        .cloned()
+        .collect();
+
+    if let Some(dir) = seed_dir {
+        match crate::company::load_dir_tasks(dir) {
+            Ok(bundled) => {
+                for seed in bundled {
+                    // A company's own card wins outright rather than merging
+                    // field by field, the way its own ledger and its own agent
+                    // supersede the baseline's.
+                    seeds.retain(|global| global.id != seed.id);
+                    seeds.push(seed);
+                }
+            }
+            Err(err) => on_error(err),
+        }
+    }
+
+    seeds
+}
+
 /// Auto-wires the tiny.place economy for a discoverable company (feature build).
 ///
 /// Returns `None` unless `[place].discoverable` is set and a `@handle` is
@@ -3550,14 +4195,301 @@ fn build_networked_brain(
 mod test {
     use super::*;
     use crate::openhuman::MockOpenHumanRpc;
-    use crate::ports::types::ToolCall;
+    use crate::ports::types::{AgentOverride, CompanyId, CompressedTrace, ToolCall};
     use crate::runtime::journal::ExecutedEffect;
+
+    #[derive(Clone)]
+    struct TestMemoryScopes {
+        context: Arc<dyn ContextStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::store::MemoryScopes for TestMemoryScopes {
+        fn agent_context(&self, _agent_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        fn desk_context(&self, _desk_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        async fn archived_traces(&self, _company: &CompanyId) -> Result<Vec<CompressedTrace>> {
+            Ok(Vec::new())
+        }
+    }
 
     fn tmp_home(prefix: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix(prefix)
             .tempdir()
             .expect("tempdir")
+    }
+
+    /// A manifest upgrade that widens the allow-list into a BYO namespace must
+    /// not hand billing to persisted teammates whose grant was left unstated
+    /// (#788). Their pre-upgrade scope is frozen into an explicit line instead.
+    #[test]
+    fn an_upgrade_into_chargebee_preserves_the_pre_upgrade_scope_of_empty_lines() {
+        let old: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\"]\n",
+        )
+        .expect("old manifest");
+        let new: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("new manifest");
+        let overlay_agents = vec![
+            OverlayAgent {
+                id: "clerk".to_string(),
+                name: "Clerk".to_string(),
+                role: "Data Entry".to_string(),
+                description: None,
+                tools: Vec::new(),
+                model: None,
+                harness: None,
+            },
+            OverlayAgent {
+                id: "finance_help".to_string(),
+                name: "Finance Help".to_string(),
+                role: "Assistant".to_string(),
+                description: None,
+                tools: vec!["docs.*".to_string()],
+                model: None,
+                harness: None,
+            },
+        ];
+
+        let (migrated, _) = RuntimeBuilder::preserve_pre_upgrade_grant_scope(
+            overlay_agents,
+            Vec::new(),
+            Some(&old),
+            &new,
+        );
+
+        assert_eq!(
+            migrated[0].tools, old.tools.allow,
+            "an empty line is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+        );
+        assert_eq!(
+            migrated[1].tools,
+            vec!["docs.*".to_string()],
+            "a stated grant is untouched"
+        );
+    }
+
+    /// The console's per-agent edit half carries the same empty-means-standard
+    /// rule (`AgentOverride.tools = Some([])` is "give this teammate the
+    /// company's standard grant"), so an upgrade into a BYO namespace must
+    /// freeze its empty line to the previous allow-list as well — otherwise the
+    /// override, copied across the rebuild verbatim, replaces the new
+    /// manifest's explicit non-billing `tools` line with the widened list.
+    #[test]
+    fn an_upgrade_into_chargebee_freezes_an_empty_agent_override_scope() {
+        let old: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\"]\n",
+        )
+        .expect("old manifest");
+        let new: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("new manifest");
+        let edits = vec![
+            AgentOverride {
+                agent_id: "tax_preparer".to_string(),
+                // The stored spelling of "reset to the company's standard
+                // grant" — what the console writes for an empty tools list.
+                tools: Some(Vec::new()),
+                ..Default::default()
+            },
+            AgentOverride {
+                agent_id: "brand_strategist".to_string(),
+                tools: Some(vec!["docs.*".to_string()]),
+                ..Default::default()
+            },
+        ];
+
+        let (_, migrated) =
+            RuntimeBuilder::preserve_pre_upgrade_grant_scope(Vec::new(), edits, Some(&old), &new);
+
+        assert_eq!(
+            migrated[0].tools.as_deref().unwrap(),
+            old.tools.allow,
+            "an empty override is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+        );
+        assert_eq!(
+            migrated[1].tools.as_deref().unwrap(),
+            vec!["docs.*".to_string()],
+            "a stated override grant is untouched"
+        );
+    }
+
+    /// When the upgrade does not newly confer a BYO namespace, empty lines keep
+    /// tracking the allow-list as they always have.
+    #[test]
+    fn an_upgrade_without_a_new_billing_namespace_leaves_empty_lines_tracking() {
+        let old: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"media\"]\n",
+        )
+        .expect("old manifest");
+        let new: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"media\", \"search\"]\n",
+        )
+        .expect("new manifest");
+        let overlay_agents = vec![OverlayAgent {
+            id: "clerk".to_string(),
+            name: "Clerk".to_string(),
+            role: "Data Entry".to_string(),
+            description: None,
+            tools: Vec::new(),
+            model: None,
+            harness: None,
+        }];
+
+        let (migrated, _) = RuntimeBuilder::preserve_pre_upgrade_grant_scope(
+            overlay_agents,
+            Vec::new(),
+            Some(&old),
+            &new,
+        );
+
+        assert!(
+            migrated[0].tools.is_empty(),
+            "no BYO namespace was newly conferred, so tracking is preserved"
+        );
+    }
+
+    mod seed_cards {
+        use super::*;
+
+        fn bundle(body: &str) -> tempfile::TempDir {
+            let dir = tmp_home("opencompany-seed-cards-");
+            std::fs::write(dir.path().join("tasks.toml"), body).expect("write tasks.toml");
+            dir
+        }
+
+        fn resolve(disable: &[&str], dir: Option<&std::path::Path>) -> Vec<String> {
+            let disable: Vec<String> = disable.iter().map(|d| (*d).to_string()).collect();
+            resolve_seed_cards(&disable, dir, |err| {
+                panic!("unexpected load failure: {err}")
+            })
+            .into_iter()
+            .map(|seed| seed.id)
+            .collect()
+        }
+
+        /// A company with no bundle still gets the baseline: a
+        /// platform-provisioned tenant carries no `companies/<name>` directory
+        /// and is still a company somebody has to start using.
+        #[test]
+        fn a_company_with_no_bundle_gets_the_baseline() {
+            let ids = resolve(&[], None);
+            assert!(!ids.is_empty(), "the baseline must seed something");
+            let baseline: Vec<String> = crate::globals::tasks()
+                .iter()
+                .map(|seed| seed.id.clone())
+                .collect();
+            assert_eq!(ids, baseline);
+        }
+
+        /// The bundle's cards land after the baseline's, so the setup work every
+        /// company shares is read first.
+        #[test]
+        fn a_bundle_appends_its_own_cards_after_the_baseline() {
+            let dir = bundle("[[task]]\nid = \"set-up-the-thing\"\ntitle = \"Set up the thing\"\n");
+            let ids = resolve(&[], Some(dir.path()));
+            assert_eq!(
+                ids.last().map(String::as_str),
+                Some("set-up-the-thing"),
+                "{ids:?}"
+            );
+            assert_eq!(ids.len(), crate::globals::tasks().len() + 1);
+        }
+
+        /// A bundle card of the same id **replaces** the baseline's rather than
+        /// duplicating it — the precedence every other global surface uses.
+        #[test]
+        fn a_bundle_card_supersedes_the_baseline_card_of_the_same_id() {
+            let shared = &crate::globals::tasks()[0].id;
+            let dir = bundle(&format!(
+                "[[task]]\nid = \"{shared}\"\ntitle = \"Ours instead\"\n"
+            ));
+            let seeds = resolve_seed_cards(&[], Some(dir.path()), |err| panic!("{err}"));
+            let matching: Vec<&crate::company::TaskSeed> =
+                seeds.iter().filter(|s| &s.id == shared).collect();
+            assert_eq!(matching.len(), 1, "the id must not appear twice");
+            assert_eq!(matching[0].title, "Ours instead");
+            assert_eq!(seeds.len(), crate::globals::tasks().len());
+        }
+
+        /// `[globals].disable` drops a baseline card, using the same
+        /// `<kind>:<id>` vocabulary that already drops a baseline agent,
+        /// workflow, skill or ledger.
+        #[test]
+        fn disable_drops_one_baseline_card_and_keeps_the_rest() {
+            let dropped = crate::globals::tasks()[0].id.clone();
+            let ids = resolve(&[&format!("task:{dropped}")], None);
+            assert!(!ids.contains(&dropped), "{ids:?}");
+            assert_eq!(ids.len(), crate::globals::tasks().len() - 1);
+        }
+
+        /// A bundle file that will not load costs its own cards and nothing
+        /// else. Refusing the boot would strand a hand-edited bundle where the
+        /// console that could fix it is unreachable.
+        #[test]
+        fn a_malformed_bundle_file_still_leaves_the_baseline() {
+            let dir = bundle("[[task]\nid = ");
+            let mut reported = None;
+            let seeds = resolve_seed_cards(&[], Some(dir.path()), |err| {
+                reported = Some(err.to_string());
+            });
+            assert!(
+                reported.is_some(),
+                "the failure must be reported, not swallowed"
+            );
+            assert_eq!(seeds.len(), crate::globals::tasks().len());
+        }
+
+        /// Every seeded card is To-do, whatever it came from. `in_progress`
+        /// dispatches a run and `planning` bills a pass, so this is the property
+        /// that keeps a freshly provisioned company from spending money at boot.
+        #[test]
+        fn every_seeded_card_is_todo() {
+            let dir = bundle("[[task]]\nid = \"ours\"\ntitle = \"Ours\"\n");
+            for seed in resolve_seed_cards(&[], Some(dir.path()), |err| panic!("{err}")) {
+                let card = seed.to_record(0);
+                assert_eq!(card.column, crate::ports::tasks::COLUMN_TODO, "{}", seed.id);
+            }
+        }
+
+        /// Seeding is opt-in. `tests/one_card_per_message.rs` asserts exact board
+        /// sizes against a company built straight from this builder, so a
+        /// baseline that arrived unasked would quietly turn those assertions into
+        /// statements about the baseline.
+        #[test]
+        fn task_seeding_is_off_unless_a_caller_asks_for_it() {
+            let home = tmp_home("opencompany-seed-flag-");
+            let manifest: CompanyManifest =
+                toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest");
+            let builder = RuntimeBuilder::new(home.path().to_path_buf(), manifest);
+            assert!(!builder.seed_tasks, "board seeding must default to off");
+            assert!(builder.with_task_seeding(true).seed_tasks);
+        }
     }
 
     /// Automatic Git checkpoints are opt-in and stay off unless the operator
@@ -3585,11 +4517,507 @@ mod test {
         );
     }
 
+    /// The provider decorator only has value if the runtime keeps all of its
+    /// safe handles. This pins the overlay path specifically: direct builder
+    /// injection could otherwise pass while `with_memory_overlay` still drops
+    /// scratch, scoped facades, or the archive reader.
+    #[tokio::test]
+    async fn memory_overlay_carries_scratch_scopes_and_archive_access_to_runtime() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-memory-overlay-");
+        let memory = tempfile::tempdir().unwrap();
+        let context = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let plain: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(context.path().to_path_buf()));
+        let scratch: Arc<dyn ContextStore> =
+            Arc::new(FsContextStore::new(scratch.path().to_path_buf()));
+        let scopes: Arc<dyn crate::store::MemoryScopes> = Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
+        });
+        let mut overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(memory.path().to_path_buf())),
+            plain,
+            None,
+        );
+        overlay.scratch = Some(scratch);
+        overlay.scopes = Some(scopes);
+
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let runtime = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(runtime.scratch_context().is_some());
+        assert!(runtime.agent_context("cto").is_some());
+        assert!(runtime.desk_context("engineering").is_some());
+        assert_eq!(runtime.archived_traces().await.unwrap(), Some(Vec::new()));
+    }
+
+    /// A live engine swap must replace the outgoing engine's memory-family
+    /// ports, never inherit them. `with_handover` carries the outgoing
+    /// runtime's ports, and `build()` used to resolve those handover-first —
+    /// so a rebuild that re-applied the new selection kept the old engine's
+    /// scratch and scope partitions (issue #1113): provider→provider, the
+    /// successor read the engine the swap was replacing. The overlay-applied
+    /// marker makes the builder's own (new) handles authoritative whenever the
+    /// selection was re-applied.
+    #[tokio::test]
+    async fn a_rebuild_reapplying_the_engine_replaces_the_handover_ports() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        // Engine A: plain ports, no decorator (the pre-swap engine).
+        let home = tmp_home("opencompany-engine-swap-");
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            first.scratch_context().is_none(),
+            "engine A has no decorator"
+        );
+
+        // Engine B: adds scratch and scope partitions, so the swap is
+        // observable — the successor must carry B's, not A's (none).
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let mut overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        overlay_b.scratch = Some(Arc::new(FsContextStore::new(scratch.path().to_path_buf())));
+        overlay_b.scopes = Some(Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
+        }));
+
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay_b)
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            swapped.scratch_context().is_some(),
+            "the swapped engine's scratch partition must win over the handover's none"
+        );
+        assert!(
+            swapped.agent_context("cto").is_some(),
+            "the swapped engine's scope partition must win over the handover's none"
+        );
+    }
+
+    /// The mirror: switching to the base backend must drop the outgoing
+    /// provider's decorator, not inherit it. The handover carries the
+    /// provider's scratch and scope partitions, and a rebuild that applied no
+    /// overlay used to inherit them anyway — so a company switched to `store`
+    /// kept reading the provider it just deselected. The overlay-cleared marker
+    /// resolves the builder's own (absent) ports instead, which is the base
+    /// backend's honest answer.
+    #[tokio::test]
+    async fn a_rebuild_clearing_the_engine_drops_the_handover_decorator() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-engine-clear-");
+        let mem = tempfile::tempdir().unwrap();
+        let ctx = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let scoped = tempfile::tempdir().unwrap();
+        let mut overlay = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx.path().to_path_buf())),
+            None,
+        );
+        overlay.scratch = Some(Arc::new(FsContextStore::new(scratch.path().to_path_buf())));
+        overlay.scopes = Some(Arc::new(TestMemoryScopes {
+            context: Arc::new(FsContextStore::new(scoped.path().to_path_buf())),
+        }));
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            first.scratch_context().is_some(),
+            "engine A has a decorator"
+        );
+
+        let cleared = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay_cleared()
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            cleared.scratch_context().is_none(),
+            "the base backend has no scratch partition; the provider's must not be inherited"
+        );
+        assert!(
+            cleared.agent_context("cto").is_none(),
+            "the base backend has no scope partitions; the provider's must not be inherited"
+        );
+    }
+
+    /// The scratch/scopes swaps above leave `ops.facts` untouched: the ops
+    /// struct is inherited wholesale on a rebuild, so the fact store stayed on
+    /// the outgoing engine while memory and context moved to the new one — a
+    /// fact created after a live engine swap was written to the deselected
+    /// engine while its recall mirror went to the new context store. This pins
+    /// the override that keeps `facts` on the selected engine's port family.
+    #[tokio::test]
+    async fn a_rebuild_reapplying_the_engine_replaces_the_fact_store() {
+        use crate::store::{FsContextStore, FsMemoryStore, FsOps, MemoryOverlay};
+
+        // Engine A serves facts; the swap to B must re-point `ops.facts` at B's
+        // store, not keep A's.
+        let home = tmp_home("opencompany-engine-fact-swap-");
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let facts_dir_a = tempfile::tempdir().unwrap();
+        let facts_a: Arc<dyn FactStore> = Arc::new(FsOps::new(facts_dir_a.path().to_path_buf()));
+        let mut overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        overlay_a.facts = Some(facts_a.clone());
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(first.facts(), &facts_a),
+            "engine A's facts are the runtime's before the swap"
+        );
+
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let facts_dir_b = tempfile::tempdir().unwrap();
+        let facts_b: Arc<dyn FactStore> = Arc::new(FsOps::new(facts_dir_b.path().to_path_buf()));
+        let mut overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        overlay_b.facts = Some(facts_b.clone());
+
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_b)
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(swapped.facts(), &facts_b),
+            "the swapped engine's facts must win over the handover's engine A store"
+        );
+
+        // The mirror: switching to the base backend drops the provider's fact
+        // store back onto the base backend, exactly as the first-construction
+        // branch does for an engine that serves no facts.
+        let cleared = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay_cleared()
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(cleared.facts(), &facts_a),
+            "switching to `store` must drop the outgoing provider's fact store"
+        );
+    }
+
+    /// Issue #1113 wiring: a live engine swap must move the selection marker on
+    /// the inherited harness pool, so the pool can drop the cached roster on
+    /// the next rebuild and `ensure` can fold the replacement ports into new
+    /// agents.
+    ///
+    /// The pool-level contract (roster dropped, replacement store read) is
+    /// covered in `harness::built_in`; this pins the builder half — every build
+    /// re-records the selection, an unchanged one is a no-op, and a swap moves
+    /// the marker.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_rebuild_over_a_swapped_engine_rebinds_the_harness_pool() {
+        use crate::store::{FsContextStore, FsMemoryStore, MemoryOverlay};
+
+        let home = tmp_home("opencompany-engine-pool-");
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let pool = Arc::new(crate::harness::HarnessPool::new());
+
+        let mem_a = tempfile::tempdir().unwrap();
+        let ctx_a = tempfile::tempdir().unwrap();
+        let overlay_a = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_a.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_a.path().to_path_buf())),
+            None,
+        );
+        let first = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .with_harness(pool.clone())
+            .build()
+            .await
+            .unwrap();
+        let id = first.id().clone();
+        let fp_a = pool.memory_engine(&id).await;
+        assert!(
+            fp_a.is_some(),
+            "boot records the engine selection on the pool"
+        );
+
+        // A rebuild that re-applies the same engine is a no-op: same marker,
+        // so the pool keeps the roster (conversation history intact).
+        let again = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+            .with_memory_overlay(&overlay_a)
+            .with_harness(pool.clone())
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            pool.memory_engine(&id).await,
+            fp_a,
+            "re-applying the same engine keeps the same marker"
+        );
+        drop(again);
+
+        // A live swap to engine B moves the marker, so the pool can tell the
+        // cached roster is stale and drop it on the next build.
+        let mem_b = tempfile::tempdir().unwrap();
+        let ctx_b = tempfile::tempdir().unwrap();
+        let overlay_b = MemoryOverlay::test_with_ports(
+            Arc::new(FsMemoryStore::new(mem_b.path().to_path_buf())),
+            Arc::new(FsContextStore::new(ctx_b.path().to_path_buf())),
+            None,
+        );
+        let swapped = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_memory_overlay(&overlay_b)
+            .with_harness(pool.clone())
+            .with_handover(first.handover())
+            .build()
+            .await
+            .unwrap();
+        let fp_b = pool.memory_engine(&id).await;
+        assert!(
+            fp_b.is_some(),
+            "the swap re-records the engine selection on the pool"
+        );
+        assert_ne!(
+            fp_b, fp_a,
+            "a different engine must move the marker, or the pool cannot tell a swap from a no-op"
+        );
+        drop(swapped);
+    }
+
     mod scoped_grants {
         use super::*;
 
         fn strings(values: &[&str]) -> Vec<String> {
             values.iter().map(|v| v.to_string()).collect()
+        }
+
+        /// A catch-all company grant must not satisfy opt-in namespaces that
+        /// carry billing, tenant credentials, third-party source access, or
+        /// workspace writes. Workspace writes protect operator-owned
+        /// guidance and therefore require an explicit `workspace` or
+        /// `workspace.write` grant, just like the special namespaces below.
+        #[test]
+        fn wildcard_does_not_cover_special_namespaces() {
+            let allow = strings(&["*"]);
+            for grant in [
+                "media",
+                "media.*",
+                "media.image",
+                "composio",
+                "composio.*",
+                "composio.gmail",
+                "chargebee",
+                "chargebee.*",
+                "chargebee.read",
+                "hosting",
+                "hosting.*",
+                "hosting.deploy",
+                "paypal",
+                "paypal.*",
+                "paypal.wallet",
+                "search",
+                "search.*",
+                "search.web",
+                "mcp:*",
+                "mcp*",
+            ] {
+                assert!(
+                    !allow_covers(&allow, grant),
+                    "catch-all must not cover opt-in grant `{grant}`"
+                );
+            }
+            assert!(!allow_covers(&allow, "workspace.write"));
+            assert!(
+                !allow_covers(&allow, "workspace"),
+                "the bare `workspace` grant is a write grant to the wiring predicate, \
+                 so a catch-all must not cover it"
+            );
+            assert!(allow_covers(&allow, "workspace.read"));
+            assert!(allow_covers(&allow, "docs.read"));
+        }
+
+        /// Explicit special grants still cover the corresponding setup belt —
+        /// bare namespaces and sub-grant requests alike, matching the `_explicit`
+        /// wiring predicates that accept both shapes.
+        #[test]
+        fn explicit_special_grants_cover_their_namespaces() {
+            let allow = strings(&[
+                "media",
+                "composio",
+                "chargebee",
+                "hosting",
+                "paypal",
+                "search",
+                "mcp:*",
+                "workspace",
+            ]);
+            for grant in [
+                "media",
+                "media.*",
+                "media.image",
+                "composio",
+                "composio.*",
+                "composio.gmail",
+                "chargebee",
+                "chargebee.*",
+                "chargebee.read",
+                "hosting",
+                "hosting.*",
+                "hosting.deploy",
+                "paypal",
+                "paypal.*",
+                "paypal.wallet",
+                "search",
+                "search.*",
+                "search.web",
+                "mcp:*",
+                "workspace",
+                "workspace.write",
+            ] {
+                assert!(
+                    allow_covers(&allow, grant),
+                    "explicit grant must cover `{grant}`"
+                );
+            }
+        }
+
+        /// The workspace write grant does not cover a read-glob request, in
+        /// either direction of the asymmetry the manifest pair documents.
+        ///
+        /// `workspace` is a *write* grant to the wiring predicate
+        /// ([`grants_workspace_write_explicit`]), while a `workspace.*` request
+        /// strips to `workspace.` and falls to the generic matcher, where an
+        /// unstarred grant matches only itself — so `allow_covers` answers
+        /// false, and `agent_effective_grants` drops the request from the
+        /// belt. The console's `companyCovers` mirror pins the same pair.
+        #[test]
+        fn a_write_grant_does_not_cover_a_read_glob_request() {
+            assert!(!allow_covers(&strings(&["workspace"]), "workspace.*"));
+            assert!(allow_covers(
+                &strings(&["workspace", "workspace.*"]),
+                "workspace.*"
+            ));
+            assert!(!allow_covers(&strings(&["*"]), "workspace.write"));
+        }
+
+        /// A bare opt-in namespace grant covers its sub-grant requests, again
+        /// matching the wiring predicate: `search.web` in the effective grants
+        /// satisfies `grants_search_explicit` exactly as `search` does, so the
+        /// request must not be dropped at the allow-list. The ordinary namespaces
+        /// keep the exact-match rule, which is why this test sits beside the two
+        /// opt-in ones rather than being folded into the generic matcher.
+        #[test]
+        fn a_bare_opt_in_grant_covers_its_sub_grants() {
+            assert!(allow_covers(&strings(&["search"]), "search.*"));
+            assert!(allow_covers(&strings(&["search"]), "search.web"));
+            assert!(allow_covers(&strings(&["media"]), "media.image"));
+            assert!(allow_covers(&strings(&["chargebee"]), "chargebee.read"));
+            assert!(
+                !allow_covers(&strings(&["docs"]), "docs.read"),
+                "ordinary namespaces keep the unstarred-grant exact-match rule"
+            );
+        }
+
+        /// A request glob whose `*` is glued to an explicit opt-in namespace
+        /// (`search*`, `workspace.write*`) is stored *verbatim* by the write
+        /// path, and the wiring predicates reject the glued spelling —
+        /// `grants_search_explicit` wants `search` or a `search.`-descendant,
+        /// `grants_workspace_write_explicit` wants the two exact tokens. So even
+        /// a company that holds the namespace must not have `allow_covers`
+        /// promise a grant that will silently fail to wire; the console's
+        /// `companyCovers` mirror pins the same rule.
+        #[test]
+        fn a_glued_star_opt_in_request_is_not_covered() {
+            let allow = strings(&[
+                "search",
+                "workspace",
+                "media",
+                "composio",
+                "chargebee",
+                "hosting",
+                "paypal",
+                "mcp:*",
+            ]);
+            for grant in [
+                "search*",
+                "workspace*",
+                "workspace.write*",
+                "media*",
+                "composio*",
+                "chargebee*",
+                "hosting*",
+                "paypal*",
+                "mcp*",
+            ] {
+                assert!(
+                    !allow_covers(&allow, grant),
+                    "glued-star `{grant}` must not be covered"
+                );
+            }
+        }
+
+        /// The separator-broken opt-in spellings — the ones the wiring
+        /// predicates actually accept — stay covered even when they end in a
+        /// `*`: `search.web*` strips to a `search.`-descendant that
+        /// `grants_search_explicit` accepts verbatim, `workspace.write` is an
+        /// exact write token, and `mcp:notion*` is a colon-scoped prefix.
+        #[test]
+        fn a_separator_broken_opt_in_request_stays_covered() {
+            let allow = strings(&["search", "workspace", "media", "mcp:*"]);
+            assert!(allow_covers(&allow, "search.*"));
+            assert!(allow_covers(&allow, "search.web*"));
+            assert!(allow_covers(&allow, "workspace.write"));
+            assert!(allow_covers(&allow, "media.*"));
+            assert!(allow_covers(&allow, "media.image*"));
+            assert!(allow_covers(&allow, "mcp:notion*"));
         }
 
         /// Runs the three-level narrowing over `&str` slices, so each case below
@@ -4244,6 +5672,7 @@ mod test {
                     id: "u1".into(),
                     email: "ada@example.com".into(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Active,
                     password_hash: None,
@@ -5388,122 +6817,6 @@ needs_reason = true
         toml::from_str(toml_src).expect("valid manifest")
     }
 
-    // ---- issue #752: `repo` needs a backend that keeps secrets off disk ----
-
-    /// A company that already bound a repository predates the bind-time gate,
-    /// so the *restart* is where it has to be caught. A repo-granted company on
-    /// an fs host does not come up.
-    #[tokio::test]
-    async fn a_repo_granted_company_does_not_boot_on_a_plaintext_secret_backend() {
-        let home = tmp_home("oc-752-boot-");
-        let manifest = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["repo", "shell"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-            .with_id(CompanyId::new("acme"))
-            // The default, spelled out: this is what a local `serve` is.
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect_err("an fs host must refuse to bring up a repo-granted company");
-        let message = err.to_string();
-        assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
-        assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
-        assert!(message.contains("`repo` grant"), "{message}");
-    }
-
-    /// The wildcard case, which a check against `[tools].allow` alone would let
-    /// through: `*` deliberately does **not** confer `repo`, so the company line
-    /// reads as ungranted while the agent naming `repo` explicitly holds it.
-    #[tokio::test]
-    async fn an_agent_that_names_repo_under_a_wildcard_company_is_caught_too() {
-        let home = tmp_home("oc-752-boot-wildcard-");
-        let manifest = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["*"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            tools = ["repo"]
-            "#,
-        );
-        // The company line itself is not an explicit grant — if it were, this
-        // test would pass for the wrong reason.
-        assert!(!crate::company::grants_repo_explicit(&manifest.tools.allow));
-        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect_err("an agent-level `repo` grant must be caught at boot");
-        assert!(err.to_string().contains("OPENCOMPANY_STORAGE=fs"), "{err}");
-    }
-
-    /// The other side, without which the two above only prove the check is on:
-    /// the same company boots on the backend that keeps secrets out of the
-    /// container, and a company that grants no `repo` boots on fs unaffected.
-    #[tokio::test]
-    async fn the_same_company_boots_where_secrets_leave_the_container() {
-        let home = tmp_home("oc-752-boot-ok-");
-        let granted = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["repo", "shell"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        RuntimeBuilder::new(home.path().to_path_buf(), granted)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Mongodb)
-            .build()
-            .await
-            .expect("mongodb-backed secrets must clear the #752 boot gate");
-
-        let ungranted_home = tmp_home("oc-752-boot-ungranted-");
-        let ungranted = parse(
-            r#"
-            [company]
-            name = "Acme"
-            [policy]
-            mode = "full"
-            [tools]
-            allow = ["shell", "web"]
-            [[agent]]
-            id = "ceo"
-            role = "Chief"
-            "#,
-        );
-        RuntimeBuilder::new(ungranted_home.path().to_path_buf(), ungranted)
-            .with_id(CompanyId::new("acme"))
-            .with_storage_kind(crate::store::StorageKind::Fs)
-            .build()
-            .await
-            .expect("a company without `repo` is untouched by this gate");
-    }
-
-    // ---- `[policy]` override across a rebuild (issue #562) ----------------
-
     fn seed_policy(mode: &str, always: &[&str], under: Option<f64>) -> Policy {
         Policy {
             mode: mode.to_string(),
@@ -5518,6 +6831,8 @@ needs_reason = true
         PolicyOverride {
             mode: Some(mode.to_string()),
             always_approve: None,
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
             set_by: Actor {
                 kind: ActorKind::User,
                 id: "admin-1".to_string(),
@@ -5598,6 +6913,142 @@ needs_reason = true
         let after = seed_policy("full", &[], None);
         assert!(carry_policy_override(&before, &before.clone(), None).is_none());
         assert!(carry_policy_override(&before, &after, None).is_none());
+    }
+
+    /// A `[tools]` block granting exactly `allow`.
+    fn seed_tools(allow: &[&str]) -> Tools {
+        let mut tools = Tools {
+            provider: crate::company::TOOL_PROVIDERS[0].to_string(),
+            allow: allow.iter().map(|g| g.to_string()).collect(),
+            web_allowed_domains: Vec::new(),
+            composio: Default::default(),
+            search_daily_calls: None,
+            max_delegation_depth: None,
+        };
+        tools.allow.shrink_to_fit();
+        tools
+    }
+
+    /// A console grant of `added`, as the write route would have stored it.
+    fn held_grants(added: &[&str]) -> ToolGrantsOverride {
+        use crate::ports::types::{Actor, ActorKind};
+        ToolGrantsOverride {
+            added: added.iter().map(|g| g.to_string()).collect(),
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "admin-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// A rebuild that does not touch `[tools]` leaves the console grants alone
+    /// (issue #1796).
+    ///
+    /// The half that makes the one-click grant durable. Clearing on every
+    /// rebuild would put the operator straight back in the dead end: the
+    /// integration would read "Connected" and reach nobody again after the next
+    /// restart, with nothing in the console saying the grant had been dropped.
+    #[test]
+    fn an_unchanged_seed_tools_block_leaves_the_grants_alone() {
+        let seed = seed_tools(&["*"]);
+        let carried =
+            carry_tool_grants_override(&seed, &seed.clone(), Some(&held_grants(&["chargebee"])));
+        assert_eq!(
+            carried.map(|o| o.added),
+            Some(vec!["chargebee".to_string()])
+        );
+    }
+
+    /// A seed `[tools]` change clears the console grants — version control wins
+    /// when it speaks.
+    ///
+    /// **The security half, and the sharper one.** This is the only overlay in
+    /// the product that widens capability, so a grant outliving a seed edit
+    /// would be a runtime grant surviving the operator revoking it in version
+    /// control: the named harm that makes `[tools]` seed-authoritative at all.
+    #[test]
+    fn a_changed_seed_tools_block_clears_the_grants() {
+        let before = seed_tools(&["*", "chargebee"]);
+        let revoked = seed_tools(&["*"]);
+        assert!(
+            carry_tool_grants_override(&before, &revoked, Some(&held_grants(&["paypal"])))
+                .is_none(),
+            "a seed that edited `[tools]` must clear the console grants"
+        );
+
+        // Widening the seed clears them too. The rule is "the seed spoke", not
+        // "the seed got stricter" — an operator who edits `[tools]` at all has
+        // turned their attention to the company's grant.
+        let widened = seed_tools(&["*", "hosting"]);
+        assert!(
+            carry_tool_grants_override(&revoked, &widened, Some(&held_grants(&["paypal"])))
+                .is_none()
+        );
+    }
+
+    /// Any field of `[tools]` counts as the seed speaking, not just `allow`.
+    /// The Composio toolkit allowlist narrows what a granted namespace can
+    /// reach, so an edit to it that left a console grant standing would be the
+    /// same hole through a different field.
+    #[test]
+    fn every_tools_field_counts_as_the_seed_speaking() {
+        let base = seed_tools(&["*"]);
+        let mut narrowed = base.clone();
+        narrowed.composio.toolkits = vec!["gmail".to_string()];
+        assert!(
+            carry_tool_grants_override(&base, &narrowed, Some(&held_grants(&["composio"])))
+                .is_none()
+        );
+    }
+
+    /// With no grants held there is nothing to carry, whatever the seed did.
+    #[test]
+    fn no_tool_grants_carry_nothing() {
+        let before = seed_tools(&["*"]);
+        let after = seed_tools(&["files"]);
+        assert!(carry_tool_grants_override(&before, &before.clone(), None).is_none());
+        assert!(carry_tool_grants_override(&before, &after, None).is_none());
+    }
+
+    /// The carry rule compares **seeds**, and the record's manifest is not one:
+    /// it is materialised seed-plus-grants. `seed_allow` is what recovers the
+    /// seed side, and without it a company with any console grant would report
+    /// "version control spoke" on its very first rebuild and lose the grant —
+    /// making the whole layer inert one restart after it was clicked.
+    #[test]
+    fn the_seed_is_recovered_from_the_materialised_manifest() {
+        let seed = seed_tools(&["*"]);
+        let held = held_grants(&["chargebee"]);
+        // What the record actually stores after a grant: the fold.
+        let mut materialised = seed.clone();
+        materialised.allow.push("chargebee".to_string());
+
+        assert_eq!(seed_allow(&materialised, Some(&held)).allow, seed.allow);
+        assert!(
+            carry_tool_grants_override(&seed_allow(&materialised, Some(&held)), &seed, Some(&held))
+                .is_some(),
+            "an untouched seed must keep the grant across a rebuild"
+        );
+    }
+
+    /// A namespace the seed *now* grants on its own clears the override: the
+    /// subtraction makes the seed look changed, which is both the honest read
+    /// (version control did edit `[tools]`) and the safe one — the company
+    /// keeps the grant either way, and the console stops claiming credit for it.
+    #[test]
+    fn a_seed_that_adopts_the_grant_clears_the_override() {
+        let held = held_grants(&["chargebee"]);
+        let materialised = seed_tools(&["*", "chargebee"]);
+        let next_seed = seed_tools(&["*", "chargebee"]);
+        assert!(
+            carry_tool_grants_override(
+                &seed_allow(&materialised, Some(&held)),
+                &next_seed,
+                Some(&held)
+            )
+            .is_none()
+        );
     }
 
     /// A bodiless overlay stub — `merge_enabled_workflows` only reads the id.
@@ -5728,6 +7179,7 @@ needs_reason = true
             None,
             wf_draft("daily_digest", "Daily Digest"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -5844,6 +7296,153 @@ needs_reason = true
             "a runtime tool grant survived a seed rollback"
         );
         assert_eq!(rebuilt.manifest.company.name, "Acme");
+    }
+
+    /// Issue #1796: a grant written through the **overlay** survives a rebuild,
+    /// where the raw manifest write above does not.
+    ///
+    /// The two tests are a pair, and the pair is the design. A runtime write
+    /// straight into `record.manifest.tools.allow` is still discarded — the
+    /// seed-wins property is untouched — while a console grant, which is an
+    /// attributed operator decision the seed never spoke about, is carried and
+    /// re-folded. Without this the one-click grant would work until the next
+    /// restart and then silently revert, which is the dead end #1796 is about
+    /// with a delay attached.
+    #[tokio::test]
+    async fn a_console_tool_grant_survives_a_rebuild() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-tool-grant-rebuild-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("[tools]\nallow=[\"*\"]\n");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            !crate::company::grants_chargebee_explicit(&record.manifest.tools.allow),
+            "the catch-all must not confer it to begin with"
+        );
+        record.overlay_tool_grants = Some(held_grants(&["chargebee"]));
+        record.manifest.tools.allow = record.effective_tool_allow();
+        store.save(&record).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            crate::company::grants_chargebee_explicit(&rebuilt.manifest.tools.allow),
+            "the console grant must survive the rebuild: {:?}",
+            rebuilt.manifest.tools.allow
+        );
+        assert_eq!(
+            rebuilt
+                .overlay_tool_grants
+                .as_ref()
+                .map(|o| o.added.clone()),
+            Some(vec!["chargebee".to_string()]),
+            "and it must still be attributed to the operator, not to the seed"
+        );
+        // Folded exactly once, however many rebuilds run.
+        assert_eq!(
+            rebuilt
+                .manifest
+                .tools
+                .allow
+                .iter()
+                .filter(|g| *g == "chargebee")
+                .count(),
+            1
+        );
+        drop(runtime);
+
+        // And version control still wins when it speaks: a seed that edits
+        // `[tools]` drops the console grant wholesale.
+        let runtime = RuntimeBuilder::new(home, wf_manifest("[tools]\nallow=[\"files\"]\n"))
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let after_seed_edit = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(after_seed_edit.manifest.tools.allow, vec!["files"]);
+        assert!(after_seed_edit.overlay_tool_grants.is_none());
+    }
+
+    /// The console grant reaches the **tool provider's** grant list, which is
+    /// what `call_tool` enforces against (issue #1796).
+    ///
+    /// This is the reader the first shape of the fold missed, and missing it was
+    /// worse than not shipping the feature. `effective_grants(&self.manifest)`
+    /// runs near the top of `build`, ~800 lines ahead of where the overlays used
+    /// to load, so folding into a local clone at the save site left the provider
+    /// holding the seed's list — permanently, since a rebuild re-parses
+    /// `company.toml`. The operator would see every console surface report
+    /// "granted" while the very next tool call was refused as ungranted.
+    ///
+    /// Asserted through `effective_grants` on the runtime's own manifest rather
+    /// than by poking the provider, because that function IS the provider's
+    /// input: `build` passes its result straight to `StubToolProvider::new` /
+    /// `OpenHumanToolProvider::new`.
+    #[tokio::test]
+    async fn a_console_tool_grant_reaches_the_grant_list_the_provider_enforces() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-tool-grant-provider-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        // A catch-all company: `*` covers shell/code/web and confers none of the
+        // namespaces this layer deals in, which is the manifest shape the issue
+        // was reported against.
+        let manifest = wf_manifest("[tools]\nallow=[\"*\"]\n");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        assert!(
+            !crate::company::grants_search_explicit(&effective_grants(&manifest)),
+            "the catch-all must not confer it to begin with"
+        );
+
+        // Exactly what `PUT …/tools/grants` writes.
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_tool_grants = Some(held_grants(&["search"]));
+        record.manifest.tools.allow = record.effective_tool_allow();
+        store.save(&record).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+
+        // The record — the readers that were already right.
+        assert!(crate::company::grants_search_explicit(
+            &rebuilt.manifest.tools.allow
+        ));
+        // And the grant list the provider is constructed from, which is the one
+        // that was wrong. `build` computes this from `self.manifest`, so this
+        // fails unless the fold reached the source rather than a local clone.
+        assert!(
+            crate::company::grants_search_explicit(&effective_grants(&rebuilt.manifest)),
+            "the provider's grant list must carry the console grant: {:?}",
+            effective_grants(&rebuilt.manifest)
+        );
     }
 
     /// Issue #208: an enabled id with no surviving graph body — a seed entry
@@ -6068,14 +7667,18 @@ needs_reason = true
                     name: "Research".to_string(),
                     description: None,
                     members: vec!["ceo".to_string()],
+                    responder: crate::ports::types::ResponderMode::default(),
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -6242,14 +7845,18 @@ needs_reason = true
                     name: "Research".to_string(),
                     description: None,
                     members: vec!["ceo".to_string()],
+                    responder: crate::ports::types::ResponderMode::default(),
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -6507,6 +8114,8 @@ needs_reason = true
             description: None,
             tools: None,
             instructions: None,
+            avatar: None,
+            ..Default::default()
         });
         record.retire_agent("cto");
         store.save(&record).await.unwrap();
@@ -6639,10 +8248,13 @@ needs_reason = true
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -6664,11 +8276,13 @@ needs_reason = true
             .unwrap();
 
         let desk_turn = |text: &'static str| CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: text.to_string(),
             by: None,
             chat: Some("eng".to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
 
         // Baseline: the blueprint lead answers. Asserted rather than assumed, so
@@ -6759,10 +8373,13 @@ needs_reason = true
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -6795,6 +8412,7 @@ needs_reason = true
             name: "Design".to_string(),
             description: None,
             members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
         });
         record.overlay_desk_members.push(OverlayDeskMember {
             desk_id: "design".to_string(),
@@ -6812,11 +8430,13 @@ needs_reason = true
 
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hello design".to_string(),
                 by: None,
                 chat: Some("design".to_string()),
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .expect("cycle");
@@ -6900,10 +8520,13 @@ needs_reason = true
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -6930,11 +8553,13 @@ needs_reason = true
         // lead `eng2`, not the blueprint lead `eng1`.
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "who leads?".to_string(),
                 by: None,
                 chat: Some("eng".to_string()),
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .expect("cycle");
@@ -6951,6 +8576,117 @@ needs_reason = true
         assert!(
             !labels.contains(&"task-outcome/eng1"),
             "desk turn routed to the blueprint lead eng1 — the builder dropped the operator desk order; saw {labels:?}"
+        );
+    }
+
+    /// A build applies the carried console override to the live gate, and marks
+    /// the runtime so the per-cycle refresh (issue #1455) knows the gate is the
+    /// real one. A test-injected gate is exempt on both counts: it carries its
+    /// own policy/TTL on purpose.
+    #[tokio::test]
+    async fn build_applies_the_effective_policy_to_the_gate_but_not_an_injected_one() {
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{
+            Actor, ActorKind, Effect, EffectGroup, PolicyDecision, PolicyOverride,
+        };
+        use crate::store::FsCompanyStore;
+
+        let dir = tmp_home("oc-policy-build-");
+        let manifest = parse(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [policy]\nmode = \"supervised\"\n\
+             always_approve = [\"payment.send\"]\n\
+             auto_approve_under_usd = 5.0\n\
+             approval_ttl_hours = 24\n",
+        );
+        let id = CompanyId::new("acme");
+        let overlay = PolicyOverride {
+            mode: Some("full".to_string()),
+            always_approve: None,
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "admin-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        };
+        FsCompanyStore::new(dir.path())
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: Some(overlay),
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+
+        let runtime = RuntimeBuilder::new(dir.path(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        assert!(!runtime.gate_injected);
+        // The override moved the tier: a $30 spend, above the manifest cap of
+        // $5, now `Allow`s under the carried `full` mode.
+        let spend = Effect {
+            kind: "x402.spend".to_string(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(30.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        assert!(matches!(
+            runtime.approval_gate.evaluate(&id, &spend).await.unwrap(),
+            PolicyDecision::Allow
+        ));
+
+        // An injected gate wins: the build must not clobber its fixture.
+        let injected = Arc::new(
+            ManifestApprovalGate::new(seed_policy("readonly", &[], None)).with_ttl_millis(999),
+        );
+        let injected_runtime = RuntimeBuilder::new(dir.path(), manifest)
+            .with_id(id.clone())
+            .with_approvals(injected.clone())
+            .build()
+            .await
+            .unwrap();
+        assert!(injected_runtime.gate_injected);
+        assert_eq!(injected_runtime.approval_gate.ttl_millis(), 999);
+        assert_eq!(
+            injected_runtime.approval_gate.parked_ids(),
+            injected.parked_ids()
+        );
+        assert!(
+            matches!(
+                injected_runtime
+                    .approval_gate
+                    .evaluate(&id, &spend)
+                    .await
+                    .unwrap(),
+                PolicyDecision::RequireApproval
+            ),
+            "the injected readonly gate must keep its own policy, not the carried override"
         );
     }
 }

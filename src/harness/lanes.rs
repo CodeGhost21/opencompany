@@ -87,6 +87,7 @@ fn resolve_acp_engine(
     harness: &Harness,
     acp_agents: Option<AcpFactory<'_>>,
     workspace_root: &std::path::Path,
+    agent_models: &std::collections::HashMap<String, String>,
 ) -> std::result::Result<Arc<dyn RunTurn>, String> {
     // Validation guarantees `acp` is `Some` and `transport` is one of
     // `ACP_TRANSPORTS` on every harness that reaches here — this crate's own
@@ -109,7 +110,7 @@ fn resolve_acp_engine(
     let factory = acp_agents.ok_or_else(|| unavailable_reason("acp"))?;
     let agent_id = acp.agent.as_deref().unwrap_or_default();
     factory
-        .build(agent_id, acp.model.as_deref(), workspace_root)
+        .build(agent_id, acp.model.as_deref(), agent_models, workspace_root)
         .map(|agent| {
             Arc::new(crate::harness::acp::run_turn::AcpRunTurn::new(agent)) as Arc<dyn RunTurn>
         })
@@ -124,6 +125,7 @@ fn resolve_acp_engine(
     _harness: &Harness,
     _acp_agents: Option<AcpFactory<'_>>,
     _workspace_root: &std::path::Path,
+    _agent_models: &std::collections::HashMap<String, String>,
 ) -> std::result::Result<Arc<dyn RunTurn>, String> {
     Err(unavailable_reason("acp"))
 }
@@ -148,23 +150,111 @@ pub struct Lanes {
 
 /// Which agents are bound to `harness_id`, given the company's default.
 fn agents_on(record: &CompanyRecord, harness_id: &str, default_harness: &str) -> HashSet<String> {
+    // `effective_agents`, not `manifest.agents`: an admin's harness or model
+    // edit to a blueprint teammate is stored as an overlay, so the raw
+    // manifest row still says what the company launched with. Reading it here
+    // meant a saved binding survived the write, survived a restart, and was
+    // then ignored by the runtime that actually routes turns — the setting
+    // persisted everywhere except where it mattered. It also drops retired
+    // teammates, which have no business in a lane.
     let mut ids: HashSet<String> = record
-        .manifest
-        .agents
-        .iter()
+        .effective_agents()
+        .into_iter()
         .filter(|a| a.harness.as_deref().unwrap_or(default_harness) == harness_id)
-        .map(|a| a.id.clone())
+        .map(|a| a.id)
         .collect();
-    // A console-created (overlay) teammate has no manifest row and therefore no
-    // harness binding — `overlay_agent_to_manifest` hardcodes `harness: None` —
-    // so every overlay runs on the default harness. Fold them into the default
-    // lane's serve set, or a multi-harness company would build them on no pool
-    // at all: the default pool's `serves` would exclude them, no other lane
-    // claims them, and the roster would silently drop a teammate the console
-    // is still showing.
-    if harness_id == default_harness {
-        ids.extend(record.overlay_agents.iter().map(|a| a.id.clone()));
-    }
+    // A console-created (overlay) teammate carries its own optional binding
+    // (issue #1245's harness-picker follow-up), resolved against the default
+    // exactly like a manifest agent's. Folded in here rather than left for
+    // some other pool to claim — every harness's serve set has to account for
+    // its own overlay teammates, or a multi-harness company would build one
+    // on no pool at all: the roster would silently drop a teammate the
+    // console is still showing.
+    ids.extend(
+        record
+            .overlay_agents
+            .iter()
+            .filter(|a| a.harness.as_deref().unwrap_or(default_harness) == harness_id)
+            .map(|a| a.id.clone()),
+    );
+    ids
+}
+
+/// Per-agent model overrides for the agents [`agents_on`] returns for
+/// `harness_id` — issue #1245's per-agent follow-up.
+///
+/// A `HashMap` rather than reusing `agents_on`'s `HashSet<String>`: an ACP
+/// harness's factory needs the override *value*, not just which agents are
+/// bound, and looking it back up by id from `record` at prompt time would
+/// mean `LocalAcpAgent` holding a `&CompanyRecord` across turns rather than
+/// the plain snapshot `resolve_acp_engine` already builds once. Only agents
+/// with a model override appear here — `CompanyManifest::validate` already
+/// confirmed every override sits on an `acp`-bound agent, so a `built_in`
+/// company's agents never enter this map at all.
+fn agent_models_on(
+    record: &CompanyRecord,
+    harness_id: &str,
+    default_harness: &str,
+) -> std::collections::HashMap<String, String> {
+    // Effective, not raw — see `agents_on`. A model an admin picked in the
+    // console lives in the overlay, and this map is what actually carries it
+    // to the spawned harness.
+    let mut models: std::collections::HashMap<String, String> = record
+        .effective_agents()
+        .into_iter()
+        .filter(|a| a.harness.as_deref().unwrap_or(default_harness) == harness_id)
+        .filter_map(|a| a.model.clone().map(|model| (a.id, model)))
+        .collect();
+    // Mirrors `agents_on`'s own overlay fold: an overlay teammate's own
+    // binding decides which harness's map it enters, not an assumed default.
+    models.extend(
+        record
+            .overlay_agents
+            .iter()
+            .filter(|a| a.harness.as_deref().unwrap_or(default_harness) == harness_id)
+            .filter_map(|a| a.model.clone().map(|model| (a.id.clone(), model))),
+    );
+    models
+}
+
+/// Coding-CLI harness ids some agent binds to that no `[[harness]]` declares
+/// — issue #1245's detected-harness follow-up.
+///
+/// Sorted and de-duplicated so a rebuild produces the same lane order rather
+/// than whatever the roster happened to iterate in.
+///
+/// Reads **both** roster halves: an overlay teammate carries its own
+/// `harness` binding now, and a console-added teammate on a detected CLI is
+/// the whole point of the feature — missing it would leave that agent bound
+/// to a lane nothing built.
+fn referenced_implicit_locals(
+    record: &CompanyRecord,
+    declared: &[Harness],
+    default_harness: &str,
+) -> Vec<String> {
+    // Effective, not raw — see `agents_on`. This decides which implicit-local
+    // lanes get synthesized at all, so missing an overlay binding here leaves
+    // the teammate bound to a lane nothing built.
+    let effective = record.effective_agents();
+    let manifest_bindings = effective.iter().filter_map(|a| a.harness.as_deref());
+    let overlay_bindings = record
+        .overlay_agents
+        .iter()
+        .filter_map(|a| a.harness.as_deref());
+
+    let mut ids: Vec<String> = manifest_bindings
+        .chain(overlay_bindings)
+        .map(str::trim)
+        // The default is resolved elsewhere and must not be shadowed here: a
+        // company whose default *is* a declared `claude` harness would
+        // otherwise get a second, synthesized lane of the same id.
+        .filter(|id| *id != default_harness)
+        .filter(|id| Harness::is_implicit_local_id(id))
+        .filter(|id| !declared.iter().any(|h| h.id == *id))
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
     ids
 }
 
@@ -200,7 +290,12 @@ pub fn build(
         "built_in" => {
             Some(Arc::new(HarnessRunTurn::new(pool, Arc::new(base.clone()))) as Arc<dyn RunTurn>)
         }
-        "acp" => match resolve_acp_engine(&default_harness, acp_agents, &base.workspace_root) {
+        "acp" => match resolve_acp_engine(
+            &default_harness,
+            acp_agents,
+            &base.workspace_root,
+            &agent_models_on(record, &default_harness_id, &default_harness_id),
+        ) {
             Ok(engine) => Some(engine),
             Err(reason) => {
                 unavailable.push((default_harness_id.clone(), reason));
@@ -226,7 +321,12 @@ pub fn build(
                     &default_harness_id,
                 ),
             )),
-            "acp" => match resolve_acp_engine(harness, acp_agents, &base.workspace_root) {
+            "acp" => match resolve_acp_engine(
+                harness,
+                acp_agents,
+                &base.workspace_root,
+                &agent_models_on(record, &harness.id, &default_harness_id),
+            ) {
                 Ok(engine) => lanes.push((harness.id.clone(), engine)),
                 Err(reason) => unavailable.push((harness.id.clone(), reason)),
             },
@@ -234,7 +334,32 @@ pub fn build(
         }
     }
 
-    let default_serves = if declared.len() <= 1 {
+    // Coding CLIs bound by name without any `[[harness]]` declaring them
+    // (issue #1245's detected-harness follow-up). Built **on demand** — only
+    // for an id some agent actually references — and that is load-bearing
+    // rather than an optimization: `HarnessBrain::run_turn` returns the plain
+    // engine when `lanes` *and* `unavailable` are both empty, so synthesizing
+    // a lane per known CLI for every company would take every company off
+    // that path. A company that binds nobody to one adds nothing here.
+    for id in referenced_implicit_locals(record, &declared, &default_harness_id) {
+        let harness = Harness::implicit_local(&id);
+        match resolve_acp_engine(
+            &harness,
+            acp_agents,
+            &base.workspace_root,
+            &agent_models_on(record, &id, &default_harness_id),
+        ) {
+            Ok(engine) => lanes.push((id, engine)),
+            Err(reason) => unavailable.push((id, reason)),
+        }
+    }
+
+    // `lanes.is_empty()` joins the old `declared.len() <= 1` test rather than
+    // replacing it: a company that declares one harness but binds somebody to
+    // a detected CLI now has somewhere else for an agent to land, so the
+    // default pool must be narrowed to the agents that actually stay on it.
+    // Every previously-existing case resolves identically.
+    let default_serves = if declared.len() <= 1 && lanes.is_empty() {
         None
     } else {
         Some(agents_on(record, &default_harness_id, &default_harness_id))
@@ -337,6 +462,8 @@ kind = "built_in"
                 role: "Content Writer".into(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             }],
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
@@ -344,10 +471,13 @@ kind = "built_in"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -370,5 +500,78 @@ kind = "built_in"
         assert!(deep.contains("researcher"));
         assert!(!deep.contains("writer"));
         assert!(!deep.contains("ceo"));
+    }
+
+    /// **The property the whole detected-harness design rests on** (issue
+    /// #1245's follow-up): a company that binds nobody to a coding CLI
+    /// synthesizes nothing.
+    ///
+    /// Not a tidiness assertion. `HarnessBrain::run_turn` returns the plain
+    /// engine when `lanes` *and* `unavailable` are both empty, so folding a
+    /// lane per known CLI into every company would quietly take every
+    /// company in every deployment off that path — and on a server build
+    /// (no ACP factory) leave three `unavailable` entries behind as well.
+    #[test]
+    fn an_unreferenced_coding_cli_synthesizes_no_lane() {
+        let rec = record();
+        let declared = rec.manifest.effective_harnesses();
+        assert!(
+            referenced_implicit_locals(&rec, &declared, "embedded").is_empty(),
+            "nobody names a coding CLI, so nothing is synthesized"
+        );
+    }
+
+    /// A binding to a coding CLI no `[[harness]]` declares is picked up from
+    /// **either** roster half — a console-added teammate on a detected CLI is
+    /// the case the feature exists for.
+    #[test]
+    fn a_referenced_coding_cli_is_synthesized_from_either_roster_half() {
+        let mut rec = record();
+        rec.manifest.agents[0].harness = Some("claude".into());
+        rec.overlay_agents[0].harness = Some("codex".into());
+        let declared = rec.manifest.effective_harnesses();
+
+        // Sorted and de-duplicated, so a rebuild keeps the same lane order.
+        assert_eq!(
+            referenced_implicit_locals(&rec, &declared, "embedded"),
+            vec!["claude".to_string(), "codex".to_string()]
+        );
+
+        // And each is a `local` acp harness the ACP path can resolve.
+        let synthesized = Harness::implicit_local("claude");
+        assert_eq!(synthesized.kind, "acp");
+        assert!(!synthesized.default, "never the company default");
+        assert_eq!(synthesized.acp.expect("acp").transport, "local".to_string());
+    }
+
+    /// A declared harness of the same id is never shadowed by a synthesized
+    /// one — otherwise a company that deliberately pinned a model on its own
+    /// `claude` harness would get a second, bare lane of the same name.
+    #[test]
+    fn a_declared_or_default_coding_cli_is_not_synthesized_twice() {
+        let mut rec = record();
+        rec.manifest.agents[0].harness = Some("claude".into());
+
+        // Declared under that exact id.
+        let declared = vec![
+            Harness::implicit(),
+            Harness {
+                id: "claude".into(),
+                kind: "acp".into(),
+                default: false,
+                inference: None,
+                acp: None,
+            },
+        ];
+        assert!(
+            referenced_implicit_locals(&rec, &declared, "embedded").is_empty(),
+            "the declared harness wins"
+        );
+
+        // And when it *is* the default, which is resolved separately.
+        assert!(
+            referenced_implicit_locals(&rec, &[], "claude").is_empty(),
+            "the default is resolved by the default path, not synthesized here"
+        );
     }
 }

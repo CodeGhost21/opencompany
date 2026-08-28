@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
   ChevronRight,
   Info,
   KeyRound,
@@ -10,9 +9,13 @@ import {
   LogIn,
   Plug,
   Plus,
+  Power,
+  PowerOff,
+  RefreshCw,
   Server,
   Trash2,
   Unplug,
+  Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -62,7 +65,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
+import { McpIconButton } from "@/views/mcp/McpIconButton";
 import { McpRegistryBrowser } from "@/views/connections/McpRegistryBrowser";
 import { ProviderDetail } from "@/views/connections/ProviderDetail";
 
@@ -685,14 +688,22 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
 
   return (
     <section className="space-y-3">
-      {chrome === "inline" && (
-        <div className="flex items-center gap-2">
-          <Server className="size-4 text-muted-foreground" />
-          <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            MCP Servers
-          </h3>
-        </div>
-      )}
+      {/* `h2` in both chromes, and it lands one level under the page's `h1`
+          either way (issue #1392). Inline on Connections it is a peer of
+          the company key, Composio and providers, which all head their
+          sections at the same level —
+          `test/unit/connections-section-heading-level.test.ts` holds them
+          together, because promoting this one alone would read to a screen
+          reader as though every section after it were a subsection of MCP
+          Servers. Standalone on `#/settings/mcp` the page's own `h1` is "MCP
+          Servers", so this names what it actually heads there instead of
+          repeating it. */}
+      <div className="flex items-center gap-2">
+        {chrome === "inline" && <Server className="size-4 text-muted-foreground" />}
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          {chrome === "inline" ? "MCP Servers" : "Installed servers"}
+        </h2>
+      </div>
       <p className="text-sm text-muted-foreground">
         Remote MCP tool servers your teammates can call. Add an HTTP endpoint and (optionally) a
         token — the token is stored securely and never shown again.
@@ -759,46 +770,72 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                       data-testid="mcp-server-row"
                       className="space-y-2 py-3 first:pt-0 last:pb-0"
                     >
-                      <div className="flex flex-wrap items-center gap-2">
-                        {/* The row's handle on its own detail view (issue #821).
-                            A button on the name rather than a trailing "Open":
-                            the row's right edge is already five controls deep,
-                            and the name is what an operator points at when they
-                            want to know what a server is.
-
-                            The chevron is not decoration. Hover styling alone
-                            makes a name that opens something indistinguishable
-                            from one that does not until the pointer is already
-                            on it — which on a touch screen is never, and for
-                            anyone scanning the page is a control that does not
-                            exist. */}
-                        <button
-                          type="button"
-                          data-testid="mcp-server-open"
-                          className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                          onClick={() => setOpened(server.name)}
-                          aria-label={`Open ${server.name}`}
-                        >
-                          {server.name}
-                          <ChevronRight className="size-3.5 text-muted-foreground" />
-                        </button>
-                        <Badge variant={badge.variant} data-testid="mcp-source-badge">
-                          {badge.label}
-                        </Badge>
-                        <McpHealthBadge
-                          health={health}
-                          authConfigured={server.authConfigured}
-                          bridge={bridge}
-                        />
-                        <span className="ml-auto flex items-center gap-2">
-                          {controls.toggle && (
-                            <Switch
-                              checked={server.enabled}
-                              disabled={busy !== null || !canManage}
-                              onCheckedChange={(v) => void toggle(server, v)}
-                              aria-label={`Enable ${server.name}`}
-                            />
+                      {/* Claude-style row: an identity on the left, the
+                          controls as icons on the right (issue: the MCP page
+                          redesign). Labelled buttons pushed a row six controls
+                          deep onto two lines, and the second line was always
+                          the one carrying the endpoint — the row's own
+                          information lost to its chrome. Every icon keeps its
+                          sentence in a tooltip and in its accessible name; see
+                          `McpIconButton`. */}
+                      <div className="flex items-start gap-3">
+                        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-muted/40">
+                          {server.iconUrl ? (
+                            // The directory's own icon when the row came from
+                            // one; a decorative image, so it is named by the
+                            // row beside it rather than by alt text repeating
+                            // the server name a screen reader just read.
+                            <img src={server.iconUrl} alt="" className="size-full object-cover" />
+                          ) : (
+                            <Server className="size-4 text-muted-foreground" />
                           )}
+                        </span>
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {/* The row's handle on its own detail view (issue #821).
+                                A button on the name rather than a trailing "Open":
+                                the row's right edge is already several controls
+                                deep, and the name is what an operator points at
+                                when they want to know what a server is.
+
+                                The chevron is not decoration. Hover styling alone
+                                makes a name that opens something indistinguishable
+                                from one that does not until the pointer is already
+                                on it — which on a touch screen is never, and for
+                                anyone scanning the page is a control that does not
+                                exist. */}
+                            <button
+                              type="button"
+                              data-testid="mcp-server-open"
+                              className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                              onClick={() => setOpened(server.name)}
+                              aria-label={`Open ${server.name}`}
+                            >
+                              {server.name}
+                              <ChevronRight className="size-3.5 text-muted-foreground" />
+                            </button>
+                            <Badge variant={badge.variant} data-testid="mcp-source-badge">
+                              {badge.label}
+                            </Badge>
+                            <McpHealthBadge
+                              health={health}
+                              authConfigured={server.authConfigured}
+                              bridge={bridge}
+                            />
+                            {/* The enable switch became an icon with the rest of
+                                the controls, and an icon in an off state reads
+                                as "press me to turn it off" as readily as the
+                                reverse. A disabled server therefore says so in
+                                words, where the other statuses are. */}
+                            {controls.toggle && !server.enabled && (
+                              <Badge variant="outline" data-testid="mcp-disabled-badge">
+                                disabled
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="truncate text-xs text-muted-foreground">{server.endpoint}</p>
+                        </div>
+                        <span className="flex shrink-0 items-center gap-0.5">
                           {/* Issue #1260: `oauth_required` means the server asked for
                               OAuth; it does NOT mean this console can complete one. A
                               server advertising no dynamic client registration — Slack's
@@ -811,33 +848,32 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           {credential === "add_token" &&
                             canManage &&
                             credentialFor !== server.name && (
-                              <Button
-                                variant="default"
-                                size="sm"
-                                data-testid="mcp-add-token"
+                              <McpIconButton
+                                label={
+                                  server.authConfigured
+                                    ? `Replace ${server.name}'s API token`
+                                    : `Add an API token for ${server.name}`
+                                }
+                                icon={KeyRound}
+                                tone="primary"
+                                testId="mcp-add-token"
                                 disabled={busy !== null}
                                 onClick={() => {
                                   setCredentialDraft("");
                                   setCredentialFor(server.name);
                                 }}
-                              >
-                                <KeyRound className="size-4" /> Add token
-                              </Button>
+                              />
                             )}
                           {credential === "sign_in" && canManage && (
-                            <Button
-                              variant="default"
-                              size="sm"
+                            <McpIconButton
+                              label={`Sign in to ${server.name}`}
+                              icon={LogIn}
+                              tone="primary"
+                              testId="mcp-sign-in"
+                              busy={busy === server.name}
                               disabled={busy !== null}
                               onClick={() => void signIn(server)}
-                            >
-                              {busy === server.name ? (
-                                <Loader2 className="size-4 animate-spin" />
-                              ) : (
-                                <LogIn className="size-4" />
-                              )}{" "}
-                              Sign in
-                            </Button>
+                            />
                           )}
                           {/* Issue #1270: a directory install's credentials are
                               named env values in the host's registry store, so
@@ -846,33 +882,28 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           {credential === "rotate_env" &&
                             canManage &&
                             envFor !== server.name && (
-                              <Button
-                                variant="default"
-                                size="sm"
-                                data-testid="mcp-rotate-env"
+                              <McpIconButton
+                                label={`Set ${server.name}'s credentials`}
+                                icon={KeyRound}
+                                tone="primary"
+                                testId="mcp-rotate-env"
                                 disabled={busy !== null}
                                 onClick={() => void openEnvRotation(server)}
-                              >
-                                <KeyRound className="size-4" /> Credentials
-                              </Button>
+                              />
                             )}
                           {dial !== null && canManage && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              data-testid="mcp-lifecycle"
+                            <McpIconButton
+                              label={
+                                dial === "connect"
+                                  ? `Connect ${server.name}`
+                                  : `Disconnect ${server.name}`
+                              }
+                              icon={dial === "connect" ? Plug : Unplug}
+                              testId="mcp-lifecycle"
+                              busy={busy === server.name}
                               disabled={busy !== null}
                               onClick={() => void lifecycle(server, dial)}
-                            >
-                              {busy === server.name ? (
-                                <Loader2 className="size-4 animate-spin" />
-                              ) : dial === "connect" ? (
-                                <Plug className="size-4" />
-                              ) : (
-                                <Unplug className="size-4" />
-                              )}{" "}
-                              {dial === "connect" ? "Connect" : "Disconnect"}
-                            </Button>
+                            />
                           )}
                           {/* Test and Tools resolve the row's `name` against
                               List A's declarations, which a directory install
@@ -882,43 +913,53 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               the connection state and the tool count. */}
                           {controls.probe && (
                             <>
-                              <Button
-                                variant="ghost"
-                                size="sm"
+                              <McpIconButton
+                                label={`Re-check ${server.name}`}
+                                icon={RefreshCw}
+                                testId="mcp-test"
+                                busy={busy === server.name}
                                 disabled={busy !== null}
                                 onClick={() => void test(server)}
-                              >
-                                {busy === server.name ? (
-                                  <Loader2 className="size-4 animate-spin" />
-                                ) : (
-                                  <Plug className="size-4" />
-                                )}{" "}
-                                Test
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
+                              />
+                              <McpIconButton
+                                label={
+                                  tools[server.name]?.kind === "ready"
+                                    ? `Hide ${server.name}'s tools`
+                                    : `List ${server.name}'s tools`
+                                }
+                                icon={Wrench}
+                                testId="mcp-tools"
                                 disabled={busy !== null}
                                 onClick={() => void discover(server)}
-                              >
-                                <ChevronDown className="size-4" /> Tools
-                              </Button>
+                              />
                             </>
                           )}
+                          {controls.toggle && canManage && (
+                            <McpIconButton
+                              label={
+                                server.enabled
+                                  ? `Disable ${server.name}`
+                                  : `Enable ${server.name}`
+                              }
+                              icon={server.enabled ? Power : PowerOff}
+                              testId="mcp-toggle"
+                              busy={busy === server.name}
+                              disabled={busy !== null}
+                              onClick={() => void toggle(server, !server.enabled)}
+                            />
+                          )}
                           {controls.removal.kind !== "none" && canManage && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
+                            <McpIconButton
+                              label={`Remove ${server.name}`}
+                              icon={Trash2}
+                              tone="destructive"
+                              testId="mcp-remove"
                               disabled={busy !== null}
                               onClick={() => void remove(server)}
-                              aria-label={`Remove ${server.name}`}
-                            >
-                              <Trash2 className="size-4" />
-                            </Button>
+                            />
                           )}
                         </span>
                       </div>
-                      <p className="truncate text-xs text-muted-foreground">{server.endpoint}</p>
                       {/* Reachability (issue #568): who can actually call this server. An
                           enabled server no agent reaches is almost always a misconfiguration,
                           so that empty case is flagged loudly rather than shown as a blank list.
@@ -1009,6 +1050,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                       )}
                       {envFor === server.name && canManage && (
                         <div className="space-y-2 rounded-md bg-muted/40 p-2" data-testid="mcp-env-inline">
+                          <p className="text-xs text-muted-foreground">
+                            Saving merges these values with the stored credentials and reconnects this server.
+                          </p>
                           {envFields.kind === "loading" ? (
                             <p className="flex items-center gap-1 text-xs text-muted-foreground">
                               <Loader2 className="size-3 animate-spin" /> Reading this
@@ -1179,6 +1223,11 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                     Add
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Adding saves the server now. {bridge === "absent"
+                    ? "It stays unavailable to teammates until this deployment is rebuilt with MCP support."
+                    : "Teammates pick up its tools on their next turn."}
+                </p>
               </div>
             )}
 

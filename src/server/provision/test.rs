@@ -1126,6 +1126,7 @@ impl Brain for EffectBrain {
                     text: format!("handled: {text}"),
                     steps: Vec::new(),
                     reply_to: None,
+                    mentions: Vec::new(),
                 });
             }
         }

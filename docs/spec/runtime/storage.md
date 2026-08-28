@@ -95,14 +95,12 @@ Moved to [`workspace-layout.md`](workspace-layout.md) — this file was over the
 
 Moved to [`memory-engine.md`](memory-engine.md) — this file was over the repository's 500-line limit. See that page for the full detail.
 
-`OPENCOMPANY_MEMORY` selects `store` (default), `embedded` (formerly, and still,
-`tinycortex`), `remote`, or `null`. A hosted engine additionally needs
+`OPENCOMPANY_MEMORY` selects `store` (default), `remote`, or `null`. A hosted engine additionally needs
 `OPENCOMPANY_MEMORY_DRIVER`, `OPENCOMPANY_MEMORY_URL` and
 `OPENCOMPANY_MEMORY_API_KEY`; each refuses at boot when missing, naming the
-knob, and never falls back to the embedded engine. `embedded` with
-`OPENCOMPANY_MEMORY_DRIVER=namespace` binds the contract's own durable in-pod
-store through the provider seam instead of the engine overlay
-(`tinymemory-embedded` feature). The credential and the
+knob, and never falls back to the base store's memory. The in-pod
+`embedded`/`tinycortex` engine and its `namespace` provider-store mode were
+removed in #1568 and refuse at boot if still selected. The credential and the
 endpoint never appear in logs, `/healthz`, `/spec`, status output, or an export
 — `/spec` reports the engine's `driver_id` and negotiated capabilities only.
 
@@ -220,9 +218,46 @@ changes.
 Beyond the core assertions (per-company isolation, append-only event/ledger,
 monotonic event sequence, export totality) it exercises each WS3 store —
 `assert_task_store`, `assert_workspace_store`, `assert_fact_store`,
-`assert_skill_state_store`, `assert_inbox_store`, `assert_usage_meter` — plus a
-dedicated `assert_usage_retention` that verifies samples older than the 90-day
-window are evicted on write. A new backend passes only when all of these hold.
+`assert_skill_state_store`, `assert_inbox_store`, `assert_usage_meter`,
+`assert_secret_store` — plus a dedicated `assert_usage_retention` that verifies
+samples older than the 90-day window are evicted on write. A new backend passes
+only when all of these hold.
+
+`assert_secret_store` (issue #1505) covers the port holding a tenant's inference
+credential, MCP OAuth tokens, Composio account tokens and SMTP password:
+read-back, absence, per-key independence, overwrite, "cleared is an empty value
+and not absence", and — the property with security consequences — that a secret
+written for company A is unreadable as company B, in both directions. The port
+has no `delete`; callers clear by writing an empty value, which is why the
+empty-value case stands in for a deletion case.
+
+It also asserts that two distinct keys stay distinct — issue #1510. The
+filesystem backend encodes each key into an injective filename (percent-encoded
+with a `%` prefix the legacy slug layout can never produce, and truncated with a
+digest suffix for long keys), and the old slugged file is kept readable as a
+migration fallback. Upper-case letters are percent-encoded rather than passed
+through (so filenames stay distinct on case-insensitive volumes — the macOS and
+Windows default), and a trailing `.` is encoded as `%2E` (Windows strips
+trailing periods), so distinct keys map to distinct files on every supported
+filesystem. `set` keeps the legacy file for non-empty rotations, because one
+slug can name several distinct keys and it may still hold a colliding alias's
+value that an un-migrated alias reads through the fallback. Clears are
+different: writing an empty value is a revocation, so the shared legacy file is
+removed rather than allowing an un-migrated alias to resurrect the revoked
+credential. `get` prefers the canonical file, so a rotated key is shadowed while
+a cleared ambiguous legacy value is unavailable to every alias. The suite covers
+both the space-vs-underscore keys the old slug conflated, two keys differing only
+in letter case, a key ending in a period, and a key shaped like a legacy filename
+(`key-foo`) reading or deleting a different key's value.
+
+**Fixtures in this suite are non-empty on purpose.** An empty vec, map or `None`
+survives every possible bug, including a backend that never persisted the field
+at all, so seeding one certifies the gap it was meant to close. Issue #1504 was
+exactly that: `CompanyRecord::overlay_agents` was seeded as `Vec::new()` and
+never read back, so a backend that dropped every console-created teammate passed
+the whole suite. The fixture now seeds `overlay_agents`, `overlay_desks` and
+`overlay_desk_members` with their optional fields populated, and both
+`assert_isolation_by_company` and `assert_export_totality` assert them.
 
 `assert_workspace_folder_claims` (issue #759) additionally drives eight
 concurrent callers at one `(parent, name)`: all must succeed, all must come away
@@ -242,3 +277,19 @@ OPENCOMPANY_TEST_MONGODB_URI=mongodb://127.0.0.1:27017 \
 ```
 
 Each test creates (and drops) a uniquely named throwaway database.
+
+## Deep trace
+
+Each backend gains one store for the unredacted companion of a run's steps —
+fs `deep-trace.jsonl`, sqlite `run_step_details`, one mongodb collection of the
+same name — all keyed `(company_id, run_id, step_seq)` and held to
+`assert_deep_trace_store` in the shared conformance suite. See
+[deep-trace.md](deep-trace.md) for what it holds, its caps, and why it is a
+sibling of the run store rather than part of it.
+
+`runs` also gains a `workflow_run_id` mirror for the workflow-node join
+(see [ports-runs.md](ports-runs.md)). On sqlite the column is added by
+`add_column_if_missing` and its index created **after** the `#983` table rebuild
+— that rebuild recreates `runs` from a fixed column list, so an index declared in
+`MIGRATIONS` would fail outright on exactly the legacy databases the additive
+step exists for.

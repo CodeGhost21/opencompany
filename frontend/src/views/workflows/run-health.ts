@@ -281,8 +281,12 @@ const AWAITING_APPROVAL = "awaiting approval";
  * itself did not fail and telling an operator it did would send them at a graph
  * that was fine. `awaiting approval` shares amber with `blocked`: both are
  * waiting on a person, and neither is a fault. See docs/design-system/color.md.
+ *
+ * Exported (issue #1697) so the traces list's status filter can enumerate the
+ * closed set of verdicts with the same dot and label every other reader uses,
+ * rather than a second wording that could drift from this one.
  */
-const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: string }> =
+export const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: string }> =
   {
     running: { dot: "animate-pulse bg-status-running", label: "running" },
     failed: { dot: "bg-status-failed", label: "failed" },
@@ -466,7 +470,7 @@ export function runDuration(
   return ms >= 0 ? ms : null;
 }
 
-/** A duration in the console's compact form: `840ms`, `12.4s`, `3m 07s`. */
+/** A duration in the console's compact form: `840ms`, `12.4s`, `1h 03m 07s`. */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
@@ -474,5 +478,15 @@ export function formatDuration(ms: number): string {
   // disagree — `${Math.floor(ms / 60_000)}m ${Math.round(…)}s` renders "3m 60s"
   // for anything within half a second of the minute.
   const total = Math.round(ms / 1000);
-  return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, "0")}s`;
+  const days = Math.floor(total / 86_400);
+  const hours = Math.floor((total % 86_400) / 3_600);
+  const minutes = Math.floor((total % 3_600) / 60);
+  const seconds = total % 60;
+  const tail = `${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+
+  if (days > 0) {
+    return `${days}d ${String(hours).padStart(2, "0")}h ${tail}`;
+  }
+  if (hours > 0) return `${hours}h ${tail}`;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }

@@ -58,6 +58,20 @@ host:
 Anyone can fork this manifest, point it at their market, and have their own
 opportunity studio — no changes to the kernel required.
 
+## Tool servers
+
+A weekly brief is only as good as its sources: current documentation for what a signal claims, and the workspace the briefs accumulate in.
+
+Declared in [`mcp.json`](mcp.json) and merged with anything the install
+ships and anything an operator adds from the console. A server marked
+*needs a token* is declared but off: write its credential from
+Settings → Connections, then enable it there.
+
+| Server | What it is for | Ships |
+| --- | --- | --- |
+| `context7` | Version-accurate API and library documentation, so answers match the release in use. | on |
+| `notion` | The workspace this company's documents already live in. Needs a token. | off — needs a token |
+
 ## Run it
 
 ```sh

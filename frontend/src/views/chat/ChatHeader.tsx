@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, Users } from "lucide-react";
+import { useState, type Ref } from "react";
+import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, PanelRight, Users } from "lucide-react";
 
+import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -12,8 +13,17 @@ interface Props {
   memberCount: number;
   membersOpen: boolean;
   onToggleMembers: () => void;
-  /** Only rendered below `md`, where the rail shares the pane. */
+  /** Only rendered below `lg`, where the full rail shares the pane. */
   onOpenRail?: () => void;
+  channelsCollapsed: boolean;
+  onToggleChannels: () => void;
+  /**
+   * Where the shell restores focus after this header's own toggle unmounts the
+   * compact rail's expand button (issue #1340). The header toggle is mounted on
+   * both density states, so it is the one control the shell can count on to
+   * carry focus across the switch.
+   */
+  channelsToggleRef?: Ref<HTMLButtonElement>;
 }
 
 /**
@@ -35,6 +45,9 @@ export function ChatHeader({
   membersOpen,
   onToggleMembers,
   onOpenRail,
+  channelsCollapsed,
+  onToggleChannels,
+  channelsToggleRef,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const title = channelTitle(channel);
@@ -63,6 +76,18 @@ export function ChatHeader({
           <PanelLeft className="size-4" />
         </Button>
       )}
+
+      <Button
+        ref={channelsToggleRef}
+        variant="ghost"
+        size="icon"
+        className="hidden size-8 lg:inline-flex"
+        onClick={onToggleChannels}
+        aria-label={channelsCollapsed ? "Expand channels" : "Collapse channels"}
+        title={channelsCollapsed ? "Expand channels" : "Collapse channels"}
+      >
+        {channelsCollapsed ? <PanelRight className="size-4" /> : <PanelLeft className="size-4" />}
+      </Button>
 
       <div className="group/title flex min-w-0 flex-1 items-center gap-1.5">
         <KindIcon channel={channel} />
@@ -126,7 +151,15 @@ function KindIcon({ channel }: { channel: Channel }) {
     const face = dmFace(channel);
     // A DM with no roster entry behind it has nobody to draw — the rail falls
     // back to the same glyph rather than inventing a face for a stranger.
-    return face ? <TeammateAvatar {...face} className="size-6" /> : <CircleDot className={cls} aria-hidden />;
+    return face ? (
+      // The teammate this line is *with* — clicking their face here opens who
+      // they are (issue #1653), same as clicking it in the transcript below.
+      <AgentAvatarButton agentId={channel.member?.id} name={channel.name}>
+        <TeammateAvatar {...face} className="size-6" />
+      </AgentAvatarButton>
+    ) : (
+      <CircleDot className={cls} aria-hidden />
+    );
   }
   if (channel.private) return <Lock className={cls} aria-hidden />;
   return <Hash className={cls} aria-hidden />;

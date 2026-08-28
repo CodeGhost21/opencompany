@@ -3,6 +3,7 @@
 // the wire) and runs one via `…/workflows/{wid}/run`. Replaces the client-side
 // `workflow-sample` illustrative data.
 
+import type { ArtifactKind } from "./artifacts";
 import type { OpenCompanyClient } from "./client";
 
 /** A one-line workflow entry, as the picker lists it. */
@@ -944,6 +945,83 @@ export function workflowRunOutput(
 ): Promise<WorkflowRunOutputRecord> {
   return client.get<WorkflowRunOutputRecord>(
     `${client.scopeFor(company)}/workflows/runs/${encodeURIComponent(runId)}/output`,
+  );
+}
+
+/**
+ * One file a workflow run produced (issue #1684) — a row of the run inspector's
+ * "Files associated" section.
+ *
+ * The host resolves these through the run's provenance chain (`run_id → cards
+ * opened by the run → each card's artifacts`), so a row carries exactly what the
+ * console needs to deep-link the file and nothing more: it is **metadata only**,
+ * never the artifact body. {@link artifactHref} turns `taskId` + `artifactId` +
+ * `latestVersion` into the Artifacts-tab address, and `workspaceNodeId` — when
+ * the file was mirrored into the shared tree — into the second `#/workspace/<id>`
+ * link.
+ */
+export interface RunArtifactRow {
+  /** The card that produced the file — scopes the Artifacts tab the link opens. */
+  taskId: string;
+  /** The artifact's stable id → the tab's open artifact. */
+  artifactId: string;
+  /** The artifact's display title. */
+  title: string;
+  /** What the file holds — `text` | `markdown` | `image` | `file`. */
+  kind: ArtifactKind;
+  /**
+   * The workspace-relative path the agent published (e.g. `specs/launch.md`).
+   * Absent on a legacy record captured before the source path existed (issue
+   * #244); the console labels those rather than hiding them.
+   */
+  source?: string;
+  /** The newest revision number → the version the deep-link pins. */
+  latestVersion: number;
+  /** Epoch-millis of the newest revision — the host's sort key and the row's time. */
+  updatedAtMillis: number;
+  /**
+   * The workspace node the newest revision was mirrored into (issue #552), when
+   * one was → an optional `#/workspace/<id>` link. Absent when nothing mirrored it.
+   */
+  workspaceNodeId?: string;
+  /** The producing card's title, for grouping rows by card. */
+  taskTitle?: string;
+}
+
+/** The `GET …/workflows/runs/{rid}/artifacts` response. A wrapper rather than a
+ * bare array so a run whose file count exceeds the host's defensive cap can say
+ * so instead of the console presenting an incomplete list as exhaustive. */
+export interface RunArtifactsResponse {
+  /** The run's files, newest first (the host's sort). */
+  files: RunArtifactRow[];
+  /**
+   * Whether older rows were cut by the host's cap. `false` for every run in
+   * practice — the cap is a ceiling, not a page size — but when `true` the
+   * console labels the list rather than silently showing a subset.
+   */
+  truncated: boolean;
+}
+
+/**
+ * Fetches the files one past run produced (issue #1684), for the run inspector's
+ * lazy "Files associated" disclosure.
+ *
+ * Lazy per-run by design, exactly like {@link workflowRunOutput}: the history
+ * list stays structural, and only the run an operator expands is fetched.
+ *
+ * **Answers `200 { files: [] }` — never `404` — for a run that produced no
+ * files**, which is the common case (a run that opened no cards, or cards that
+ * published nothing). That is the one contract difference from
+ * `workflowRunOutput`: a fileless run is normal, so callers render the empty
+ * state off an empty array rather than off a caught 404.
+ */
+export function fetchRunArtifacts(
+  client: OpenCompanyClient,
+  company: string | null,
+  runId: string,
+): Promise<RunArtifactsResponse> {
+  return client.get<RunArtifactsResponse>(
+    `${client.scopeFor(company)}/workflows/runs/${encodeURIComponent(runId)}/artifacts`,
   );
 }
 

@@ -30,15 +30,17 @@ describe("chat rails collapse to single-rail below lg (issue #1383)", () => {
   const chatView = read("views/ChatView.tsx");
   const chatHeader = read("views/chat/ChatHeader.tsx");
 
-  it("shows the channel rail only from lg, toggled below it", () => {
-    // The rail: on from lg, otherwise governed by the mobile pane toggle.
-    expect(chatView).toContain(
-      'cn("lg:flex", mobilePane === "rail" ? "flex" : "hidden")',
-    );
+  it("shows the full channel rail below lg only when toggled", () => {
+    // The mobile rail stays full-width and is governed by the shared-pane toggle.
+    expect(chatView).toContain('cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")');
     // Regression guard: the `md` rail is what produced the two-rail band.
-    expect(chatView).not.toContain(
-      'cn("md:flex", mobilePane === "rail" ? "flex" : "hidden")',
-    );
+    expect(chatView).not.toContain('cn("md:hidden", mobilePane === "rail" ? "flex" : "hidden")');
+  });
+
+  it("keeps a separate desktop rail from lg onward", () => {
+    // A desktop-local compact rail must not affect the 768–1023px mobile-pane flow.
+    expect(chatView).toContain('className="hidden lg:flex"');
+    expect(chatView).not.toContain('className="hidden md:flex"');
   });
 
   it("shows the chat pane full-width below lg (single pane), split at lg", () => {
@@ -50,6 +52,11 @@ describe("chat rails collapse to single-rail below lg (issue #1383)", () => {
     // The "Show channels" affordance must reach up to lg, matching the rail.
     expect(chatHeader).toContain("size-8 lg:hidden");
     expect(chatHeader).not.toContain("size-8 md:hidden");
+  });
+
+  it("offers the desktop channel collapse separately from the mobile rail toggle", () => {
+    expect(chatHeader).toContain('className="hidden size-8 lg:inline-flex"');
+    expect(chatHeader).toContain('aria-label={channelsCollapsed ? "Expand channels" : "Collapse channels"}');
   });
 });
 
@@ -67,8 +74,9 @@ describe("settings sub-rail collapses to chips below lg (issue #1383)", () => {
   });
 
   it("shows the chip-row fallback below lg, so the pane gets full width", () => {
-    expect(settings).toContain("flex gap-1 overflow-x-auto border-b p-2 lg:hidden");
-    expect(settings).not.toContain("flex gap-1 overflow-x-auto border-b p-2 sm:hidden");
+    expect(settings).toContain("border-b lg:hidden");
+    expect(settings).toContain("flex gap-1 overflow-x-auto p-2");
+    expect(settings).not.toContain("border-b sm:hidden");
   });
 });
 
@@ -91,5 +99,25 @@ describe("composer keeps Send in-flow in a narrow pane (issue #1383)", () => {
     const sendButton = composer.slice(Math.max(0, idx - 300), idx);
     expect(sendButton).toContain("ml-auto");
     expect(sendButton).not.toMatch(/\babsolute\b|\bfixed\b/);
+  });
+});
+
+describe("mention clearing is gated on the transcript being visible (codex P1)", () => {
+  const chatView = read("views/ChatView.tsx");
+
+  it("only reports a channel viewed while the chat pane is actually on screen", () => {
+    // The view-report effect that clears mentions must not fire while a sub-`lg`
+    // pane shows only the rail — a mention landing then would be marked read
+    // behind the operator's back. A jsdom render cannot prove it (the whole
+    // failure is the `lg` media query), so this pins the gate to the same
+    // `mobilePane` toggle and `lg` breakpoint the pane's class contract above
+    // uses: a future move of the rail off `lg` trips that class test too.
+    expect(chatView).toMatch(/if \(channel && chatPaneVisible\)/);
+    expect(chatView).toContain(
+      'const chatPaneVisible = mobilePane === "chat" || isDesktop;',
+    );
+    // The visibility flag is a dependency, so re-opening the pane from the rail
+    // re-runs the report and clears whatever is newly visible.
+    expect(chatView).toContain("chatPaneVisible,\n  ]);");
   });
 });

@@ -4,11 +4,15 @@ import {
   agentEdits,
   draftFrom,
   draftIsValid,
+  harnessEdit,
+  harnessOptionLabel,
   isEditable,
+  modelEdit,
+  resolvedHarnessKind,
   summarizeGrants,
   tierLabel,
 } from "@/lib/agent";
-import type { AgentDetailDto } from "@/api/types";
+import type { AgentDetailDto, HarnessDto } from "@/api/types";
 
 /**
  * The derivations behind the agent detail view (issue #264).
@@ -30,7 +34,7 @@ function agent(over: Partial<AgentDetailDto> = {}): AgentDetailDto {
     source: "overlay",
     editable: ["name", "role", "description"],
     isOrchestrator: false,
-    tools: { requested: [], companyAllow: ["workspace.*"], effective: ["workspace.*"] },
+    tools: { requested: [], companyAllow: ["workspace.*"], deskAllow: [], deskCeilingActive: false, effective: ["workspace.*"] },
     desks: [],
     inboxEnabled: false,
     ...over,
@@ -109,6 +113,8 @@ describe("what an agent's tools amount to", () => {
     const summary = summarizeGrants({
       requested: [],
       companyAllow: ["workspace", "composio"],
+      deskAllow: [],
+      deskCeilingActive: false,
       effective: ["workspace", "composio"],
     });
     expect(summary.standardGrant).toBe(true);
@@ -120,6 +126,8 @@ describe("what an agent's tools amount to", () => {
     const summary = summarizeGrants({
       requested: ["workspace.read", "email.send"],
       companyAllow: ["workspace.*"],
+      deskAllow: [],
+      deskCeilingActive: false,
       effective: ["workspace.read"],
     });
     expect(summary.standardGrant).toBe(false);
@@ -130,6 +138,8 @@ describe("what an agent's tools amount to", () => {
     const summary = summarizeGrants({
       requested: ["email.send"],
       companyAllow: ["workspace"],
+      deskAllow: [],
+      deskCeilingActive: false,
       effective: [],
     });
     expect(summary.effective).toEqual([]);
@@ -146,6 +156,97 @@ describe("how a tier reads", () => {
     expect(tierLabel(agent({ tier: undefined, isOrchestrator: true }))).toBe("Orchestrator");
     expect(tierLabel(agent({ tier: "orchestrator", isOrchestrator: true }))).toBe("Orchestrator");
     expect(tierLabel(agent())).toBe("Worker");
+  });
+});
+
+describe("what a model-override edit sends (issue #1245)", () => {
+  it("sends nothing when the draft did not change", () => {
+    expect(modelEdit(undefined, "")).toBeUndefined();
+    expect(modelEdit("claude-opus-4-5", "claude-opus-4-5")).toBeUndefined();
+  });
+
+  it("trims, so whitespace alone is not a change", () => {
+    expect(modelEdit("claude-opus-4-5", "  claude-opus-4-5  ")).toBeUndefined();
+  });
+
+  it("sets the override", () => {
+    expect(modelEdit(undefined, "claude-opus-4-5")).toBe("claude-opus-4-5");
+  });
+
+  it("clears the override with null, not by leaving it alone", () => {
+    // A blank draft is a deliberate "go back to the harness's own default",
+    // and only `null` reads that way to the host — `undefined` would leave
+    // the old override in place and the operator would watch it survive.
+    expect(modelEdit("claude-opus-4-5", "   ")).toBeNull();
+  });
+});
+
+// `detected: false` on both: these stand for entries the company declared in
+// its manifest, which is what an edit is validated against. A detected row is
+// one the host synthesized from `ACP_AGENTS`, and it is covered separately in
+// `harness-join.test.ts`.
+const laptop: HarnessDto = {
+  id: "laptop",
+  kind: "acp",
+  default: false,
+  detected: false,
+  agent: "claude",
+  transport: "local",
+};
+const main: HarnessDto = { id: "main", kind: "built_in", default: true, detected: false };
+
+describe("what a harness-binding edit sends (issue #1245's harness-picker follow-up)", () => {
+  it("sends nothing when the draft did not change", () => {
+    expect(harnessEdit(undefined, "")).toBeUndefined();
+    expect(harnessEdit("laptop", "laptop")).toBeUndefined();
+  });
+
+  it("pins the binding", () => {
+    expect(harnessEdit(undefined, "laptop")).toBe("laptop");
+  });
+
+  it("clears the binding with null, not by leaving it alone — same contract as modelEdit", () => {
+    expect(harnessEdit("laptop", "")).toBeNull();
+  });
+});
+
+describe("which harness kind a binding resolves to", () => {
+  it("resolves an explicit id to its own kind", () => {
+    expect(resolvedHarnessKind([main, laptop], "laptop")).toBe("acp");
+    expect(resolvedHarnessKind([main, laptop], "main")).toBe("built_in");
+  });
+
+  it("falls back to the declared default when the id is absent", () => {
+    // The same contract `AgentDetailDto.harness` and a blank select share:
+    // undeclared means "whichever harness is marked default", not "none".
+    expect(resolvedHarnessKind([main, laptop], undefined)).toBe("built_in");
+  });
+
+  it("answers undefined for an id nothing declares, rather than guessing", () => {
+    expect(resolvedHarnessKind([main, laptop], "does-not-exist")).toBeUndefined();
+  });
+});
+
+describe("how a harness reads in the picker", () => {
+  it("names the CLI for a local ACP harness", () => {
+    expect(harnessOptionLabel(laptop)).toBe("claude — laptop");
+  });
+
+  it("says remote for a runner-transport ACP harness", () => {
+    expect(
+      harnessOptionLabel({
+        id: "shared",
+        kind: "acp",
+        default: false,
+        detected: false,
+        agent: "codex",
+        transport: "runner",
+      }),
+    ).toBe("codex (remote) — shared");
+  });
+
+  it("reads as managed for a built_in harness", () => {
+    expect(harnessOptionLabel(main)).toBe("Managed — main");
   });
 });
 

@@ -29,6 +29,16 @@ export interface TransportRequest {
   headers: Record<string, string>;
   /** Already serialized. `undefined` for a bodyless request. */
   body?: string;
+  /**
+   * Ask the browser to keep this request alive past the page that issued it —
+   * for the one caller that fires a request from `pagehide` and needs it to
+   * still land after the document is gone (`disconnectPresenceBeacon`).
+   * Meaningful only to `BrowserTransport`, which threads it straight to
+   * `fetch`'s own `keepalive` option; `ProxyTransport` ignores it, because a
+   * Tauri `invoke` call is core-process IPC, not a page-scoped browser
+   * request, and has no equivalent teardown-survival problem to solve.
+   */
+  keepalive?: boolean;
 }
 
 export interface TransportResponse {

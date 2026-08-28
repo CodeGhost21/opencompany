@@ -1,0 +1,51 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a drug-discovery startup is defined
+# by — the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-programme-record"
+title = "Set up the programme record"
+priority = "high"
+note = """
+Open a `programs` row for each target being pursued, with its rationale, \
+its stage and the decision that would kill it.
+
+A programme with no stated kill criterion is one that runs until the money \
+does.
+
+Done when each live programme has a row naming what would stop it.\
+"""
+
+[[task]]
+id = "set-up-the-safety-signal-flow"
+title = "Set up the safety signal flow"
+priority = "high"
+note = """
+Decide what opens a `safety-signals` row, who is told, and how fast. Write \
+it down before there is a signal to argue about.
+
+This is the one flow in this company where being slow is the failure. It \
+must be decided while nobody is under pressure.
+
+Done when the rule is a `decisions` row naming the trigger and the \
+escalation.\
+"""
+
+[[task]]
+id = "set-up-the-experiment-record"
+title = "Set up the experiment record"
+priority = "medium"
+note = """
+State what an `experiments` row must carry — hypothesis, method, result, \
+and what it changes — so a result can be read a year later by someone who \
+was not there.
+
+Done when the rule is recorded and running experiments have rows.\
+"""

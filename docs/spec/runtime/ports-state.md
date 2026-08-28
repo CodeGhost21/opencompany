@@ -184,8 +184,8 @@ that keeps growing: these files own the port *traits*, that one owns the
 
 ## MemoryStore
 
-The equivalent of Medulla's `CyclePersistence`; TinyCortex is the target
-backend ([integrations/tinycortex.md](../integrations/tinycortex.md)).
+The equivalent of Medulla's `CyclePersistence`; a hosted provider is the
+target backend ([memory-engine.md](memory-engine.md)).
 
 ```rust
 // src/ports/memory.rs
@@ -210,10 +210,25 @@ pub trait ContextStore: Send + Sync {
     async fn list(&self, id: &CompanyId, prefix: &str) -> Result<Vec<ChunkMeta>>;
     async fn peek(&self, id: &CompanyId, addr: &ChunkAddr, range: Option<Range<usize>>)
         -> Result<String>;
+    async fn peek_many(&self, id: &CompanyId, addrs: &[ChunkAddr])
+        -> Result<Vec<Option<String>>>; // defaulted: loops peek
     async fn search(&self, id: &CompanyId, query: &str, limit: usize)
         -> Result<Vec<ChunkHit>>;
+    async fn delete(&self, id: &CompanyId, addr: &ChunkAddr) -> Result<bool>;
+    async fn delete_label(&self, id: &CompanyId, addr: &ChunkAddr, label: &str)
+        -> Result<bool>;
 }
 ```
+
+Chunks are content-addressed: byte-identical bodies share one address, and
+every backend keeps one claim per `(addr, label)` (issue #1300 — a re-`put`
+of an identical body under a new label lands that label's claim; under an
+identical label it is a no-op). `delete` is address-level and takes every
+claim with the body — the operator's hard-delete. `delete_label` removes one
+claim and reaps the body only with the last one, decided atomically inside
+the backend, which is what lets `memory_forget` and the fact-mirror reap
+remove their own claim on a shared address without racing a concurrent
+identical-content write.
 
 ## SecretStore
 
@@ -226,6 +241,50 @@ pub trait SecretStore: Send + Sync {
     async fn set(&self, company: &CompanyId, key: &str, value: SecretValue) -> Result<()>;
 }
 ```
+
+There is no `delete`: callers clear a secret by writing an empty value
+(`src/company/mcp.rs::clear_auth`, `src/company/inference.rs::clear_key`), so an
+empty value and an unset key are **different states** and a backend must keep
+them apart — collapsing `""` into `None` would fall back to whatever the
+manifest or the environment supplies and silently undo the operator's
+revocation.
+
+`SecretValue` is **opaque by construction** (issue #1741): it hand-writes both
+`Debug` and `Serialize` to emit `[redacted]`, so a struct that embeds one and
+derives either cannot leak the credential — the guard is on the type, not on
+each enclosing struct. Before this, five separate hand-written `Debug` impls
+guarded the containers and nothing at all guarded serialization, so
+`serde_json::to_value` over a config holding a secret emitted plaintext.
+
+`Deserialize` stays derived — reading a secret *in* never leaks one — so a
+serde round-trip is deliberately asymmetric and yields `SecretValue("[redacted]")`,
+which fails closed at the point of use. Persistence is unaffected because it
+never used serde: every backend writes `value.expose()` and reads back through
+the `SecretValue` constructor.
+
+`expose()` is the *named* door out, not the only one: the field is `pub`, so
+`let SecretValue(raw) = value` reads the plaintext without it, and about ten
+production call sites already do. Audit with
+`grep -E 'expose\(|SecretValue\('`, not `grep 'expose()'` — the shorter search
+reads clean while missing them. Privatizing the field behind a constructor
+would close the gap and is deliberately left as separate work: it touches
+roughly 110 construction sites and is unrelated to the serialization guard.
+
+Credential-bearing fields hold a `SecretValue` rather than a `String` for the
+same reason (issue #1770): `SmtpCredentials::password`, `ImapCredentials::password`
+and the legacy `StoredConfig::password` were each guarded on one rendering
+surface and not the other — three structs, three hand-written or documented
+`Debug` decisions, and a derived `Serialize` nobody considered. Holding the
+credential in the guarded type is what makes `#[derive(Debug, Serialize)]` on
+`MailCredentials`, `TenantMailboxConfig` or the next mail struct safe without
+anyone remembering.
+
+`assert_secret_store` in `src/store/conformance.rs` is the contract every
+backend is checked against (issue #1505): read-back, absence, per-key
+independence, overwrite, the empty-value distinction above, and isolation in
+both directions. See
+[storage.md](storage.md#conformance-coverage) for what it deliberately does not
+assert yet.
 
 ## UserStore, SessionStore, LoginCodeStore
 

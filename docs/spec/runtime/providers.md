@@ -179,6 +179,30 @@ product a tenant runs.
 
 ---
 
+## History protection
+
+The managed inference profile advertises a **context window**
+(`max_input_tokens`) because openhuman's turn loop engages
+`ContextCompressionMiddleware` and `ImageAwareMessageTrimMiddleware` only for a
+positive window. Without one, intra-turn history grows unbounded across many tool
+iterations, and an oversized request to a hosted model can fail *silently*:
+HTTP 200, `finish_reason: "failed"`, an empty message, and zero usage — no
+diagnosable provider error.
+
+The advertised window defaults to 240,000 tokens and is configurable through
+`OPENCOMPANY_CONTEXT_WINDOW` (see [config.md](config.md)). Compression and
+deterministic trimming activate at 90% of the window (`window - window / 10`), so
+the estimated budget stays under the model's hard limit; the full derivation is
+documented in `src/harness/built_in/provider.rs`.
+
+An operator using a model with a smaller advertised window must lower the
+threshold to that window (with an estimation margin) rather than trusting the
+default, or requests can exceed the provider limit before compaction engages.
+`OPENCOMPANY_CONTEXT_WINDOW=off` or `0` restores the previous unbounded behavior
+for a model that tolerates arbitrarily long turns.
+
+---
+
 ## Unknown providers fail loudly
 
 An unrecognised kind is an error at resolution, not a fallback. The manifest

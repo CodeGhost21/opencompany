@@ -147,6 +147,20 @@ export interface RunDetail {
 export interface RunQuery {
   /** Only attempts at this card. */
   task?: string;
+  /**
+   * Only attempts dispatched to this desk/teammate (issue #1573).
+   *
+   * Sent to the host rather than applied to the answer. Filtering a fetched
+   * page here would make {@link limit} mean "the newest N attempts in the
+   * *company*, of which some happen to be this desk's" — so a teammate who has
+   * been quiet while the rest of the company was busy would render as one who
+   * has never run at all.
+   *
+   * A host predating the selector ignores it and answers with the whole
+   * company's attempts. That is why the caller must still not assume every row
+   * it gets back is this desk's; see `AgentRuns`.
+   */
+  agent?: string;
   /** Only these statuses. An unknown word is refused with a 400, not silently dropped. */
   status?: RunStatus[];
   /** Cap the page; the host clamps it. */
@@ -156,6 +170,7 @@ export interface RunQuery {
 function queryString(query: RunQuery): string {
   const params = new URLSearchParams();
   if (query.task) params.set("task", query.task);
+  if (query.agent) params.set("agent", query.agent);
   if (query.status?.length) params.set("status", query.status.join(","));
   if (query.limit !== undefined) params.set("limit", String(query.limit));
   const encoded = params.toString();

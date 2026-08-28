@@ -39,8 +39,58 @@ tool the gate refuses is the exact failure this single-source rule prevents.
 
 ### Levels in detail
 
-**Company — `[tools].allow`.** The ceiling. Defaults to
-`["*", "media", "composio"]`.
+**Company — `[tools].allow`.** The ceiling, and **the one place a capability is
+turned off for a whole company**. It defaults to `globals/globals.toml`'s
+`default_allow`:
+
+```toml
+default_allow = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]
+```
+
+Every capability in the list above is on by default, and dropping an entry from
+this list is how it comes off — for every teammate at once, whatever their own
+`tools` line asks for. `allow` **replaces** the default rather than extending
+it, so a company that means to withhold one namespace writes the rest of the
+list out and leaves that one off.
+
+The default withholds the credential-gated `chargebee`, `hosting` and `paypal`
+integrations, and `repo`. The first three are opt-in by name because each is a
+company-specific third-party integration — `hosting` publishes the workspace to
+the public internet and provisions databases the company pays for. `repo` is
+withheld for a different reason, and not as a preference: a host on filesystem
+storage refuses to boot a company whose allow-list names it, because a
+repository credential would sit on that filesystem in plaintext. A
+MongoDB-backed company that wants it adds `repo.*` here and on the teammates
+that need it.
+
+#### Granting a credential-gated namespace from the console (issue #1796)
+
+`[tools].allow` is seed-authoritative: a rebuild re-persists it from
+`company.toml`, and for `[tools]` that is a security property rather than an
+implementation detail. That left the credential-gated integrations above with no
+way in on a hosted tenant, where the manifest is a read-only boot snapshot baked
+into the image — so a company could connect Chargebee from the console, see
+**Connected**, and reach no teammate, with the page correctly reporting that it
+"cannot be fixed from this page".
+
+A connect surface can now add the grant itself, through `PUT …/tools/grants`
+([the write plane](api-write-plane.md)). It is an attributed operator override
+folded into the effective list, **not** a manifest write, and it is bounded two
+ways:
+
+- **A closed list.** `CONSOLE_GRANTABLE_NAMESPACES` is exactly the five the
+  console holds a credential form for — `chargebee`, `composio`, `hosting`,
+  `paypal`, `search`. Granting is the second half of an action the operator
+  already took against an account they already hold. `shell`, `code` and `web`
+  have no such form and are not grantable from any page.
+- **Version control still wins.** A `[tools]` edit in `company.toml` clears
+  every console grant on the next rebuild. This layer only ever *widens*, so a
+  grant outliving a seed edit would be a runtime capability surviving the
+  operator revoking it — the named harm the seed-wins rule exists to prevent.
+
+Narrowing is unchanged and lives one level down: the console withdraws a
+namespace it granted, and takes capability *away* through desk ceilings, never
+by subtracting from the company's own list.
 
 **Desk — `[[group_chat]].tools`.** A department's ceiling. A company organises
 its teammates into desks — a finance desk, a creative desk — and this is where
@@ -69,13 +119,18 @@ company grant itself — but it is not the intuitive one.
 ## The wildcard does not mean everything
 
 `*` covers `files`, `docs`, `shell`, `code`, `web` and `subagent`. It
-deliberately does **not** confer four namespaces, each of which must be named:
+deliberately does **not** confer the explicit opt-in namespaces, each of which
+must be named:
 
 | Namespace | Why it must be named |
 | --- | --- |
 | `media` | Spends real money per generated image or video. |
 | `composio` | Reaches the tenant's connected third-party accounts and moves real side effects — sends email, opens PRs. |
-| `search` | Every call is a billed request on the managed platform. |
+| `search` | The queries leave the building, and a call is billed — to the managed platform, or to the company's own provider account. See [search.md](search.md). |
+| `mcp:*` | Reaches every `[[mcp_server]]` the company wired, each holding its own endpoint and credentials; a bare `*` must not hand a third-party server's tools to every teammate. |
+| `chargebee` | Billing API, wired only against the company's own Chargebee credentials. |
+| `paypal` | Wallet reads — a business's private figure, not a `*` wildcard's business. |
+| `hosting` | Publishes the workspace to the public internet and provisions databases the company pays for. |
 | `repo` | Materializes a third party's source inside a sandbox where the agent may also hold `shell`. |
 
 `repo.write` is tighter still: only the exact string confers it. A bare `repo`
@@ -87,7 +142,15 @@ Each rule has its own predicate beside the manifest types
 (`grants_media_explicit` and siblings in `src/company/types.rs`). Nothing may
 re-derive these answers from the generic glob matcher: it reports `*` as
 covering everything, which is right for the ordinary families and wrong for
-these four.
+every opt-in namespace above.
+
+The predicates accept two spellings — the bare namespace (`search`) or a
+`namespace.`-descendant (`search.web`) — plus, for the workspace pair, the exact
+`workspace.write` token. A `*` **glued** to the namespace (`search*`,
+`workspace.write*`) is neither: the write path stores a request glob verbatim,
+and no predicate accepts the glued form, so the coverage check and the card
+preview both report it as not applying. Write the broken form instead
+(`search.*`, or `search.web`) when a sub-grant ask is meant.
 
 ## The catalog
 
@@ -111,6 +174,42 @@ Two flags on each entry exist because the naive rendering is wrong:
 A disabled `[[mcp_server]]` is listed with `granted: false` rather than omitted:
 an operator needs to see that the server exists and is switched off, which an
 absent row cannot say.
+
+## Where a company's MCP servers are declared
+
+A company's effective servers merge in four layers, lowest precedence first:
+
+1. **Default** — `[[default_mcp_server]]` in the instance `config.toml`, shipped
+   to every company on the install (`docs/spec/runtime/config.md`).
+2. **Bundle** — `companies/<name>/mcp.json`, in the `{"mcpServers": {…}}` shape
+   every other MCP host uses. Parsed by `src/company/mcp_file.rs` and merged into
+   `mcp_servers` by `CompanyManifest::from_located` **before** validation, so a
+   bundle server is held to exactly the rules an inline entry is — HTTP
+   transport only, no credential in the URL, unique name.
+3. **Manifest** — `[[mcp_server]]` in `company.toml`. Layer 2 and 3 are the same
+   layer once loaded: a name declared in **both** is a validation problem naming
+   both files, refused rather than resolved by precedence, for the reason the
+   roster refuses a bundle that declares agents twice — either precedence rule
+   silently discards a declaration somebody wrote down.
+4. **Runtime** — what an operator adds or overrides from the console.
+
+The server's name is the `mcp.json` map key, so it cannot disagree with itself.
+`url` and `endpoint` are both accepted; setting both to different values is
+refused. A `$comment` key is ignored at file and server level, because JSON
+carries no comments and a template's reasoning has to live somewhere.
+
+An invalid **entry** is dropped with a logged reason rather than failing the
+boot — an `mcp.json` copied from a vendor README usually carries a stdio
+`command`, which hosted v1 does not support — while a malformed **file** is a
+manifest problem. `content_test` is what makes either fatal for a shipped
+template, and additionally requires every shipped server to be `https`,
+described, documented in its bundle README, and disabled if it names an
+`authSecret` (an enabled server that needs a token fails at an agent's first
+tool call rather than here).
+
+Removing a server from `mcp.json` takes effect on the next `serve`, which
+re-parses the bundle — not on an in-place rebuild, which uses the persisted
+manifest. That is the same behaviour as editing `company.toml`.
 
 ## Runtime overrides
 

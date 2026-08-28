@@ -38,10 +38,13 @@ async fn state_at(dir: &std::path::Path) -> AppState {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -107,8 +110,7 @@ async fn brain_rows(state: &AppState) -> Vec<Value> {
         .unwrap();
     let response = router(state.clone()).oneshot(request).await.unwrap();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    serde_json::from_slice::<Value>(&bytes)
-        .unwrap()
+    serde_json::from_slice::<Value>(&bytes).unwrap()["items"]
         .as_array()
         .cloned()
         .unwrap_or_default()

@@ -133,51 +133,6 @@ use crate::ports::types::{
 };
 use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
-/// Deletes everything this turn's repository tools materialized, however the
-/// turn ends (issue #245).
-///
-/// The lifecycle a checkout needs is *exactly* a turn's, and a turn ends in five
-/// ways — a reply, an error, a steer cancel, redirect exhaustion, and a panic
-/// unwinding through the whole stack. A cleanup call written at the end of the
-/// happy path covers one of those. So the boundary is an RAII guard claimed at
-/// each entry point instead: `Drop` runs on all five, which is what makes "a
-/// checkout does not outlive the task that asked for it" a property of the
-/// control flow rather than a rule every future edit has to remember.
-///
-/// It purges on the way **in** as well, for the reason the publish claim clears
-/// on the way in: several turns share one `HarnessDeps` within a cycle, and a
-/// path that somehow left a checkout behind must not have it attributed — or
-/// silently reused — by the next one.
-///
-/// Best-effort by construction: a path that cannot be removed is logged and
-/// forgotten, and the boot sweep
-/// ([`repo::sweep_orphaned_checkouts`](crate::harness::repo::sweep_orphaned_checkouts))
-/// is the backstop. A janitor that could fail a turn would trade a disk problem
-/// for a lost answer.
-#[must_use = "the janitor deletes on drop; dropping it immediately removes this turn's checkouts"]
-pub struct CheckoutJanitor {
-    ledger: crate::harness::repo::CheckoutLedger,
-}
-
-impl CheckoutJanitor {
-    /// Claims the ledger for the span of one turn.
-    pub fn claim(ledger: &crate::harness::repo::CheckoutLedger) -> Self {
-        ledger.purge();
-        Self {
-            ledger: ledger.clone(),
-        }
-    }
-}
-
-impl Drop for CheckoutJanitor {
-    fn drop(&mut self) {
-        let removed = self.ledger.purge();
-        if removed > 0 {
-            tracing::debug!(removed, "[repo] removed this turn's checkouts");
-        }
-    }
-}
-
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
     pool: Arc<HarnessPool>,
@@ -217,6 +172,10 @@ pub struct HarnessBrain {
     /// record read; `OnceLock` because it is immutable once built and the cost
     /// is a clone of two `Arc`s, not a model call.
     triage: std::sync::OnceLock<crate::harness::triage::MeteredTriage>,
+    /// The per-message responder selection for `auto` channels, built on first
+    /// use (issue #1835). Lazy and `OnceLock` for exactly [`Self::triage`]'s
+    /// reasons — it needs the company id, and once built it is immutable.
+    selector: std::sync::OnceLock<crate::harness::selector::MeteredSelector>,
     /// The company's record, **re-read from the store at the top of every
     /// cycle** (issue #707).
     ///
@@ -280,6 +239,7 @@ fn system_notice(text: String) -> OutboundMessage {
         text,
         steps: Vec::new(),
         reply_to: None,
+        mentions: Vec::new(),
     }
 }
 
@@ -308,6 +268,7 @@ fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
         agent: Some(confine::CONFINED_AGENT_ID.to_string()),
         text: outcome.reply,
         reply_to: None,
+        mentions: Vec::new(),
         steps: outcome.steps,
     }
 }
@@ -325,11 +286,22 @@ impl HarnessBrain {
         let responder =
             orchestrator::orchestrator_id(&record.effective_agents()).unwrap_or_default();
         let default_harness = record.manifest.default_harness_id();
+        // Effective agents plus the overlay roster — the same two halves
+        // `lanes::agents_on` folds together. Built from the raw manifest, this
+        // map saw neither a console-created teammate nor an admin's harness
+        // edit to a blueprint one, so the lane excluded such a teammate from
+        // the default pool while this router still dispatched it there. The
+        // binding was saved, survived a restart, and did nothing.
         let bindings = record
-            .manifest
-            .agents
-            .iter()
-            .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
+            .effective_agents()
+            .into_iter()
+            .filter_map(|a| a.harness.clone().map(|h| (a.id, h)))
+            .chain(
+                record
+                    .overlay_agents
+                    .iter()
+                    .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h))),
+            )
             .collect();
         Self {
             pool,
@@ -343,6 +315,7 @@ impl HarnessBrain {
             responder,
             runs: None,
             triage: std::sync::OnceLock::new(),
+            selector: std::sync::OnceLock::new(),
         }
     }
 
@@ -537,10 +510,6 @@ impl HarnessBrain {
             tool: String,
             instruction: String,
             origin_thread: Option<String>,
-            /// The task this approval was parked from (issue #796), so the
-            /// re-issue turn can reclaim its held-across-park checkout and stamp
-            /// the ledger so `repo_publish` can name the task branch.
-            origin_task: Option<String>,
         }
 
         let grants = self.deps.approval_requests.grants();
@@ -559,7 +528,6 @@ impl HarnessBrain {
                 tool: grant.tool,
                 agent: grant.agent,
                 origin_thread: grant.origin_thread,
-                origin_task: grant.origin_task,
             }
         } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
             // No exact-arguments pin, and deliberately so: a standing grant
@@ -576,16 +544,11 @@ impl HarnessBrain {
                 tool: standing.tool,
                 agent: standing.agent,
                 origin_thread: standing.origin_thread,
-                origin_task: standing.origin_task,
             }
         } else {
             return Ok(None);
         };
         let instruction = grant.instruction.clone();
-        // Issue #796: the task (if any) this approval resumes. Bound before the
-        // struct's fields are moved into the run below.
-        let origin_task = grant.origin_task.clone();
-
         let guard = self.deps.steer.register(
             &self.record().id,
             InflightEntry {
@@ -630,28 +593,6 @@ impl HarnessBrain {
                     .pending_publishes
                     .claim(publish::PublishDestination::Conversation)
             });
-        // Issue #245: a re-dispatched approval is a full agent turn with the
-        // whole toolbelt, so it can check a repository out, and the janitor
-        // claimed here deletes what this turn creates. Issue #796 refines what
-        // "this turn's checkout" is: a turn resuming a task first reclaims that
-        // task's held-across-park tree, so the resumed step operates on the same
-        // working tree — and the commit it needs — the parked step left behind.
-        let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
-        // Issue #796: at the claim, drop any task's retained checkout whose
-        // approval was denied or expired — no live grant names it, so nothing
-        // will ever resume it. `grants` is the same live set peeked above.
-        self.deps
-            .checkouts
-            .sweep_orphans(|task| grants.any_for_task(task));
-        // Issue #735/#796: stamp the task this grant resumes so `repo_publish`
-        // can name its branch, and reclaim the checkout the parked step left so
-        // the resumed step — a commit, a publish — finds its own work. A
-        // re-dispatch with no task (a plain operator-chat approval) clears the
-        // cell and reclaims nothing, exactly as #735 did.
-        self.deps.checkouts.set_task(origin_task.clone());
-        if let Some(task) = &origin_task {
-            self.deps.checkouts.reclaim(task);
-        }
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
@@ -665,23 +606,6 @@ impl HarnessBrain {
             )
             .await;
         drop(guard);
-        // Issue #796: hold the task's checkout across the turn boundary on EVERY
-        // re-issue, not only one that parks a new approval.
-        //
-        // A write is a chain of separately-approved steps — checkout, edit,
-        // commit, publish — and an operator commonly approves them in a batch, so
-        // the grants exist up front. Re-issuing one grant then need NOT queue a
-        // new approval, yet the checkout it just materialized (or the commit it
-        // just made) must still be there when the next grant is re-issued in its
-        // own turn. Retaining only on a fresh park dropped exactly that tree the
-        // turn it was created. So retain unconditionally here; the checkout is
-        // reclaimed on the next re-issue, and `sweep_orphans` at the next claim
-        // deletes it once no live grant names the task — the flow finished, was
-        // denied, or expired.
-        if let Some(task) = &origin_task {
-            self.deps.checkouts.retain_for_task(task);
-        }
-
         let published = self.deps.pending_publishes.drain();
         if !published.is_empty()
             && publish_claim.is_some()
@@ -781,6 +705,7 @@ impl HarnessBrain {
             text,
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         }))
     }
 
@@ -905,26 +830,6 @@ impl HarnessBrain {
         // redirected turn's work, which is a different decision from who is
         // entitled to queue.
         let _delegation_claim = self.deps.delegations.claim();
-        // Issue #245: and the checkout ledger, for the same span. A dispatched
-        // card is where a `repo_checkout` is most likely to happen, and the
-        // guard's `Drop` is what deletes the tree on every exit — success,
-        // error, cancel, redirect exhaustion and panic-unwind alike.
-        let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
-        // Issue #796: at the claim, drop any task's retained checkout whose
-        // approval was denied or expired — no live grant names it, so nothing
-        // will resume it.
-        {
-            let grants = self.deps.approval_requests.grants();
-            self.deps
-                .checkouts
-                .sweep_orphans(|task| grants.any_for_task(task));
-        }
-        // Issue #735: this is a dispatched card, so `repo_publish` names its
-        // branch `oc/<company>/<card>`. Stamped on the same per-turn cell the
-        // janitor above claims. A parked step of this card resumes through the
-        // approval re-issue path (which reclaims the tree there, issue #796), not
-        // by re-running the card, so nothing is reclaimed here.
-        self.deps.checkouts.set_task(Some(card.id.clone()));
         // Issue #339, same argument for staged workflow references: an operator
         // chat turn earlier in this cycle may have run a workflow through the
         // orchestrator's tool, and that run belongs to the conversation, not to
@@ -985,12 +890,6 @@ impl HarnessBrain {
             // part of the loop and never clears, so a nudge cannot discard what
             // the turn it is asking about published.
             self.deps.pending_publishes.clear();
-            // Issue #245, same argument for a checkout: a redirect abandons the
-            // previous turn's work, and a working tree that turn cloned is part
-            // of that work. Deleting it here also means a redirect re-runs
-            // against a fresh checkout rather than one the abandoned turn may
-            // have half-patched.
-            self.deps.checkouts.purge();
             // Issue #339: an abandoned redirect's workflow run is abandoned with
             // it, for the same reason — the card's link must name what the turn
             // that actually settled produced, not what a discarded one did.
@@ -1180,17 +1079,6 @@ impl HarnessBrain {
                 }
             }
         };
-
-        // Issue #796: if this dispatch parked (a step it ran needs approval),
-        // hold whatever checkout it built across that park so the approved step
-        // resumes on the same tree. A dispatch that ended without parking keeps
-        // the pre-#796 behaviour — the janitor's `Drop` deletes its checkout.
-        // Orphan cleanup for the denied/expired case is the `sweep_orphans` at
-        // the next claim, which is safe against a still-pending approval in a way
-        // an unconditional purge here would not be.
-        if self.deps.approval_requests.queued() > approvals_before {
-            self.deps.checkouts.retain_for_task(&card.id);
-        }
 
         // ── Issue #244: the deliverable gate, and the one nudge ─────────────
         //
@@ -1752,6 +1640,8 @@ impl HarnessBrain {
             .append(
                 &self.record().id,
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     chat_id: card.id.clone(),
                     agent_id: responder.to_string(),
@@ -2048,6 +1938,11 @@ impl HarnessBrain {
                 let target = artifact_mirror::PublishTarget {
                     agent_id: author,
                     task_id: &card.id,
+                    // Issue #1687: the folder the deliverable lands in is
+                    // named for the work, not only keyed by it. The card is
+                    // right here and its title is the one string that says
+                    // what an operator is looking at.
+                    task_title: Some(card.title.as_str()),
                     source: &pending.source,
                     payload: match &pending.payload {
                         crate::harness::publish::PublishPayload::Text(text) => {
@@ -2488,26 +2383,18 @@ impl HarnessBrain {
         let Some(chat) = chat else {
             return self.responder.clone();
         };
-        if let Some(lead) = self.desk_lead(chat) {
-            return lead;
-        }
-        if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
-            return agent;
-        }
-        // Issue #982, step 3: the console's DM channel id, `dm:<teammate-id>`.
-        // Tried LAST, and for the same reason the case-folding above is safe —
-        // it can only claim a key that resolves to nothing today, so no existing
+        // The four arms — desk lead, bare roster id, then the console's
+        // `dm:<teammate-id>` key tried both ways (issue #982, step 3) — live on
+        // the brain-agnostic seam since issue #1725, so the cycle's small-talk
+        // fast path attributes its reply to the same teammate a turn would have.
+        // The DM arm stays LAST there for the reason it was last here: it can
+        // only claim a key that resolves to nothing today, so no existing
         // thread moves, and a company that really does have a desk or teammate
-        // called `dm:x` keeps it. Without it a `dm:`-keyed thread reached arm 4
-        // and the orchestrator answered a DM addressed to somebody else, which
-        // is the same misroute #884 closed for a bare key.
-        if let Some(key) = crate::runtime::assignee::dm_key(chat) {
-            if let Some(lead) = self.desk_lead(key) {
-                return lead;
-            }
-            if let Some(agent) = self.record().resolve_roster_agent_id(key) {
-                return agent;
-            }
+        // called `dm:x` keeps it.
+        if let Some(responder) =
+            crate::runtime::delegation_tools::chat_responder(&self.record(), chat)
+        {
+            return responder;
         }
         tracing::warn!(
             company = %self.record().id,
@@ -2519,21 +2406,17 @@ impl HarnessBrain {
         self.responder.clone()
     }
 
-    /// The lead member of a desk: the first member of the matching group chat
-    /// (by id, or by case-insensitive name) that is a real roster teammate.
-    /// `None` when no desk matches or none of its members are on the roster.
-    ///
-    /// Membership is the desk's **effective** roster — the manifest members
-    /// unioned with operator-added overlay members (issue #72) — resolved through
-    /// the same [`CompanyRecord::effective_desk_members`] the REST `list_desks`
-    /// handler uses, so the two cannot drift. A roster teammate is a manifest
-    /// agent or a team-overlay teammate, so an overlay-added lead is reachable on
-    /// a desk the manifest left empty.
-    fn desk_lead(&self, desk: &str) -> Option<String> {
-        // Desk-lead resolution is brain-agnostic — it reads only `CompanyRecord`
-        // — so it lives on the delegation seam (issue #176); this stays a thin
-        // wrapper for the routing callers on the brain.
-        delegation::desk_lead(&self.record(), desk)
+    /// The desk key `@everyone` expands against for a message addressed to
+    /// `chat`. Folds the General-desk spellings [`is_general_chat`] admits
+    /// (`None`, `""`, `"main"`, `"General"`) to [`DEFAULT_DESK`], so a
+    /// broadcast from the console's default thread — which sends
+    /// `chat: "main"`, an alias `resolve_desk_id` does not know — expands
+    /// against the General desk rather than no desk at all.
+    fn everyone_desk(chat: Option<&str>) -> &str {
+        match chat {
+            Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => chat,
+            _ => crate::server::ops::language::DEFAULT_DESK,
+        }
     }
 
     /// Drains the MCP failure queue **onto the operator bubble's step timeline**
@@ -2753,6 +2636,137 @@ impl HarnessBrain {
             crate::harness::triage::MeteredTriage::from_deps(&self.deps, company.clone())
         })
     }
+
+    /// The company's responder selection, built once (issue #1835).
+    fn selector_pass(
+        &self,
+        company: &crate::ports::types::CompanyId,
+    ) -> &crate::harness::selector::MeteredSelector {
+        self.selector.get_or_init(|| {
+            crate::harness::selector::MeteredSelector::from_deps(&self.deps, company.clone())
+        })
+    }
+
+    /// The per-message pick for a message addressed to an `auto` channel — or
+    /// `None` wherever the deterministic answer should stand (issue #1835).
+    ///
+    /// `None` covers every case, deliberately in one place: the chat key names
+    /// no desk, the desk is lead-routed, the channel has fewer than two roster
+    /// members (a pick over one candidate is the fallback with extra latency),
+    /// or the selection failed — unreachable, slow, unparseable, or an id
+    /// outside the membership. The caller falls back to
+    /// [`responder_for`](Self::responder_for), whose desk arm answers the
+    /// channel's first roster member; **the worst case of this rung is the old
+    /// rung**.
+    ///
+    /// Takes the operator's raw `text`, not the attachment-composed wire body:
+    /// routing is judged on what was said, and a 200k-char extracted-file block
+    /// would drown the one line the selection is about.
+    ///
+    /// A member's role and description come from the same halves the Team page
+    /// renders — [`CompanyRecord::effective_agent`] for a manifest teammate
+    /// (edits applied), the overlay row plus its stored edit for a
+    /// console-created one — so the selector judges fit by what an operator
+    /// reads on the members pane.
+    async fn auto_channel_responder(&self, chat: Option<&str>, text: &str) -> Option<String> {
+        let chat = chat?;
+        let (company, desk_id, candidates) = {
+            let record = self.record();
+            let desk_id = record.resolve_desk_id(chat)?;
+            if record.desk_responder_mode(&desk_id).is_lead() {
+                return None;
+            }
+            let candidates: Vec<crate::harness::selector::SelectorCandidate> = record
+                .effective_desk_members(&desk_id)
+                .into_iter()
+                .filter(|m| record.is_roster_agent(m))
+                .filter_map(|id| selector_candidate(&record, &id))
+                .collect();
+            (record.id.clone(), desk_id, candidates)
+        };
+        match candidates.len() {
+            // Every member has left the roster since the channel was created —
+            // `POST …/desks` refuses an empty auto channel, but `DELETE
+            // …/team/{id}` can empty one later (codex on #1872). There is
+            // nobody to pick, so this defers to the caller's fallback ladder
+            // and the orchestrator answers, exactly as it does for any desk
+            // whose members have all gone. Refusing the deletion instead would
+            // be worse — a teammate you cannot remove because a channel names
+            // them — so the gap is closed by saying so rather than by
+            // pretending the channel still routes.
+            0 => {
+                tracing::warn!(
+                    company = %company,
+                    chat = %desk_id,
+                    "[selector] this channel has no roster members left, so there is nobody to \
+                     pick; the orchestrator is answering a message addressed to the channel"
+                );
+                None
+            }
+            1 => Some(candidates[0].id.clone()),
+            // The plan-level total-token ceiling gates the selection too, not
+            // only the responder turn it precedes (codex on #1872). Selection
+            // runs *before* a responder exists, so `total_ceiling_refusal` has
+            // no agent to refuse as — but it is a real model call, and without
+            // this a tenant past its hard ceiling could keep paying to route
+            // by posting into an auto channel, one selector call per message,
+            // after the ceiling that is supposed to permit no model calls at
+            // all. Falling through to the deterministic first member costs
+            // nothing and is the same answer a lead desk would give.
+            _ if crate::harness::HarnessPool::total_ceiling_spent(&company, &self.deps).await => {
+                tracing::info!(
+                    company = %company,
+                    chat = %desk_id,
+                    "[selector] total token ceiling reached; routing to the channel's first \
+                     member without a selection call"
+                );
+                None
+            }
+            _ => match self.selector_pass(&company).select(text, &candidates).await {
+                crate::harness::selector::SelectorVerdict::Member(id) => {
+                    tracing::info!(
+                        company = %company,
+                        chat = %desk_id,
+                        picked = %id,
+                        "[selector] routed an unmentioned channel message to its best-fit member"
+                    );
+                    Some(id)
+                }
+                crate::harness::selector::SelectorVerdict::Unavailable => None,
+            },
+        }
+    }
+}
+
+/// One channel member as [`HarnessBrain::auto_channel_responder`] hands it to
+/// the selection: the manifest half through
+/// [`CompanyRecord::effective_agent`] (stored edits applied), the overlay half
+/// from its row with any stored edit's role/description preferred — the same
+/// two halves the Team page folds, so the selector and the members pane
+/// describe a teammate identically.
+fn selector_candidate(
+    record: &CompanyRecord,
+    id: &str,
+) -> Option<crate::harness::selector::SelectorCandidate> {
+    if let Some(agent) = record.effective_agent(id) {
+        return Some(crate::harness::selector::SelectorCandidate {
+            id: agent.id.clone(),
+            role: agent.role.clone(),
+            description: agent.description.clone(),
+        });
+    }
+    let agent = record.overlay_agents.iter().find(|a| a.id == id)?;
+    let edit = record.overlay_agent_edits.iter().find(|e| e.agent_id == id);
+    Some(crate::harness::selector::SelectorCandidate {
+        id: agent.id.clone(),
+        role: edit
+            .and_then(|e| e.role.clone())
+            .unwrap_or_else(|| agent.role.clone()),
+        description: edit
+            .and_then(|e| e.description.clone())
+            .filter(|d| !d.is_empty())
+            .or_else(|| agent.description.clone()),
+    })
 }
 
 /// The turn instruction for a dispatched card: its title, plus its note when it
@@ -2804,7 +2818,27 @@ impl Brain for HarnessBrain {
         // returned early used to leave its entries for the *next* cycle to
         // park; now the window is the claim's lifetime and nothing outlives it.
         let claim = self.deps.approval_requests.claim(ApprovalScope::Cycle);
-        claim.scoped(self.run_cycle_scoped(req, host)).await
+        let company_id = req.company_id.clone();
+        // Issue #1455: the cycle's policy pin must not outlive the cycle even
+        // if the cycle body is cancelled or unwinds through a panic after
+        // `ensure_with_policy` installed it — the `await` that would have
+        // released it is exactly where a dropped future stops. The guard holds
+        // the same `run_turn` the body warms through and releases every lane's
+        // pin synchronously from `Drop`, so the release covers success, error,
+        // cancellation and panic alike. The explicit `end_cycle` below keeps
+        // the happy path visible; both are idempotent map removals.
+        let _pin_guard = PolicyPinGuard::new(self.run_turn(), company_id.clone());
+        let result = claim.scoped(self.run_cycle_scoped(req, host)).await;
+        // Issue #1455: release the cycle's policy pin now that the cycle body is
+        // over — success or error. The pin's whole job was to keep the in-flight
+        // roster on the snapshot the native gate was re-applied from for the
+        // cycle's own turns; a standalone workflow turn between cycles must
+        // instead rebuild against the live store overlay, and a pin left behind
+        // would keep the roster on a snapshot that only an unrelated cycle could
+        // refresh. Dispatched through `run_turn` so a router releases every
+        // lane's pool, not just the default one.
+        self.run_turn().end_cycle(&company_id).await;
+        result
     }
 
     /// The harness meters itself per turn in [`HarnessPool::run`], against the
@@ -2814,8 +2848,48 @@ impl Brain for HarnessBrain {
         Cognition {
             path: crate::ports::brain::HARNESS_PATH,
             provider: "per-turn",
+            // Named per turn, beside the provider slug, for the same reason:
+            // this path meters itself and reports zero cycle usage, so a model
+            // named here would never reach a sample (issue #1749).
+            model: None,
             metering: UsageMetering::PerTurn,
         }
+    }
+}
+
+/// RAII release for a cycle's policy pins, the analogue of
+/// [`ApprovalClaim`](crate::harness::policy::ApprovalClaim)'s `Drop` half.
+///
+/// A cycle pins its policy snapshot to every lane's pool through
+/// [`RunTurn::ensure_with_policy`]; the pin must be released when the cycle is
+/// over so a standalone workflow turn between cycles rebuilds against the live
+/// store overlay. The async [`RunTurn::end_cycle`] covers the normal end, but
+/// a cycle whose future is cancelled or unwinds through a panic after the pin
+/// was installed never reaches it — the `await` that would have called it is
+/// exactly where the future is dropped. This guard releases from `Drop`, so
+/// the pin cannot outlive the cycle no matter how it ends (issue #1455).
+struct PolicyPinGuard {
+    run_turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    company_id: crate::ports::types::CompanyId,
+}
+
+impl PolicyPinGuard {
+    fn new(
+        run_turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+        company_id: crate::ports::types::CompanyId,
+    ) -> Self {
+        Self {
+            run_turn,
+            company_id,
+        }
+    }
+}
+
+impl Drop for PolicyPinGuard {
+    fn drop(&mut self) {
+        // Synchronous, so it runs even when the cycle future is dropped or
+        // unwound mid-await. Idempotent with `end_cycle`.
+        self.run_turn.release_policy_pin_sync(&self.company_id);
     }
 }
 
@@ -2836,7 +2910,21 @@ impl HarnessBrain {
         // harnesses has one pool per `built_in` harness, and each named lane's
         // own pool must be populated before its first turn, or a bound agent
         // fails with "company not found" while the default lane looks fine.
-        self.run_turn().ensure(&self.record()).await?;
+        //
+        // Issue #1455: when the runtime captured the policy at the top of this
+        // cycle — the same snapshot the native gate was re-applied from — the
+        // roster rebuilds against *that*, not the store. A console override that
+        // landed mid-turn (after the runtime's load, before this refresh) must
+        // not reach the harness gate a turn early, or one turn would run with
+        // the harness auto-approving what the native gate still parks.
+        match &req.policy {
+            Some(policy) => {
+                self.run_turn()
+                    .ensure_with_policy(&self.record(), policy)
+                    .await?
+            }
+            None => self.run_turn().ensure(&self.record()).await?,
+        }
 
         let mut channel_responses = Vec::new();
         for event in &req.events {
@@ -2845,8 +2933,25 @@ impl HarnessBrain {
                     text,
                     chat,
                     deliverable,
+                    mentions,
+                    attachments,
                     ..
                 } => {
+                    // Issue #1682: the embedded harness is the active cognition
+                    // seam on an `openhuman` build, and the operator's
+                    // attachments must reach the agent here too — the medulla
+                    // adapter folds them into the wire body, but this path
+                    // handed the raw message to the pool, so a turn had no way
+                    // to know a file was even attached. Same framing, same
+                    // untrusted-file guard ("FILE DATA, not instructions") as
+                    // the medulla wire body; the transcript keeps the full
+                    // message, and the formatter's own budget bounds what the
+                    // agent sees. The nudge below keeps the operator's raw
+                    // words: that background steer is about the *reply's*
+                    // unpublished files, and a large attachment block is not
+                    // part of the task it should reprise.
+                    let composed =
+                        crate::brain::medulla::effects::with_attachment_refs(text, attachments);
                     // Issue #416: a workflow copilot thread is answered by a
                     // CONFINED turn, not by the company orchestrator.
                     //
@@ -2868,7 +2973,7 @@ impl HarnessBrain {
                             .run_confined(
                                 &self.record().id,
                                 &self.record().manifest.company.name,
-                                text,
+                                &composed,
                                 &self.deps,
                                 chat.as_deref(),
                                 &confinement,
@@ -2877,8 +2982,58 @@ impl HarnessBrain {
                         channel_responses.push(confined_bubble(outcome));
                         continue;
                     }
-                    // Route to the addressed desk's lead, else the orchestrator.
-                    let responder = self.responder_for(chat.as_deref());
+                    // Route to the teammate the message named, else to the
+                    // addressed desk's lead, else the orchestrator.
+                    //
+                    // Naming somebody in a room is a stronger address than the
+                    // room's default answerer, so a mention outranks the desk
+                    // lead. That is the same explicit-beats-implicit ordering
+                    // `responder_for` already applies between an addressed desk
+                    // and the orchestrator (issue #884) — one more rung at the
+                    // top of the existing ladder, not a second competing notion
+                    // of who a message is for.
+                    //
+                    // Resolves nothing on a message that mentions no teammate,
+                    // which is every message journaled before mentions existed,
+                    // so routing is unchanged byte-for-byte for them.
+                    let responder =
+                        match crate::runtime::mentions::mention_responder(&self.record(), mentions)
+                        {
+                            Some(responder) => responder,
+                            // Issue #1835: below a mention, above the deterministic
+                            // answer, an `auto` channel picks its best-fit member
+                            // for this message. Every way the pick cannot happen —
+                            // not an auto channel, one member, selection failed —
+                            // is `None`, and the ladder continues exactly where it
+                            // always stood.
+                            None => {
+                                match self.auto_channel_responder(chat.as_deref(), text).await {
+                                    Some(responder) => responder,
+                                    None => self.responder_for(chat.as_deref()),
+                                }
+                            }
+                        };
+                    // Everyone else the message named, for the answering turn's
+                    // context. A list, not a fan-out: one operator message still
+                    // spawns exactly one turn, and this teammate spreads the
+                    // work — if it should — through the existing gated
+                    // delegation seam rather than through a new uncontrolled
+                    // one. `@everyone` expands here, against the addressed
+                    // desk's membership.
+                    //
+                    // The addressed desk is the raw chat key unless it is one of
+                    // the General-desk spellings `is_general_chat` folds — the
+                    // console's default thread sends `chat: "main"`, and
+                    // `resolve_desk_id` does not recognise that console-only
+                    // alias, so a broadcast from the main thread would otherwise
+                    // expand against no desk at all.
+                    let addressed_desk = Self::everyone_desk(chat.as_deref());
+                    let also_mentioned = crate::runtime::mentions::mentioned_agents(
+                        &self.record(),
+                        addressed_desk,
+                        mentions,
+                        Some(&responder),
+                    );
                     // The chat/desk thread this turn answers — the same id the
                     // reply is journaled under (`AgentReply.chat_id`). Passed into
                     // the pool so the live turn-stream frames carry it and the
@@ -2920,24 +3075,6 @@ impl HarnessBrain {
                                 .pending_publishes
                                 .claim(publish::PublishDestination::Conversation)
                         });
-                    // Issue #245: the chat half of the checkout lifecycle. An
-                    // operator conversation runs the same toolbelt a card does,
-                    // so it can clone a repository, and the guard's `Drop`
-                    // removes it when this turn ends.
-                    let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
-                    // Issue #796: sweep any task checkout orphaned by a
-                    // denied/expired approval, on this turn's claim like every
-                    // other.
-                    {
-                        let grants = self.deps.approval_requests.grants();
-                        self.deps
-                            .checkouts
-                            .sweep_orphans(|task| grants.any_for_task(task));
-                    }
-                    // Issue #735: a conversation is not a task card, so clear any
-                    // task a prior turn stamped — `repo_publish` requires a task
-                    // and refuses on a chat turn (task turns only, this tier).
-                    self.deps.checkouts.set_task(None);
                     // Drive the brain-agnostic delegation seam (issue #176): the
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
@@ -2955,7 +3092,10 @@ impl HarnessBrain {
                         // "this is not work", which the runtime has to honour or
                         // the console's promise holds on one surface only.
                         .requested(*deliverable)
-                        .handle_operator_message(&responder, text, chat_id)
+                        // Who else this message named (issue: mentions). Context
+                        // for the turn, never a second dispatch.
+                        .also_mentioned(also_mentioned)
+                        .handle_operator_message(&responder, &composed, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
                     let mut operator_reply = turn.reply;
@@ -3108,6 +3248,7 @@ impl HarnessBrain {
                         agent: Some(responder.clone()),
                         text: operator_reply,
                         reply_to: None,
+                        mentions: Vec::new(),
                         steps: operator_steps,
                     });
                     // Issue #926: a turn that paused at its step cap says so,
@@ -3137,6 +3278,7 @@ impl HarnessBrain {
                             text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
                             steps: Vec::new(),
                             reply_to: None,
+                            mentions: Vec::new(),
                         });
                     }
                     // Issue #1032: and a turn halted for spend says so, in its
@@ -3162,6 +3304,7 @@ impl HarnessBrain {
                             text: spend_halt_notice(halt),
                             steps: Vec::new(),
                             reply_to: None,
+                            mentions: Vec::new(),
                         });
                     }
                     channel_responses.extend(turn.bubbles);
@@ -3342,10 +3485,13 @@ description = "Runs Acme."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -3366,6 +3512,7 @@ description = "Runs Acme."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -3403,10 +3550,10 @@ description = "Runs Acme."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record)
     }
@@ -3417,6 +3564,7 @@ description = "Runs Acme."
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
+            policy: None,
         }
     }
 
@@ -3427,11 +3575,13 @@ description = "Runs Acme."
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "status?".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -3531,10 +3681,13 @@ description = "Builds it."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -3552,6 +3705,7 @@ description = "Builds it."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -3589,10 +3743,10 @@ description = "Builds it."
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -3677,6 +3831,7 @@ members = ["engineer"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -3714,10 +3869,10 @@ members = ["engineer"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: with_workspace.then(|| ops.clone() as Arc<dyn crate::ports::WorkspaceStore>),
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -4131,7 +4286,10 @@ members = ["engineer"]
                     && n.parent_id
                         .as_deref()
                         .and_then(name_of)
-                        .is_some_and(|parent| parent == "t-1")
+                        // Issue #1687: the task folder is named for the work
+                        // and keyed by the card id — `<title>.<id>`, not the
+                        // bare id — so browsing by path lands on that name.
+                        .is_some_and(|parent| parent == "ship-the-thing.t-1")
             })
             .expect("agent B finds the deliverable by browsing the shared tree");
 
@@ -5436,6 +5594,8 @@ members = ["engineer"]
                 role: "Growth".into(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             })
         });
         tasks
@@ -5565,10 +5725,13 @@ members = ["engineer"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -5585,6 +5748,7 @@ members = ["engineer"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -5622,10 +5786,10 @@ members = ["engineer"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -5668,7 +5832,7 @@ members = ["engineer"]
             "an absent record must not empty the roster"
         );
         assert_eq!(
-            brain.desk_lead("eng_desk"),
+            delegation::desk_lead(&brain.record(), "eng_desk"),
             Some("engineer".to_string()),
             "nor cost the company its desks"
         );
@@ -5722,6 +5886,106 @@ members = ["engineer"]
             "a cycle must fail when the record cannot be read, rather than \
              quietly routing on a stale one"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Mention routing: naming somebody outranks the desk lead
+    // -----------------------------------------------------------------------
+
+    fn mention_of(id: &str) -> crate::ports::types::Mention {
+        crate::ports::types::Mention {
+            target: crate::ports::types::MentionTarget::Agent { id: id.to_string() },
+            text: format!("@{id}"),
+            offset: 0,
+            quiet: false,
+        }
+    }
+
+    /// The whole point of the feature: `@engineer` in the main line is answered
+    /// by the engineer, not by the orchestrator that would otherwise take it.
+    #[test]
+    fn a_mentioned_teammate_answers_instead_of_the_default_responder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        // Without a mention, the orchestrator answers an unaddressed message.
+        assert_eq!(brain.responder_for(None), "chief");
+        // With one, the named teammate does.
+        assert_eq!(
+            crate::runtime::mentions::mention_responder(&brain.record(), &[mention_of("engineer")]),
+            Some("engineer".to_string()),
+        );
+    }
+
+    /// And it outranks the *desk lead*, which is the stronger claim: a message
+    /// addressed to a desk still goes to the teammate it names.
+    #[test]
+    fn a_mention_outranks_the_addressed_desks_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+        assert_eq!(
+            crate::runtime::mentions::mention_responder(&brain.record(), &[mention_of("ceo")]),
+            Some("ceo".to_string()),
+            "the named teammate answers even on a desk with its own lead",
+        );
+    }
+
+    /// A message that mentions nobody routes exactly as it did before mentions
+    /// existed — which is every message already in every journal.
+    #[test]
+    fn a_message_with_no_mentions_routes_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        assert_eq!(
+            crate::runtime::mentions::mention_responder(&brain.record(), &[]),
+            None,
+            "so the caller falls through to responder_for",
+        );
+        assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+        assert_eq!(brain.responder_for(None), "chief");
+    }
+
+    /// `@everyone` names the addressed desk's teammates for the turn's context
+    /// — and still leaves exactly one responder, because it is a list and not a
+    /// fan-out.
+    #[test]
+    fn everyone_names_the_desk_without_choosing_a_responder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let mentions = [crate::ports::types::Mention {
+            target: crate::ports::types::MentionTarget::Everyone,
+            text: "@everyone".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        assert_eq!(
+            crate::runtime::mentions::mention_responder(&brain.record(), &mentions),
+            None,
+            "a broadcast names no single teammate, so the desk lead still answers",
+        );
+        assert_eq!(
+            crate::runtime::mentions::mentioned_agents(
+                &brain.record(),
+                "eng_desk",
+                &mentions,
+                Some("engineer"),
+            ),
+            Vec::<String>::new(),
+            "the only member is the responder, and it is not told it was mentioned",
+        );
+    }
+
+    /// `@everyone` from the console's default thread (`chat: "main"`) expands
+    /// against the General desk, not no desk at all. The console-only alias is
+    /// not a desk key `resolve_desk_id` knows, so the brain folds it — and the
+    /// other General-desk spellings — to the General desk id before expanding.
+    #[test]
+    fn everyone_desk_folds_the_main_thread_alias_to_general() {
+        assert_eq!(HarnessBrain::everyone_desk(None), "General");
+        assert_eq!(HarnessBrain::everyone_desk(Some("")), "General");
+        assert_eq!(HarnessBrain::everyone_desk(Some("main")), "General");
+        assert_eq!(HarnessBrain::everyone_desk(Some("General")), "General");
+        assert_eq!(HarnessBrain::everyone_desk(Some("eng_desk")), "eng_desk");
     }
 
     /// The default responder is the `orchestrator`-tier agent, even when it is
@@ -5948,13 +6212,19 @@ name = "Design"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
-        assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
+        assert_eq!(
+            delegation::desk_lead(&brain.record(), "design"),
+            Some("engineer".to_string())
+        );
         assert_eq!(brain.responder_for(Some("design")), "engineer");
     }
 
@@ -6001,6 +6271,8 @@ members = ["eng1", "eng2"]
                 role: "CTO".to_string(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             }],
             overlay_desk_members: vec![crate::ports::types::OverlayDeskMember {
                 desk_id: "eng".to_string(),
@@ -6014,13 +6286,19 @@ members = ["eng1", "eng2"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
-        assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
+        assert_eq!(
+            delegation::desk_lead(&brain.record(), "eng"),
+            Some("cto".to_string())
+        );
     }
 
     /// Regression for the builder seeding path (#133): a desk-order change written
@@ -6075,10 +6353,13 @@ members = ["eng1", "eng2"]
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -6087,7 +6368,7 @@ members = ["eng1", "eng2"]
         let loaded = store.load(&id).await.unwrap().unwrap();
         let (brain, _tasks) = brain_over(dir.path(), loaded);
         assert_eq!(
-            brain.desk_lead("eng"),
+            delegation::desk_lead(&brain.record(), "eng"),
             Some("eng1".to_string()),
             "blueprint lead before reorder"
         );
@@ -6107,7 +6388,7 @@ members = ["eng1", "eng2"]
         let reloaded = store.load(&id).await.unwrap().unwrap();
         let (rebuilt, _tasks2) = brain_over(dir.path(), reloaded);
         assert_eq!(
-            rebuilt.desk_lead("eng"),
+            delegation::desk_lead(&rebuilt.record(), "eng"),
             Some("eng2".to_string()),
             "reorder did not take effect on routing after rebuild"
         );
@@ -6169,11 +6450,13 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "we should announce this".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -6228,11 +6511,13 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "two things".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -6273,11 +6558,13 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "status?".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -6582,6 +6869,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir.path())),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -6619,10 +6907,10 @@ members = ["eng1", "eng2"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -6734,6 +7022,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir.path())),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
@@ -6771,10 +7060,10 @@ members = ["eng1", "eng2"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -6829,6 +7118,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -6866,10 +7156,10 @@ members = ["eng1", "eng2"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -7165,6 +7455,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -7202,10 +7493,10 @@ members = ["eng1", "eng2"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -7227,6 +7518,7 @@ members = ["eng1", "eng2"]
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
+            policy: None,
         }
     }
 
@@ -7323,142 +7615,6 @@ members = ["eng1", "eng2"]
             .all(|e| !matches!(e.event, CompanyEvent::AgentReply { .. }))
     }
 
-    /// Issue #796: a task's checkout survives a whole BATCH of re-issues, the way
-    /// a supervised write actually runs — the operator approves `repo_checkout`,
-    /// the edit, the commit and the publish up front, and each grant is re-issued
-    /// in its own turn. The checkout the first re-issue materializes must still be
-    /// there when the next grant is re-issued, and the one after that.
-    ///
-    /// This is the exact loop the first cut of the fix still had: retaining the
-    /// tree only on a turn that parked a NEW approval dropped it the moment a
-    /// batched re-issue parked nothing, so the next approved step found the tree
-    /// gone. `MockProvider` parks and consumes nothing, so both grants stay live —
-    /// the task is in flight — and the tree must be held across every re-issue.
-    #[tokio::test]
-    async fn a_task_checkout_survives_a_batch_of_re_issues() {
-        let dir = tempfile::tempdir().unwrap();
-        let log: Arc<dyn crate::ports::EventLog> =
-            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
-        let requests = crate::harness::policy::ApprovalRequestQueue::default();
-        // Two of the task's steps approved up front (a batch), both under t-1.
-        for (id, tool) in [("appr-1", "repo_checkout"), ("appr-2", "git_operations")] {
-            requests
-                .grants()
-                .grant(crate::runtime::grants::GrantedCall {
-                    approval_id: ApprovalId::new(id),
-                    agent: "ceo".into(),
-                    tool: tool.into(),
-                    args: serde_json::json!({}),
-                    at_millis: now_millis(),
-                    origin_thread: None,
-                    origin_parent: None,
-                    // The link that makes each re-issue reclaim the same tree.
-                    origin_task: Some("t-1".into()),
-                });
-        }
-        let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
-
-        // The checkout the task's first step materialized, held under its task.
-        let tree = dir.path().join("held-checkout");
-        std::fs::create_dir_all(&tree).unwrap();
-        brain.deps.checkouts.record(tree.clone());
-        brain.deps.checkouts.retain_for_task("t-1");
-
-        // Re-issue the first approved step. The tree must survive the turn — the
-        // task is not done, its other step is still granted.
-        brain
-            .run_cycle(
-                cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
-                &NoopHost,
-            )
-            .await
-            .expect("cycle runs");
-        assert!(
-            tree.is_dir(),
-            "the checkout was wiped between two batched re-issues — the loop is back"
-        );
-        assert_eq!(
-            brain.deps.checkouts.retained_tasks(),
-            vec!["t-1".to_string()],
-            "the task's checkout must stay held while the task is in flight"
-        );
-
-        // Re-issue the second approved step. Still held.
-        brain
-            .run_cycle(
-                cycle_over(vec![approval_resolved("appr-2", Verdict::Approve)]),
-                &NoopHost,
-            )
-            .await
-            .expect("cycle runs");
-        assert!(
-            tree.is_dir(),
-            "the checkout did not survive the second re-issue"
-        );
-        assert_eq!(
-            brain.deps.checkouts.retained_tasks(),
-            vec!["t-1".to_string()]
-        );
-    }
-
-    /// Issue #796: a checkout held for a task no live grant names — the
-    /// approval was denied or expired, so nothing will ever resume it — is swept
-    /// the next time any turn claims the janitor, rather than leaking to the boot
-    /// sweep. Here an unrelated approval drives that turn.
-    #[tokio::test]
-    async fn an_orphaned_task_checkout_is_swept_at_the_next_janitor_claim() {
-        let dir = tempfile::tempdir().unwrap();
-        let log: Arc<dyn crate::ports::EventLog> =
-            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
-        let requests = crate::harness::policy::ApprovalRequestQueue::default();
-        // A live grant with no task of its own — an ordinary chat approval — to
-        // drive one redispatch turn. It names no task, so it cannot keep the
-        // orphan alive.
-        requests
-            .grants()
-            .grant(crate::runtime::grants::GrantedCall {
-                approval_id: ApprovalId::new("appr-1"),
-                agent: "ceo".into(),
-                tool: "composio_execute".into(),
-                args: serde_json::json!({}),
-                at_millis: now_millis(),
-                origin_thread: None,
-                origin_parent: None,
-                origin_task: None,
-            });
-        let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
-
-        // A tree held for a task whose approval is gone: no grant names it.
-        let tree = dir.path().join("orphaned-checkout");
-        std::fs::create_dir_all(&tree).unwrap();
-        brain.deps.checkouts.record(tree.clone());
-        brain.deps.checkouts.retain_for_task("t-gone");
-        assert!(tree.is_dir());
-
-        brain
-            .run_cycle(
-                cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
-                &NoopHost,
-            )
-            .await
-            .expect("cycle runs");
-
-        assert!(
-            !tree.exists(),
-            "an orphaned task checkout was not swept at the janitor claim"
-        );
-        assert!(brain.deps.checkouts.retained_tasks().is_empty());
-    }
-
-    // Issue #379's reply routing — a channel's continuation must resume in that
-    // channel and not in its lead's private DM, and the mirror — used to be
-    // pinned here, against a hand-built grant. It moved with the journaling
-    // (issue #469): the runtime journals every continuation reply once, for both
-    // grant scopes, from the same `journal.approval_thread` key this read off the
-    // grant. The both-directions mirror is now driven end to end over the real
-    // router by
-    // `server::operator::test::a_continuation_resumes_in_the_thread_it_was_raised_in_and_no_other`.
-
     /// Issue #374: a resolution that minted only a STANDING grant must still
     /// re-dispatch the agent.
     ///
@@ -7482,6 +7638,7 @@ members = ["eng1", "eng2"]
                 agent: "ceo".into(),
                 workflow: None,
                 tool: "workspace_write".into(),
+                verdict: Verdict::Approve,
                 granted_by: crate::ports::types::Actor {
                     kind: crate::ports::types::ActorKind::User,
                     id: "user-1".into(),
@@ -7669,6 +7826,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: Some("stub-model".to_string()),
@@ -7706,10 +7864,10 @@ members = ["eng1", "eng2"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -7995,6 +8153,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -8034,10 +8193,10 @@ members = ["eng1", "eng2"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),
@@ -8240,6 +8399,335 @@ members = ["eng1", "eng2"]
         );
     }
 
+    /// A provider for the selection rung (issue #1835): a request opening with
+    /// the selector's own system prompt gets the scripted reply; anything else
+    /// echoes. Keyed on the prompt's opening sentence for the reason
+    /// [`is_triage_request`] documents, and pinned the same way below.
+    struct SelectingProvider {
+        reply: String,
+        selector_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    fn is_selection_request(request: &ModelRequest) -> bool {
+        request
+            .messages
+            .first()
+            .map(|m| {
+                m.text()
+                    .contains("You route one message in a group channel")
+            })
+            .unwrap_or(false)
+    }
+
+    #[async_trait]
+    impl ChatModel<()> for SelectingProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
+            if is_selection_request(&request) {
+                self.selector_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(ModelResponse::assistant(self.reply.clone()));
+            }
+            let message = request
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m, Message::User(_)))
+                .map(|m| m.text())
+                .unwrap_or_default();
+            Ok(ModelResponse::assistant(format!("mock: {message}")))
+        }
+    }
+
+    impl HarnessModel for SelectingProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "selecting".to_string()
+        }
+    }
+
+    #[test]
+    fn a_selection_request_is_recognised_as_one() {
+        let selection = ModelRequest {
+            messages: vec![
+                tinyagents::harness::message::Message::system(
+                    crate::harness::selector::system_prompt_for_test(),
+                ),
+                tinyagents::harness::message::Message::user("who owns login?".to_string()),
+            ],
+            ..ModelRequest::default()
+        };
+        assert!(
+            is_selection_request(&selection),
+            "the fixture must recognise the real prompt, or it silently starts \
+             eating scripted turns"
+        );
+    }
+
+    /// A brain whose provider answers every selection request with `reply`.
+    /// The record is [`record_with_desk`] — `engineer` + `chief`, a lead
+    /// `eng_desk` — plus an `auto` overlay channel `launch` holding both.
+    fn brain_that_selects(
+        dir: &std::path::Path,
+        reply: &str,
+    ) -> (HarnessBrain, Arc<SelectingProvider>) {
+        brain_that_selects_with(dir, reply, None, None)
+    }
+
+    /// [`brain_that_selects`], plus an optional plan and usage meter, so a
+    /// test can place the company past its plan-level total-token ceiling.
+    fn brain_that_selects_with(
+        dir: &std::path::Path,
+        reply: &str,
+        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
+        meter: Option<Arc<dyn crate::ports::usage::UsageMeter>>,
+    ) -> (HarnessBrain, Arc<SelectingProvider>) {
+        let provider = Arc::new(SelectingProvider {
+            reply: reply.to_string(),
+            selector_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: provider.clone(),
+            provider_slug: "selecting".to_string(),
+            serves: None,
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter,
+            workspace_root: dir.to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: InflightRegistry::new(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
+        };
+        let mut record = record_with_desk();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "launch".to_string(),
+            name: "Launch week".to_string(),
+            description: None,
+            members: vec!["engineer".to_string(), "chief".to_string()],
+            responder: crate::ports::types::ResponderMode::Auto,
+        });
+        (
+            HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
+            provider,
+        )
+    }
+
+    /// Issue #1835, the rung itself: an unmentioned message addressed to an
+    /// `auto` channel is routed to the selector's pick — a member the
+    /// deterministic fallback (`engineer`, the first member) would never have
+    /// chosen — and the pick is clamped to the channel.
+    #[tokio::test]
+    async fn an_auto_channel_routes_by_the_selectors_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_selects(dir.path(), "chief");
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "which strategy are we running?")
+                .await
+                .as_deref(),
+            Some("chief"),
+            "the selection overrides the first-member fallback"
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    /// The worst case of the new rung is the old rung: a pick outside the
+    /// channel's membership answers `None`, and the caller keeps the
+    /// deterministic fallback. Revert the clamp in `SelectorVerdict::parse`
+    /// and this routes a turn to a teammate the channel does not contain.
+    #[tokio::test]
+    async fn a_failed_selection_keeps_the_deterministic_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _provider) = brain_that_selects(dir.path(), "somebody_else");
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "which strategy are we running?")
+                .await,
+            None,
+            "an out-of-membership pick must fall back, never route"
+        );
+    }
+
+    /// Issue #1872 (codex P1): the plan-level total-token ceiling gates the
+    /// **selection**, not only the responder turn it precedes.
+    ///
+    /// Selection runs before a responder exists, so `total_ceiling_refusal`
+    /// has no agent to refuse as and never fired for it — meaning a tenant
+    /// past its hard ceiling could keep paying to route, one selector call per
+    /// message, after the ceiling that is supposed to permit no model calls at
+    /// all. Remove the `total_ceiling_spent` arm in `auto_channel_responder`
+    /// and this spends a call and answers `chief`.
+    #[tokio::test]
+    async fn an_exhausted_total_ceiling_routes_without_paying_for_a_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let meter = Arc::new(SpentMeter);
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: Default::default(),
+            total_budget: Some(10),
+        };
+        let (brain, provider) =
+            brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "which strategy are we running?")
+                .await,
+            None,
+            "past the ceiling the deterministic fallback answers, not a selection"
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a company past its hard ceiling must not pay to route"
+        );
+    }
+
+    /// Issue #1872 (codex P2): a channel emptied *after* creation.
+    ///
+    /// `POST …/desks` refuses an empty auto channel, but `DELETE …/team/{id}`
+    /// can retire its last roster-backed member later. There is then nobody to
+    /// pick, so this defers to the caller's ladder — the orchestrator answers,
+    /// as it does for any desk whose members have all gone — and spends
+    /// nothing doing it. Refusing the deletion instead would mean a teammate
+    /// you cannot remove because a channel names them.
+    #[tokio::test]
+    async fn a_channel_emptied_by_deletion_falls_back_without_paying() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_selects(dir.path(), "chief");
+        brain.mutate_record(|r| {
+            r.overlay_retired_agents = vec!["engineer".to_string(), "chief".to_string()];
+        });
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "who owns the retry logic?")
+                .await,
+            None,
+            "no candidates left: fall back rather than route to a retired teammate"
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    /// A meter whose every query reports spend past any ceiling a test sets.
+    struct SpentMeter;
+
+    #[async_trait]
+    impl crate::ports::usage::UsageMeter for SpentMeter {
+        async fn record(
+            &self,
+            _company: &CompanyId,
+            _sample: &crate::ports::usage::UsageSample,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn query(
+            &self,
+            _company: &CompanyId,
+            _since: u64,
+        ) -> crate::Result<Vec<crate::ports::usage::UsageSample>> {
+            Ok(vec![crate::ports::usage::UsageSample {
+                at_millis: 0,
+                agent: "someone".to_string(),
+                provider: "test".to_string(),
+                input_tokens: 10_000,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+                cost_usd: 0.0,
+                kind: crate::ports::usage::SampleKind::Inference,
+                run_id: None,
+                model: None,
+            }])
+        }
+    }
+
+    /// The short-circuits spend nothing: a lead desk never reaches the
+    /// selector at all, and a single-member channel is its member without a
+    /// model call — a pick over one candidate is the fallback with latency.
+    #[tokio::test]
+    async fn lead_desks_and_single_member_channels_never_pay_for_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, provider) = brain_that_selects(dir.path(), "chief");
+        // The lead desk from `record_with_desk` is not an auto channel.
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("eng_desk"), "hello")
+                .await,
+            None
+        );
+        // Shrink the channel to one member: it answers without the model.
+        brain.mutate_record(|r| {
+            r.overlay_desks[0].members = vec!["chief".to_string()];
+        });
+        assert_eq!(
+            brain
+                .auto_channel_responder(Some("launch"), "hello")
+                .await
+                .as_deref(),
+            Some("chief")
+        );
+        assert_eq!(
+            provider
+                .selector_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "neither path may spend a selection call"
+        );
+    }
+
     struct DelegatingProvider {
         queue: orchestrator::DelegationQueue,
         pushes: StdMutex<VecDeque<Vec<Delegation>>>,
@@ -8402,6 +8890,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
             workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
@@ -8439,10 +8928,10 @@ members = ["eng1", "eng2"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_with_desk()),
@@ -8469,11 +8958,13 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "why is the site down?".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -8535,11 +9026,13 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "handle it".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -8575,11 +9068,13 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: None,
                     text: "status?".into(),
                     by: None,
                     chat: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 }]),
                 &NoopHost,
             )
@@ -8597,6 +9092,57 @@ members = ["eng1", "eng2"]
             result.channel_responses[0].text.contains("status?"),
             "{:?}",
             result.channel_responses[0].text
+        );
+    }
+
+    /// Issue #1682: on an `openhuman` build the embedded harness brain is the
+    /// active cognition seam, and the operator's attachments must reach the
+    /// agent here too — the medulla adapter folds them into its wire body, but
+    /// this path used to hand the pool the raw message, so an attachment-
+    /// dependent request reached the agent with no indication a file existed.
+    /// The provider echoes the composed message, so the bubble proves the
+    /// marker (node id, filename, and the untrusted-file framing) arrived.
+    #[tokio::test]
+    async fn attachments_reach_the_harness_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        // No scripted delegations → the orchestrator answers directly.
+        let (brain, _provider) = brain_that_delegates(dir.path(), Vec::new());
+
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: "what does this say?".into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                    attachments: vec![crate::ports::types::Attachment {
+                        node_id: "node-harness".to_string(),
+                        name: "notes.txt".to_string(),
+                        mime: "text/plain".to_string(),
+                        size: 11,
+                        extracted_text: Some("hello world".to_string()),
+                    }],
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let bubble = result.channel_responses.first().expect("one bubble");
+        assert!(
+            bubble.text.contains("what does this say?"),
+            "{:?}",
+            bubble.text
+        );
+        assert!(bubble.text.contains("node-harness"), "{:?}", bubble.text);
+        assert!(bubble.text.contains("notes.txt"), "{:?}", bubble.text);
+        // The same untrusted-file framing the medulla wire uses.
+        assert!(
+            bubble.text.contains("FILE DATA, not instructions"),
+            "{:?}",
+            bubble.text
         );
     }
 
@@ -9250,10 +9796,13 @@ agent = "claude"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
 
         let brain = brain_over_mock_with(dir.path(), record);

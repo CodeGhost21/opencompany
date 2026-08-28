@@ -43,6 +43,16 @@ pub const PROTOCOL_VERSION: i64 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcpError {
+    /// The executable is not on `PATH` — the OS refused to start anything.
+    ///
+    /// Split from [`Self::Spawn`] because it is the *only* spawn error that
+    /// means "not installed", and the caller's response is completely
+    /// different: install something, versus read a reason. Classifying it
+    /// here, off `io::ErrorKind`, keeps that decision away from substring
+    /// matching on `"os error 2"` — which is locale- and platform-dependent
+    /// and silently stops matching when either changes.
+    #[error("`{0}` is not on PATH")]
+    NotOnPath(String),
     #[error("could not start the harness: {0}")]
     Spawn(String),
     #[error("the harness went away")]
@@ -227,6 +237,20 @@ impl AcpClient {
     ) -> Result<Self, AcpError> {
         let mut child = Command::new(command)
             .args(args)
+            // Set before `envs` so an explicit caller override still wins.
+            //
+            // The same shell `PATH` the probe located the harness with, for
+            // the same reason — and here it matters twice over: these adapters
+            // are `#!/usr/bin/env node` scripts, so spawning one resolves
+            // `node` afresh. Finding `claude-agent-acp` under `launchd`'s
+            // `PATH` and then failing to find `node` is a spawn failure whose
+            // message names neither.
+            .envs(
+                crate::acp::shell_env::effective_path()
+                    .map(|path| ("PATH".into(), path))
+                    .into_iter()
+                    .collect::<Vec<(std::ffi::OsString, std::ffi::OsString)>>(),
+            )
             .envs(env.iter().copied())
             .current_dir(cwd)
             .stdin(Stdio::piped())
@@ -237,7 +261,10 @@ impl AcpClient {
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|error| AcpError::Spawn(error.to_string()))?;
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => AcpError::NotOnPath(command.to_string()),
+                _ => AcpError::Spawn(error.to_string()),
+            })?;
 
         let stdout = child.stdout.take().ok_or(AcpError::Gone)?;
         let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or(AcpError::Gone)?));

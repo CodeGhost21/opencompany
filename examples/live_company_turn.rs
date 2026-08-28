@@ -95,10 +95,13 @@ async fn main() -> anyhow::Result<()> {
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     };
 
     let dir = tempfile::tempdir()?;
@@ -113,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),
         workspace_root: dir.path().join("harness"),
+        mcp_home: Some(dir.path().join("mcp")),
         workspace_git_enabled: false,
         // Issue #775: the shell audit sink hangs off the data root as
         // `companies/<slug>/audit/<agent>/`, deliberately a sibling of the
@@ -153,10 +157,10 @@ async fn main() -> anyhow::Result<()> {
         run_supervisor: opencompany::runtime::RunSupervisor::default(),
         delivery: None,
         search: None,
+        tenant_search: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: Default::default(),
+        workflow_runs: None,
+        deep_trace: None,
     };
 
     let pool = HarnessPool::new();

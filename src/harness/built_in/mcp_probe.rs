@@ -24,8 +24,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use openhuman_core::openhuman as oh;
-
 use crate::company::mcp::{McpHealth, McpServerDecl, McpStatus};
 use crate::harness::mcp::registry_from_decls;
 use crate::ports::now_millis;
@@ -226,11 +224,21 @@ pub fn classify_mcp_error(
 fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bool) -> FailureKind {
     // 1. Typed 401 — the security-critical case. Read the typed
     //    `resource_metadata` (not the message) to decide OAuth vs static auth.
-    if let Some(unauthorized) = err
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<oh::mcp::http_client::McpUnauthorizedError>())
+    //
+    //    The standalone `McpUnauthorizedError` became `tinymcp::Error::Unauthorized`
+    //    when the client was extracted. `Error` is `#[non_exhaustive]`, so match
+    //    the one variant and fall through to the string rules for the rest —
+    //    which is what a new variant should do here anyway.
+    if let Some(resource_metadata) =
+        err.chain()
+            .find_map(|cause| match cause.downcast_ref::<tinymcp::Error>() {
+                Some(tinymcp::Error::Unauthorized {
+                    resource_metadata, ..
+                }) => Some(resource_metadata),
+                _ => None,
+            })
     {
-        return if unauthorized.resource_metadata.is_some() {
+        return if resource_metadata.is_some() {
             FailureKind::OauthRequired
         } else if auth_configured {
             FailureKind::TokenRejected
@@ -260,20 +268,23 @@ fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bo
 
     // 3. String arms over the upstream bail! messages (whole chain).
     let full = format!("{err:#}");
+    // 3. Typed non-success status. Read the variant rather than the rendered
+    //    text: the transport's own `Display` is `mcp http {status} from …`,
+    //    which the string rule below only catches because it is spelled
+    //    case-insensitively. A caller holding the error itself should not
+    //    depend on that.
+    if let Some(status) =
+        err.chain()
+            .find_map(|cause| match cause.downcast_ref::<tinymcp::Error>() {
+                Some(tinymcp::Error::Http { status, .. }) => Some(*status),
+                _ => None,
+            })
+    {
+        return status_kind(status, auth_configured);
+    }
+
     if let Some(code) = http_status_in(&full) {
-        return match code {
-            401 => {
-                if auth_configured {
-                    FailureKind::TokenRejected
-                } else {
-                    FailureKind::CredentialRequired
-                }
-            }
-            403 => FailureKind::TokenRejected,
-            404 => FailureKind::NotMcp,
-            500..=599 => FailureKind::ServerError,
-            _ => FailureKind::Unknown,
-        };
+        return status_kind(code, auth_configured);
     }
     if full.contains("Failed to parse MCP JSON response") {
         return FailureKind::NotMcp;
@@ -287,11 +298,37 @@ fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bo
     FailureKind::Unknown
 }
 
+/// What an HTTP status code means for a server we were trying to reach.
+fn status_kind(code: u16, auth_configured: bool) -> FailureKind {
+    match code {
+        401 => {
+            if auth_configured {
+                FailureKind::TokenRejected
+            } else {
+                FailureKind::CredentialRequired
+            }
+        }
+        403 => FailureKind::TokenRejected,
+        404 => FailureKind::NotMcp,
+        500..=599 => FailureKind::ServerError,
+        _ => FailureKind::Unknown,
+    }
+}
+
 /// The HTTP status code embedded in an upstream `MCP HTTP {status} — …` message,
 /// if present.
+///
+/// Matched case-insensitively: the extracted client renders the same fact as
+/// `mcp http {status} from …`, and this is the path that classifies an error
+/// which has crossed an RPC boundary and arrived as text with no variant left
+/// to read.
 fn http_status_in(text: &str) -> Option<u16> {
-    let after = text.split("MCP HTTP ").nth(1)?;
-    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    let lowered = text.to_ascii_lowercase();
+    let offset = lowered.find("mcp http ")? + "mcp http ".len();
+    let digits: String = text[offset..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
     digits.parse().ok()
 }
 
@@ -379,6 +416,11 @@ pub async fn probe_server(decl: &McpServerDecl) -> McpHealth {
             }
         }
         Err(err) => {
+            // The transport reports its own error type now. Wrap it so the
+            // classifier keeps seeing one `anyhow::Error` chain — it downcasts
+            // through that chain for both the typed 401 and the typed reqwest
+            // transport failure, and `anyhow` preserves `source()`.
+            let err = anyhow::Error::new(err);
             let class = classify_mcp_error(&err, auth_configured, false);
             // Issue #1260: "wants OAuth" and "we can sign in" are two different
             // questions, and only the second decides whether the console should
@@ -733,9 +775,9 @@ mod tests {
 
     #[test]
     fn classify_typed_401_dominates_string() {
-        // A typed McpUnauthorizedError with OAuth metadata → oauth_required,
+        // A typed `Error::Unauthorized` with OAuth metadata → oauth_required,
         // even though the message string would otherwise be generic.
-        let err = anyhow::Error::new(oh::mcp::http_client::McpUnauthorizedError {
+        let err = anyhow::Error::new(tinymcp::Error::Unauthorized {
             endpoint: "host".into(),
             resource_metadata: Some("https://host/.well-known/oauth".into()),
         });
@@ -844,7 +886,7 @@ mod tests {
 
     #[test]
     fn classify_typed_401_without_metadata_respects_credential_state() {
-        let err = anyhow::Error::new(oh::mcp::http_client::McpUnauthorizedError {
+        let err = anyhow::Error::new(tinymcp::Error::Unauthorized {
             endpoint: "host".into(),
             resource_metadata: None,
         });

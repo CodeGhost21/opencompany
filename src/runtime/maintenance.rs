@@ -51,9 +51,17 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::CompanyRuntime;
-use crate::ports::types::{ApprovalId, CompanyId};
+use crate::ports::types::{ApprovalId, CompanyId, EvictionPolicy};
 use crate::runtime::CompanyRegistry;
 use crate::runtime::scheduler::{Clock, MINUTE_MS, PRUNE_CUTOFF_MINUTES, millis_to_next_minute};
+
+/// Number of completed-cycle traces retained for one company.
+///
+/// Trace summaries are not yet a recall mechanism (#1175), but they remain
+/// useful in the export bundle and through the inspection route. Keeping this
+/// small, fixed window bounds every backend until a real compression and recall
+/// design supplies a policy with stronger product semantics.
+pub(crate) const TRACE_RETENTION_LIMIT: usize = 32;
 
 /// Retires expired approvals, expired grants and stale fire claims for every
 /// company in the registry, once a minute.
@@ -205,6 +213,18 @@ pub(crate) async fn sweep_company(
     {
         tracing::warn!(%company, %err, "[maintenance] pruning fire claims failed");
     }
+    if let Err(err) = runtime
+        .memory
+        .evict(
+            company,
+            EvictionPolicy::KeepRecent {
+                n: TRACE_RETENTION_LIMIT,
+            },
+        )
+        .await
+    {
+        tracing::warn!(%company, %err, "[maintenance] trace retention sweep failed");
+    }
     retired
 }
 
@@ -212,12 +232,13 @@ pub(crate) async fn sweep_company(
 mod test {
     use std::sync::Arc;
 
-    use super::MaintenanceTicker;
+    use super::{MaintenanceTicker, TRACE_RETENTION_LIMIT};
     use crate::company::CompanyManifest;
     use crate::policy::ManifestApprovalGate;
     use crate::ports::now_millis;
     use crate::ports::types::{
-        Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, Effect, EffectGroup, Verdict,
+        Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompressedTrace, Effect,
+        EffectGroup, Verdict,
     };
     use crate::runtime::scheduler::FakeClock;
     use crate::runtime::{CompanyRegistry, RuntimeBuilder};
@@ -552,6 +573,44 @@ mod test {
         // by a stale id, which is what an archive between the two calls leaves.
         assert!(registry.get(&CompanyId::new("gone")).is_none());
         assert_eq!(ticker.tick().await, 0);
+    }
+
+    /// Trace summaries are not recalled yet, but the maintenance loop must
+    /// bound their durable window for companies with and without schedules.
+    #[tokio::test]
+    async fn maintenance_retains_only_the_newest_cycle_traces() {
+        let home_dir = tmp_home();
+        let (runtime, ticker) =
+            given_an_unscheduled_company_with_an_overdue_gate(home_dir.path()).await;
+
+        for i in 0..=TRACE_RETENTION_LIMIT {
+            runtime
+                .memory
+                .save_trace(
+                    runtime.id(),
+                    CompressedTrace {
+                        cycle_id: format!("cycle-{i}"),
+                        summary: format!("summary-{i}"),
+                        at_millis: i as u64,
+                    },
+                )
+                .await
+                .expect("trace saves");
+        }
+
+        ticker.tick().await;
+
+        let traces = runtime
+            .memory
+            .recent_traces(runtime.id(), TRACE_RETENTION_LIMIT + 1)
+            .await
+            .expect("traces read");
+        assert_eq!(traces.len(), TRACE_RETENTION_LIMIT);
+        assert_eq!(traces.first().unwrap().cycle_id, "cycle-1");
+        assert_eq!(
+            traces.last().unwrap().cycle_id,
+            format!("cycle-{TRACE_RETENTION_LIMIT}")
+        );
     }
 
     /// Recursively lists files under `root`. Test-only; the journal's on-disk

@@ -8,7 +8,9 @@ the desks the two shared without ever being connected.
 ## Routing
 
 `#/chat/<channelId>` — the channel id is the hash's second segment, so a
-channel is linkable and survives a refresh.
+channel is linkable and survives a refresh. The rail shows only direct messages
+with at least one line, newest first; **New message** opens the full roster to
+start an otherwise absent DM.
 
 - A desk's channel id is the host's desk id, which is also its chat thread id.
 - A DM is `dm:<teammate-id>` — e.g. `#/chat/dm:designer` for a host roster
@@ -50,7 +52,7 @@ backend, and there is no per-channel routing on the host.
 | Threads | A reply posts its `parent` — the parent message's own id — and comes back under it. Both halves of the exchange hang off the row the thread opened from. |
 | Reactions | One durable row per person per emoji, so a chip says who reacted and whether one of them was you. `POST {scope}/chat/messages/{seq}/reactions` with an explicit `on`, which makes a retry idempotent. |
 | Message ids | A sent message comes back with the id it was journaled under (`messageId`), which is what a thread reply or a reaction names. Until the id lands the row's reply/react actions are disabled and say why. |
-| Message intent | The composer's three positions — "Just chatting" / "Do it once" / "Build me the workflow" — travel as `deliverable` on the message and are journaled with it. Only a non-default value is sent, so an unmarked line is byte-identical on the wire to a pre-#580 one. `chat` withholds the card the host would otherwise open by construction; it does **not** take the orchestrator's own `spawn_task` away, so it means "not automatically carded", not "never carded". |
+| Message intent | The composer's three positions — "Just chatting" / "Do it once" / "Build me the workflow" — travel as `deliverable` on the message and are journaled with it. None starts selected: an unmarked line leaves no operator override, so the host's triage decides whether to open a card. `chat` withholds the card the host would otherwise open by construction; it does **not** take the orchestrator's own `spawn_task` away, so it means "not automatically carded", not "never carded". |
 
 **Still console-local:**
 
@@ -58,6 +60,7 @@ backend, and there is no per-channel routing on the host.
 |---|---|
 | Unread counts | Derived here from when this tab last looked at a channel — the host keeps no read receipts, so two consoles will disagree. The badge's tooltip says so. |
 | A console-only teammate's other half | A starter-roster teammate is not on the company, so nothing answers their DM. The transcript is still saved; a notice above the composer says which half is missing. |
+| Channel rail density | The desktop channel rail can collapse to an icon strip, preserving channel reachability while giving the transcript back its width. This is stored per browser connection and company; it is not a company-wide shell setting and does not change the full rail below `lg` (issue #1340). |
 
 Reactions are deliberately **not** on the SSE feed: the frame would have to
 carry the reacting person, and that stream has no per-viewer projection to turn
@@ -166,13 +169,24 @@ that read as one utterance is worse than an extra avatar.
 
 ## One face per teammate
 
-`TeammateAvatar` (`@/components/teammate-avatar`) draws its mascot from an
-`avatar` key seeded on the teammate's **id** — `TeamMember.avatar`, computed
-once by `fromDto` in `lib/team.ts` — so a rename never changes anyone's face
-(issue #1185). It falls back to hashing the `name` it is given only when no
-`avatar` prop is passed, which is the honest answer for a voice with no
-roster entry behind it (a channel, a cross-posted agent line `senderOf`
-couldn't match against the roster).
+`TeammateAvatar` (`@/components/teammate-avatar`) draws its face from an
+`avatar` **reference** — the one this teammate was given, or the mascot hashed
+from its **id** when nobody has chosen (`TeamMember.avatar`, resolved once by
+`fromDto` in `lib/team.ts`, see `docs/spec/runtime/avatars.md`). Seeding on the
+id is why a rename never changes anyone's face (issue #1185), and carrying the
+chosen face through the *same* field is why setting an icon changes it
+everywhere at once rather than on the page it was set from. It falls back to
+hashing the `name` it is given only when no `avatar` prop is passed, which is
+the honest answer for a voice with no roster entry behind it (a channel, a
+cross-posted agent line `senderOf` couldn't match against the roster).
+
+An uploaded face (`blob:<nodeId>`) is fetched through the authenticated client
+rather than put straight in an `src` — the blob route needs a credential an
+`<img>` cannot carry — so it arrives a render late and is cached module-wide.
+That is the whole reason the tile keeps a tone-tinted square with initials
+underneath: the gutter is never empty while an image is in flight, and a face
+whose bytes were deleted degrades to a coloured tile rather than to a broken
+image.
 
 A DM is where seeding it wrong bites hardest: the rail row and `ChatHeader`
 sit on screen together, and seeding them differently would put two faces on
@@ -184,12 +198,45 @@ one person behind it. The header draws its tile at 24px, the floor below
 which `TeammateAvatar`'s `markOnly` says a mascot is a smudge and the bare
 tone tile is the honest mark.
 
+Your own lines carry your own face too: `buildTimeline` takes a `youAvatar`,
+which `ChatView` reads from the same `auth/me` call that resolves your role.
+The name stays "You" — in your own transcript the second person is what
+identifies the line, and your name there would read as somebody else — so only
+the face is yours, which is the half you actually pick your lines out by.
+
+**Every surface that resolves a sender needs it, not just the timeline**
+(issue #1729). `ThreadPanel` resolves its own senders rather than reading
+`TimelineEntry`, and it was passing three arguments to `senderOf` instead of
+four — so a "you" line in a thread had no `avatar`, `TeammateAvatar` seeded on
+the name it was given, and `avatarFor("You")` hashes to the same mascot the
+agent happened to be wearing. Both participants drew one face and the thread
+could not be read. The panel takes a `youAvatar` prop from `ChatView` for
+exactly that reason; a new sender-resolving surface owes the same.
+
 The main timeline's `senderOf(message, channel, members)` carries the same
 seed for a message whose `channel` field names a distinct originating voice:
 it looks that id up against the roster (`members.find`) the same way
 `ChatView` already does elsewhere, and simply leaves the mascot unresolved —
 falling back to the name seed, never a wrong face — when the id names a desk
 rather than a teammate.
+
+## A face is a way in
+
+Clicking a teammate's face — in the gutter of a message, in the member pane, or
+in a DM's header — opens `AgentProfileSheet`
+(`@/components/agent-profile-sheet`): a right-hand panel with that agent's
+persona, tier, desks and **resolved** tool grants, and two links out to their
+own page (`#/team/<id>`, and `#/team/<id>?edit` for the page with its edit form
+already open). The panel is mounted once by `AgentProfileProvider` in
+`app-shell.tsx`, so no chat surface threads a client, a company scope or an open
+flag of its own.
+
+Only a voice that resolves to a roster teammate is clickable. `Sender.agentId`
+is set exactly where `senderOf` **matched** the roster, never from the channel
+slug that seeded the face — that slug is a desk id for a cross-posted line, and
+a desk has no profile to open. `AgentAvatarButton` renders the bare avatar
+rather than a dead button wherever there is no id behind it (a desk, the
+company, you), which is also what it does outside the provider.
 
 ## One name per teammate
 

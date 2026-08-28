@@ -78,9 +78,10 @@ export function TourController({
   company,
   setView,
   hold,
+  suppressWelcome,
 }: {
   company: string | null;
-  /** `sub` names a section's sub-page, e.g. `#/settings/connections`. */
+  /** `sub` names a section's sub-page, e.g. `#/settings/oauth`. */
   setView: (view: View, sub?: string) => void;
   /**
    * Hold the tour back while first-run setup is on screen
@@ -97,6 +98,12 @@ export function TourController({
    * tour's own stops are what would have been empty.
    */
   hold?: boolean;
+  /**
+   * Setup has just finished and navigated to the new roster. Its build-out
+   * already introduced the product, so leave that arrival unobscured for this
+   * console mount rather than opening a second welcome dialog over it.
+   */
+  suppressWelcome?: boolean;
 }) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -222,7 +229,7 @@ export function TourController({
         // nobody on it (`docs/spec/runtime/company-setup.md`). A render-time gate
         // rather than a state one: the effect above has side effects that must
         // fire exactly once, and this only decides what is on screen.
-        open={welcomeOpen && !hold}
+        open={welcomeOpen && !hold && !suppressWelcome}
         onOpenChange={setWelcomeOpen}
         onStart={start}
         onSkip={handleSkip}

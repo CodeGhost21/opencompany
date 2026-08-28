@@ -76,7 +76,7 @@ use crate::harness::workflow_refs::WorkflowRefQueue;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
-use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OverlayAgent};
+use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent};
 use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
@@ -1562,6 +1562,19 @@ impl Tool for QueryCompanyTool {
                     Some(lead) => md.push_str(&format!(
                         "- **{id}** — lead: {lead} (delegate with `delegate_to_desk` desk=`{id}`)\n"
                     )),
+                    // A leadless answer is two different facts (issue #1835):
+                    // an `auto` channel has members but no lead by design —
+                    // "cannot be handed work" would be a lie about a staffed
+                    // channel — while a desk with nobody on the roster really
+                    // cannot take anything.
+                    None if record
+                        .as_ref()
+                        .is_some_and(|r| !r.desk_responder_mode(id).is_lead()) =>
+                    {
+                        md.push_str(&format!(
+                            "- **{id}** — channel without a lead; who answers is picked per message. `delegate_to_desk` cannot target it — use `delegate_to_teammate` with one of its members\n"
+                        ))
+                    }
                     None => md.push_str(&format!(
                         "- **{id}** — no member on the roster, so it cannot be handed work\n"
                     )),
@@ -1841,6 +1854,18 @@ fn summarize_event(event: &CompanyEvent) -> String {
             tool,
             ..
         } => format!("workflow child {child_workflow_id} ran {tool} at node {node} unapproved"),
+        // Issue #1843. Structural only, like every arm here: which step, from
+        // a fixed vocabulary — no company or operator free text involved.
+        CompanyEvent::OnboardingStepCompleted { step } => match step {
+            OnboardingStep::NameConfirmed => "activation step: name confirmed".to_string(),
+            OnboardingStep::IntegrationConnected => {
+                "activation step: integration connected".to_string()
+            }
+            OnboardingStep::WorkflowRunSucceeded => {
+                "activation step: workflow run succeeded".to_string()
+            }
+        },
+        CompanyEvent::OnboardingCompleted { .. } => "activation completed".to_string(),
     }
 }
 
@@ -3006,16 +3031,22 @@ impl Tool for AddAgentTool {
         // Issue #619: the company grant is the wrong ceiling. Clamp to the
         // MINTER's own scope, resolved before the store is touched so a refused
         // scope never leaves a half-written roster.
-        let tools = match requested {
+        //
+        // The boolean says whether the request LEFT the grant unstated — the
+        // `None` and empty-list cases, which inherit the minter — rather than
+        // stating one explicitly. Only an unstated grant is filtered for the BYO
+        // real-money namespaces below; an explicitly requested billing namespace
+        // survives, narrowed to what the minter holds.
+        let (mut tools, unstated) = match requested {
             // Nothing asked for: copy the minter's own line. Copying the *line*
             // rather than its resolved grant is deliberate — an unscoped minter
             // mints an unscoped teammate that keeps tracking `[tools].allow`,
             // instead of freezing today's allow-list into the record as an
             // explicit scope a later company-wide narrowing would not reach.
-            None => self.minter_tools.clone(),
+            None => (self.minter_tools.clone(), true),
             // An explicitly empty list is the same request as none at all —
             // "give them what you have" — not "grant everything".
-            Some(globs) if globs.is_empty() => self.minter_tools.clone(),
+            Some(globs) if globs.is_empty() => (self.minter_tools.clone(), true),
             Some(globs) => {
                 // Narrow against what the minter actually holds. An empty result
                 // means nothing asked for was within reach, and storing that
@@ -3034,7 +3065,7 @@ impl Tool for AddAgentTool {
                         },
                     )));
                 }
-                narrowed
+                (narrowed, false)
             }
         };
 
@@ -3051,6 +3082,39 @@ impl Tool for AddAgentTool {
             .load(&self.company)
             .await?
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.company.to_string()))?;
+
+        // The BYO real-money namespaces are not inherited by a minted teammate
+        // (#788/#789). What an unstated grant inherits depends on the minter:
+        // an empty minter line means the whole company allow-list (so an
+        // unscoped-looking mint from, say, a desk-restricted creative director
+        // would otherwise store an empty grant that reads back as billing it
+        // does not hold), and a non-empty minter line that itself names billing
+        // (the shipped bookkeeper) would hand it on. Both are filtered — the
+        // company allow-list when the minter line is empty, the minter's own
+        // line otherwise — before persistence.
+        //
+        // Same helper and same reasoning as the console `POST .../team` route,
+        // deliberately rather than incidentally: two creation paths that answer
+        // "what does an unstated grant mean" differently is how the first hole
+        // got here. `CreationGrant::Standard` leaves the copied line untouched,
+        // so nothing changes for the companies that grant none of these, and an
+        // explicitly requested billing namespace is untouched too.
+        if unstated {
+            let inherited = if tools.is_empty() {
+                &record.manifest.tools.allow
+            } else {
+                &tools
+            };
+            match crate::company::creation_default_grants(inherited) {
+                crate::company::CreationGrant::Standard => {}
+                crate::company::CreationGrant::Narrowed(narrowed) => tools = narrowed,
+                crate::company::CreationGrant::NothingLeft => {
+                    return Ok(ToolResult::error(format!(
+                        "This company grants only billing namespaces, so \"{name}\" would inherit them. Pass an explicit `tools` list naming what they should hold."
+                    )));
+                }
+            }
+        }
 
         // Deduplication guard: reject a call whose `name` already names an
         // existing overlay teammate, so a trigger-happy orchestrator can't
@@ -3081,6 +3145,8 @@ impl Tool for AddAgentTool {
             role: role.clone(),
             description,
             tools: tools.clone(),
+            model: None,
+            harness: None,
         };
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
@@ -4627,6 +4693,10 @@ impl Tool for CreateWorkflowTool {
             self.events.as_ref(),
             draft,
             None,
+            // Issue #1843: an agent authoring a graph on its own initiative is
+            // not the human activation signal `by` exists to capture — keep
+            // this path unattributed, same as before this field existed.
+            None,
         )
         .await
         {
@@ -4777,6 +4847,7 @@ mod tests {
             classes: Vec::new(),
             ledgers: None,
             can_declare_ledgers: true,
+            model: None,
         }
     }
 
@@ -6354,6 +6425,8 @@ members = ["legal_counsel"]
             role: "Designer".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         let store = Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>;
         let tool = DelegateToTeammateTool::new(queue.clone(), company, store);
@@ -6395,6 +6468,8 @@ members = ["legal_counsel"]
                 role: "Designer".to_string(),
                 description: None,
                 tools: Vec::new(),
+                model: None,
+                harness: None,
             });
         }
         let store = Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>;
@@ -6990,6 +7065,8 @@ name = "Morning"
             role: "Researcher".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record));
 
@@ -7036,6 +7113,8 @@ name = "Morning"
             role: "Designer".to_string(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         });
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record.clone()));
 
@@ -7150,10 +7229,13 @@ name = "Morning"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -7361,6 +7443,109 @@ name = "Morning"
 
         let record = store.load(&company).await.unwrap().expect("record");
         assert!(record.overlay_agents[0].tools.is_empty());
+    }
+
+    /// A minter whose own line names `chargebee` (the shipped bookkeeper) hands
+    /// that line on when `tools` is omitted — but an unstated grant never
+    /// confers billing (#788/#789), so the copied line is filtered before it is
+    /// stored. The #619 copy-the-line rule still holds for the non-BYO parts.
+    #[tokio::test]
+    async fn an_unstated_mint_from_a_billing_holding_minter_withholds_chargebee() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("valid manifest");
+        let store = Arc::new(MemStore::seeded(record));
+        let belt = vec![
+            "*".to_string(),
+            "workspace.*".to_string(),
+            "workspace.write".to_string(),
+            "media".to_string(),
+            "composio".to_string(),
+            "search".to_string(),
+            "mcp:*".to_string(),
+            "chargebee".to_string(),
+        ];
+        let tool = AddAgentTool::new(
+            company.clone(),
+            store.clone(),
+            "bookkeeper".to_string(),
+            belt.clone(),
+            belt,
+        );
+
+        let result = tool
+            .execute(json!({ "name": "Jamie", "role": "Data Entry" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        let added = &record.overlay_agents[0];
+        assert!(
+            !added
+                .tools
+                .iter()
+                .any(|g| g == "chargebee" || g.starts_with("chargebee.")),
+            "an unstated mint must not hand on billing: {:?}",
+            added.tools
+        );
+        assert!(
+            added.tools.contains(&"*".to_string()),
+            "the rest of the minter's line is still copied verbatim (#619): {:?}",
+            added.tools
+        );
+    }
+
+    /// An EXPLICIT `tools` request naming `chargebee` survives — an unstated
+    /// grant is withheld, a stated one is narrowed to what the minter holds.
+    #[tokio::test]
+    async fn an_explicit_chargebee_request_from_a_billing_minter_is_honored() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .expect("valid manifest");
+        let store = Arc::new(MemStore::seeded(record));
+        let belt = vec![
+            "*".to_string(),
+            "workspace.*".to_string(),
+            "workspace.write".to_string(),
+            "media".to_string(),
+            "composio".to_string(),
+            "search".to_string(),
+            "mcp:*".to_string(),
+            "chargebee".to_string(),
+        ];
+        let tool = AddAgentTool::new(
+            company.clone(),
+            store.clone(),
+            "bookkeeper".to_string(),
+            belt.clone(),
+            belt,
+        );
+
+        let result = tool
+            .execute(json!({ "name": "Jamie", "role": "Data Entry", "tools": ["chargebee"] }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents[0].tools,
+            vec!["chargebee".to_string()],
+            "a stated billing namespace is narrowed to the minter's grant, not dropped"
+        );
     }
 
     /// A non-string `tools` item is a clean argument error, the same shape as a
@@ -8129,10 +8314,13 @@ name = "Morning"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 

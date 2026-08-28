@@ -288,6 +288,22 @@ export interface Task {
    */
   originChatId?: string;
   /**
+   * The workflow run whose agent node opened this card (issue #661), and the
+   * graph it is a run of.
+   *
+   * Carried on the **board** read, not just task detail, because a card with no
+   * parent and no origin chat is otherwise unexplained: with these two an
+   * operator finding a card nobody opened can see the schedule that did. They
+   * are stamped together by one call site on the host, so either both are
+   * present or neither is — but they are typed independently, because a host
+   * predating them sends neither and the console must make no claim then.
+   *
+   * `originRunId` is what deep-links the workflow canvas to *the run that
+   * opened this card* rather than to the graph's current shape.
+   */
+  originRunId?: string;
+  originWorkflowId?: string;
+  /**
    * What this card's latest successful attempt produced (issue #339).
    *
    * Carried on the **board** read, not just task detail, because the link is
@@ -859,6 +875,41 @@ export interface InflightRun {
   agentId: string;
   startedAt: number;
   pendingAction: string | null;
+}
+
+/**
+ * The live board state Chat needs for a card-linked background turn (#1758).
+ *
+ * `column` is the task's stage when the current three-column API provides one,
+ * otherwise its column. `startedAt` is present only while the task appears in
+ * the in-flight read, so it supplies the elapsed clock and wins a brief race
+ * where the board has already moved but the run has not disappeared yet.
+ */
+export interface TaskStatus {
+  column: string;
+  startedAt?: number;
+}
+
+/** Task id -> status, merged from the board and in-flight reads (#1758). */
+export function taskStatusesById(
+  tasks: readonly Task[],
+  inflight: readonly InflightRun[],
+): Record<string, TaskStatus> {
+  const statuses: Record<string, TaskStatus> = {};
+
+  for (const task of tasks) {
+    statuses[task.id] = { column: task.stage ?? task.column };
+  }
+
+  for (const run of inflight) {
+    if (!run.taskId) continue;
+    statuses[run.taskId] = {
+      column: statuses[run.taskId]?.column ?? "in_progress",
+      startedAt: run.startedAt,
+    };
+  }
+
+  return statuses;
 }
 
 /** The steer body. `redirect` requires `instruction`; `cancel` requires `confirm`. */

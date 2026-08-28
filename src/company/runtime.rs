@@ -10,6 +10,7 @@
 //! the methods here are thin delegations so callers hold a single
 //! `Arc<CompanyRuntime>`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,7 +31,7 @@ use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Verdict,
+    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Mention, Verdict,
 };
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
@@ -156,6 +157,9 @@ pub struct OpsStores {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class records of each task attempt: status, trace, cost (#242).
     pub runs: Arc<dyn RunStore>,
+    /// The unredacted companion of a run's steps — reasoning text and raw tool
+    /// I/O, kept beside the scrubbed skeleton in [`Self::runs`].
+    pub deep_trace: Arc<dyn crate::ports::deep_trace::DeepTraceStore>,
     /// Per-workflow edit history, for rollback of an edited workflow (#274).
     pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     /// Durable cross-replica scheduler fire claims (#241).
@@ -202,6 +206,10 @@ pub struct CompanyRuntime {
     /// resolved at build time — same store as `context` when the engine
     /// cannot represent taint.
     pub(crate) inbound_context: Arc<dyn ContextStore>,
+    /// Isolated provisional working context from a provider-backed overlay.
+    pub(crate) scratch_context: Option<Arc<dyn ContextStore>>,
+    /// Safe agent/desk partitions and archive reads from that overlay.
+    pub(crate) memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
     pub(crate) tools: Arc<dyn ToolProvider>,
     pub(crate) channels: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) economy: Option<Arc<dyn AgentEconomy>>,
@@ -210,6 +218,14 @@ pub struct CompanyRuntime {
     /// the amend and expiry-sweep methods that live outside the trait without a
     /// downcast.
     pub(crate) approval_gate: Arc<ManifestApprovalGate>,
+    /// Whether `approval_gate` came from [`RuntimeBuilder::with_approvals`]
+    /// (crate::runtime::RuntimeBuilder::with_approvals) — a test seam that
+    /// carries its own policy/TTL on purpose — rather than from the manifest and
+    /// the persisted record. Issue #1455 refreshes the live gate from the
+    /// record's effective policy at safe turn boundaries; an injected gate must
+    /// be exempt, or the refresh would clobber the fixture (e.g. a zero-TTL gate
+    /// for expiry tests).
+    pub(crate) gate_injected: bool,
     pub(crate) journal: Arc<RuntimeJournal>,
     /// Per-company secrets, read by the feedback scrubber (and webhook HMAC
     /// verification, later).
@@ -269,18 +285,6 @@ pub struct CompanyRuntime {
     /// which is what makes a wedged cron fire and an agent-initiated run as
     /// stoppable from the console as a Run-button one.
     pub(crate) run_supervisor: crate::runtime::RunSupervisor,
-    /// Issue #245: the company's bound repositories and their host-side mirror
-    /// cache, when the runtime was built over a filesystem home.
-    ///
-    /// `None` is a real state, not an omission: the manager is rooted at
-    /// `companies/<slug>/repos/`, so a runtime assembled from injected ports
-    /// with no home (a test harness, an embedding) has no cache to manage and
-    /// the ops routes answer "not wired" rather than inventing a location.
-    ///
-    /// Compiled in every build. Nothing here is agent-facing — there is no
-    /// grant and no tool in this tier — so it needs no feature gate, and the
-    /// forge HTTP client it can optionally hold is the only part that does.
-    pub(crate) repos: Option<Arc<crate::runtime::RepoManager>>,
     /// Issue #243: the live single-use grants minted when an operator approves a
     /// tool call an agent was blocked from making.
     ///
@@ -335,6 +339,27 @@ pub struct CompanyRuntime {
     /// hold. Handing the lock over is also what makes
     /// [`quiesce`](Self::quiesce)'s drain meaningful across the swap.
     pub(crate) serial: Arc<TokioMutex<()>>,
+    /// One lock slot per addressed agent, so two operators talking to two
+    /// different agents in the same company do not serialize behind each other.
+    ///
+    /// [`serial`](Self::serial) is held for a whole cycle — a live agent turn —
+    /// so with only that lock, three messages to three agents in one company run
+    /// strictly one after another even though nothing they touch is shared: each
+    /// agent has its own conversation history in the harness pool, and the state
+    /// they *do* share (the task board, the event-log `seq`) already has its own
+    /// finer lock. This map hands each addressed agent its own slot so their
+    /// turns overlap while a whole-company cycle still serializes against all of
+    /// them.
+    ///
+    /// A cycle with no single addressee — a scheduler tick, an unaddressed
+    /// message routed to the orchestrator, or a batch naming more than one agent
+    /// — falls back to [`serial`](Self::serial) and so still serializes against
+    /// everything. That is deliberate: such a cycle may touch the whole company.
+    ///
+    /// `Arc`-shared for the same reason as `serial`: a rebuilt runtime must
+    /// inherit the *same* per-agent slots (issue #290), or an agent mid-turn
+    /// could start a second turn beside itself across the swap.
+    pub(crate) per_agent: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
     /// Held across a REST board write's read → validate → write, so two
     /// concurrent edits cannot each validate against a snapshot that predates
     /// the other's edge (issue #185 review).
@@ -411,6 +436,11 @@ fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> Comp
             .to_string(),
         steps: Vec::new(),
         task_id: None,
+        // A runtime notice addressed to whoever is reading it. It names no
+        // teammate and no person, so there is nothing to chip and nobody to
+        // ping.
+        mentions: Vec::new(),
+        mention_depth: 0,
     }
 }
 
@@ -453,11 +483,14 @@ impl CompanyRuntime {
             memory,
             context,
             inbound_context,
+            scratch_context: None,
+            memory_scopes: None,
             tools,
             channels,
             economy,
             approvals,
             approval_gate,
+            gate_injected: false,
             journal,
             secrets,
             inbox,
@@ -470,12 +503,12 @@ impl CompanyRuntime {
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
-            repos: None,
             grants,
             continuations: ContinuationQueue::default(),
             workflow_gates: WorkflowGateQueue::default(),
             blocked_nodes: BlockedNodeQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
+            per_agent: Arc::new(TokioMutex::new(HashMap::new())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "openhuman")]
@@ -500,6 +533,47 @@ impl CompanyRuntime {
         self.source_dir = dir;
     }
 
+    /// Installs the provider-backed memory decorators selected at boot.
+    ///
+    /// These are optional because the base store and the legacy embedded engine
+    /// do not have the provider contract's isolated partitions or archive tier.
+    pub(crate) fn set_memory_decorators(
+        &mut self,
+        scratch_context: Option<Arc<dyn ContextStore>>,
+        memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
+    ) {
+        self.scratch_context = scratch_context;
+        self.memory_scopes = memory_scopes;
+    }
+
+    /// The isolated working-memory partition, when the selected engine serves
+    /// the provider-backed decorator contract.
+    pub fn scratch_context(&self) -> Option<Arc<dyn ContextStore>> {
+        self.scratch_context.clone()
+    }
+
+    /// One agent's private context partition, without exposing namespaces.
+    pub fn agent_context(&self, agent_id: &str) -> Option<Arc<dyn ContextStore>> {
+        self.memory_scopes
+            .as_ref()
+            .map(|scopes| scopes.agent_context(agent_id))
+    }
+
+    /// One desk's shared context partition, without exposing namespaces.
+    pub fn desk_context(&self, desk_id: &str) -> Option<Arc<dyn ContextStore>> {
+        self.memory_scopes
+            .as_ref()
+            .map(|scopes| scopes.desk_context(desk_id))
+    }
+
+    /// Traces preserved by the provider decorator's archive-on-evict policy.
+    pub async fn archived_traces(&self) -> Result<Option<Vec<crate::ports::CompressedTrace>>> {
+        match &self.memory_scopes {
+            Some(scopes) => scopes.archived_traces(&self.id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// The company's on-disk source directory, when built on the serve path.
     /// `None` in platform-provisioned mode.
     pub fn source_dir(&self) -> Option<&Path> {
@@ -521,20 +595,6 @@ impl CompanyRuntime {
     /// caching it honest.
     pub fn auth_mode(&self) -> AuthMode {
         self.auth_mode
-    }
-
-    /// Issue #245: attach the repository manager after construction, wired by
-    /// the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the same
-    /// filesystem home the company's bundle hangs off.
-    pub fn set_repos(&mut self, repos: Arc<crate::runtime::RepoManager>) {
-        self.repos = Some(repos);
-    }
-
-    /// The company's bound repositories, if a mirror cache is wired. `None` on
-    /// a runtime built without a filesystem home, where the ops routes report
-    /// the surface as not wired.
-    pub fn repos(&self) -> Option<&Arc<crate::runtime::RepoManager>> {
-        self.repos.as_ref()
     }
 
     /// Issue #29: attach the workflow runner after construction. Wired by the
@@ -659,6 +719,24 @@ impl CompanyRuntime {
     #[cfg(feature = "openhuman")]
     pub fn roster_builder(&self) -> Option<&Arc<crate::harness::roster_build::RosterBuilder>> {
         self.roster_builder.as_ref()
+    }
+
+    /// The pass that drafts one teammate's mandate or persona (issue #1776).
+    ///
+    /// Built on demand from the same harness deps the workflow builder holds —
+    /// the same provider and model override — so a console BYOK switch reaches
+    /// drafting with no second credential path and no second wiring site. It is
+    /// two `Arc` clones and carries no state between calls, so there is nothing
+    /// to attach at boot and nothing to rebuild.
+    ///
+    /// `None` means this company has no harness path, which is a supported
+    /// configuration: the route answers `no_model` and the console says so,
+    /// rather than offering a control that can only fail.
+    #[cfg(feature = "openhuman")]
+    pub(crate) fn profile_drafter(&self) -> Option<crate::harness::profile_draft::ProfileDrafter> {
+        Some(crate::harness::profile_draft::ProfileDrafter::from_deps(
+            self.workflow_harness_deps.as_ref()?,
+        ))
     }
 
     /// Attaches the embedded MCP runtime used by REST and harness agents.
@@ -1190,6 +1268,12 @@ impl CompanyRuntime {
         &self.ops.runs
     }
 
+    /// The unredacted companion of this company's run steps: reasoning text and
+    /// raw tool I/O, kept beside the scrubbed skeleton in [`Self::runs`].
+    pub fn deep_trace(&self) -> &Arc<dyn crate::ports::deep_trace::DeepTraceStore> {
+        &self.ops.deep_trace
+    }
+
     /// This company's per-workflow edit history (#274), the snapshot ring a
     /// workflow rollback reads and writes.
     pub fn workflow_revisions(&self) -> &Arc<dyn WorkflowRevisionStore> {
@@ -1325,8 +1409,14 @@ impl CompanyRuntime {
     /// Called by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) on a
     /// rebuild, before the successor is registered and therefore before anything
     /// can be holding either lock through *this* runtime.
-    pub fn adopt_locks(&mut self, serial: Arc<TokioMutex<()>>, task_writes: Arc<TokioMutex<()>>) {
+    pub fn adopt_locks(
+        &mut self,
+        serial: Arc<TokioMutex<()>>,
+        per_agent: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
+        task_writes: Arc<TokioMutex<()>>,
+    ) {
         self.serial = serial;
+        self.per_agent = per_agent;
         self.task_writes = task_writes;
     }
 
@@ -1996,6 +2086,206 @@ impl CompanyRuntime {
             .then_some(parent)
     }
 
+    /// The console channel id a mention in `desk` belongs to.
+    ///
+    /// A desk channel's id is its own thread id, so the context is the desk id
+    /// unchanged. A DM's thread id is the bare roster teammate id, while the
+    /// console's channel id for the same DM is `dm:<teammate-id>` — and the
+    /// console addresses a DM with that bare id (ChatView sends
+    /// `active.member.id`). So a mention in a DM has to be re-keyed into the
+    /// console's channel-id space or the rail has no row to badge, and opening
+    /// the DM can never match or clear the notification.
+    ///
+    /// The roster check goes through [`crate::runtime::assignee::resolve`] for
+    /// its desk-first ordering: the same one `responder_for` uses, so a desk
+    /// whose id happens to match a teammate id still stores the desk id, and a
+    /// desk literally named `dm:<…>` keeps that id instead of being displaced
+    /// by the `dm:`-stripped retry. The human user directory is deliberately
+    /// consulted **only** when the store will not answer — never ahead of that
+    /// resolution, or a desk id matching a human id would be misclassified as
+    /// `dm:<id>`. The resolution carries the **canonical** id (issue #214), so
+    /// a key typed as a display name — `chat: "Engineering"` for a desk whose
+    /// id is `engineering` — stores the canonical id, which is what the rail's
+    /// channel ids are built from. A `dm:`-prefixed key is tried **as sent**
+    /// first and only split for the retry when it names nothing — so a
+    /// noncanonical address — `dm:BACKEND_ENGINEER`, `dm:<display name>` —
+    /// still stores `dm:<canonical-agent-id>` and badges the rail's real DM
+    /// channel rather than one that does not exist.
+    pub(crate) async fn mention_context(
+        &self,
+        id: &CompanyId,
+        users: &[crate::ports::users::UserRecord],
+        desk: &str,
+    ) -> String {
+        // The key is tried **as sent** first, exactly as the routing does: a
+        // desk or teammate literally named `dm:x` resolves today, and an
+        // unconditional prefix-strip would let `dm:x` claim it
+        // ([`crate::runtime::assignee::dm_key`] documents that ordering). The
+        // stripped retry below is only for a `dm:`-prefixed key that names
+        // nothing as sent.
+        let Ok(Some(record)) = self.store().load(id).await else {
+            // Store will not answer; best-effort, same as the callers. A
+            // canonical `dm:<teammate-id>` still badges through the raw key,
+            // and a *noncanonical* roster key is re-keyed through the
+            // directory. This runs only on the store-down path, never ahead of
+            // `assignee::resolve`: a desk id that happens to match a human id
+            // must still file under the desk when the store answers, or a
+            // mention aimed at that desk would badge a nonexistent `dm:<id>`
+            // channel.
+            if users.iter().any(|u| u.id == desk) {
+                return format!("dm:{desk}");
+            }
+            if let Some(bare) = crate::runtime::assignee::dm_key(desk)
+                && users.iter().any(|u| u.id == bare)
+            {
+                return format!("dm:{bare}");
+            }
+            return desk.to_string();
+        };
+        let bare = crate::runtime::assignee::dm_key(desk);
+        match crate::runtime::assignee::resolve(&record, desk) {
+            // A bare teammate key files under the console's DM channel id,
+            // canonicalized (issue #214) — as does a teammate literally named
+            // `dm:<…>`, whose DM channel id is `dm:dm:<…>` in the same space.
+            crate::runtime::assignee::AssigneeResolution::Agent(agent) => format!("dm:{agent}"),
+            // A desk with no member to work it is still a real desk with a real
+            // rail channel, so it files under the same canonical id as one with
+            // a lead — a memberless `"Sales"` still has to badge `#sales`.
+            crate::runtime::assignee::AssigneeResolution::Desk { desk: desk_id, .. }
+            | crate::runtime::assignee::AssigneeResolution::EmptyDesk(desk_id) => desk_id,
+            // Unassigned, unknown, or ambiguous. A `dm:`-prefixed key that
+            // names nothing as sent can still be the console's DM channel for a
+            // *noncanonical* address — `dm:BACKEND_ENGINEER`,
+            // `dm:<display name>` — which the routing resolves
+            // case-insensitively, so the stored context has to carry the
+            // canonical agent id the rail's channel ids are keyed by. Storing
+            // the raw key files the badge under a channel that does not exist,
+            // and opening the actual DM can never clear it. Split the prefix
+            // off and run the bare half through the same resolution as an
+            // un-prefixed desk, re-applying the prefix only when it names a
+            // teammate.
+            _ => {
+                if let Some(bare) = bare {
+                    match crate::runtime::assignee::resolve(&record, bare) {
+                        crate::runtime::assignee::AssigneeResolution::Agent(agent) => {
+                            return format!("dm:{agent}");
+                        }
+                        crate::runtime::assignee::AssigneeResolution::Desk {
+                            desk: desk_id,
+                            ..
+                        }
+                        | crate::runtime::assignee::AssigneeResolution::EmptyDesk(desk_id) => {
+                            return desk_id;
+                        }
+                        _ => {}
+                    }
+                }
+                // A general-chat spelling — `"General"` (the default for an
+                // unaddressed message), `"main"`, or `""` — still names the
+                // General desk, the console's default thread, so it has to file
+                // under the console's canonical main-thread id, which the rail
+                // aliases onto its first rendered desk channel
+                // ([`crate::server::chat_history::is_general_chat`], issue #65).
+                // Anything else is honestly the string as written: it may badge
+                // nowhere, but it is not a lie.
+                let probe = bare.unwrap_or(desk);
+                if crate::server::chat_history::is_general_chat(Some(probe)) {
+                    crate::server::chat_history::MAIN_THREAD_ID.to_string()
+                } else {
+                    desk.to_string()
+                }
+            }
+        }
+    }
+
+    /// Files a durable mention notification for the people `mentions` names in
+    /// `desk` (the console's channel-id space), for the journaled message at
+    /// `message_seq`.
+    ///
+    /// **One row, many recipients** — not one row each. Read state is already
+    /// per `(company, user, notification)`, so a single row carrying an
+    /// audience gives every recipient independent read state for free, and the
+    /// feed does not grow by the size of the room every time somebody types
+    /// `@everyone`. Teammates produce no notification: an agent has no inbox to
+    /// badge and no person to interrupt; a mention of one is already handled by
+    /// routing.
+    ///
+    /// Shared by the operator `/chat` path and the approval-continuation path,
+    /// so an `@user` an agent types back badges and notifies whoever it names
+    /// whichever journaling surface wrote the reply. Without this, a
+    /// continuation's mentions rendered as chips and nothing else — the badge
+    /// and the notification both silently missing for exactly the person they
+    /// are meant to reach: offline when the reply lands.
+    pub(crate) async fn notify_mentions(
+        &self,
+        id: &CompanyId,
+        mentions: &[Mention],
+        message_seq: &EventSeq,
+        by: Option<&Actor>,
+        desk: &str,
+    ) {
+        let users = match self.users().list_users(id).await {
+            Ok(users) => users,
+            Err(err) => {
+                tracing::warn!(
+                    company = %id,
+                    error = %err,
+                    "[mentions] the user directory could not be read; this message badges nobody"
+                );
+                return;
+            }
+        };
+        let users: Vec<_> = users
+            .into_iter()
+            .filter(|u| u.status == crate::ports::users::UserStatus::Active)
+            .collect();
+        let mut audience = crate::runtime::mentions::mentioned_users(&users, mentions);
+        // Never notify the author, even when they wrote `@everyone`. `normalize`
+        // already drops a direct self-mention, but a broadcast expands to the
+        // whole company *after* that, so this is the only place the author can
+        // be removed from one.
+        if let Some(Actor {
+            kind: ActorKind::User,
+            id: author,
+        }) = by
+        {
+            audience.retain(|u| u != author);
+        }
+        if audience.is_empty() {
+            return;
+        }
+
+        let who = by
+            .filter(|a| a.kind == ActorKind::User)
+            .and_then(|a| users.iter().find(|u| u.id == a.id))
+            .map(crate::runtime::mentions::user_label)
+            .unwrap_or_else(|| "Someone".to_string());
+        let note = crate::ports::notifications::Notification {
+            id: crate::ports::generate_id(),
+            kind: "mention".to_string(),
+            subject: crate::ports::notifications::Subject {
+                kind: crate::ports::notifications::SubjectKind::Message,
+                id: message_seq.value().to_string(),
+            },
+            created_at: crate::ports::now_millis(),
+            title: format!("{who} mentioned you in {desk}"),
+            audience: Some(audience),
+            // The console's channel-id space, so a badge lands without the
+            // browser having loaded that transcript. Whether the thread is a DM
+            // is a question about the roster, not the human user directory —
+            // see [`Self::mention_context`].
+            context: Some(self.mention_context(id, &users, desk).await),
+        };
+        if let Err(err) = self.notifications().append(id, &note).await {
+            tracing::warn!(
+                company = %id,
+                error = %err,
+                "[mentions] a mention could not be recorded; the message still lands and \
+                 still renders, but nobody is badged for it"
+            );
+        }
+    }
+
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
         let conversation = self
             .journal
@@ -2015,13 +2305,29 @@ impl CompanyRuntime {
             // goes to the run or card the work belongs to, and a root belonging
             // to some other channel must not follow it there.
             let parent = self.resolvable_parent(conversation.parent, &chat_id).await;
+            // Scanned host-side from the reply text. The author is passed so a
+            // teammate naming itself in its own answer does not chip itself.
+            let reply_mentions = self
+                .resolve_mentions(
+                    &response.text,
+                    None,
+                    response
+                        .agent
+                        .as_deref()
+                        .map(|id| Actor {
+                            kind: ActorKind::Agent,
+                            id: id.to_string(),
+                        })
+                        .as_ref(),
+                )
+                .await;
             match self
                 .events
                 .append(
                     &self.id,
                     CompanyEvent::AgentReply {
                         parent,
-                        chat_id,
+                        chat_id: chat_id.clone(),
                         // Issue #885: the author, not the destination. Same
                         // fallback as the `/chat` path — a producer that names
                         // no agent keeps the pre-#885 behaviour exactly.
@@ -2032,11 +2338,27 @@ impl CompanyRuntime {
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
+                        mentions: reply_mentions.clone(),
+                        // Zero, and stays zero: no reply's mentions reach
+                        // dispatch, so no reply is ever a mention hop.
+                        mention_depth: 0,
                     },
                 )
                 .await
             {
-                Ok(seq) => response.message_id = Some(seq.value().to_string()),
+                Ok(seq) => {
+                    response.message_id = Some(seq.value().to_string());
+                    // The durable half of a reply's mention, same as an operator
+                    // message's and the `/chat` path's. Without this an `@user`
+                    // the agent types back renders as a chip and nothing else —
+                    // the badge and the notification both silently missing for
+                    // whoever it named, which is worst for exactly the person it
+                    // is meant to reach: offline when the reply lands.
+                    if !reply_mentions.is_empty() {
+                        self.notify_mentions(&self.id, &reply_mentions, &seq, None, &chat_id)
+                            .await;
+                    }
+                }
                 Err(err) => tracing::warn!(
                     company = %self.id,
                     approval_id = %approval_id,
@@ -2118,6 +2440,7 @@ impl CompanyRuntime {
                 ),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             }],
             executed_effects: Vec::new(),
             parked: Vec::new(),
@@ -2320,6 +2643,7 @@ impl CompanyRuntime {
                             text: text.clone(),
                             steps: Vec::new(),
                             reply_to: None,
+                            mentions: Vec::new(),
                         })
                         .await
                     {
@@ -2412,6 +2736,7 @@ impl CompanyRuntime {
                         text: text.to_string(),
                         steps: Vec::new(),
                         reply_to: None,
+                        mentions: Vec::new(),
                     })
                     .await
                 {
@@ -2521,6 +2846,13 @@ impl CompanyRuntime {
                 // Read before the field moves below (issue #880): the answer
                 // needs the task link *and* the effect together.
                 workflow_run_id: workflow_run_of(&p),
+                // Issue #1098's gate id, projected as a fact rather than read
+                // out of the display payload — role redaction (issue #618)
+                // strips the payload from a member, and the run link (which
+                // needs this id) has to survive for the member holding the
+                // stalled workflow up.
+                workflow_id: crate::runtime::workflow_resume::gate_workflow_id(&p.effect)
+                    .map(str::to_owned),
                 id: p.id,
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
@@ -2558,6 +2890,17 @@ impl CompanyRuntime {
                 // cannot disagree.
                 broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
+                // Issue #1458: a standing **denial** is enforced only on the
+                // agent turn path (`standing_deny_applies`); the workflow gate
+                // does not honour `Deny`, and the resolve route's 400 refuses a
+                // workflow standing denial before the gate is touched. So the
+                // deny control is offered only where the runtime will actually
+                // enforce it — an agent subject — while the grant half above
+                // still covers a workflow, which can hold a standing permission.
+                broadly_deniable: matches!(
+                    crate::runtime::grants::subject_of(&p.effect),
+                    Some(crate::runtime::grants::GrantSubject::Agent(_))
+                ),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction
@@ -2595,13 +2938,64 @@ impl CompanyRuntime {
     /// previews the exact final issue body or files it (per consent). The
     /// scrubber fails closed, so a report that cannot be safely scrubbed is
     /// blocked rather than risked.
+    ///
+    /// `item_id` carries the previewed item on the confirm (Send-after-Preview)
+    /// path: the same item is finalized — never a second capture — so the report
+    /// appears once in the feedback family and the posted body is the exact
+    /// previewed bytes (see [`crate::feedback::service::finalize`]).
+    ///
+    /// A confirm closes two gaps a bare `finalize` call would leave open:
+    ///
+    /// * **Idempotent** — an item that already left this machine (its
+    ///   `issue_status` is recorded) returns the recorded result instead of
+    ///   filing or forwarding again, so a retried or double-submitted Send does
+    ///   not file a second issue or add a duplicate comment. A per-item lock
+    ///   held across the whole confirm serialises concurrent confirms of the
+    ///   same item, so the loser re-reads the winner's recorded result instead
+    ///   of both sending.
+    /// * **Preview-first** — an item captured by the feedback tool or the chat
+    ///   intent was never previewed and its words are hidden from the reports
+    ///   list, so confirming it by id would send a body nobody inspected.
+    ///   Confirms of such items are refused; the operator must preview first.
     pub async fn submit_feedback(
         &self,
         input: FeedbackInput,
         preview: bool,
+        item_id: Option<String>,
     ) -> Result<FeedbackResponse> {
-        let item = self.capture_feedback(input).await?;
         let manifest = self.store.load(&self.id).await?.map(|r| r.manifest);
+        // Held until the end of the call for a confirm, so the check below and
+        // the finalize that records the status are one critical section.
+        let mut _confirm_guard = None;
+        let item = match item_id {
+            Some(id) => {
+                // A nonexistent `item_id` is caller-supplied, so it must not
+                // mint an entry in the process-wide confirm-lock registry,
+                // which is never evicted. Validate existence before taking the
+                // lock; the feedback family is append-only, so an id that
+                // exists here still exists at the locked re-read below.
+                if self.feedback.get(&id).await?.is_none() {
+                    return Err(OpenCompanyError::NotFound(format!("feedback item {id}")));
+                }
+                _confirm_guard = Some(crate::feedback::store::confirm_lock(&id).lock_owned().await);
+                let item = self.feedback.get(&id).await?.expect(
+                    "feedback item exists: existence checked before taking the confirm lock",
+                );
+                if !preview {
+                    if item.issue_status.is_some() {
+                        return Ok(FeedbackResponse::recorded(&item));
+                    }
+                    if item.scrubbed_body.is_none() {
+                        return Ok(FeedbackResponse::blocked(
+                            &id,
+                            "this report was not previewed; preview it before sending".to_string(),
+                        ));
+                    }
+                }
+                item
+            }
+            None => self.capture_feedback(input).await?,
+        };
         crate::feedback::service::finalize(
             &self.feedback,
             self.secrets.as_ref(),
@@ -2692,6 +3086,69 @@ impl CompanyRuntime {
             Some(name) if !name.trim().is_empty() => name.trim().to_string(),
             _ => self.id.to_string(),
         }
+    }
+
+    /// Resolve the mentions in one chat message body.
+    ///
+    /// The single seam both journal sites go through, so an operator message
+    /// and an agent reply cannot end up obeying different rules about who
+    /// `@ada` is. Loads the record and the user directory and hands them to
+    /// [`crate::runtime::mentions::resolve`], which does the rest without
+    /// touching IO.
+    ///
+    /// **Never fails a send.** A store that cannot answer means mentions cannot
+    /// be resolved, not that the message cannot be delivered — so a read error
+    /// yields an empty list and is logged. The message still lands; it simply
+    /// draws no chips and pings nobody, which is the same state every message
+    /// journaled before this feature existed is in.
+    pub async fn resolve_mentions(
+        &self,
+        text: &str,
+        supplied: Option<Vec<Mention>>,
+        sender: Option<&Actor>,
+    ) -> Vec<Mention> {
+        // Issue: on the operator-message path this runs BEFORE the journal
+        // append (`mention_responder` reads the resolved mentions off the
+        // journaled event, so the append cannot go first), which puts these
+        // two store reads in front of every chat POST's accept latency. Run
+        // together rather than sequentially — they read different stores and
+        // neither depends on the other's result — to keep that addition close
+        // to the cost of the slower read alone rather than the sum of both.
+        let (record, user_list) =
+            tokio::join!(self.store.load(&self.id), self.users().list_users(&self.id));
+        let record = match record {
+            Ok(Some(record)) => record,
+            Ok(None) => return Vec::new(),
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.id,
+                    error = %err,
+                    "[mentions] the company record could not be read; this message is \
+                     journaled with no mentions"
+                );
+                return Vec::new();
+            }
+        };
+        let mut users = user_list.unwrap_or_else(|err| {
+            tracing::warn!(
+                company = %self.id,
+                error = %err,
+                "[mentions] the user directory could not be read; only teammates and \
+                 desks are resolvable on this message"
+            );
+            Vec::new()
+        });
+        // Suspended users are retained only for attribution and are refused on
+        // every request — they must not be a live mention target here either.
+        users.retain(|u| u.status == crate::ports::users::UserStatus::Active);
+        // Sorted by the same stable key `GET .../chat/mentionables` uses before
+        // it mints slugs (`user_slugs`), so a collision between two same-named
+        // users gets the same `-2`/`-3` suffix here that the picker advertised —
+        // an unsorted `UserStore` order (most-recently-created first) could
+        // otherwise resolve `@sam-2` to a different person than the one the
+        // picker showed under that label.
+        users.sort_by(|a, b| a.id.cmp(&b.id));
+        crate::runtime::mentions::resolve(text, supplied, sender, &record, &users)
     }
 
     /// A status snapshot, loading the company record for name and lifecycle.
@@ -3106,6 +3563,8 @@ mod tests {
         use crate::server::chat_history::owns;
 
         let reply = |chat_id: String| CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id,
             agent_id: "copywriter".to_string(),
@@ -3895,11 +4354,13 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "pay the invoice".into(),
                     by: None,
                     chat: Some("desk-finance".into()),
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -3909,11 +4370,13 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "unrelated".into(),
                     by: None,
                     chat: Some("desk-ops".into()),
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -3968,11 +4431,13 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "and another thing".into(),
                     by: None,
                     chat: Some("desk-finance".into()),
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -4062,11 +4527,13 @@ mod tests {
                     .append(
                         &rt.id,
                         CompanyEvent::OperatorMessage {
+                            mentions: Vec::new(),
                             text: "ship it".into(),
                             by: None,
                             chat: chat.map(str::to_string),
                             parent: None,
                             deliverable: None,
+                            attachments: Vec::new(),
                         },
                     )
                     .await
@@ -4093,11 +4560,13 @@ mod tests {
             .append(
                 &rt.id,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     text: "unrelated".into(),
                     by: None,
                     chat: Some("desk-ops".into()),
                     parent: None,
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             )
             .await

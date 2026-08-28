@@ -103,3 +103,18 @@ implemented — the `context` key in particular is carried as data and not yet
 consumed, and the workflow expresses one pass rather than a retrying loop. See
 the [orchestration spec](../../docs/spec/runtime/orchestration/README.md) for
 what lands in which phase.
+
+## Tool servers
+
+A source-backed report needs primary sources it can cite: published models, datasets and papers, and the actual implementation behind a claim.
+
+Declared in [`mcp.json`](mcp.json) and merged with anything the install
+ships and anything an operator adds from the console. A server marked
+*needs a token* is declared but off: write its credential from
+Settings → Connections, then enable it there.
+
+| Server | What it is for | Ships |
+| --- | --- | --- |
+| `deepwiki` | Documentation and Q&A for any public GitHub repository. Public and no-auth. | on |
+| `context7` | Version-accurate API and library documentation, so answers match the release in use. | on |
+| `huggingface` | Models, datasets and papers on the Hugging Face Hub. Public and no-auth. | on |

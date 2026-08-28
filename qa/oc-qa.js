@@ -903,7 +903,7 @@
       row(
         "data-hygiene",
         PASS,
-        `${m.facts || 0} facts · ${m.agentChunks || 0} chunks (${m.taskOutcomes || 0} outcomes) · last write ${age(m.lastUpdatedAtMillis)} ago`,
+        `${m.totalItems || 0} items: ${m.facts || 0} facts · ${m.teammateMemory || 0} teammate memories · ${m.taskOutcomes || 0} outcomes · ${m.documentMemory || 0} document chunks · last write ${age(m.lastUpdatedAtMillis)} ago`,
         // `factsUpdatedAtMillis` sits at 0 for any company whose operator never
         // hand-authored a fact, so it is not the freshness signal.
         m.lastUpdatedAtMillis ? "" : "nothing has ever been remembered here",

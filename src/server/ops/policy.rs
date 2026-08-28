@@ -42,7 +42,7 @@
 //! On the company's **next turn**, not on the turn already running.
 //! `ApprovalPolicy` is built once per roster build, and
 //! `HarnessPool::ensure` rebuilds the roster when the policy fingerprint moves
-//! (issue #562's `policy_fingerprint`). So the write lands, the next `ensure`
+//! (issue #562's `effective_policy_fingerprint`). So the write lands, the next `ensure`
 //! rebuilds, and the following turn runs on the new tier — an in-flight turn
 //! finishes under the old one. Since "stop the flood **now**" is the motivating
 //! complaint, the response says so rather than leaving an operator to discover
@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::{POLICY_MODES, Policy};
 use crate::error::OpenCompanyError;
+use crate::policy::DEFAULT_TTL_MILLIS;
 use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{Actor, ActorKind, CompanyRecord, PolicyOverride};
@@ -126,13 +127,15 @@ const TIER_TEXT: &[TierDto] = &[
     TierDto {
         value: "supervised",
         label: "Supervised",
-        description: "The agents ask before every change, including their own scratch files.",
+        description: "The agents ask before every change, except payments under the configured \
+                      spend cap — the always-ask list and daily budget still stop them.",
     },
     TierDto {
         value: "auto",
         label: "Auto",
         description: "The agents work on their own and stop before anything that leaves the \
-                      company or spends money.",
+                      company or spends money, except payments under the configured spend cap — \
+                      the always-ask list and daily budget still stop them.",
     },
     TierDto {
         value: "full",
@@ -183,11 +186,19 @@ pub(crate) struct PolicyDto {
     /// The always-ask list actually in force. The operator's real lever: it
     /// wins over every tier, `full` included.
     pub(crate) always_approve: Vec<String>,
+    /// The spend threshold actually in force. `None` means every spend parks.
+    pub(crate) auto_approve_under_usd: Option<f64>,
+    /// The deadline actually in force, including the runtime default.
+    pub(crate) approval_ttl_hours: u64,
     /// The manifest's tier, so the console can show what "reset" would restore
     /// rather than describing it abstractly.
     pub(crate) manifest_mode: String,
     /// The manifest's always-ask list, for the same reason.
     pub(crate) manifest_always_approve: Vec<String>,
+    /// The manifest's spend threshold, before any console override.
+    pub(crate) manifest_auto_approve_under_usd: Option<f64>,
+    /// The manifest's deadline, if it explicitly names one.
+    pub(crate) manifest_approval_ttl_hours: Option<u64>,
     /// Whether an operator override is in force. Distinct from comparing the
     /// values: an override that happens to match the manifest is still an
     /// override, and still what `DELETE` would remove.
@@ -203,6 +214,18 @@ pub(crate) struct PolicyDto {
     /// When a change bites. Stated because "stop the flood now" is what an
     /// operator comes here to do, and this is not quite that.
     pub(crate) takes_effect: &'static str,
+    /// Every tool name this build's approval gate can match, for the console's
+    /// "is this a real tool?" note (issue #1423).
+    ///
+    /// The complete registry, not the granted-and-wired subset
+    /// (`/workflows/tool-slugs`): the gate matches a tool call by name, so an
+    /// entry naming a wired agent tool (`hosting_launch_site`,
+    /// `publish_artifact`) is a legitimate fence and must not be called a
+    /// mistake just because it cannot be a workflow node. Sourced from
+    /// `consequence::declared_tools`, which
+    /// `every_registered_tool_is_declared` proves covers every tool a live
+    /// agent can call.
+    pub(crate) known_tools: Vec<String>,
 }
 
 impl PolicyDto {
@@ -212,13 +235,28 @@ impl PolicyDto {
         Self {
             mode: effective.mode,
             always_approve: effective.always_approve,
+            auto_approve_under_usd: effective.auto_approve_under_usd,
+            approval_ttl_hours: effective
+                .approval_ttl_hours
+                .unwrap_or(DEFAULT_TTL_MILLIS / (60 * 60 * 1000)),
             manifest_mode: manifest.mode.clone(),
             manifest_always_approve: manifest.always_approve.clone(),
+            manifest_auto_approve_under_usd: manifest.auto_approve_under_usd,
+            manifest_approval_ttl_hours: manifest.approval_ttl_hours,
             overridden: record.overlay_policy.is_some(),
             set_by: record.overlay_policy.as_ref().map(|o| o.set_by.id.clone()),
             set_at_millis: record.overlay_policy.as_ref().map(|o| o.at_millis),
             tiers: selectable_tiers(),
             takes_effect: TAKES_EFFECT,
+            known_tools: {
+                let mut tools: Vec<String> = crate::policy::consequence::declared_tools()
+                    .map(str::to_owned)
+                    .collect();
+                // Deterministic over the wire; the console compares membership,
+                // not order, but a stable list is easier to read and to test.
+                tools.sort();
+                tools
+            },
         }
     }
 }
@@ -247,11 +285,15 @@ struct SetPolicy {
     mode: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     always_approve: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "double_option")]
+    auto_approve_under_usd: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    approval_ttl_hours: Option<Option<u64>>,
 }
 
 /// `GET {scope}/policy` — the tier in force, what the manifest would restore,
 /// and the selectable tiers with their consequences.
-async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, Response> {
+async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let record = load_record(&company).await?;
     Ok(Json(PolicyDto::build(&record)))
 }
@@ -264,14 +306,19 @@ async fn set_policy(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<SetPolicy>,
-) -> Result<Json<PolicyDto>, Response> {
+) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
 
-    if body.mode.is_none() && body.always_approve.is_none() {
+    if body.mode.is_none()
+        && body.always_approve.is_none()
+        && body.auto_approve_under_usd.is_none()
+        && body.approval_ttl_hours.is_none()
+    {
         return Err(refusal(
-            "Nothing to set. Send `mode`, `alwaysApprove`, or both — or `DELETE` \
+            "Nothing to set. Send a policy field — or `DELETE` \
              this endpoint to go back to the manifest's policy.",
-        ));
+        )
+        .into());
     }
 
     // Validate against the same list `company.toml` is validated against, so a
@@ -285,7 +332,18 @@ async fn set_policy(
         return Err(refusal(&format!(
             "`mode` must be one of {} — you sent `{mode}`.",
             POLICY_MODES.join(", ")
-        )));
+        ))
+        .into());
+    }
+    if let Some(Some(cap)) = body.auto_approve_under_usd
+        && (!cap.is_finite() || cap < 0.0)
+    {
+        return Err(refusal("`autoApproveUnderUsd` must be a non-negative number.").into());
+    }
+    if let Some(Some(hours)) = body.approval_ttl_hours
+        && !(1..=8_760).contains(&hours)
+    {
+        return Err(refusal("`approvalTtlHours` must be between 1 hour and 1 year.").into());
     }
 
     let write_lock = company_write_lock(company.id());
@@ -306,10 +364,24 @@ async fn set_policy(
         Some(value) => value,
         None => held.as_ref().and_then(|o| o.always_approve.clone()),
     };
+    let auto_approve_under_usd = match body.auto_approve_under_usd {
+        Some(value) => Some(value),
+        None => held.as_ref().and_then(|o| o.auto_approve_under_usd),
+    };
+    let approval_ttl_hours = match body.approval_ttl_hours {
+        Some(Some(value)) => Some(value),
+        // An explicit `null` clears this one override — restoring the
+        // manifest/default deadline — while an omitted field keeps the held
+        // value. `mode: null` and `alwaysApprove` already work this way.
+        Some(None) => None,
+        None => held.as_ref().and_then(|o| o.approval_ttl_hours),
+    };
 
     let entry = PolicyOverride {
         mode,
         always_approve,
+        auto_approve_under_usd,
+        approval_ttl_hours,
         set_by: Actor {
             kind: ActorKind::User,
             id: admin.user_id,
@@ -322,6 +394,20 @@ async fn set_policy(
     record.overlay_policy = (!entry.is_empty()).then_some(entry);
 
     save(&company, &record).await?;
+    // The deadline is immediate, not next-turn: a parked card stays the same
+    // request, but its deadline is re-evaluated against the current TTL each
+    // time it is displayed, swept or resolved, so waiting for the next cycle
+    // would let approvals parked under the old (longer) TTL outlive the deadline
+    // the console just reported. The tier/cap/always-ask half is the safe-turn-
+    // boundary one and is applied by `run_locked` at the start of the next
+    // cycle — an in-flight turn must finish under the policy snapshot it started
+    // with (issue #1455). A test-injected gate is exempt.
+    if !company.runtime.gate_injected {
+        company
+            .runtime
+            .approval_gate
+            .apply_effective_ttl(&record.effective_policy());
+    }
     Ok(Json(PolicyDto::build(&record)))
 }
 
@@ -338,7 +424,7 @@ async fn clear_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
-) -> Result<Json<PolicyDto>, Response> {
+) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
@@ -347,6 +433,16 @@ async fn clear_policy(
     let mut record = load_record(&company).await?;
     record.overlay_policy = None;
     save(&company, &record).await?;
+    // Same split as `set_policy` (issue #1455): the manifest/default deadline
+    // applies immediately — a parked card's deadline is re-evaluated against the
+    // current TTL — while the manifest tier/cap/always-ask returns at the start
+    // of the next cycle via `run_locked`.
+    if !company.runtime.gate_injected {
+        company
+            .runtime
+            .approval_gate
+            .apply_effective_ttl(&record.effective_policy());
+    }
     Ok(Json(PolicyDto::build(&record)))
 }
 
@@ -354,25 +450,29 @@ fn refusal(message: &str) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, message.to_string()).into_response()
 }
 
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }
 
-async fn save(company: &ScopedCompany, record: &CompanyRecord) -> Result<(), Response> {
+async fn save(
+    company: &ScopedCompany,
+    record: &CompanyRecord,
+) -> Result<(), crate::server::Rejection> {
     company
         .runtime
         .store()
         .save(record)
         .await
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 #[cfg(test)]
@@ -395,7 +495,9 @@ mod tests {
     const MANIFEST: &str = "[company]\nname = \"Acme\"\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
          [policy]\nmode = \"supervised\"\n\
-         always_approve = [\"payment.send\", \"filing.submit\"]\n";
+         always_approve = [\"payment.send\", \"filing.submit\"]\n\
+         auto_approve_under_usd = 5.0\n\
+         approval_ttl_hours = 24\n";
 
     fn home() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -423,10 +525,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -468,9 +573,37 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["mode"], "supervised");
         assert_eq!(body["manifestMode"], "supervised");
+        assert_eq!(body["autoApproveUnderUsd"], 5.0);
+        assert_eq!(body["manifestAutoApproveUnderUsd"], 5.0);
+        assert_eq!(body["approvalTtlHours"], 24);
+        assert_eq!(body["manifestApprovalTtlHours"], 24);
         assert_eq!(body["overridden"], false);
         assert!(body["setBy"].is_null());
         assert!(!body["tiers"].as_array().unwrap().is_empty());
+    }
+
+    /// `GET` also answers the console's "is this a real tool?" note: the
+    /// complete gateable registry, not the workflow-authorable subset. A wired
+    /// agent tool that cannot be a workflow node (`publish_artifact`,
+    /// `hosting_launch_site`) is still a fence the gate matches, so it must be
+    /// present — otherwise the console would call a working entry a mistake.
+    #[tokio::test]
+    async fn get_serves_the_complete_gateable_tool_registry() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let known_tools: &Vec<Value> = body["knownTools"]
+            .as_array()
+            .expect("knownTools is an array");
+        assert!(
+            known_tools.iter().any(|tool| tool == "publish_artifact"),
+            "a wired agent tool the workflow catalog does not carry must be known"
+        );
+        assert!(
+            known_tools.iter().any(|tool| tool == "shell"),
+            "the registry still carries the workflow tools"
+        );
     }
 
     /// A tier `PUT` moves the tier and leaves the always-ask list on the
@@ -505,6 +638,108 @@ mod tests {
         assert_eq!(body["mode"], "supervised", "the tier must not have moved");
     }
 
+    /// The spend cap and deadline use the same field-wise write behaviour as
+    /// the tier: changing either leaves every other policy setting alone.
+    #[tokio::test]
+    async fn putting_a_cap_or_deadline_overrides_only_that_field() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            Some(json!({ "autoApproveUnderUsd": null, "approvalTtlHours": 72 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["autoApproveUnderUsd"].is_null());
+        assert_eq!(body["approvalTtlHours"], 72);
+        assert_eq!(body["mode"], "supervised");
+        assert_eq!(
+            body["alwaysApprove"],
+            json!(["payment.send", "filing.submit"])
+        );
+
+        let (_, reread) = call(&state, "GET", None).await;
+        assert!(reread["autoApproveUnderUsd"].is_null());
+        assert_eq!(reread["approvalTtlHours"], 72);
+    }
+
+    /// The saved override reaches the live gate on the documented schedule
+    /// (issue #1455): the deadline immediately — a parked card is re-checked
+    /// against the current TTL each time it is displayed or swept — and the
+    /// tier/cap/always-ask half at the next turn boundary, applied by
+    /// `run_locked` so an in-flight turn finishes under the snapshot it started
+    /// with.
+    #[tokio::test]
+    async fn a_policy_put_applies_the_deadline_immediately_and_the_cap_next_turn() {
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{CompanyEvent, Effect, EffectGroup, PolicyDecision};
+
+        let dir = home();
+        let state = state(dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("registered").clone();
+        assert_eq!(runtime.approval_gate.ttl_millis(), 24 * 60 * 60 * 1000);
+
+        // Deadline-only PUT: the live gate's TTL moves without waiting for a turn.
+        let (status, body) = call(&state, "PUT", Some(json!({ "approvalTtlHours": 72 }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["approvalTtlHours"], 72);
+        assert_eq!(runtime.approval_gate.ttl_millis(), 72 * 60 * 60 * 1000);
+
+        // Cap PUT: the snapshot must NOT move mid-turn...
+        let (status, _) = call(&state, "PUT", Some(json!({ "autoApproveUnderUsd": 50 }))).await;
+        assert_eq!(status, StatusCode::OK);
+        let spend = Effect {
+            kind: "x402.spend".to_string(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(30.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        // ...a $30 spend still parks under the manifest cap of $5...
+        assert!(matches!(
+            runtime.approval_gate.evaluate(&id, &spend).await.unwrap(),
+            PolicyDecision::RequireApproval
+        ));
+
+        // ...and the next turn applies the effective policy, so it allows.
+        runtime
+            .run_cycle(vec![CompanyEvent::ScheduleFired {
+                cron: "* * * * *".to_string(),
+                prompt: "status".to_string(),
+            }])
+            .await
+            .expect("the next turn runs");
+        assert!(matches!(
+            runtime.approval_gate.evaluate(&id, &spend).await.unwrap(),
+            PolicyDecision::Allow
+        ));
+    }
+
+    /// A deadline `null` releases that one override while preserving the cap,
+    /// just as `mode: null` releases only the tier override.
+    #[tokio::test]
+    async fn null_deadline_stops_overriding_the_deadline() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        call(
+            &state,
+            "PUT",
+            Some(json!({ "autoApproveUnderUsd": 10, "approvalTtlHours": 72 })),
+        )
+        .await;
+
+        let (status, body) = call(&state, "PUT", Some(json!({ "approvalTtlHours": null }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["autoApproveUnderUsd"], 10.0);
+        assert_eq!(body["approvalTtlHours"], 24);
+    }
+
     /// A body that sets nothing is refused rather than stored, and an unknown
     /// tier is refused rather than silently downgraded to `supervised`.
     #[tokio::test]
@@ -522,6 +757,15 @@ mod tests {
             "an unknown tier must be refused — accepting it would leave the console \
              showing a tier the gate was not running"
         );
+
+        for hours in [0, 8_761, u64::MAX] {
+            let (status, _) = call(&state, "PUT", Some(json!({ "approvalTtlHours": hours }))).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "an invalid approval deadline must be refused before persistence"
+            );
+        }
 
         // Neither refusal stored anything.
         let (_, body) = call(&state, "GET", None).await;

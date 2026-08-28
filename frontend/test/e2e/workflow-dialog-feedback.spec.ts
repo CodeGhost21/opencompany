@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 /**
  * Issues #260 / #261 / #262: how the workflow create dialog validates input and
@@ -53,6 +53,19 @@ async function openCreateDialog(page: Page) {
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("New workflow", { exact: true })).toBeVisible();
   return dialog;
+}
+
+/**
+ * Clicks Create through the id-confirm gate (issue #1808) and waits for the
+ * dialog to close. Create mode shows the confirm on the first click rather
+ * than writing; the confirm's own action — also rendered "Create workflow",
+ * but portalled onto `document.body` and reached by test id rather than
+ * `dialog`-scoped role — is the one that fires the write.
+ */
+async function submitCreate(page: Page, dialog: Locator) {
+  await dialog.getByRole("button", { name: "Create workflow" }).click();
+  await page.getByTestId("workflow-id-confirm-create").click();
+  await expect(dialog).toBeHidden({ timeout: 30_000 });
 }
 
 /**
@@ -306,8 +319,7 @@ test("a condition's branches are picked, not typed, and the host checks the grap
   });
 
   // And the graph the pre-flight approved is the graph Create accepts.
-  await dialog.getByRole("button", { name: "Create workflow" }).click();
-  await expect(dialog).toBeHidden({ timeout: 30_000 });
+  await submitCreate(page, dialog);
 });
 
 /**
@@ -398,8 +410,7 @@ test("a valid workflow still saves", async ({ page }) => {
   await dialog.getByLabel("Edge to").click();
   await page.getByRole("option", { name: "done", exact: true }).click();
 
-  await dialog.getByRole("button", { name: "Create workflow" }).click();
-  await expect(dialog).toBeHidden({ timeout: 30_000 });
+  await submitCreate(page, dialog);
 });
 
 test("a new scheduled workflow discloses that it starts paused (#813)", async ({

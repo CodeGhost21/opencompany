@@ -48,6 +48,9 @@ pub mod capability;
 pub mod daily_budget;
 mod finances;
 pub mod inference;
+/// Issue #1749: [`ModelSlug`], the closed vocabulary a metered sample names its
+/// model in. See [`model`].
+pub mod model;
 pub mod oauth;
 /// Issue #337: the planning pass's usage sample and its company-bucket
 /// attribution rule. See [`planning`].
@@ -55,8 +58,12 @@ pub mod planning;
 /// First-run company setup's usage sample and its company-bucket attribution
 /// rule (a sibling of [`planning`], not of an agent turn — the pass runs before
 /// the roster it is building exists). See [`roster_build`].
+/// Issue #1776: what one drafted teammate mandate or persona costs, charged to
+/// the company rather than to the teammate it describes. See [`profile_draft`].
+pub mod profile_draft;
 pub mod roster_build;
 pub mod search;
+pub mod selector;
 pub mod triage;
 mod types;
 mod usage;
@@ -72,13 +79,18 @@ pub use inference::{
     INFERENCE_SPEND_KIND, MEDULLA_PROVIDER, UNATTRIBUTED_AGENT, inference_ledger_entry,
     inference_sample, record_inference_usage,
 };
+pub use model::ModelSlug;
 pub use oauth::{
     MCP_PROVIDER_PREFIX, UNKNOWN_PROVIDER, mcp_provider, oauth_call_sample, record_oauth_call,
 };
 pub use planning::{planning_sample, record_planning_usage};
+pub use profile_draft::{
+    DraftBudget, profile_draft_sample, record_profile_draft_usage, reserve_draft,
+};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };
+pub use selector::{record_selector_usage, selector_sample};
 pub use triage::{record_triage_usage, triage_sample};
 pub use types::{
     AgentTokens, CategorySpend, Direction, Finances, ProviderCalls, Transaction, Usage, UsagePoint,
@@ -136,6 +148,7 @@ mod tests {
                 classes: Vec::new(),
                 ledgers: None,
                 can_declare_ledgers: true,
+                model: None,
             },
             Agent {
                 global: false,
@@ -155,6 +168,7 @@ mod tests {
                 classes: Vec::new(),
                 ledgers: None,
                 can_declare_ledgers: true,
+                model: None,
             },
         ];
         let overlay = vec![OverlayAgent {
@@ -163,6 +177,8 @@ mod tests {
             role: "Creative".into(),
             description: None,
             tools: Vec::new(),
+            model: None,
+            harness: None,
         }];
         let map = roster_display_names(&agents, &overlay);
         assert_eq!(map.get("strategy").unwrap(), "Strategy desk");

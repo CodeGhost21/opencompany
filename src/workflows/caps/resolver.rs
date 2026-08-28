@@ -33,14 +33,16 @@
 //! re-reads the source directory, so a workflow edited between steps is picked
 //! up.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use serde_json::Value;
 
 use async_trait::async_trait;
 use tinyflows::caps::WorkflowResolver;
 use tinyflows::error::{EngineError, Result as TfResult};
-use tinyflows::model::WorkflowGraph;
+use tinyflows::model::{NodeKind, WorkflowGraph};
 
 use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_with_globals};
 use crate::ports::CompanyStore;
@@ -66,26 +68,77 @@ pub struct StoreWorkflowResolver {
     /// The id of the top-level workflow the current run started from — a child
     /// whose closure reaches back to it would loop the whole run.
     root_id: String,
-    /// What the company's policy would park, and where to record that it was
-    /// not asked (issue #617). `None` for a dry run, which executes nothing and
-    /// therefore has nothing to disclose.
-    audit: Option<ChildCallAudit>,
+    /// The live per-run policy inputs used to gate child graphs (issue #617).
+    /// `None` for a dry run, whose effect slots are all inert.
+    gates: Option<ChildPolicyGates>,
 }
 
-/// Everything the #617 audit line needs: the policy to ask, the run to name,
-/// and the log to write to.
+/// The policy inputs the top-level runner selected for this run.
 ///
-/// Grouped so [`StoreWorkflowResolver::new`] does not grow three more
-/// parameters for one concern, and so the whole concern is `Option` — a dry run
-/// passes `None` and the resolver behaves exactly as it did before.
-pub struct ChildCallAudit {
-    /// The company `[policy]` block, verbatim — the same input the top-level
-    /// gate pass reads, so the two can never disagree about the same call.
+/// Grouped so [`StoreWorkflowResolver::new`] does not grow more parameters for
+/// one concern. A dry run passes `None`, preserving its no-gate semantics.
+pub struct ChildPolicyGates {
+    /// The effective company policy, including any console override.
     pub policy: crate::company::Policy,
-    /// The run resolving this child, for the journal line.
+    /// The parent run resolving this child.
     pub run_id: String,
-    /// Where the line goes. Without it the disclosure is a log warning only.
-    pub events: Option<Arc<dyn crate::ports::EventLog>>,
+    /// The company's live standing permissions.
+    pub grants: crate::runtime::grants::GrantSet,
+    /// Per-run record of the gates the resolver marked, keyed by child id.
+    ///
+    /// The parent's parking path reads this when a child pauses, so the card
+    /// can name the child's tool and reason the way a top-level gate's card
+    /// does (issue #617).
+    pub registry: Arc<ChildGateRegistry>,
+}
+
+/// The namespace that separates a child gate's id from the `sub_workflow` node
+/// that ran it, as tinyflows builds it (`namespaced_gate` in
+/// `vendor/openhuman/vendor/tinyflows/src/nodes/integration/sub_workflow.rs`).
+///
+/// A parent gate `approve` and a child's gate `approve` are different gates in
+/// different id spaces, so tinyflows reports the child's as `<node>::<gate>`.
+/// Both consumers of that shape live on this side of the seam: the resolver's
+/// [`child_gate_call`] and the runner's unreplayable-call report.
+pub(crate) const GATE_NAMESPACE: &str = "::";
+
+/// What the resolver recorded about one resolved child: the gated graph as
+/// tinyflows runs it, and the calls the policy raised on it.
+#[derive(Clone)]
+pub(crate) struct ChildGateRecord {
+    /// The child graph the engine is running, post-gate-pass.
+    pub graph: WorkflowGraph,
+    /// The calls the policy stopped on it (the ones marked `requires_approval`).
+    pub gated: Vec<crate::workflows::gate::GatedCall>,
+}
+
+/// A per-run record of every child graph the resolver gated, keyed by child id.
+///
+/// The resolver is invoked by the engine mid-run; the parent's parking path
+/// runs after the engine returns. This registry is the one channel between the
+/// two, so a child that pauses can be described from what the gate pass
+/// actually classified instead of being re-read from the store (which may have
+/// moved on, and the graph the engine ran is what the card must describe).
+#[derive(Default)]
+pub(crate) struct ChildGateRegistry {
+    inner: std::sync::Mutex<HashMap<String, ChildGateRecord>>,
+}
+
+impl ChildGateRegistry {
+    /// Records the gate pass for one resolved child.
+    pub(crate) fn record(&self, child_id: &str, record: ChildGateRecord) {
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(child_id.to_string(), record);
+    }
+
+    /// The record for `child_id`, cloned out so the caller need not hold the
+    /// lock (the graphs are small and lookups happen at pause time, not per
+    /// node).
+    pub(crate) fn get(&self, child_id: &str) -> Option<ChildGateRecord> {
+        self.inner.lock().unwrap().get(child_id).cloned()
+    }
 }
 
 impl StoreWorkflowResolver {
@@ -96,86 +149,55 @@ impl StoreWorkflowResolver {
         store: Arc<dyn CompanyStore>,
         company: CompanyId,
         root_id: String,
-        audit: Option<ChildCallAudit>,
+        gates: Option<ChildPolicyGates>,
     ) -> Self {
         Self {
             source_dir,
             store,
             company,
             root_id,
-            audit,
+            gates,
         }
     }
 
-    /// Issue #617: say, on the record, that this child's calls were never
-    /// offered for approval.
+    /// Applies the same policy pass the top-level runner uses to a child graph.
     ///
-    /// # Why this discloses rather than gates
+    /// tinyflows now surfaces a child pause at the parent's `sub_workflow` node
+    /// using a namespaced id and forwards that approval when the parent re-runs.
+    /// Marking the child here therefore reaches the ordinary card and resume
+    /// path instead of silently executing an effect beneath the parent graph.
     ///
-    /// The child is resolved and run *inside* the engine, so its nodes never
-    /// reach the gate pass #460 and #614 added. Gating them is not on the table:
-    /// tinyflows cannot resume a child across the sub-workflow boundary, and a
-    /// paused child halts the parent with an unresumable error — so marking the
-    /// node would turn a run that works into one that fails with **no card to
-    /// decide**, which is worse than the hole. Closing it properly is engine
-    /// work (#617).
+    /// The gate pass runs against the run's **root** workflow id, not the
+    /// child's own: `policy_gates` binds its standing-permission subject to the
+    /// workflow it is gating, and the card the parent parks is minted with the
+    /// root's id (issue #617). Binding the child to its own id would make a
+    /// permission the operator granted the top-level workflow invisible to the
+    /// child's checks, so a child call would park again under a grant that
+    /// should have admitted it.
     ///
-    /// So the run proceeds and the omission is recorded. The value is exactly
-    /// the value #460 argued for: an operator auditing what the company was
-    /// asked to approve stops seeing a gap with nothing to explain it.
-    ///
-    /// Best-effort and never fails a resolve — a journal write must not be able
-    /// to stop a workflow that would otherwise run. The `warn!` lands either
-    /// way, so a build with no event log still says it out loud.
-    async fn disclose_ungated_calls(&self, child_id: &str, graph: &WorkflowGraph) {
-        let Some(audit) = self.audit.as_ref() else {
+    /// The resulting gates — and the gated graph itself — are recorded per child
+    /// id so the parent's parking path can name them after the run pauses (see
+    /// [`ChildGateRegistry`]).
+    async fn apply_policy_gates(&self, child_id: &str, graph: &mut WorkflowGraph) {
+        let Some(gates) = self.gates.as_ref() else {
             return;
         };
-        let ungated = crate::workflows::gate::policy_gates(
+        let gated = crate::workflows::gate::apply_policy_gates_with_policy(
             graph,
-            &audit.policy,
+            &gates.policy,
             &self.company,
-            child_id,
-            &audit.run_id,
-            // Issue #1098: the audit reports calls never offered for approval at
-            // all, so it deliberately does not consult standing permissions.
-            None,
+            &self.root_id,
+            &gates.run_id,
+            &gates.grants,
         )
         .await;
-
-        for call in ungated {
-            tracing::warn!(
-                company = %self.company,
-                workflow = %self.root_id,
-                child_workflow = child_id,
-                run_id = %audit.run_id,
-                node = %call.node_id,
-                tool = %call.slug,
-                "workflow: this call was NOT offered for approval because it is inside a \
-                 sub_workflow; the engine cannot resume a child across that boundary (issue \
-                 #617), so it runs unparked"
-            );
-            let Some(events) = audit.events.as_ref() else {
-                continue;
-            };
-            let event = crate::ports::types::CompanyEvent::WorkflowChildCallNotOffered {
-                workflow_id: self.root_id.clone(),
-                child_workflow_id: child_id.to_string(),
-                run_id: audit.run_id.clone(),
-                node: call.node_id,
-                tool: call.slug,
-                reason: call.reason,
-            };
-            if let Err(err) = events.append(&self.company, event).await {
-                tracing::warn!(
-                    company = %self.company,
-                    child_workflow = child_id,
-                    %err,
-                    "workflow: could not journal an ungated sub_workflow call; the run is \
-                     unaffected but the audit line is lost"
-                );
-            }
-        }
+        gates.registry.record(
+            child_id,
+            ChildGateRecord {
+                graph: graph.clone(),
+                gated,
+            },
+        );
     }
 
     /// The **static** `workflow_id` references a graph makes — literal ids only.
@@ -323,12 +345,109 @@ impl WorkflowResolver for StoreWorkflowResolver {
         })??;
 
         // (e) Translate to a runnable tinyflows graph.
-        let graph = crate::workflows::translate::translate(&file);
-        // (f) Issue #617: the child's calls never reach the gate pass, so say
-        // so on the record before handing the graph to the engine.
-        self.disclose_ungated_calls(workflow_id, &graph).await;
+        let mut graph = crate::workflows::translate::translate(&file);
+        // (f) A child is translated inside tinyflows, after the top-level
+        // runner's gate pass. Apply that same pass before giving it back.
+        self.apply_policy_gates(workflow_id, &mut graph).await;
         Ok(graph)
     }
+}
+
+/// The child workflow id a `sub_workflow` node resolves to — the key the
+/// registry records the gate pass under.
+///
+/// A static `workflow_id` names it directly. A `=`-expression names it through
+/// the engine, which resolves it against the node's run scope at run time; for
+/// a `once` node — the only shape whose id this lookup can reconstruct — that
+/// scope's `item` is the whole trigger input, so the same resolution is
+/// repeated here. Best-effort: an expression touching a key a parked run no
+/// longer carries (`run`, `nodes`), or a `per_item` fan-out whose per-element
+/// scope needs the item index the paused id does not carry, yields `None` and
+/// the caller falls back rather than failing the pause.
+pub(crate) fn child_id_of(
+    graph: &WorkflowGraph,
+    node: &str,
+    trigger_input: Option<&Value>,
+) -> Option<String> {
+    let node = graph.nodes.iter().find(|n| n.id == node)?;
+    if !matches!(node.kind, NodeKind::SubWorkflow) {
+        return None;
+    }
+    let config = node.config.get("workflow_id")?;
+    let id = config.as_str()?;
+    if !id.starts_with('=') {
+        return Some(id.to_string());
+    }
+    // A `per_item` fan-out resolves `workflow_id` against each element's own
+    // scope, and the paused id carries no item index to say which element that
+    // was. Resolving against the whole-input scope could describe the wrong
+    // child, so fall back rather than guess.
+    if node.config.get("execution").and_then(Value::as_str) == Some("per_item") {
+        return None;
+    }
+    let input = trigger_input?;
+    tinyflows::expr::resolve(
+        config,
+        &serde_json::json!({ "item": input, "items": [input] }),
+    )
+    .as_str()
+    .map(str::to_string)
+}
+
+/// Walks a namespaced pending id (`sub::work`, `sub::nested::work`) down through
+/// the registry's per-child records, to the gate the deepest child paused on.
+///
+/// Each segment before the last names a `sub_workflow` node in the graph one
+/// level up; [`child_id_of`] resolves the child it runs, and the registry entry
+/// for that child carries the next graph down. The last segment names the gate
+/// *inside* the deepest child. Returns that deepest record and the gate id, so
+/// the caller can read the gate's own classification ([`ChildGateRecord::gated`])
+/// or walk its upstream calls.
+///
+/// A segment that names no `sub_workflow` node, a child id the registry did not
+/// record (its gate pass never ran — a child the policy let through), or an
+/// expression-bound id this side cannot reconstruct yields `None`, and the
+/// caller falls back to its own default rather than failing the pause.
+pub(crate) fn descend(
+    registry: &ChildGateRegistry,
+    parent: &WorkflowGraph,
+    node_id: &str,
+    trigger_input: Option<&Value>,
+) -> Option<(ChildGateRecord, String)> {
+    let mut segments: Vec<&str> = node_id.split(GATE_NAMESPACE).collect();
+    let gate = segments.pop()?;
+    let mut record: Option<ChildGateRecord> = None;
+    for node in segments {
+        let graph = match &record {
+            None => parent,
+            Some(record) => &record.graph,
+        };
+        let child_id = child_id_of(graph, node, trigger_input)?;
+        record = Some(registry.get(&child_id)?);
+    }
+    Some((record?, gate.to_string()))
+}
+
+/// The policy classification behind a namespaced child gate (`sub::work`,
+/// `sub::nested::work`), if the resolver recorded it this run.
+///
+/// The parent's parking path resolves a namespaced id by descending the
+/// registry's per-child records — resolving each intermediate `sub_workflow`
+/// node's `workflow_id` (static, or a `=expr` best-effort against
+/// `trigger_input`) to the child the engine actually ran — and reading the
+/// deepest child's own classification. This is the only route by which the
+/// child's policy gate (tool, reason, arguments) reaches the card: the parent
+/// graph does not contain the child's nodes, and the child's partial output
+/// does not travel up when it pauses (tinyflows drops it on
+/// `ChildOutcome::Paused`).
+pub(crate) fn child_gate_call(
+    registry: &ChildGateRegistry,
+    parent: &WorkflowGraph,
+    node_id: &str,
+    trigger_input: Option<&Value>,
+) -> Option<crate::workflows::gate::GatedCall> {
+    let (record, gate) = descend(registry, parent, node_id, trigger_input)?;
+    record.gated.iter().find(|g| g.node_id == gate).cloned()
 }
 
 /// Whether `id` is a single safe on-disk filename stem — no path separators, no
@@ -346,9 +465,7 @@ mod tests {
 
     use crate::company::CompanyManifest;
     use crate::error::Result as OcResult;
-    use crate::ports::types::{
-        CompanyEvent, CompanyRecord, CompanySummary, EventSeq, LedgerEntry, StoredEvent,
-    };
+    use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
 
     /// An in-memory `CompanyStore` holding one record, so the resolver's overlay
     /// half can be seeded without a real backend.
@@ -400,10 +517,13 @@ mod tests {
             overlay_workflows: overlays,
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }))))
     }
 
@@ -425,10 +545,13 @@ mod tests {
             overlay_workflows: overlays,
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }))))
     }
 
@@ -701,32 +824,7 @@ to = "sub"
         );
     }
 
-    // ---- Issue #617: disclosing a child's ungated calls -------------------
-
-    /// An [`EventLog`] that only remembers what it was handed.
-    struct RecordingEvents(std::sync::Mutex<Vec<CompanyEvent>>);
-
-    #[async_trait]
-    impl crate::ports::EventLog for RecordingEvents {
-        async fn append(&self, _id: &CompanyId, event: CompanyEvent) -> OcResult<EventSeq> {
-            self.0.lock().unwrap().push(event);
-            Ok(EventSeq::from(1))
-        }
-        async fn read_from(
-            &self,
-            _id: &CompanyId,
-            _seq: EventSeq,
-            _limit: usize,
-        ) -> OcResult<Vec<StoredEvent>> {
-            Ok(Vec::new())
-        }
-        fn subscribe(
-            &self,
-            _id: &CompanyId,
-        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
-            Box::pin(futures::stream::empty())
-        }
-    }
+    // ---- Issue #617: gating child calls -----------------------------------
 
     /// A child graph whose one working node is a `tool_call` the policy parks.
     fn child_with_shell(id: &str) -> String {
@@ -747,7 +845,7 @@ slug = "shell"
 [node.config.args]
 # An ACTING command. Since issue #875 `shell` is classified by what it was
 # handed, so a read would be a call the policy does not park — and the
-# disclosure this fixture exists to exercise only happens for one that would.
+# gate this fixture exists to exercise only happens for one that would.
 command = "rm -rf ."
 [[edge]]
 from = "start"
@@ -756,11 +854,7 @@ to = "run"
         )
     }
 
-    fn audited_resolver(
-        overlays: Vec<OverlayWorkflow>,
-        mode: &str,
-        events: Arc<RecordingEvents>,
-    ) -> StoreWorkflowResolver {
+    fn gated_resolver(overlays: Vec<OverlayWorkflow>, mode: &str) -> StoreWorkflowResolver {
         let policy: crate::company::Policy =
             toml::from_str(&format!("mode = \"{mode}\"\nalways_approve = []\n"))
                 .expect("valid [policy]");
@@ -769,89 +863,410 @@ to = "run"
             store_with(overlays),
             CompanyId::new("acme"),
             "root".to_string(),
-            Some(ChildCallAudit {
+            Some(ChildPolicyGates {
                 policy,
                 run_id: "run-1".to_string(),
-                events: Some(events),
+                grants: crate::runtime::grants::GrantSet::default(),
+                registry: Arc::new(ChildGateRegistry::default()),
             }),
         )
     }
 
-    /// Issue #617. The child's `shell` call is one the policy would park at the
-    /// top level. It cannot be parked here — the engine cannot resume a child
-    /// across the boundary — so the resolver must **say so on the record**
-    /// rather than let the call disappear from the approvals story.
+    /// Issue #617. The child's `shell` call is one the policy parks at the top
+    /// level, so the resolver must mark it before tinyflows runs the child.
     #[tokio::test]
-    async fn an_ungated_child_call_is_disclosed_to_the_journal() {
-        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
-        let resolver = audited_resolver(
+    async fn a_policy_gated_child_call_is_marked_before_the_engine_runs_it() {
+        let resolver = gated_resolver(
             vec![overlay("child", child_with_shell("child"))],
             "supervised",
-            events.clone(),
         );
 
         let graph = resolver.resolve("child").await.expect("child resolves");
 
-        let seen = events.0.lock().unwrap();
-        let [
-            CompanyEvent::WorkflowChildCallNotOffered {
-                workflow_id,
-                child_workflow_id,
-                run_id,
-                node,
-                tool,
-                reason,
-            },
-        ] = seen.as_slice()
-        else {
-            panic!("expected exactly one disclosure: {seen:?}");
-        };
-        assert_eq!(workflow_id, "root", "the line names the run's own workflow");
-        assert_eq!(child_workflow_id, "child");
-        assert_eq!(run_id, "run-1");
-        assert_eq!(node, "run");
-        assert_eq!(tool, "shell");
-        assert!(reason.contains("shell"), "{reason}");
-
-        // And the child is NOT gated: marking it would pause a child the engine
-        // cannot resume, turning a working run into a dead one (issue #617).
         let run = graph
             .nodes
             .iter()
             .find(|n| n.id == "run")
             .expect("the child's node survives");
         assert!(
-            run.config.get("requires_approval").is_none(),
-            "disclosing must not gate the child: {:?}",
+            run.config["requires_approval"].as_bool().unwrap_or(false),
+            "the child call must be gated: {:?}",
             run.config
         );
     }
 
-    /// A company that would not park the call has nothing to disclose. Without
-    /// this, the test above is also satisfied by a resolver that logs on every
-    /// child regardless of policy.
+    /// A company whose policy does not park the call leaves the child runnable.
     #[tokio::test]
-    async fn a_child_the_policy_would_not_park_discloses_nothing() {
-        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
-        let resolver = audited_resolver(
-            vec![overlay("child", child_with_shell("child"))],
-            "full",
-            events.clone(),
-        );
+    async fn a_child_the_policy_would_not_park_is_not_marked() {
+        let resolver = gated_resolver(vec![overlay("child", child_with_shell("child"))], "full");
 
-        resolver.resolve("child").await.expect("child resolves");
+        let graph = resolver.resolve("child").await.expect("child resolves");
+        let run = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "run")
+            .expect("the child's node survives");
 
         assert!(
-            events.0.lock().unwrap().is_empty(),
-            "an ungated-by-policy call is not a disclosure"
+            run.config.get("requires_approval").is_none(),
+            "an ungated child call remains runnable: {:?}",
+            run.config
         );
     }
 
-    /// A dry run executes nothing, so there is no omission to confess. The
-    /// audit is `None` there and the resolver behaves exactly as before.
+    /// A dry run executes nothing, so its resolver receives no gate context.
     #[tokio::test]
-    async fn a_resolver_without_an_audit_discloses_nothing() {
+    async fn a_resolver_without_policy_gates_leaves_the_child_unmarked() {
         let resolver = overlay_resolver(vec![overlay("child", child_with_shell("child"))], "root");
+        let graph = resolver.resolve("child").await.expect("child resolves");
+        let run = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "run")
+            .expect("the child's node survives");
+        assert!(run.config.get("requires_approval").is_none());
+    }
+
+    // ---- Issue #617: routing the child's gate pass back to the parent -------
+
+    /// A child graph whose one working node is a `web_fetch` — the grantable
+    /// call the standing-permission tests below exercise (`shell` is
+    /// `Standing::PerCall`, so no grant can ever admit it).
+    fn child_with_web_fetch(id: &str) -> String {
+        format!(
+            r#"
+id = "{id}"
+name = "{id}"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "tool_call"
+name = "Fetch"
+[node.config]
+slug = "web_fetch"
+[node.config.args]
+url = "https://docs.rs/jaq"
+[[edge]]
+from = "start"
+to = "fetch"
+"#
+        )
+    }
+
+    /// A live standing permission for `web_fetch` held by one workflow.
+    fn web_fetch_grant(workflow: &str) -> crate::runtime::grants::GrantSet {
+        let grants = crate::runtime::grants::GrantSet::default();
+        grants.grant_standing(crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("g-web"),
+            agent: String::new(),
+            workflow: Some(workflow.to_string()),
+            tool: "web_fetch".to_string(),
+            verdict: crate::ports::types::Verdict::Approve,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("approval-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        });
+        grants
+    }
+
+    /// Like [`gated_resolver`], but hands back the registry too so a test can
+    /// assert what the resolver recorded, and accepts the live grant set.
+    fn gated_resolver_with_grants(
+        overlays: Vec<OverlayWorkflow>,
+        mode: &str,
+        grants: crate::runtime::grants::GrantSet,
+    ) -> (StoreWorkflowResolver, Arc<ChildGateRegistry>) {
+        let policy: crate::company::Policy =
+            toml::from_str(&format!("mode = \"{mode}\"\nalways_approve = []\n"))
+                .expect("valid [policy]");
+        let registry = Arc::new(ChildGateRegistry::default());
+        let resolver = StoreWorkflowResolver::new(
+            None,
+            store_with(overlays),
+            CompanyId::new("acme"),
+            "root".to_string(),
+            Some(ChildPolicyGates {
+                policy,
+                run_id: "run-1".to_string(),
+                grants,
+                registry: registry.clone(),
+            }),
+        );
+        (resolver, registry)
+    }
+
+    /// Issue #617. The child's policy check is bound to the run's **root**
+    /// workflow id — the id the parked card is minted under — so a permission
+    /// the operator granted the top-level workflow is honoured inside the
+    /// child. Bound to the child's own id instead, the grant would not match
+    /// and the child call would park again under a permission that should have
+    /// admitted it.
+    #[tokio::test]
+    async fn a_standing_grant_for_the_root_workflow_admits_a_child_call() {
+        let (resolver, _) = gated_resolver_with_grants(
+            vec![overlay("child", child_with_web_fetch("child"))],
+            "supervised",
+            web_fetch_grant("root"),
+        );
+
+        let graph = resolver.resolve("child").await.expect("child resolves");
+        let fetch = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "fetch")
+            .expect("the child's node survives");
+        assert!(
+            fetch.config.get("requires_approval").is_none(),
+            "a grant for the root workflow must admit the child's call: {:?}",
+            fetch.config
+        );
+    }
+
+    /// The other direction of the subject decision: a grant bound to the
+    /// child's own id does **not** admit it, because the child's checks run
+    /// under the root workflow. No card path mints a child-bound grant — cards
+    /// are minted with the root — so this pins the decision rather than a
+    /// reachable state, and keeps the two ids from being confused again.
+    #[tokio::test]
+    async fn a_grant_bound_to_the_child_id_does_not_admit_the_child_call() {
+        let (resolver, _) = gated_resolver_with_grants(
+            vec![overlay("child", child_with_web_fetch("child"))],
+            "supervised",
+            web_fetch_grant("child"),
+        );
+
+        let graph = resolver.resolve("child").await.expect("child resolves");
+        let fetch = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "fetch")
+            .expect("the child's node survives");
+        assert!(
+            fetch.config["requires_approval"].as_bool().unwrap_or(false),
+            "a grant bound to the child's own id must not admit it: {:?}",
+            fetch.config
+        );
+    }
+
+    /// Issue #617. The resolver records each gated child — the graph the engine
+    /// is actually running and the calls the policy raised on it — so the
+    /// parent's parking path can name a child pause after the run settles.
+    /// A namespaced pending id (`sub::work`) resolves through the parent graph
+    /// and the registry back to the child's own classification.
+    #[tokio::test]
+    async fn a_policy_gated_child_is_recorded_for_the_parents_parking_path() {
+        let (resolver, registry) = gated_resolver_with_grants(
+            vec![overlay("child", child_with_shell("child"))],
+            "supervised",
+            crate::runtime::grants::GrantSet::default(),
+        );
         resolver.resolve("child").await.expect("child resolves");
+
+        let record = registry
+            .get("child")
+            .expect("the resolver recorded the gated child");
+        // The recorded graph is the one the engine runs — post-gate-pass.
+        assert!(
+            record.graph.nodes.iter().any(|n| n.id == "run"),
+            "the recorded graph is the gated child graph"
+        );
+        // The gated list names the child's OWN node ids (un-namespaced), so the
+        // parent can match them against the stripped namespace.
+        let gate = record
+            .gated
+            .iter()
+            .find(|g| g.node_id == "run")
+            .expect("the shell call was gated");
+        assert_eq!(gate.slug, "shell");
+        assert!(
+            gate.reason.contains("shell"),
+            "the reason names the call: {}",
+            gate.reason
+        );
+
+        // The test graph is the post-gate graph. Populate a registry record
+        // manually so this unit test exercises the namespace lookup itself,
+        // rather than depending on a second engine resolve to reach a nested
+        // child.
+        let registry = Arc::new(ChildGateRegistry::default());
+        let child = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&child_with_shell("child")).expect("child parses"),
+        );
+        let gated = child
+            .nodes
+            .iter()
+            .find(|node| node.id == "run")
+            .map(|node| crate::workflows::gate::GatedCall {
+                node_id: node.id.clone(),
+                slug: "shell".to_string(),
+                reason: "shell requires approval".to_string(),
+                args: node.config.get("args").cloned().unwrap_or(Value::Null),
+                target: None,
+            })
+            .into_iter()
+            .collect();
+        registry.record(
+            "child",
+            ChildGateRecord {
+                graph: child,
+                gated,
+            },
+        );
+
+        let parent = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&parent_of("parent", "child")).expect("parent parses"),
+        );
+        let described = child_gate_call(&registry, &parent, "sub::run", None)
+            .expect("a namespaced child gate resolves through the registry");
+        assert_eq!(described.node_id, "run");
+        assert_eq!(described.slug, "shell");
+    }
+
+    /// Issue #617, the nested half. A gate two levels down is reported as
+    /// `sub::nested::work`; the parent graph resolves only the first hop, so
+    /// the parking path must descend the registry — resolving each intermediate
+    /// `sub_workflow` node's `workflow_id` to the child that actually ran it —
+    /// to reach the grandchild's own classification.
+    #[tokio::test]
+    async fn a_two_level_child_gate_resolves_through_the_registry() {
+        let (_resolver, _unused_registry) = gated_resolver_with_grants(
+            vec![
+                // `a` runs `b` from a node named `nested`.
+                overlay("a", parent_of("a", "b")),
+                overlay("b", child_with_shell("b")),
+            ],
+            "supervised",
+            crate::runtime::grants::GrantSet::default(),
+        );
+        // `a`'s child record is the graph that contains `nested`; `b`'s record
+        // is the graph that contains the gated `work` node. Populate both
+        // explicitly so the lookup test mirrors the engine's call order.
+        let registry = Arc::new(ChildGateRegistry::default());
+        let a = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(
+                r#"
+id = "a"
+name = "a"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "nested"
+kind = "sub_workflow"
+name = "Nested"
+[node.config]
+workflow_id = "b"
+[[edge]]
+from = "start"
+to = "nested"
+"#,
+            )
+            .expect("a parses"),
+        );
+        let b = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&child_with_shell("b")).expect("b parses"),
+        );
+        let gated = b
+            .nodes
+            .iter()
+            .find(|node| node.id == "run")
+            .map(|node| crate::workflows::gate::GatedCall {
+                node_id: node.id.clone(),
+                slug: "shell".to_string(),
+                reason: "shell requires approval".to_string(),
+                args: node.config.get("args").cloned().unwrap_or(Value::Null),
+                target: None,
+            })
+            .into_iter()
+            .collect();
+        registry.record(
+            "a",
+            ChildGateRecord {
+                graph: a,
+                gated: Vec::new(),
+            },
+        );
+        registry.record("b", ChildGateRecord { graph: b, gated });
+        let parent = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&parent_of("parent", "a")).expect("parent parses"),
+        );
+        let described = child_gate_call(&registry, &parent, "sub::nested::run", None)
+            .expect("a two-level namespaced child gate resolves through the registry");
+        assert_eq!(described.node_id, "run");
+        assert_eq!(described.slug, "shell");
+    }
+
+    /// Issue #617, the dynamic half. A `workflow_id = "=item.target"` child is
+    /// resolved by the engine at run time, so the registry is keyed by the
+    /// RESOLVED id (`child`), not the authored expression. The parking path
+    /// must resolve the same expression against the trigger input to find the
+    /// record and describe the gate.
+    #[tokio::test]
+    async fn an_expr_bound_child_gate_resolves_through_the_registry() {
+        let registry = Arc::new(ChildGateRegistry::default());
+        let child = crate::workflows::translate::translate(
+            &crate::company::parse_workflow(&child_with_shell("child")).expect("child parses"),
+        );
+        let gated = child
+            .nodes
+            .iter()
+            .find(|node| node.id == "run")
+            .map(|node| crate::workflows::gate::GatedCall {
+                node_id: node.id.clone(),
+                slug: "shell".to_string(),
+                reason: "shell requires approval".to_string(),
+                args: node.config.get("args").cloned().unwrap_or(Value::Null),
+                target: None,
+            })
+            .into_iter()
+            .collect();
+        registry.record(
+            "child",
+            ChildGateRecord {
+                graph: child,
+                gated,
+            },
+        );
+
+        let parent = r#"
+id = "parent"
+name = "Parent"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Sub"
+[node.config]
+workflow_id = "=item.target"
+[[edge]]
+from = "start"
+to = "sub"
+"#;
+        let file = crate::company::parse_workflow(parent).expect("parent parses");
+        let parent = crate::workflows::translate::translate(&file);
+        let described = child_gate_call(
+            &registry,
+            &parent,
+            "sub::run",
+            Some(&serde_json::json!({ "target": "child" })),
+        )
+        .expect("an expression-bound child gate resolves through the registry");
+        assert_eq!(described.node_id, "run");
+        assert_eq!(described.slug, "shell");
     }
 }

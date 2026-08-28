@@ -29,6 +29,10 @@ export class BrowserTransport implements Transport {
       // Access-Control-Allow-Credentials — use the Vite proxy so the console
       // stays same-origin.
       credentials: "include",
+      // Only ever set by a request issued from `pagehide` — see
+      // `TransportRequest.keepalive`. `undefined` for every other call, which
+      // `fetch` treats as `false`.
+      keepalive: req.keepalive,
     });
 
     // Read the body here rather than handing the caller a live `Response`: the

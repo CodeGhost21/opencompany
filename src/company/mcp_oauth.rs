@@ -121,7 +121,10 @@ fn gen_pkce() -> (String, String) {
 /// `initialize` probe. `Ok(None)` means the server did not 401 (open / static
 /// token). Errors surface a discovery failure.
 async fn discover(endpoint: &str) -> Result<Option<McpAuthorizationContext>> {
-    let client = McpHttpClient::new(endpoint.to_string(), HTTP_TIMEOUT_SECS);
+    // Building the client is fallible now — a malformed proxy or an unusable
+    // TLS setting fails here rather than at the first request.
+    let client = McpHttpClient::new(endpoint.to_string(), HTTP_TIMEOUT_SECS)
+        .map_err(|e| OpenCompanyError::Harness(format!("oauth discovery client: {e}")))?;
     client
         .discover_authorization()
         .await

@@ -150,8 +150,9 @@ pub struct Transaction {
 pub struct Finances {
     /// The wallet balance (economy wallet when present, else bookkeeping net).
     pub balance_usd: f64,
-    /// The monthly budget cap from `[budget].monthly_usd` (0 when uncapped).
-    pub budget_usd: f64,
+    /// The monthly budget cap from `[budget].monthly_usd`; `None` when the
+    /// manifest sets no cap, `Some(0.0)` when it is capped at zero.
+    pub budget_usd: Option<f64>,
     /// Current-month outgoing spend (positive magnitude).
     pub spent_usd: f64,
     /// Current-month incoming revenue (positive magnitude).

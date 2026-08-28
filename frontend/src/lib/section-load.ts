@@ -1,6 +1,6 @@
 // How a connections-section fetch failure should be read (issue #1470).
 //
-// Five sections on the Connections page treated ANY fetch failure as "this host
+// Five sections on the old Connections page treated ANY fetch failure as "this host
 // has no such thing" and unmounted themselves, so a transient 500 or a dropped
 // session was indistinguishable from a feature the host genuinely does not have
 // — the operator concluded the feature was missing and went looking for a

@@ -30,20 +30,31 @@ The compose form reads `needsReason` off the declaration and asks for the reason
 
 ### One board component, one screen
 
-Any ledger with statuses renders as columns — one per status, in declaration
-order, labelled by the host. That falls out rather than being designed: a status
-list *is* a lifecycle, and the only thing that differs between the board and a
-hiring pipeline is which call a drop makes. A native ledger's drop goes through
-`patchTask`, because entering a column fires work; every other ledger's is an
-ordinary `record_entry` merge. A drop into a status that demands a reason opens
-the compose form instead of writing, since the host refuses a silent close.
+The board is a *view*, not the screen. A ledger with statuses can render as
+columns — one per status, in declaration order, labelled by the host — but only
+the native `tasks` ledger opens that way by default (`defaultLedgerMode` in
+`views/LedgersView.tsx`). Every declared ledger opens as rows, because rows are
+where a row's whole contents get read: the closing reason a declared ledger
+records, and any long prose it carries, would be one truncated card among
+several. A "Board" toggle next to the filters switches any status-bearing ledger
+to its columns, and the choice belongs to the ledger, not the screen —
+navigating from Tasks to Goals restores Goals to rows, and coming back restores
+the dispatch board (`setMode` re-runs `defaultLedgerMode` whenever the selected
+ledger changes).
+
+The status list is still a lifecycle, and the only thing that differs between
+the board and a hiring pipeline is which call a drop makes. A native ledger's
+drop goes through `patchTask`, because entering a column fires work; every other
+ledger's is an ordinary `record_entry` merge. A drop into a status that demands
+a reason opens the compose form instead of writing, since the host refuses a
+silent close.
 
 `views/LedgerBoard.tsx` is that board, and it is the **only** one. It owns the
 columns, the counts and the drag mechanics; the card is a `renderCard` slot.
 
 There was a standalone Tasks page beside Ledgers until issue #1140, rendering
 the same records through this same component, and an operator who met their work
-twice had to learn which of the two was the real one. Now one screen uses the
+twice had to learn which of the two was the real one. Now one screen hosts the
 board, and it chooses its card by what is behind the row:
 
 | rows | card |

@@ -26,6 +26,19 @@
 
 Humans keep **occasional appearance or ai avatar**; the agents run everything else. The output of this harness is **a creator brand that never sleeps**.
 
+## Tool servers
+
+The content calendar and the sponsorship terms live in a shared workspace.
+
+Declared in [`mcp.json`](mcp.json) and merged with anything the install
+ships and anything an operator adds from the console. A server marked
+*needs a token* is declared but off: write its credential from
+Settings → Connections, then enable it there.
+
+| Server | What it is for | Ships |
+| --- | --- | --- |
+| `notion` | The workspace this company's documents already live in. Needs a token. | off — needs a token |
+
 ## Run it
 
 ```sh

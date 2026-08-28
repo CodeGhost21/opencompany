@@ -61,10 +61,19 @@ export function PagesView({ client, company }: Props) {
   const [pages, setPages] = useState<PageManifestDto[]>([]);
   const [activeSlug, setActiveSlug] = useState("");
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  // The per-document bridge capability. Rotated on every iframe `load`, so a
-  // document the page navigated itself to — which shares the same
-  // `contentWindow` and could not have received the current token — is rejected.
+  // The per-document bridge capability, granted only to the initial document.
   const capabilityRef = useRef<string>("");
+  // The document-bound half of the channel minted for that same document. The
+  // bridge listens on this port — a navigated-to document never received the
+  // other half, so it has no way to send through the bridge, which is what
+  // makes the port the real credential and the capability string a backstop.
+  const portRef = useRef<MessagePort | null>(null);
+  const loadsRef = useRef(0);
+  // The bridge handler, kept in a ref because the port it is attached to is
+  // minted later (in `handleLoad`, on the iframe's `load` event) while the
+  // handler needs `client` and the current page. The bridge effect below only
+  // swaps what this ref points at.
+  const bridgeHandlerRef = useRef<(event: MessageEvent) => void>(() => {});
 
   // Only nav-visible pages appear in the sidebar (`nav_visible = false` in
   // `page.toml` deliberately keeps one off the nav, reachable only by direct
@@ -80,20 +89,43 @@ export function PagesView({ client, company }: Props) {
   );
   const active = visible.find((p) => p.slug === activeSlug) ?? visible[0];
 
-  // Mint a fresh capability for the newly loaded iframe document and hand it
-  // to that document via postMessage. Because `sandbox="allow-scripts"` makes
-  // the frame opaque-origin, we cannot target it by origin — but any document
-  // the page later navigates itself to has no way to learn this token, so only
-  // the exact document we just minted it for can speak through the bridge.
+  // Grant a capability only to the document the console asked the frame to
+  // load. A self-navigation retains the same WindowProxy and sandbox flags,
+  // so it cannot be distinguished by message source or origin; the second
+  // load must revoke access rather than minting a token for its new occupant.
   const handleLoad = useCallback(() => {
     const frame = iframeRef.current;
+    if (++loadsRef.current > 1) {
+      capabilityRef.current = "";
+      portRef.current?.close();
+      portRef.current = null;
+      return;
+    }
     const cap =
       typeof globalThis.crypto?.randomUUID === "function"
         ? globalThis.crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // A fresh channel per document. port2 is transferred to the frame below,
+    // and the bridge listens on port1 — only port2 can reach it. When the
+    // document is destroyed (navigation), port2 dies with it, so a replacement
+    // document's scripts have no port to post through even before this `load`
+    // handler revokes the capability string.
+    const channel = new MessageChannel();
     capabilityRef.current = cap;
-    frame?.contentWindow?.postMessage({ type: "oc:init", capability: cap }, "*");
+    portRef.current = channel.port1;
+    channel.port1.onmessage = (event) => bridgeHandlerRef.current(event);
+    frame?.contentWindow?.postMessage({ type: "oc:init", capability: cap }, "*", [
+      channel.port2,
+    ]);
   }, []);
+
+  // Changing the selected page — or switching to a different company, which
+  // serves a different document at the same slug — creates a new iframe
+  // document. Its first load is eligible for a capability; any later load in
+  // that browsing context is a navigation and remains revoked.
+  useEffect(() => {
+    loadsRef.current = 0;
+  }, [active?.slug, company]);
 
   const loadRun = useRef(0);
   const loadPages = useCallback(async () => {
@@ -124,48 +156,55 @@ export function PagesView({ client, company }: Props) {
   }, [loadPages]);
 
   // The bridge: forwards a page's GraphQL request to the console's own
-  // authenticated endpoint and posts the answer back. Scoped to the active
-  // iframe element and torn down on unmount or whenever the selected page
-  // changes, so a stale iframe (the previous page, already unmounted) can
-  // never be mistaken for the source of a later request.
+  // authenticated endpoint and posts the answer back over the same port.
+  // The handler lives in a ref ([`bridgeHandlerRef`]) because the port it is
+  // attached to is minted later, in `handleLoad`, when the iframe's document
+  // finishes loading.
   useEffect(() => {
-    function onMessage(event: MessageEvent) {
+    bridgeHandlerRef.current = (event: MessageEvent) => {
       // The actual authentication of "did this really come from my own
       // embedded page":
-      //   * `source` identity — only this console's own iframe element.
-      //   * `event.origin === "null"` — only an opaque-origin sandboxed iframe
-      //     reports the literal `"null"` origin; any other frame or tab has a
-      //     real origin.
-      //   * the per-document `capability` — rotated on every `load`, so a
-      //     document the page navigated itself to cannot replay it. This is
-      //     what closes the post-navigation exfiltration window that
-      //     `event.source` alone (which survives navigation) would leave open.
-      if (event.source !== iframeRef.current?.contentWindow) return;
-      if (event.origin !== "null") return;
+      //   * the port — only the entangled half the console transferred to
+      //     exactly one iframe document can send a message here, and a
+      //     document the page navigated itself to never received that half.
+      //     This replaces the `event.source` / `event.origin` checks a window
+      //     listener would need (both survive navigation; the port does not).
+      //   * the per-document `capability` — granted only to the initial load,
+      //     a redundant second layer on top of the port binding.
       if (!isGraphQLBridgeMessage(event.data)) return;
-      if (event.data.capability !== capabilityRef.current) return;
+      if (!capabilityRef.current || event.data.capability !== capabilityRef.current) return;
       const { id, query, variables } = event.data;
-      const replyTo = event.source as Window;
+      // Reply through the port that delivered this request, not through
+      // `portRef.current` at settle time. A switch — to another page or
+      // company — closes the old port and mints a fresh one while the request
+      // is still in flight, and the stale response must not land on the newly
+      // mounted document's port. Posting to a closed port is a silent no-op,
+      // so a reply that settles after the switch simply goes nowhere.
+      const replyPort = portRef.current;
+      if (!replyPort) return;
+      const reply = { type: "oc:graphql:result" as const, id };
       void client
         .graphqlRequest(query, variables)
         .then((result) => {
-          replyTo.postMessage({ type: "oc:graphql:result", id, data: result.data, errors: result.errors }, "*");
+          replyPort.postMessage({ ...reply, data: result.data, errors: result.errors });
         })
         .catch((cause: unknown) => {
-          replyTo.postMessage(
-            {
-              type: "oc:graphql:result",
-              id,
-              errors: [{ message: cause instanceof Error ? cause.message : "request failed" }],
-            },
-            "*",
-          );
+          replyPort.postMessage({
+            ...reply,
+            errors: [{ message: cause instanceof Error ? cause.message : "request failed" }],
+          });
         });
-    }
-
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [client, active?.slug]);
+    };
+    return () => {
+      // The selected page or company changed, or the view unmounted: the
+      // iframe document this port was minted for is gone, so the port can
+      // never legitimately be used again. Close it rather than leaving a live
+      // channel into a document that no longer exists.
+      portRef.current?.close();
+      portRef.current = null;
+      capabilityRef.current = "";
+    };
+  }, [client, active?.slug, company]);
 
   if (load === "loading") {
     return (
@@ -240,7 +279,11 @@ export function PagesView({ client, company }: Props) {
       <section className="flex flex-1 flex-col overflow-hidden">
         {active ? (
           <iframe
-            key={active.slug}
+            // The key is the iframe document's complete identity: a distinct
+            // page, or the same slug under a different company, is a distinct
+            // document and must remount so its first load is granted a fresh
+            // bridge rather than treated as a navigation of the old one.
+            key={`${company ?? ""}:${active.slug}`}
             ref={iframeRef}
             onLoad={handleLoad}
             sandbox="allow-scripts"

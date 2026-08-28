@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
+import type { ChatMentionDto } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import type {
   DeliveryReport,
@@ -40,6 +41,14 @@ export type CompanyStreamEvent =
        * that predates persisted threads.
        */
       parentId?: string;
+      /**
+       * Who this reply names, as the host resolved them (issue #1645).
+       *
+       * Absent when the event predates the field, and on a host that does not
+       * project mentions onto the SSE feed. The same mentions are always
+       * available through `chat/history` (see {@link fromHistory}).
+       */
+      mentions?: ChatMentionDto[];
     }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
   | {
@@ -340,6 +349,16 @@ export type CompanyStreamEvent =
       seq: number;
       agentId?: string;
       chatId?: string;
+      /**
+       * The workflow run this frame belongs to (issue #1702) — present instead
+       * of `chatId` when the turn is a workflow agent node rather than a chat
+       * turn. The run-trace sheet keys its live tool timeline on this so a
+       * node's in-flight frames append to the right run.
+       */
+      workflowRunId?: string;
+      /** The workflow node inside that run (issue #1702), so the sheet groups a
+       * run's live frames under the node the durable trace attributes them to. */
+      nodeId?: string;
       toolCallId?: string;
       label?: string;
       status?: string;
@@ -349,6 +368,10 @@ export type CompanyStreamEvent =
       seq: number;
       agentId?: string;
       chatId?: string;
+      /** See {@link CompanyStreamEvent} `tool_call.workflowRunId` (issue #1702). */
+      workflowRunId?: string;
+      /** See {@link CompanyStreamEvent} `tool_call.nodeId` (issue #1702). */
+      nodeId?: string;
       toolCallId?: string;
       label?: string;
       detail?: string;
@@ -358,7 +381,29 @@ export type CompanyStreamEvent =
   // A coalesced "Thinking" run between tool calls — streamed so the live
   // timeline shows the same rows the final folded one does (else the count
   // jumps up when the reply lands).
-  | { type: "thinking"; seq: number; agentId?: string; chatId?: string };
+  | { type: "thinking"; seq: number; agentId?: string; chatId?: string }
+  // Somebody arrived, went idle, or left. Published on a CHANGE only — a
+  // console heartbeats every minute whether or not anything moved, and
+  // republishing that would be one frame per person per minute for no visible
+  // difference. Carries no label: the console already holds the directory that
+  // names people (`GET {scope}/chat/mentionables`).
+  | {
+      type: "presence";
+      userId: string;
+      status: "online" | "away" | "offline";
+      atMillis: number;
+    }
+  // Somebody is typing. Stored nowhere, on either side: the frame carries its
+  // own moment and the console expires it. There is deliberately no "stopped
+  // typing" frame — the absence of a renewal is the stop signal, so a console
+  // that closes mid-word clears itself with no teardown to get wrong.
+  | {
+      type: "typing";
+      userId: string;
+      chatId: string;
+      parentId?: string;
+      atMillis: number;
+    };
 
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
 export interface AgentReplyEvent {
@@ -383,6 +428,14 @@ export interface AgentReplyEvent {
    * `h` prefix.
    */
   parentId?: string;
+  /**
+   * Who this reply names, as the host resolved them (issue #1645).
+   *
+   * Absent when the event predates the field, and on a host that does not
+   * project mentions onto the SSE feed. The same mentions are always
+   * available through  (see {@link fromHistory}).
+   */
+  mentions?: ChatMentionDto[];
 }
 
 interface Options {
@@ -458,6 +511,12 @@ interface Options {
    */
   onDispatchTerminal?: (event: CompanyStreamEvent) => void;
   /**
+   * Whether this console is currently showing the channel a completed task
+   * came from (#1758). Only that exact view suppresses the completion toast;
+   * the channel's inline terminal marker is already the notification there.
+   */
+  isViewingTaskOrigin?: (event: CompanyStreamEvent) => boolean;
+  /**
    * Called for each `workspace_changed` frame (issue #327) so the Workspace
    * view can re-read the tree — and the open note — live.
    *
@@ -479,6 +538,15 @@ interface Options {
    * the folded steps on the final reply.
    */
   onTurnEvent?: (event: CompanyStreamEvent) => void;
+  /**
+   * Called for each `presence` frame — somebody arrived, went idle, or left.
+   *
+   * Toast-free by construction: a dot moving is not news anybody needs
+   * interrupting for, and a company of ten would produce a stream of them.
+   */
+  onPresenceEvent?: (event: CompanyStreamEvent) => void;
+  /** Called for each `typing` frame. Toast-free for the same reason. */
+  onTypingEvent?: (event: CompanyStreamEvent) => void;
   /**
    * Called for each `workflow_run_finished` event (issue #228) so the Workflows
    * view can refresh its run history live. Matters most for a *scheduled* run:
@@ -564,8 +632,11 @@ export function useEvents(
     onTaskEvent,
     onRunEvent,
     onDispatchTerminal,
+    isViewingTaskOrigin,
     onWorkspaceEvent,
     onTurnEvent,
+    onPresenceEvent,
+    onTypingEvent,
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
@@ -591,6 +662,10 @@ export function useEvents(
   useEffect(() => {
     onDispatchTerminalRef.current = onDispatchTerminal;
   }, [onDispatchTerminal]);
+  const isViewingTaskOriginRef = useRef(isViewingTaskOrigin);
+  useEffect(() => {
+    isViewingTaskOriginRef.current = isViewingTaskOrigin;
+  }, [isViewingTaskOrigin]);
   const onWorkspaceEventRef = useRef(onWorkspaceEvent);
   useEffect(() => {
     onWorkspaceEventRef.current = onWorkspaceEvent;
@@ -599,6 +674,14 @@ export function useEvents(
   useEffect(() => {
     onTurnEventRef.current = onTurnEvent;
   }, [onTurnEvent]);
+  const onPresenceEventRef = useRef(onPresenceEvent);
+  useEffect(() => {
+    onPresenceEventRef.current = onPresenceEvent;
+  }, [onPresenceEvent]);
+  const onTypingEventRef = useRef(onTypingEvent);
+  useEffect(() => {
+    onTypingEventRef.current = onTypingEvent;
+  }, [onTypingEvent]);
   const onWorkflowRunEventRef = useRef(onWorkflowRunEvent);
   useEffect(() => {
     onWorkflowRunEventRef.current = onWorkflowRunEvent;
@@ -700,8 +783,11 @@ export function useEvents(
             onTaskEvent: onTaskEventRef.current,
             onRunEvent: onRunEventRef.current,
             onDispatchTerminal: onDispatchTerminalRef.current,
+            isViewingTaskOrigin: isViewingTaskOriginRef.current,
             onWorkspaceEvent: onWorkspaceEventRef.current,
             onTurnEvent: onTurnEventRef.current,
+            onPresenceEvent: onPresenceEventRef.current,
+            onTypingEvent: onTypingEventRef.current,
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
             onWorkflowChanged: onWorkflowChangedRef.current,
             onApprovalEvent: onApprovalEventRef.current,
@@ -752,8 +838,11 @@ export function handleEvent(
     onTaskEvent,
     onRunEvent,
     onDispatchTerminal,
+    isViewingTaskOrigin,
     onWorkspaceEvent,
     onTurnEvent,
+    onPresenceEvent,
+    onTypingEvent,
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
@@ -772,6 +861,14 @@ export function handleEvent(
     case "tool_result":
     case "thinking":
       onTurnEvent?.(event);
+      break;
+    // Awareness frames, alongside the turn frames above and toast-free for the
+    // same reason: they render inline, and a dot moving is not an interruption.
+    case "presence":
+      onPresenceEvent?.(event);
+      break;
+    case "typing":
+      onTypingEvent?.(event);
       break;
     case "mcp_call_failed":
       toast.error(`MCP ${event.server} failed`, {
@@ -818,13 +915,23 @@ export function handleEvent(
     // missing: a reader watching only the relay prose could not tell a card
     // that parked in `paused` from one that finished.
     //
-    // Still **no toast**, and for the reason written above the board arm: this
-    // fires on every settle, and the marker appearing in the channel IS the
-    // notification. A toast on top would be the second notification for one
-    // action that #379 argues against.
+    // The origin channel's inline marker remains the notification while it is
+    // on screen. Away from that exact channel, #1758 adds one linked toast so a
+    // background turn cannot finish silently while the operator works elsewhere.
     case "desk_task_completed":
       onTaskEvent?.(event);
       onDispatchTerminal?.(event);
+      if (!isViewingTaskOrigin?.(event)) {
+        toast("Task run finished", {
+          description: "Background work has stopped. Open the card for its result and next state.",
+          action: {
+            label: "Open task",
+            onClick: () => {
+              window.location.hash = `/tasks/${encodeURIComponent(event.taskId)}`;
+            },
+          },
+        });
+      }
       break;
     // Issue #327, and **no toast** for the same reason the board frames above
     // raise none — more strongly, if anything. A workspace write is not an
@@ -844,12 +951,16 @@ export function handleEvent(
         // injected line and its later rehydrated twin share an identity.
         seq: event.seq,
         // Issue #246: a reply injected from the stream — one this console did
-        // not POST for, e.g. an inbound Telegram turn — carries its "card
+        // not POST for, e.g. an inbound channel turn — carries its "card
         // opened" chip too, rather than only the locally-awaited copy.
         taskId: event.taskId,
         // Issue #364: and lands in the same thread a reload would put it in,
         // rather than arriving in the channel and jumping on the next refresh.
         parentId: event.parentId,
+        // Issue #1645: who this reply names, projected from the stored event.
+        // Absent when the host's projection omits it; the same mentions are
+        // always available through `chat/history` (see {@link fromHistory}).
+        mentions: event.mentions,
       });
       break;
     // Issue #379. No toast: the rising-edge "needs a sign-off" toast off the

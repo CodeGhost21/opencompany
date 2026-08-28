@@ -51,7 +51,7 @@
 
 mod dry_run;
 mod http;
-mod resolver;
+pub(crate) mod resolver;
 mod state;
 mod tools;
 /// Issue #849: how much upstream output one agent node's turn may carry, and
@@ -61,12 +61,14 @@ mod upstream;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tinyflows::caps::{
-    AgentRunner, Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, StateStore,
-    ToolInvoker, WorkflowResolver,
+    AgentRunOutcome, AgentRunRequest, AgentRunner, Capabilities, CodeLanguage, CodeRunner,
+    HttpClient, LlmProvider, StateStore, StopReason, ToolInvoker, WorkflowResolver,
 };
 use tinyflows::error::{EngineError, Result as TfResult};
+use tinyflows::transcript::TranscriptEntry;
 
 use crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN;
 use crate::harness::policy::{ApprovalScope, MAX_APPROVAL_REQUESTS_PER_TURN, PolicyMode};
@@ -129,6 +131,22 @@ pub struct RunContext<'a> {
     pub blocks: RunBlocks,
     /// Where an agent node records the approvals its turn parked (issue #880).
     pub approvals: RunApprovals,
+    /// Files agent nodes wrote during this run, keyed by node for durable output.
+    pub artifacts: RunArtifacts,
+    /// Where each `agent` node's turn is recorded as an attempt. `None` on a
+    /// dry run and in tests, which then behave exactly as they did before
+    /// attempts existed.
+    pub runs: Option<Arc<dyn crate::ports::RunStore>>,
+    /// The unredacted companion store for those attempts' steps.
+    pub deep: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
+    /// Collects which attempt each node ran as, for the run's journal events.
+    pub attempts: RunAttempts,
+    /// Per-run record of every child graph the resolver gated, so the parent's
+    /// parking path can name a child pause (issue #617). Created by the runner
+    /// before the engine call, handed to the resolver through `ChildPolicyGates`,
+    /// and read back when the run pauses. Crate-internal plumbing: the registry
+    /// type is not part of the public surface, so the field is not `pub`.
+    pub(crate) child_gates: Arc<resolver::ChildGateRegistry>,
 }
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
@@ -183,6 +201,11 @@ pub async fn build_capabilities(
         board,
         blocks,
         approvals,
+        artifacts,
+        runs,
+        deep,
+        attempts,
+        child_gates,
     } = run;
     let company = record.id.clone();
     // Issue #562: the tier actually in force — the operator's console override
@@ -199,21 +222,22 @@ pub async fn build_capabilities(
     // created (issue #168). Read before `deps` may move into the agent runner.
     // REAL in both modes: it is a read, and a dry sub_workflow child runs under
     // this same (dry) bundle, so dry propagates rather than stopping here.
-    // Issue #617: a child's nodes never reach the gate pass, so the resolver
-    // carries the policy in order to *say* which of its calls were never
-    // offered for approval. `None` for a dry run — nothing executes, so there
-    // is nothing to disclose, and the resolver behaves exactly as before.
-    let audit = (!dry_run).then(|| self::resolver::ChildCallAudit {
-        policy: record.manifest.policy.clone(),
+    // Issue #617: child graphs are translated inside the engine, after the
+    // top-level gate pass. Give the resolver the same live policy and grants so
+    // it can mark those graphs before tinyflows runs them. `None` for a dry run
+    // because every effect slot is inert there.
+    let gates = (!dry_run).then(|| self::resolver::ChildPolicyGates {
+        policy: record.effective_policy(),
         run_id: run_id.to_string(),
-        events: deps.events.clone(),
+        grants: deps.approval_requests.grants(),
+        registry: child_gates.clone(),
     });
     let resolver: Arc<dyn WorkflowResolver> = Arc::new(StoreWorkflowResolver::new(
         deps.workflow_source_dir.clone(),
         deps.store.clone(),
         company.clone(),
         workflow_id.to_string(),
-        audit,
+        gates,
     ));
 
     // The four effectful slots, chosen by mode at this one point.
@@ -291,6 +315,7 @@ pub async fn build_capabilities(
             grants,
             &deps.capabilities,
             deps.search.as_ref(),
+            deps.tenant_search.as_ref(),
             search_metering,
             wiring,
         );
@@ -341,24 +366,37 @@ pub async fn build_capabilities(
         // hard-abort path is when the engine future is dropped: staged-but-undrained
         // writes die with the run, exactly as `ApprovalClaim` treats gated calls.
         let board_claim = Arc::new(deps.delegations.claim_board(run_id.to_string()));
+        // The publish tool is captured by the fingerprint-cached roster agent,
+        // so a workflow run cannot replace its queue handle. Scope only refused
+        // publishes: staged publishes remain unavailable to runs because they
+        // still have no destination to claim.
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run(run_id.to_string()),
+        );
 
         // `deps` moves in last — the borrows above (`deps.capabilities`,
         // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
         // `deps.delegations`) are all done by here.
-        let agent: Arc<dyn AgentRunner> = Arc::new(HarnessAgentRunner::new(
-            turn,
-            deps,
-            record.clone(),
-            company.clone(),
-            workflow_id.to_string(),
-            run_id.to_string(),
-            run_request,
-            notices,
-            board,
-            blocks,
-            approvals,
-            board_claim,
-        ));
+        let agent: Arc<dyn AgentRunner> = Arc::new(
+            HarnessAgentRunner::new(
+                turn,
+                deps,
+                record.clone(),
+                company.clone(),
+                workflow_id.to_string(),
+                run_id.to_string(),
+                run_request,
+                notices,
+                board,
+                blocks,
+                approvals,
+                artifacts,
+                board_claim,
+                publish_refusal_claim,
+            )
+            .with_runs(runs, deep, attempts),
+        );
         (Arc::new(tools), Arc::new(http), state, Some(agent))
     };
 
@@ -494,6 +532,16 @@ pub struct HarnessAgentRunner {
     /// multi-harness company, the default lane over the pool in a
     /// single-harness one (see `run_workflow`'s single-pool entrypoint).
     turn: Arc<dyn RunTurn>,
+    /// Where a node's turn is recorded as an attempt, when this host records
+    /// one. `None` leaves every node exactly as it behaved before attempts
+    /// existed.
+    runs: Option<Arc<dyn crate::ports::RunStore>>,
+    /// The unredacted companion store, handed to the sink so a node's reasoning
+    /// and raw tool I/O are kept beside its scrubbed steps.
+    deep: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
+    /// Where each node reports the attempt it ran as, so the run's journal
+    /// events can carry the join.
+    attempts: RunAttempts,
     deps: HarnessDeps,
     /// The company record, for the board drain's desk/assignee resolution (issue
     /// #661 / M5) — the same record the rest of this bundle was built from, so a
@@ -521,6 +569,8 @@ pub struct HarnessAgentRunner {
     blocks: RunBlocks,
     /// Where this node records the approvals its turn parked (issue #880).
     approvals: RunApprovals,
+    /// Run-scoped files captured after each node turn, including failed turns.
+    artifacts: RunArtifacts,
     /// The run's [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim)
     /// claim, taken once by [`build_capabilities`] and held for the whole run.
     ///
@@ -529,6 +579,10 @@ pub struct HarnessAgentRunner {
     /// claim would let one node destroy a sibling's staged writes. See the
     /// acquisition site for the full reasoning.
     board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
+    /// The run's refusal bucket on the shared publish queue. The cached
+    /// `PublishArtifactTool` reads this task-local scope when it refuses a
+    /// publish, so sibling runs cannot drain each other's notices.
+    publish_refusal_claim: Arc<crate::harness::publish::PublishRefusalClaim>,
 }
 
 /// Where an agent node leaves a notice for the operator (issue #638).
@@ -545,6 +599,53 @@ pub struct HarnessAgentRunner {
 #[derive(Clone, Default)]
 pub struct RunNotices {
     inner: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// One file a workflow agent node wrote during its turn.
+///
+/// A workflow run has no card, so this metadata rides beside the engine result
+/// and is folded into the durable per-node output snapshot by the runner. The
+/// body itself lives in the shared workspace node named here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunArtifact {
+    source: String,
+    title: String,
+    kind: crate::ports::ArtifactKind,
+    workspace_node_id: String,
+    captured_at_millis: u64,
+}
+
+/// Run-scoped collector for node-written files.
+///
+/// Owned by the runner rather than the capability bundle so entries survive an
+/// engine failure or block, both of which drop the bundle before persistence.
+#[derive(Clone, Default)]
+pub struct RunArtifacts {
+    inner: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<RunArtifact>>>>,
+}
+
+impl RunArtifacts {
+    fn push(&self, node_id: &str, artifact: RunArtifact) {
+        let mut guard = self.inner.lock().expect("run artifacts poisoned");
+        let rows = guard.entry(node_id.to_string()).or_default();
+        if let Some(existing) = rows.iter_mut().find(|row| row.source == artifact.source) {
+            *existing = artifact;
+        } else {
+            rows.push(artifact);
+        }
+    }
+
+    /// Takes every captured row as JSON, keyed by graph node id.
+    pub fn take(&self) -> serde_json::Map<String, Value> {
+        std::mem::take(&mut *self.inner.lock().expect("run artifacts poisoned"))
+            .into_iter()
+            .map(|(node, rows)| {
+                let value = serde_json::to_value(rows).unwrap_or_else(|_| Value::Array(Vec::new()));
+                (node, value)
+            })
+            .collect()
+    }
 }
 
 impl RunNotices {
@@ -621,6 +722,47 @@ impl RunBlocks {
     /// Takes everything recorded so far, leaving the collector empty.
     pub fn take(&self) -> Vec<crate::ports::WorkflowBlockedNode> {
         std::mem::take(&mut *self.inner.lock().expect("run blocks poisoned"))
+    }
+}
+
+/// Which attempt each `agent` node ran as.
+///
+/// The fourth channel in the [`RunNotices`] / [`RunBoard`] / [`RunBlocks`]
+/// family, and it exists for the structural reason the first three do: the
+/// engine's observer is handed an `ExecutionStep`, which knows a node's id,
+/// status and duration but nothing about an attempt row the host minted inside
+/// the node's own turn. The id has to travel sideways or not at all.
+///
+/// It could have ridden the node's output instead — and that is exactly the
+/// mistake [`RunBlocks`] documents: `run_agent`'s return value *becomes* the
+/// node's output, so a non-output fact placed there lands in the next node's
+/// `=items` binding.
+///
+/// Cheap to clone; every clone writes to the same map, which is what lets a
+/// run's several agent nodes — including concurrent siblings — each record their
+/// own.
+#[derive(Clone, Default)]
+pub struct RunAttempts {
+    inner: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+}
+
+impl RunAttempts {
+    /// Records that `node_id` ran as attempt `run_id`.
+    pub fn record(&self, node_id: impl Into<String>, run_id: impl Into<String>) {
+        self.inner
+            .lock()
+            .expect("run attempts poisoned")
+            .insert(node_id.into(), run_id.into());
+    }
+
+    /// The attempt a node ran as, if it opened one.
+    #[must_use]
+    pub fn get(&self, node_id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("run attempts poisoned")
+            .get(node_id)
+            .cloned()
     }
 }
 
@@ -711,9 +853,14 @@ impl HarnessAgentRunner {
         board: RunBoard,
         blocks: RunBlocks,
         approvals: RunApprovals,
+        artifacts: RunArtifacts,
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
+        publish_refusal_claim: Arc<crate::harness::publish::PublishRefusalClaim>,
     ) -> Self {
         Self {
+            runs: None,
+            deep: None,
+            attempts: RunAttempts::default(),
             turn,
             deps,
             record,
@@ -725,8 +872,60 @@ impl HarnessAgentRunner {
             board,
             blocks,
             approvals,
+            artifacts,
             board_claim,
+            publish_refusal_claim,
         }
+    }
+
+    /// Settles this node's attempt row, if it opened one.
+    ///
+    /// Called on every arm — success, block and failure alike — because a row
+    /// left `Running` is indistinguishable from a host that died mid-turn, and
+    /// the boot reaper would later fail it with a message about an orphan that
+    /// was nothing of the kind.
+    async fn settle_attempt(
+        &self,
+        sink: Option<&Arc<crate::harness::run_trace::RunTraceSink>>,
+        status: crate::ports::RunStatus,
+        error: Option<String>,
+    ) {
+        let (Some(runs), Some(sink)) = (&self.runs, sink) else {
+            return;
+        };
+        let outcome = crate::ports::RunOutcome {
+            status,
+            error,
+            usage: sink.usage(),
+            step_count: sink.step_count(),
+        };
+        if let Err(err) = runs.finish_run(&self.company, sink.run_id(), outcome).await {
+            tracing::warn!(
+                company = %self.company,
+                run = %sink.run_id(),
+                %err,
+                "workflow agent node: could not settle the attempt row"
+            );
+        }
+    }
+
+    /// Record every node's turn as a first-class attempt.
+    ///
+    /// Optional because a bundle built without a run store (tests, the dry-run
+    /// path) must behave exactly as it did before: no row, no trace, and the
+    /// node's own success or failure completely unchanged. A run row is
+    /// observability, never the work.
+    #[must_use]
+    pub fn with_runs(
+        mut self,
+        runs: Option<Arc<dyn crate::ports::RunStore>>,
+        deep: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
+        attempts: RunAttempts,
+    ) -> Self {
+        self.runs = runs;
+        self.deep = deep;
+        self.attempts = attempts;
+        self
     }
 
     /// Drains this run's delegation bucket after a node's turn and records what it
@@ -850,37 +1049,46 @@ impl HarnessAgentRunner {
     /// three times should name it once, for the reason
     /// [`push_tool`] gives.
     ///
-    /// # Known limitation: the bucket is unscoped
+    /// # Scope
     ///
-    /// The queue handle is shared across every path in the company, and the
-    /// chat cycle's `clear()` at the top of each turn empties it. So a chat
-    /// cycle starting between a node's refusal and this drain can discard the
-    /// notice. That is the **safe** direction and the reason it is left as is:
-    /// the loss is a notice that does not appear, never one attributed to a run
-    /// that did not earn it — a claimed destination records no refusal at all
-    /// (pinned by `a_claimed_destination_records_no_refusal`), so nothing a chat
-    /// or task turn does can *add* to this bucket.
-    ///
-    /// A *different* workflow run can add to it, though: two overlapping runs
-    /// of the same company share this same bucket, and whichever run's
-    /// `drain_publish_refusals` executes first takes every refusal queued so
-    /// far, including one a sibling run just raised — a misattribution, not a
-    /// loss (tracked as issue #1243). Closing it properly is **not** as simple
-    /// as handing each run a private queue at `build_capabilities` time: the
-    /// `agent` node type dispatches through `HarnessPool::run_background` to a
-    /// roster agent built **once** by `HarnessPool::ensure` and cached behind
-    /// fingerprints, so the `PublishArtifactTool` a model's turn actually calls
-    /// captures its `pending_publishes` handle at that cache-build time, not at
-    /// per-run dispatch time — a fork made here never reaches it. The fix needs
-    /// the same *task-local* run scope issue #771 gave the delegation queue
-    /// (`ApprovalScope` / `DelegationScope` / `board_claim.scoped(..)` above),
-    /// read by `push_refusal` at call time rather than baked in at tool
-    /// construction, which is a wider change than this fix.
-    fn drain_publish_refusals(&self) {
+    /// The queue handle is shared across every path in the company because the
+    /// cached roster tool captures it at construction time. A run therefore
+    /// claims a task-local refusal scope around its node turn and this drain;
+    /// `push_refusal` reads that scope at call time. Concurrent runs write to
+    /// and drain distinct buckets while chat and task turns retain the default
+    /// bucket and their existing behavior.
+    fn drain_publish_refusals(&self, captured: &[String]) {
         let refusals = self.deps.pending_publishes.drain_refusals();
         let mut seen: Vec<String> = Vec::new();
         for source in refusals {
             if seen.iter().any(|s| s == &source) {
+                continue;
+            }
+            // The tool was built before runs had a card-less artifact target,
+            // so it may still have returned its historical refusal — telling
+            // the model mid-turn that the file was not published. The
+            // post-turn workspace capture below can catch that same file
+            // anyway, which would otherwise leave the node's own turn reply
+            // ("I could not publish this") unreconciled against a run
+            // inspector that shows the file delivered. Say both are true
+            // rather than silently dropping one: the tool's refusal was real
+            // at call time, and the capture is what actually landed it.
+            if captured.iter().any(|path| path == &source) {
+                tracing::info!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    path = %source,
+                    "workflow agent node: a publish the tool refused was captured anyway by \
+                     the post-turn workspace scan; reconciling the notice"
+                );
+                self.notices.push(format!(
+                    "A step in this workflow was told \"{source}\" could not be published — a \
+                     workflow run had no destination for that tool call — but the file was \
+                     captured from that teammate's sandbox after the turn and is available as a \
+                     run artifact."
+                ));
+                seen.push(source);
                 continue;
             }
             tracing::warn!(
@@ -898,6 +1106,144 @@ impl HarnessAgentRunner {
             ));
             seen.push(source);
         }
+    }
+
+    /// Captures every file this node wrote and mirrors it into the run tree.
+    ///
+    /// The snapshot/diff is the same bounded mechanism task dispatch uses. Any
+    /// explicitly staged publish is drained first and its already-captured body
+    /// wins; the remaining changed paths are the unpublished files and are read
+    /// directly from the node's sandbox. Nothing here can change the node's
+    /// success/failure result: a mirror error is logged and the remaining files
+    /// continue, because the turn has already happened.
+    async fn capture_run_artifacts(
+        &self,
+        agent_ref: &str,
+        node_id: &str,
+        workspace: &std::path::Path,
+        before: &crate::harness::publish::WorkspaceSnapshot,
+    ) -> Vec<String> {
+        use crate::harness::publish;
+
+        let changed = before.changed_since(workspace);
+        let staged = self.deps.pending_publishes.drain();
+        let staged_sources: Vec<String> = staged.iter().map(|row| row.source.clone()).collect();
+        let unpublished = publish::unpublished(&changed.files, &staged_sources);
+
+        let mut candidates: std::collections::BTreeMap<String, publish::PendingPublish> = staged
+            .into_iter()
+            .map(|pending| (pending.source.clone(), pending))
+            .collect();
+        for source in unpublished {
+            let file = workspace.join(&source);
+            let inferred = publish::kind_for_extension(&file);
+            let payload = match publish::capture_body(&file, &source, inferred) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        workflow = %self.workflow_id,
+                        run_id = %self.run_id,
+                        node = node_id,
+                        path = %source,
+                        %err,
+                        "workflow agent node: could not read a changed file for run capture"
+                    );
+                    continue;
+                }
+            };
+            let kind = payload.forced_kind(inferred);
+            let title = file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| source.clone());
+            candidates.insert(
+                source.clone(),
+                publish::PendingPublish {
+                    agent: agent_ref.to_string(),
+                    source,
+                    title,
+                    kind,
+                    note: None,
+                    payload,
+                },
+            );
+        }
+
+        if changed.partial {
+            tracing::warn!(
+                company = %self.company,
+                workflow = %self.workflow_id,
+                run_id = %self.run_id,
+                node = node_id,
+                "workflow agent node: the workspace scan was partial; run artifact capture may \
+                 be incomplete"
+            );
+        }
+
+        let Some(store) = self.deps.workspace.as_ref() else {
+            if !candidates.is_empty() {
+                tracing::warn!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    node = node_id,
+                    files = candidates.len(),
+                    "workflow agent node: files changed but no shared workspace store is wired"
+                );
+            }
+            return Vec::new();
+        };
+
+        let mut captured = Vec::new();
+        for pending in candidates.into_values() {
+            let payload = match &pending.payload {
+                publish::PublishPayload::Text(text) => {
+                    crate::company::artifact_mirror::MirrorPayload::Text(text)
+                }
+                publish::PublishPayload::Bytes { bytes, mime } => {
+                    crate::company::artifact_mirror::MirrorPayload::Bytes { bytes, mime }
+                }
+            };
+            let target = crate::company::artifact_mirror::RunTarget {
+                agent_id: agent_ref,
+                run_id: &self.run_id,
+                node_id,
+                source: &pending.source,
+                payload,
+            };
+            match crate::company::artifact_mirror::materialize_run(
+                store.as_ref(),
+                &self.company,
+                target,
+            )
+            .await
+            {
+                Ok(mirrored) => {
+                    captured.push(pending.source.clone());
+                    self.artifacts.push(
+                        node_id,
+                        RunArtifact {
+                            source: pending.source,
+                            title: pending.title,
+                            kind: pending.kind,
+                            workspace_node_id: mirrored.node_id,
+                            captured_at_millis: crate::ports::now_millis(),
+                        },
+                    );
+                }
+                Err(err) => tracing::error!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    node = node_id,
+                    path = %pending.source,
+                    %err,
+                    "workflow agent node: could not materialize a changed file as a run artifact"
+                ),
+            }
+        }
+        captured
     }
 
     /// Parks every approval-gated tool call this node's turn just recorded
@@ -1174,14 +1520,21 @@ fn push_tool(tools: &mut Vec<String>, tool: &str) {
     }
 }
 
-#[async_trait]
-impl AgentRunner for HarnessAgentRunner {
-    async fn run_agent(
+impl HarnessAgentRunner {
+    /// The whole turn, keeping what the trait's legacy return throws away.
+    ///
+    /// [`AgentRunner::run_agent`] can only hand back a `Value`, so before this
+    /// existed the turn's folded steps died at the end of this function — the
+    /// comment at the bottom used to say so. They are the only record of what a
+    /// workflow's agent actually did, and a workflow node has no chat bubble to
+    /// render them in, so dropping them meant a run could be inspected only as
+    /// pass/fail. Both trait methods below call this; the typed one keeps the
+    /// transcript.
+    async fn run_turn(
         &self,
         agent_ref: &str,
         request: Value,
-        _conn: Option<&str>,
-    ) -> TfResult<Value> {
+    ) -> TfResult<(Value, crate::harness::built_in::TurnOutcome)> {
         // Issue #782: fold the resolved upstream node output into the turn.
         // `translate` binds `input = "=items"` on every agent node, so the engine
         // resolves it to the previous step's output before calling us; without
@@ -1238,6 +1591,68 @@ impl AgentRunner for HarnessAgentRunner {
         let lineage_node = node_id.clone().unwrap_or_else(|| agent_ref.to_string());
         let node_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, &lineage_node);
+        // The node runs in its roster agent's sandbox, not the workflow tool
+        // workspace. Snapshot it immediately before inference so the post-turn
+        // drain can distinguish this node's writes from files already there.
+        let workspace = crate::harness::build::agent_workspace(
+            &self.deps.workspace_root,
+            &self.company,
+            agent_ref,
+        );
+        let workspace_before = crate::harness::publish::WorkspaceSnapshot::take(&workspace);
+
+        // The attempt row. This is the thing that did not exist: a workflow
+        // node's turn had no card and no conversation, so `RunStore` — keyed on
+        // exactly those two — could not name it, and nothing downstream could
+        // ask what the node's agent actually did.
+        //
+        // Minted before the turn so the trace has somewhere to land from the
+        // first event, and settled on BOTH arms below. A failure to mint is
+        // logged and the node runs anyway: observability must never be able to
+        // fail the work it is observing.
+        let run_sink = match &self.runs {
+            Some(runs) => {
+                let spec = crate::ports::NewRun::for_workflow_node(
+                    crate::ports::generate_id(),
+                    &self.run_id,
+                    &lineage_node,
+                    agent_ref,
+                );
+                match runs.create_run(&self.company, spec).await {
+                    Ok(row) => {
+                        if let Err(err) = runs.begin_run_untriggered(&self.company, &row.id).await {
+                            tracing::warn!(
+                                company = %self.company,
+                                run = %row.id,
+                                %err,
+                                "workflow agent node: could not mark the attempt running"
+                            );
+                        }
+                        self.attempts.record(&lineage_node, &row.id);
+                        Some(Arc::new(
+                            crate::harness::run_trace::RunTraceSink::new(
+                                self.company.clone(),
+                                row.id,
+                                Arc::clone(runs),
+                            )
+                            .with_deep(self.deep.clone()),
+                        ))
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            company = %self.company,
+                            workflow = %self.workflow_id,
+                            run_id = %self.run_id,
+                            node = %lineage_node,
+                            %err,
+                            "workflow agent node: could not open an attempt row; the node still runs"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
@@ -1270,10 +1685,19 @@ impl AgentRunner for HarnessAgentRunner {
         // first spawning run without these.
         let turn = Box::pin(async {
             let outcome = claim
-                .scoped(Box::pin(self.turn.run_background(
+                .scoped(Box::pin(self.turn.run_background_workflow(
                     &self.company,
                     agent_ref,
                     &message,
+                    run_sink.clone(),
+                    // The workflow run + node this turn belongs to (issue #1702):
+                    // its live tool-call frames stream tagged with these so the
+                    // console's run-trace sheet appends them under the right run
+                    // while the node is still executing. `lineage_node` is the
+                    // resolved node id (graph node, else the agent ref) — the
+                    // same id the durable trace attributes the node's steps to.
+                    &self.run_id,
+                    &lineage_node,
                 )))
                 .await;
             // Drained on BOTH arms, deliberately. A turn that errored may still have
@@ -1299,25 +1723,41 @@ impl AgentRunner for HarnessAgentRunner {
             // card would be opened; refusing to drain would make that receipt false
             // and destroy the write when the scope ends.
             Box::pin(self.drain_board_writes()).await;
-            // Issue #1192: likewise on both arms. A turn that failed after being
-            // refused a publish was still refused one, and the file it wrote is
-            // still stranded — dropping the fact because the turn ended badly is
-            // how the refusal became invisible in the first place.
-            self.drain_publish_refusals();
+            // Run artifacts are drained on BOTH arms. A provider/tool failure or
+            // a later approval block does not undo files the turn already wrote,
+            // so capture happens before either return below can discard them.
+            let captured = self
+                .capture_run_artifacts(agent_ref, &lineage_node, &workspace, &workspace_before)
+                .await;
+            // Issue #1192: likewise on both arms. A refusal is still surfaced
+            // when capture failed, but a file successfully mirrored above is no
+            // longer described as stranded.
+            self.drain_publish_refusals(&captured);
             (outcome, parked)
         });
-        let (outcome, parked) = self.board_claim.scoped(turn).await;
+        let turn = Box::pin(self.board_claim.scoped(turn));
+        let (outcome, parked) = self.publish_refusal_claim.scoped(turn).await;
         // Issue #849: a provider context-window refusal reaches the operator as
         // the run's error text, and the vendor's own wording ("Please start a
         // new chat") is unfollowable in a workflow — there is no chat and no
         // button. Rewrite that one class into what is actually too big and what
         // to do about it, keeping the provider's words at the end. Every other
         // failure passes through exactly as before.
-        let outcome = outcome.map_err(|e| {
-            let raw = e.to_string();
-            let reported = upstream::context_overflow_advice(&raw).unwrap_or(raw);
-            EngineError::Capability(format!("harness agent '{agent_ref}': {reported}"))
-        })?;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                let raw = e.to_string();
+                let reported = upstream::context_overflow_advice(&raw).unwrap_or(raw);
+                let message = format!("harness agent '{agent_ref}': {reported}");
+                self.settle_attempt(
+                    run_sink.as_ref(),
+                    crate::ports::RunStatus::Failed,
+                    Some(message.clone()),
+                )
+                .await;
+                return Err(EngineError::Capability(message));
+            }
+        };
 
         // ── Issue #881: a node whose deliverable was parked is BLOCKED ───────
         //
@@ -1351,19 +1791,162 @@ impl AgentRunner for HarnessAgentRunner {
                 unparkable: parked.unparkable,
                 stranded: 0,
             });
-            return Err(EngineError::Capability(blocked_diagnosis(
-                node_id.as_deref(),
-                agent_ref,
-                &parked,
-            )));
+            let diagnosis = blocked_diagnosis(node_id.as_deref(), agent_ref, &parked);
+            // `WaitingApproval`, not `Failed`: a person still has to decide, and
+            // the row must not read as an error nor be reaped as an orphan.
+            self.settle_attempt(
+                run_sink.as_ref(),
+                crate::ports::RunStatus::WaitingApproval,
+                Some(diagnosis.clone()),
+            )
+            .await;
+            return Err(EngineError::Capability(diagnosis));
         }
 
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
         // reply as `text` so a downstream `=item.text` binding resolves. A
         // workflow node carries no chat bubble, so the turn's steps are dropped
         // here (they surface only on operator/desk chat replies).
-        Ok(json!({ "text": outcome.reply, "agent_ref": agent_ref }))
+        // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
+        // reply as `text` so a downstream `=item.text` binding resolves.
+        // A capped turn is a real, partial checkpoint rather than a completed
+        // answer. Keep the engine's typed `LimitStop` outcome below, but do not
+        // let the durable attempt claim that this node finished successfully.
+        let (status, error) = if outcome.hit_iteration_cap {
+            (
+                crate::ports::RunStatus::Failed,
+                Some("agent stopped at the max_tool_iterations cap before finishing".to_string()),
+            )
+        } else {
+            (crate::ports::RunStatus::Succeeded, None)
+        };
+        self.settle_attempt(run_sink.as_ref(), status, error).await;
+        let value = json!({ "text": outcome.reply, "agent_ref": agent_ref });
+        Ok((value, outcome))
     }
+}
+
+#[async_trait]
+impl AgentRunner for HarnessAgentRunner {
+    async fn run_agent(
+        &self,
+        agent_ref: &str,
+        request: Value,
+        _conn: Option<&str>,
+    ) -> TfResult<Value> {
+        // The legacy shape, unchanged: a bare value, transcript discarded. Kept
+        // because the trait requires it, but nothing in this host calls it —
+        // `run` below is what the engine reaches.
+        self.run_turn(agent_ref, request)
+            .await
+            .map(|(value, _)| value)
+    }
+
+    async fn run(&self, request: AgentRunRequest) -> TfResult<AgentRunOutcome> {
+        let (value, outcome) = self
+            .run_turn(&request.agent.id, request.config.clone())
+            .await?;
+
+        // Issue #926, now expressible. A turn that stopped at its tool-iteration
+        // cap returns an ordinary reply that *reads* like a finished answer, and
+        // until this override the node reported `Finished` for it — the engine
+        // then bound a half-done answer downstream as if it were the whole one.
+        // `LimitStop` is the honest word and the engine already warns on it.
+        //
+        // The parked-approval case is deliberately NOT reported as
+        // `StopReason::Paused`: `run_turn` returns `Err` for it so the runner can
+        // reclassify the node as Blocked, and an agent node is not re-enterable
+        // (see the #881 block above). Nothing here changes that.
+        let stop = if outcome.hit_iteration_cap {
+            StopReason::LimitStop {
+                limit: "max_tool_iterations".to_string(),
+            }
+        } else {
+            StopReason::Finished
+        };
+
+        let transcript = transcript_from_steps(&outcome.steps);
+        Ok(AgentRunOutcome {
+            stop,
+            text: Some(outcome.reply.clone()),
+            json: value.clone(),
+            raw: value,
+            usage: None,
+            transcript,
+        })
+    }
+}
+
+/// The snake_case wire word for a step failure, matching how it serializes.
+fn failure_word(failure: crate::ports::types::TurnStepFailure) -> &'static str {
+    failure.wire_word()
+}
+
+/// Folds a turn's scrubbed [`TurnStep`]s into engine transcript entries.
+///
+/// The host half of the contract `tinyflows::transcript` describes: the engine
+/// carries entries and never invents them, because only the harness knows what
+/// counts as one. This is the narrow, faithful projection — one entry per step,
+/// in the order the steps were folded.
+///
+/// What it deliberately does NOT do is widen what a step already carries.
+/// `detail` is the redacted argument summary and `result` the shape of what came
+/// back; both arrive here already scrubbed by `harness::built_in::steps`, and a
+/// transcript is a *record*, not a second, laxer disclosure surface. A reader
+/// wanting the raw bodies goes to the deep-trace store, which is company-scoped
+/// for exactly that reason.
+///
+/// `at_ms` is 0 on every entry: a `TurnStep` carries an elapsed duration, not a
+/// wall-clock stamp, and inventing one from `now()` would put a timestamp on the
+/// *fold* rather than on the event. The order is the truth here; the duration
+/// rides in the text where it is honest.
+fn transcript_from_steps(steps: &[crate::ports::types::TurnStep]) -> Vec<TranscriptEntry> {
+    use crate::ports::types::{TurnStepKind, TurnStepStatus};
+
+    steps
+        .iter()
+        .map(|step| {
+            // The engine's vocabulary, which is an open set on purpose — a kind
+            // it does not recognise still renders as a timestamped line.
+            let kind = match (step.kind, step.status) {
+                (TurnStepKind::Thinking, _) => "agent_thinking",
+                (TurnStepKind::Note, _) => "agent_message",
+                (TurnStepKind::ToolCall, TurnStepStatus::Ok) => "tool_result",
+                (TurnStepKind::ToolCall, TurnStepStatus::Error) => "error",
+                // Neither finished nor failed: the two states an operator can
+                // still act on, and the two a bare "tool_call" would hide.
+                (TurnStepKind::ToolCall, TurnStepStatus::AwaitingApproval) => {
+                    "tool_awaiting_approval"
+                }
+                (TurnStepKind::ToolCall, TurnStepStatus::Running) => "tool_call",
+            };
+
+            let mut text = step.label.clone();
+            if let Some(detail) = step.detail.as_deref().filter(|d| !d.is_empty()) {
+                text.push_str(": ");
+                text.push_str(detail);
+            }
+            if let Some(result) = step.result.as_deref().filter(|r| !r.is_empty()) {
+                text.push_str(" → ");
+                text.push_str(result);
+            }
+            if step.truncated {
+                text.push_str(" [truncated]");
+            }
+            if let Some(failure) = step.failure {
+                // `TurnStepFailure` has no `as_str`, and Debug would print
+                // PascalCase where every other wire name here is snake_case.
+                text.push_str(&format!(" [{}]", failure_word(failure)));
+            }
+            if let Some(elapsed) = step.elapsed_ms {
+                text.push_str(&format!(" ({elapsed}ms)"));
+            }
+
+            // `bounded` applies the crate's own per-entry ceiling, so a long
+            // result summary cannot make one entry the whole record's budget.
+            TranscriptEntry::bounded(0, kind, text)
+        })
+        .collect()
 }
 
 /// The sentence a blocked node fails with (issue #881).
@@ -1721,6 +2304,170 @@ mod tests {
         ))
     }
 
+    /// A [`RunTurn`] that records the workflow-route ids each
+    /// `run_background_workflow` call receives, standing in for the harness pool
+    /// so the #1702 dispatch test can assert the run and node ids actually reach
+    /// the turn rather than being silently dropped by a fallback to the
+    /// un-streamed `run_background`.
+    struct RecordingWorkflowTurn {
+        /// `(agent_ref, workflow_run_id, node_id)` per call, in order.
+        calls: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl RecordingWorkflowTurn {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    /// The shape every recorded turn answers with — the dispatch under test only
+    /// cares about the ids it is handed, not what the (absent) agent did.
+    fn ok_outcome() -> crate::harness::TurnOutcome {
+        crate::harness::TurnOutcome {
+            reply: "ok".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            halted_for_spend: None,
+        }
+    }
+
+    #[async_trait]
+    impl RunTurn for RecordingWorkflowTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(ok_outcome())
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(ok_outcome())
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(ok_outcome())
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            workflow_run_id: &str,
+            node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            self.calls.lock().expect("calls").push((
+                agent_id.to_string(),
+                workflow_run_id.to_string(),
+                node_id.to_string(),
+            ));
+            Ok(ok_outcome())
+        }
+    }
+
+    /// Issue #1702: the workflow agent-node dispatch routes through
+    /// `run_background_workflow`, not the un-streamed `run_background`, so the
+    /// node's live tool frames stream tagged with the run and node ids. This
+    /// pins the forward: a regression that swapped the arguments or fell back
+    /// to `run_background` would leave the node functional but its live
+    /// activity silently gone.
+    #[tokio::test]
+    async fn an_agent_node_dispatches_through_run_background_workflow_with_run_and_node_ids() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1702-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1702"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1702"));
+        let runner = HarnessAgentRunner::new(
+            turn.clone(),
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1702".to_string(),
+            None,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        // A node resolved from the graph: `node_id` present, so the resolved
+        // `lineage_node` is that id, and the turn must receive the runner's OWN
+        // run id.
+        let (_, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({ "node_id": "gather", "prompt": "collect the numbers" }),
+            )
+            .await
+            .expect("agent node turn");
+        assert_eq!(outcome.reply, "ok");
+        assert_eq!(
+            turn.calls.lock().expect("calls").as_slice(),
+            &[(
+                "researcher".to_string(),
+                "run-1702".to_string(),
+                "gather".to_string(),
+            )],
+            "the node's live frames must be tagged with the runner's run id and the resolved node id"
+        );
+
+        // A node with no graph id (a hand-built request, or a graph compiled
+        // before #881) resolves lineage to the agent ref — and the ids still
+        // route through, tagged with that fallback.
+        runner
+            .run_turn("researcher", json!({ "prompt": "no node id" }))
+            .await
+            .expect("agent node turn without a node id");
+        assert_eq!(
+            turn.calls.lock().expect("calls").as_slice(),
+            &[
+                (
+                    "researcher".to_string(),
+                    "run-1702".to_string(),
+                    "gather".to_string(),
+                ),
+                (
+                    "researcher".to_string(),
+                    "run-1702".to_string(),
+                    "researcher".to_string(),
+                ),
+            ],
+            "a node with no graph id resolves lineage to the agent ref"
+        );
+    }
+
     /// Issue #638: a node that gates more calls than the cap allows leaves the
     /// operator a **notice**, not only a log line.
     ///
@@ -1797,6 +2544,8 @@ mod tests {
         let queue = deps.approval_requests.clone();
         let notices = RunNotices::default();
         let board_claim = Arc::new(deps.delegations.claim_board("run-1"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1"));
         let runner = HarnessAgentRunner::new(
             single_turn(&deps),
             deps,
@@ -1809,7 +2558,9 @@ mod tests {
             RunBoard::default(),
             RunBlocks::default(),
             RunApprovals::default(),
+            RunArtifacts::default(),
             board_claim,
+            publish_refusal_claim,
         );
 
         // Pushed inside the run's own scope, exactly as its turn would.
@@ -1840,6 +2591,73 @@ mod tests {
             .scoped(runner.park_gated_calls(Some("work"), &node_turn))
             .await;
         (notices.take(), queue)
+    }
+
+    /// PR #1775 review: a publish the tool refused mid-turn, but which the
+    /// post-turn workspace capture materialized anyway, must not be silently
+    /// dropped from the run's notices. The node's own turn reply already told
+    /// the operator delivery failed (the tool's response, at call time); going
+    /// silent here would leave that unreconciled against a run inspector that
+    /// shows the file delivered.
+    #[tokio::test]
+    async fn a_captured_publish_reconciles_its_earlier_refusal_notice() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1775-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let pending_publishes = deps.pending_publishes.clone();
+        let notices = RunNotices::default();
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1775"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1775"));
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "wf-1".to_string(),
+            "run-1775".to_string(),
+            None,
+            notices.clone(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim.clone(),
+        );
+
+        // The tool's refusal, staged inside this run's scope exactly as the
+        // live `publish_artifact` call would have.
+        publish_refusal_claim
+            .scoped(async { pending_publishes.push_refusal("specs/plan.md".to_string()) })
+            .await;
+
+        // The post-turn drain, told that the workspace scan captured that
+        // same file anyway.
+        publish_refusal_claim
+            .scoped(async {
+                runner.drain_publish_refusals(&["specs/plan.md".to_string()]);
+            })
+            .await;
+
+        let recorded = notices.take();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "the refusal must be reconciled with a notice, not silenced: {recorded:?}"
+        );
+        assert!(
+            recorded[0].contains("specs/plan.md"),
+            "the notice must name the file: {recorded:?}"
+        );
+        assert!(
+            recorded[0].contains("captured"),
+            "the notice must say the file landed anyway, not just that it was refused: \
+             {recorded:?}"
+        );
     }
 
     #[test]
@@ -2357,6 +3175,11 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                artifacts: Default::default(),
+                runs: None,
+                deep: None,
+                attempts: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2403,6 +3226,11 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                artifacts: Default::default(),
+                runs: None,
+                deep: None,
+                attempts: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2566,6 +3394,11 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                artifacts: Default::default(),
+                runs: None,
+                deep: None,
+                attempts: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
@@ -2619,9 +3452,263 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 approvals: Default::default(),
+                artifacts: Default::default(),
+                runs: None,
+                deep: None,
+                attempts: Default::default(),
+                child_gates: Default::default(),
             },
         )
         .await
         .expect("a dry build never touches the workspace");
+    }
+
+    // ---- the transcript fold (the record a workflow node now leaves) -------
+
+    mod transcript_fold {
+        use super::super::transcript_from_steps;
+        use crate::ports::types::{TurnStep, TurnStepFailure, TurnStepKind, TurnStepStatus};
+
+        fn step(kind: TurnStepKind, status: TurnStepStatus, label: &str) -> TurnStep {
+            TurnStep {
+                kind,
+                status,
+                label: label.to_string(),
+                ..TurnStep::default()
+            }
+        }
+
+        #[test]
+        fn a_tool_less_turn_folds_to_nothing() {
+            // The zero-steps tell: a memory-served answer genuinely did nothing
+            // worth recording, and an empty transcript says exactly that.
+            assert!(transcript_from_steps(&[]).is_empty());
+        }
+
+        #[test]
+        fn each_step_kind_maps_to_an_engine_word() {
+            let steps = vec![
+                step(TurnStepKind::Thinking, TurnStepStatus::Ok, "Thinking"),
+                step(TurnStepKind::Note, TurnStepStatus::Ok, "note"),
+                step(TurnStepKind::ToolCall, TurnStepStatus::Ok, "shell"),
+                step(TurnStepKind::ToolCall, TurnStepStatus::Error, "shell"),
+                step(TurnStepKind::ToolCall, TurnStepStatus::Running, "shell"),
+                step(
+                    TurnStepKind::ToolCall,
+                    TurnStepStatus::AwaitingApproval,
+                    "shell",
+                ),
+            ];
+            assert_eq!(
+                transcript_from_steps(&steps)
+                    .iter()
+                    .map(|e| e.kind.clone())
+                    .collect::<Vec<_>>(),
+                [
+                    "agent_thinking",
+                    "agent_message",
+                    "tool_result",
+                    "error",
+                    "tool_call",
+                    "tool_awaiting_approval",
+                ]
+            );
+        }
+
+        #[test]
+        fn a_parked_call_is_not_folded_as_a_failure() {
+            // The #411 distinction, preserved through the fold: the one step an
+            // operator can act on must not read as a crash.
+            let parked = transcript_from_steps(&[step(
+                TurnStepKind::ToolCall,
+                TurnStepStatus::AwaitingApproval,
+                "shell",
+            )]);
+            assert_eq!(parked[0].kind, "tool_awaiting_approval");
+            assert_ne!(parked[0].kind, "error");
+        }
+
+        #[test]
+        fn the_line_carries_what_the_step_knows() {
+            let entry = transcript_from_steps(&[TurnStep {
+                kind: TurnStepKind::ToolCall,
+                status: TurnStepStatus::Ok,
+                label: "shell".to_string(),
+                detail: Some("python3 solve.py".to_string()),
+                result: Some("3 lines".to_string()),
+                truncated: true,
+                elapsed_ms: Some(1200),
+                failure: None,
+            }]);
+            assert_eq!(
+                entry[0].text,
+                "shell: python3 solve.py → 3 lines [truncated] (1200ms)"
+            );
+        }
+
+        #[test]
+        fn a_failure_class_rides_the_line_in_snake_case() {
+            let entry = transcript_from_steps(&[TurnStep {
+                kind: TurnStepKind::ToolCall,
+                status: TurnStepStatus::Error,
+                label: "github.merge".to_string(),
+                failure: Some(TurnStepFailure::BlockedByPolicy),
+                ..TurnStep::default()
+            }]);
+            assert!(
+                entry[0].text.contains("[blocked_by_policy]"),
+                "got {:?}",
+                entry[0].text
+            );
+        }
+
+        #[test]
+        fn empty_detail_and_result_add_no_punctuation() {
+            // A bare label must not fold to "label: " or "label → ".
+            let entry = transcript_from_steps(&[TurnStep {
+                kind: TurnStepKind::ToolCall,
+                status: TurnStepStatus::Ok,
+                label: "workspace_read".to_string(),
+                detail: Some(String::new()),
+                result: Some(String::new()),
+                ..TurnStep::default()
+            }]);
+            assert_eq!(entry[0].text, "workspace_read");
+        }
+
+        #[test]
+        fn one_long_step_cannot_eat_the_records_budget() {
+            // `TranscriptEntry::bounded` is the crate's own ceiling; the fold
+            // must go through it rather than around it.
+            let entry = transcript_from_steps(&[TurnStep {
+                kind: TurnStepKind::ToolCall,
+                status: TurnStepStatus::Ok,
+                label: "shell".to_string(),
+                result: Some("x".repeat(64 * 1024)),
+                ..TurnStep::default()
+            }]);
+            assert!(
+                entry[0].text.len() < 8 * 1024,
+                "entry was {} bytes — bounded() was bypassed",
+                entry[0].text.len()
+            );
+            assert!(entry[0].text.ends_with("…[truncated]"));
+        }
+
+        #[test]
+        fn order_is_preserved() {
+            // A transcript read out of order is not a transcript.
+            let steps: Vec<TurnStep> = (0..5)
+                .map(|i| {
+                    step(
+                        TurnStepKind::ToolCall,
+                        TurnStepStatus::Ok,
+                        &format!("step{i}"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                transcript_from_steps(&steps)
+                    .iter()
+                    .map(|e| e.text.clone())
+                    .collect::<Vec<_>>(),
+                ["step0", "step1", "step2", "step3", "step4"]
+            );
+        }
+
+        #[test]
+        fn every_failure_class_has_a_stable_snake_case_wire_word() {
+            for (failure, expected) in [
+                (TurnStepFailure::Declined, "declined"),
+                (TurnStepFailure::BlockedByPolicy, "blocked_by_policy"),
+                (TurnStepFailure::Unauthorized, "unauthorized"),
+                (TurnStepFailure::MissingPermission, "missing_permission"),
+                (TurnStepFailure::MissingApp, "missing_app"),
+                (TurnStepFailure::NotFound, "not_found"),
+                (TurnStepFailure::Timeout, "timeout"),
+                (TurnStepFailure::Unavailable, "unavailable"),
+                (TurnStepFailure::Failed, "failed"),
+            ] {
+                assert_eq!(failure.wire_word(), expected);
+            }
+        }
+    }
+
+    // ---- the attempt row a workflow node now opens ------------------------
+
+    mod attempt {
+        use super::*;
+        use crate::ports::{NewRun, RunFilter, RunStatus, RunStore};
+
+        fn store() -> Arc<dyn RunStore> {
+            let dir = tempfile::Builder::new()
+                .prefix("oc-attempt-")
+                .tempdir()
+                .expect("tempdir");
+            let path = dir.path().to_path_buf();
+            // The tempdir must outlive the store; leak it, this is a test.
+            std::mem::forget(dir);
+            Arc::new(crate::store::fs_ops::FsOps::new(&path))
+        }
+
+        #[tokio::test]
+        async fn a_node_run_is_addressable_by_its_workflow_run() {
+            // The join, end to end at the port: this is the query that had no
+            // answer before, because a node's attempt had neither a card nor a
+            // conversation to be found by.
+            let runs = store();
+            let company = CompanyId::new("acme");
+            for (id, node) in [("a", "solve"), ("b", "check")] {
+                let row = runs
+                    .create_run(
+                        &company,
+                        NewRun::for_workflow_node(id, "run-1", node, "programmer"),
+                    )
+                    .await
+                    .expect("create");
+                runs.begin_run_untriggered(&company, &row.id)
+                    .await
+                    .expect("begin");
+            }
+
+            let found = runs
+                .list_runs(&company, &RunFilter::for_workflow_run("run-1"))
+                .await
+                .expect("list");
+            assert_eq!(found.len(), 2);
+            assert!(
+                found.iter().all(|r| r.status == RunStatus::Running),
+                "an untriggered begin still moves the row to Running"
+            );
+            assert!(
+                found.iter().all(|r| r.trigger_event_seq.is_none()),
+                "a workflow node has no driving journal event, and says so"
+            );
+            let mut nodes: Vec<&str> = found.iter().filter_map(|r| r.node_id.as_deref()).collect();
+            nodes.sort_unstable();
+            assert_eq!(nodes, ["check", "solve"]);
+        }
+
+        #[tokio::test]
+        async fn an_untriggered_begin_refuses_an_illegal_transition() {
+            // The transition legality that lives on the port must not be
+            // bypassed by the sibling entry point.
+            let runs = store();
+            let company = CompanyId::new("acme");
+            let row = runs
+                .create_run(
+                    &company,
+                    NewRun::for_workflow_node("a", "run-1", "solve", "p"),
+                )
+                .await
+                .expect("create");
+            runs.begin_run_untriggered(&company, &row.id)
+                .await
+                .expect("first begin");
+            assert!(
+                runs.begin_run_untriggered(&company, &row.id).await.is_err(),
+                "Running -> Running is not a legal transition"
+            );
+        }
     }
 }

@@ -18,7 +18,6 @@ const LISTED = [
   "public_url",
   "workspace.max_blob_mb",
   "workspace.storage_quota_gb",
-  "github_token",
   "tinyhumans_api_key",
 ];
 

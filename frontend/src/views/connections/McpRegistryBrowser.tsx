@@ -9,7 +9,6 @@ import {
   searchMcpRegistry,
   type McpCatalogueDetail,
   type McpCatalogueEntry,
-  type McpDirectoryCredentialSource,
 } from "@/api/mcp-registry";
 import { ApiError } from "@/api/types";
 import {
@@ -20,7 +19,6 @@ import {
   type McpRegistryOutage,
 } from "@/lib/mcp-registry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { McpDirectoryCredentialCard } from "@/views/connections/McpDirectoryCredentialCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,8 +36,6 @@ type Results =
       page: number;
       totalPages: number;
       servers: McpCatalogueEntry[];
-      /** Which Smithery key this search presented (issue #1287). */
-      directoryCredential: McpDirectoryCredentialSource;
     };
 
 /** The install dialog's state for the one entry an operator picked. */
@@ -122,7 +118,6 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
           page: found.page,
           totalPages: found.totalPages,
           servers: found.servers,
-          directoryCredential: found.directoryCredential,
         });
       } catch (err) {
         if (generation.current !== mine) return;
@@ -188,12 +183,12 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
   return (
     <div className="space-y-3 border-t border-border pt-3" data-testid="mcp-registry-browser">
       <div className="space-y-1">
-        <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Add from the MCP directory
-        </h4>
+        </h3>
         <p className="text-xs text-muted-foreground">
-          Search Smithery and the official MCP registry. An installed server joins the list above
-          and every teammate can call it.
+          Search the official MCP registry. An installed server joins the list above and every
+          teammate can call it.
         </p>
       </div>
 
@@ -232,7 +227,7 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
       {results.kind === "ready" &&
         (results.servers.length === 0 ? (
           <p className="text-sm text-muted-foreground" data-testid="mcp-registry-empty">
-            {directoryEmptyNotice(results.directoryCredential)}
+            {directoryEmptyNotice()}
           </p>
         ) : (
           <>
@@ -304,28 +299,6 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
           </>
         ))}
 
-      {/* The key that decides whether any of the above has hosted servers to
-          show (issue #1287). Below the results rather than above them: the
-          search box is what an operator came here for, and the empty-result
-          notice points down here in as many words when it is the thing standing
-          in their way. A save re-runs the current search, so setting the key
-          fills the list they are already looking at instead of leaving them to
-          guess it worked.
-
-          Withheld while the directory is known-unwired (issue #1467): on a build
-          without the `mcp` feature the search returns the `unwired` outage and
-          the notice above says the directory isn't enabled in this build.
-          Rendering a green "Set for this company" credential card with working
-          Rotate/Clear controls under that notice asserts a feature it just
-          denied. Any other state — idle, a transient directory error, or a live
-          catalogue — still shows the card. */}
-      {!(results.kind === "outage" && results.outage.kind === "unwired") && (
-        <McpDirectoryCredentialCard
-          client={client}
-          company={company}
-          onChanged={() => void runSearch(1)}
-        />
-      )}
     </div>
   );
 }

@@ -16,11 +16,12 @@
 # exactly the #592 shape (one lane quietly not doing what its siblings do).
 #
 # Usage:
-#   scripts/ci/run-scoped-suite.sh <label> <features> <filter>
+#   scripts/ci/run-scoped-suite.sh <label> <features> <filter> [--ignored]
 #
 #   label     what to call this suite in the log and in a failure message
 #   features  the exact --features string (comma-separated, no spaces)
 #   filter    ONE test-name filter
+#   --ignored run only ignored tests selected by that filter
 #
 # EXACTLY ONE FILTER, and that is a hard interface rather than an oversight.
 # `cargo test --lib a b` reads `a` as the filter and `b` as ANOTHER filter only
@@ -42,15 +43,16 @@
 
 set -eu
 
-if [ "$#" -ne 3 ]; then
-  echo "usage: $0 <label> <features> <filter>" >&2
-  echo "  exactly three arguments; see the header for why the filter is singular" >&2
+if [ "$#" -ne 3 ] && { [ "$#" -ne 4 ] || [ "$4" != "--ignored" ]; }; then
+  echo "usage: $0 <label> <features> <filter> [--ignored]" >&2
+  echo "  one filter, with an optional ignored-test mode; see the header" >&2
   exit 2
 fi
 
 LABEL="$1"
 FEATURES="$2"
 FILTER="$3"
+IGNORED="${4:-}"
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)
@@ -58,9 +60,13 @@ cd "${REPO_ROOT}"
 
 LOG="${RUNNER_TEMP:-/tmp}/scoped-suite-$(echo "${LABEL}" | tr -c 'A-Za-z0-9' '-').log"
 
-echo "==> ${LABEL}: cargo test --locked --features ${FEATURES} --lib ${FILTER}"
+echo "==> ${LABEL}: cargo test --locked --features ${FEATURES} --lib ${FILTER} ${IGNORED}"
 
-cargo test --locked --features "${FEATURES}" --lib "${FILTER}" 2>&1 | tee "${LOG}"
+if [ "${IGNORED}" = "--ignored" ]; then
+  cargo test --locked --features "${FEATURES}" --lib "${FILTER}" -- --ignored 2>&1 | tee "${LOG}"
+else
+  cargo test --locked --features "${FEATURES}" --lib "${FILTER}" 2>&1 | tee "${LOG}"
+fi
 
 # The pipeline's first command, not `tee`'s status. A compile error or a failing
 # test must fail this script, and without this check `set -e` would only see the

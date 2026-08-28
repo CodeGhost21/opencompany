@@ -28,8 +28,7 @@ the world as, and which third-party accounts its agents act through:
 | `inference` | `PUT …/inference`, `DELETE …/inference`, `POST …/inference/restart` |
 | `smtp` | `PUT …/smtp`, `POST …/smtp/test` (the caller names the recipient) |
 | `domain` | `PUT …/domain` |
-| `channels` | `PUT`/`DELETE …/channels/telegram`, `POST …/channels/telegram/webhook` |
-| `mcp` | `POST …/mcp/servers`, `PUT`/`DELETE …/mcp/servers/{name}`, `POST …/mcp/servers/{name}/oauth/start` |
+| `mcp` | `POST …/mcp/servers`, `PUT`/`DELETE …/mcp/servers/{name}`, `POST …/mcp/servers/{name}/oauth/start`, `PUT …/mcp/config` |
 
 Reads on those same surfaces stay open to any member: they carry a tier name and
 non-secret routing, never a credential, and knowing *that* Gmail is connected is
@@ -48,6 +47,16 @@ So do the probes over already-stored config
 — `POST …/inference/test`, `GET …/mcp/servers/{name}/tools`,
 `POST …/mcp/servers/{name}/test`, `POST …/domain/verify` — which name no
 destination of their own.
+
+Faces are on the members' side of that line, deliberately
+(`docs/spec/runtime/avatars.md`). `POST …/avatars` and the `avatar` field on
+`PATCH …/team/{agentId}` are open to any member: picking a colleague's icon
+decides nothing about what the company reaches the world as, and a company whose
+only admin is away should not be stuck with eleven hashed blobs. `tools` (a
+grant), `model` (a cost/scope choice) and `harness` (a routing binding) stay the
+admin-gated fields on that route. A **person's** own face goes the other
+way for the mirror-image reason — `PATCH …/auth/me` has no `user_id` in its
+path, so not even an admin can set somebody else's.
 
 This is deliberately **not** a read-scope / write-scope split. "Write" and
 "requires authority" are different questions here and the product answers them

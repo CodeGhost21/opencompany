@@ -23,6 +23,7 @@ import {
 } from "@/api/auth";
 import { connectWallet, hasWallet, NoWalletError, signMessage } from "@/lib/wallet";
 import { resendLabel, secondsUntilResend } from "@/views/login/resend";
+import { arrivedViaSetupHandoff, SETUP_HANDOFF_FRAGMENT } from "@/setup/state";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -191,7 +192,13 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    fetchHubProviders(client, company)
+    // A dead setup hand-off link keeps its marker in the hash while it falls
+    // back to this form, so an ecosystem button asked for from here must land on
+    // the same destination the link promised — the host carries it on the
+    // sign-in's return URI (`from=setup`), which survives the OAuth round trip
+    // the way a fragment cannot. Absent for any other sign-in, which lands
+    // wherever it always did.
+    fetchHubProviders(client, company, arrivedViaSetupHandoff() ? "setup" : undefined)
       .then((providers) => {
         if (!cancelled) setHubProviders(providers);
       })
@@ -253,7 +260,18 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const result = await requestCode(client, company, email);
+      const result = await requestCode(
+        client,
+        company,
+        email,
+        // A dead setup hand-off link keeps the address while it falls back to
+        // this form (`#/company?from=setup` survives in the hash), so a link
+        // asked for from here must carry the same destination the original did
+        // — otherwise following the replacement lands on Overview and can show
+        // the tour welcome instead of the roster setup just built. Absent for
+        // any other sign-in, which lands wherever it always did.
+        arrivedViaSetupHandoff() ? SETUP_HANDOFF_FRAGMENT : undefined,
+      );
       // Always the same acknowledgement, whoever they are.
       setSent(true);
       setDevCode(result.dev_code ?? null);
@@ -479,7 +497,11 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
               {hubProviders.map((provider) => (
                 <a
                   key={provider.id}
-                  href={provider.startUrl}
+                  href={
+                    arrivedViaSetupHandoff()
+                      ? `${provider.startUrl}${provider.startUrl.includes("?") ? "&" : "?"}from=setup`
+                      : provider.startUrl
+                  }
                   className={cn(buttonVariants({ variant: "outline", size: "lg" }), "w-full")}
                 >
                   Continue with {provider.label}

@@ -197,6 +197,12 @@ function Sidebar({
           data-sidebar="sidebar"
           data-slot="sidebar"
           data-mobile="true"
+          aria-modal="true"
+          onKeyDownCapture={(event) => {
+            if (event.key === "Escape") {
+              setOpenMobile(false)
+            }
+          }}
           className="w-(--sidebar-width) bg-sidebar p-0 text-sidebar-foreground [&>button]:hidden"
           style={
             {

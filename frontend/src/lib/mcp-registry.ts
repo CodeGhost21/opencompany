@@ -29,7 +29,6 @@
 
 import { ApiError } from "@/api/types";
 import type { McpHealth, McpServer, McpSource } from "@/api/types";
-import type { McpDirectoryCredentialSource } from "@/api/mcp-registry";
 
 /**
  * How a row is removed, if at all.
@@ -174,26 +173,14 @@ export const REGISTRY_UNWIRED_NOTICE =
   "Browsing the MCP directory isn't enabled in this build (the host was compiled without the MCP feature). The servers above still work.";
 
 /**
- * What a zero-row search means, in the operator's terms (issue #1287).
+ * What a zero-row search means, in the operator's terms.
  *
- * Zero rows has two causes and only one of them is theirs to fix. A real miss
- * and an unqueried directory look identical on screen, and the honest surface is
- * the one that names the difference — the earlier copy said "nothing matched",
- * which read as a broken search on every tenant with no key.
- *
- * Deliberately does NOT scold the shared-host tier. `environment` is a working
- * directory; the fact that it is one shared Smithery account belongs on the
- * credential card where an operator can act on it, not on top of every empty
- * search result.
+ * Zero rows has two causes and only one of them is the operator's to fix — a
+ * real miss, or a directory whose hosted entries this host cannot run — and the
+ * honest surface is the one that names the difference. A bare "nothing matched"
+ * reads as a broken search.
  */
-export function directoryEmptyNotice(tier: McpDirectoryCredentialSource): string {
-  if (tier === "none") {
-    return (
-      "No Smithery key is set, so only the open registry was searched — and nearly everything " +
-      "in it runs as a local subprocess this host can't launch. Add the company's Smithery key " +
-      "below to browse hosted servers."
-    );
-  }
+export function directoryEmptyNotice(): string {
   return (
     "No hosted servers matched that. The directory only offers servers this host can dial over " +
     "HTTP — one that runs as a local subprocess is not listed."
@@ -239,7 +226,7 @@ export function mcpProvenanceNote(source: McpSource): string {
 export function mcpRemovalNote(source: McpSource): string {
   switch (source) {
     case "manifest":
-      return "This server is declared in company.toml, so it cannot be removed from the console — turning it off drops it from every teammate's tool belt on the next turn, and it returns on the next boot unless the manifest changes.";
+      return "This server is declared in the company's bundle (company.toml or mcp.json), so it cannot be removed from the console — turning it off drops it from every teammate's tool belt on the next turn, and it returns on the next boot unless the manifest changes.";
     case "default":
       return "This server ships with the installation, so it cannot be removed from the console — turning it off drops it from every teammate's tool belt on the next turn.";
     case "registry":

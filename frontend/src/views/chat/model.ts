@@ -27,6 +27,7 @@ export function deskFromDto(d: DeskDto): Desk {
     blurb: d.description ?? "",
     members: d.members,
     overlayMembers: d.overlayMembers,
+    responder: d.responder,
   };
 }
 
@@ -122,6 +123,13 @@ export interface Channel {
    * absent falls back to the whole roster (issue #369).
    */
   memberIds?: string[];
+  /**
+   * Whether this channel has **no lead** (issue #1835): an `auto` desk, whose
+   * answerer is picked per message. `memberIds[0]` carries no rank here, so a
+   * consumer must not badge it — the host's own `desk_lead` is `None` for such
+   * a channel by definition. Absent/false for every lead desk and DM.
+   */
+  leadless?: boolean;
 }
 
 export interface ChannelSection {
@@ -138,24 +146,47 @@ export interface ChannelSection {
  * `lib/desks.ts`'s static set for a host that doesn't expose `.../desks` yet
  * (issue #53); the caller fetches the real ones and passes them in once they
  * land, so a company's own desks show up instead of the generic
- * strategy/creative/front-desk trio. Every roster teammate additionally gets
- * a DM, so a one-to-one line exists for anyone the company employs.
+ * strategy/creative/front-desk trio. A DM appears only after it has a
+ * transcript, newest conversation first; the compose picker still exposes the
+ * complete roster for starting one.
  *
  * Both kinds post to the same company endpoint. A channel scopes a transcript
  * and gives the company side a stable identity; it is not a separate backend.
  */
-export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesks()): ChannelSection[] {
+export function buildChannels(
+  members: TeamMember[],
+  desks: Desk[] = defaultDesks(),
+  transcripts: Transcripts = {},
+): ChannelSection[] {
   const channels: Channel[] = desks.map((d) => ({
     id: d.id,
     name: d.channel,
     voice: d.name,
     kind: "channel" as const,
-    purpose: d.blurb,
+    // An `auto` channel with no blurb of its own states its routing rule —
+    // the honest line about who answers, in place of a rank nothing confers
+    // (issue #1835). An operator-written blurb still wins.
+    purpose:
+      d.blurb ||
+      (d.responder === "auto" ? "Best fit picks up anything you don't @-mention" : d.blurb),
     tone: d.tone,
     memberIds: d.members,
+    leadless: d.responder === "auto" || undefined,
   }));
 
-  const dms: Channel[] = members.map((m) => ({
+  const dms = directMessageChannels(members)
+    .filter((dm) => (transcripts[dm.id]?.length ?? 0) > 0)
+    .sort((a, b) => latestMessageAt(transcripts[b.id]) - latestMessageAt(transcripts[a.id]));
+
+  return [
+    { id: "channels", label: "Channels", channels },
+    { id: "dms", label: "Direct messages", channels: dms },
+  ];
+}
+
+/** Every roster teammate as a DM target, including conversations not yet started. */
+export function directMessageChannels(members: TeamMember[]): Channel[] {
+  return members.map((m) => ({
     id: dmChannelId(m),
     name: m.name,
     kind: "dm" as const,
@@ -173,11 +204,16 @@ export function buildChannels(members: TeamMember[], desks: Desk[] = defaultDesk
     tone: m.tone,
     member: m,
   }));
+}
 
-  return [
-    { id: "channels", label: "Channels", channels },
-    { id: "dms", label: "Direct messages", channels: dms },
-  ];
+/** A DM target addressed by `id`, whether or not it is in the rail yet. */
+export function directMessageForId(members: TeamMember[], id: string | null): Channel | null {
+  if (!id) return null;
+  return directMessageChannels(members).find((channel) => channel.id === id) ?? null;
+}
+
+function latestMessageAt(messages: ChatMessage[] | undefined): number {
+  return messages?.reduce((latest, message) => Math.max(latest, message.at), 0) ?? 0;
 }
 
 /**
@@ -224,6 +260,29 @@ export function resolveDmChannelId(id: string, members: TeamMember[]): string | 
     (m) => dmChannelId(m) === id || legacyDmChannelId(m) === id,
   );
   return match ? dmChannelId(match) : null;
+}
+
+/**
+ * The channel id a `#/chat/<id>` hash segment names, with the URL escaping
+ * undone.
+ *
+ * The hash router hands views its raw segments without decoding, while hrefs
+ * that mint channel links — an approval card's "Open the conversation" pill —
+ * write them with `encodeURIComponent`, so a DM id arrives as `dm%3A<agent-id>`
+ * rather than `dm:<agent-id>`. Decode here, the same boundary
+ * `taskIdFromSegment` keeps for `#/tasks/<id>`.
+ *
+ * On a malformed escape the raw segment comes back rather than `null`: a
+ * typo'd address should still surface as an unknown channel (issue #370's
+ * notice), not silently collapse onto the fallback.
+ */
+export function channelIdFromSegment(segment: string | null): string | null {
+  if (!segment) return null;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }
 
 function nameHash(name: string): string {
@@ -444,13 +503,25 @@ export interface Sender {
   kind: SenderKind;
   tone?: string;
   /**
-   * The id-seeded mascot key (`TeamMember.avatar`), when the sender resolves
-   * to a roster teammate. Undefined for "you"/"system", and for an agent
-   * voice `senderOf` could not match against the roster — `TeammateAvatar`
-   * falls back to seeding on `name` in both of those cases, same as before
-   * issue #1185.
+   * The avatar reference (`TeamMember.avatar`) when the sender resolves to a
+   * roster teammate, and your own when the sender is you.
+   *
+   * Undefined for "system", and for an agent voice `senderOf` could not match
+   * against the roster — `TeammateAvatar` falls back to seeding on `name` in
+   * both of those cases, same as before issue #1185.
    */
   avatar?: string;
+  /**
+   * The roster agent id behind this voice, when there is one — what a click on
+   * the face opens the profile panel on (issue #1653).
+   *
+   * Set only on a voice that actually **matched** the roster, never on the
+   * channel slug that seeded the face. A desk-originated cross-post carries a
+   * desk id in that slot (see `api/types.ts` on `thread`), and opening a
+   * teammate profile on a desk id would ask the host for an agent that does not
+   * exist.
+   */
+  agentId?: string;
 }
 
 /** Channel names the host uses for its own voice rather than a named agent. */
@@ -471,8 +542,17 @@ const COMPANY_VOICE = new Set(["operator", "console", "chat", "owner", ""]);
  * desk-originated cross-post and simply keeps today's name-seeded fallback,
  * never a wrong face.
  */
-export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]): Sender {
-  if (m.from === "you") return { key: "you", name: "You", kind: "you" };
+export function senderOf(
+  m: ChatMessage,
+  channel: Channel,
+  members: TeamMember[],
+  youAvatar?: string,
+): Sender {
+  // Still "You" rather than your name: in your own transcript the second person
+  // is what identifies the line, and a name there would read as somebody else.
+  // Only the face is yours — which is the half a reader scanning a busy channel
+  // actually picks their own lines out by.
+  if (m.from === "you") return { key: "you", name: "You", kind: "you", avatar: youAvatar };
   if (m.from === "system") return { key: "system", name: "System", kind: "system" };
 
   const named = m.channel?.trim().toLowerCase() ?? "";
@@ -484,6 +564,7 @@ export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]
       kind: "agent",
       tone: named,
       avatar: agent?.avatar,
+      agentId: agent?.id,
     };
   }
 
@@ -496,6 +577,9 @@ export function senderOf(m: ChatMessage, channel: Channel, members: TeamMember[]
     kind: channel.kind === "dm" || channel.tone ? "agent" : "company",
     tone: channel.tone,
     avatar: channel.member?.avatar,
+    // A DM's other end is a roster teammate; a desk channel's voice is the desk
+    // itself, which has no profile of its own to open.
+    agentId: channel.member?.id,
   };
 }
 
@@ -543,11 +627,16 @@ export interface TimelineEntry {
  * A system line is dropped: it has no voice to draw, and a pile that counted it
  * would claim one more participant than the thread has.
  */
-function distinctSenders(messages: ChatMessage[], channel: Channel, members: TeamMember[]): Sender[] {
+function distinctSenders(
+  messages: ChatMessage[],
+  channel: Channel,
+  members: TeamMember[],
+  youAvatar?: string,
+): Sender[] {
   const byKey = new Map<string, Sender>();
   for (const m of messages) {
     if (m.from === "system") continue;
-    const sender = senderOf(m, channel, members);
+    const sender = senderOf(m, channel, members, youAvatar);
     if (!byKey.has(sender.key)) byKey.set(sender.key, sender);
   }
   return [...byKey.values()];
@@ -564,6 +653,8 @@ export function buildTimeline(
   messages: ChatMessage[],
   channel: Channel,
   members: TeamMember[],
+  /** Your own face, so your lines in a busy channel are yours at a glance. */
+  youAvatar?: string,
 ): TimelineEntry[] {
   const replies = new Map<string, ChatMessage[]>();
   for (const m of messages) {
@@ -578,7 +669,7 @@ export function buildTimeline(
 
   for (const m of messages) {
     if (m.parentId) continue;
-    const sender = senderOf(m, channel, members);
+    const sender = senderOf(m, channel, members, youAvatar);
     const newDay = !prev || !sameDay(prev.message.at, m.at);
     const continuation =
       !newDay &&
@@ -588,7 +679,23 @@ export function buildTimeline(
       m.at - prev.message.at < GROUP_WINDOW_MS &&
       // A row with replies ends its run — the summary row below it would
       // otherwise sit between two lines that read as one utterance.
-      prev.replies.length === 0;
+      prev.replies.length === 0 &&
+      // Who *typed* it ends a run too (issue #1734, codex review of #1740).
+      //
+      // A collaborator's message and an agent reply share a sender key: both
+      // are `from: "company"`, and the offline echo brain names its outbound
+      // channel `operator` exactly as an operator message does, so `senderOf`
+      // resolves both to the channel's own voice. Grouped, the second row is a
+      // continuation — no author line, and therefore no Placeholder marker —
+      // and it reads as part of the first one's utterance. That runs both ways
+      // and is wrong both ways: an echo reply hides inside a colleague's run
+      // unmarked, and a colleague's own words sit under an author line the
+      // marker has already labelled as the echo brain's.
+      //
+      // Breaking the run is the honest rendering rather than a workaround: two
+      // consecutive lines with different authorship are not one utterance, and
+      // a run is a claim that they are.
+      !!prev.message.byPerson === !!m.byPerson;
 
     const own = replies.get(m.id) ?? [];
     const entry: TimelineEntry = {
@@ -597,7 +704,7 @@ export function buildTimeline(
       continuation,
       dayLabel: newDay ? formatDay(m.at) : undefined,
       replies: own,
-      replySenders: distinctSenders(own, channel, members),
+      replySenders: distinctSenders(own, channel, members, youAvatar),
     };
     entries.push(entry);
     prev = entry;

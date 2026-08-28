@@ -26,6 +26,7 @@ import {
   RotateCw,
   Square,
   Trash2,
+  Workflow as WorkflowIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -113,6 +114,8 @@ import {
 } from "@/views/workflows/RevealSelectedNode";
 import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
+import { RunTracesList } from "@/views/workflows/RunTracesList";
+import { RunTraceSheet } from "@/views/workflows/RunTraceSheet";
 import { CopilotPanel } from "@/views/workflows/CopilotPanel";
 import { classifyRunError } from "@/views/workflows/run-error";
 import { runFailureFrom, type RunFailure } from "@/views/workflows/run-failure";
@@ -337,6 +340,23 @@ export function WorkflowsView({
   // pattern as selectedIdRef: captured in the toast closure, checked after await.
   const companyRef = useRef<string | null>(company);
   companyRef.current = company;
+  // Issue #1704 (review): how many times the selection has been torn down.
+  //
+  // The two refs above answer "where are we now", which is not the same question
+  // as "did we leave and come back". On A → B → A the identity checks match
+  // again, and that round trip is reachable: the switch to B clears
+  // `fixingRunSeq`, which re-enables Fix, so the operator can retry the SAME
+  // failed run while the first request is still in flight. The first reply would
+  // then pass an identity-only guard, overwrite the retry's verdict, and clear
+  // the spinner out from under a request that is still running.
+  //
+  // Bumped by the cleanup effect below — after commit, so it is not moved by a
+  // render React discards — and captured by `handleFixWithCopilot` when the
+  // request starts. It is checked ALONGSIDE the identity refs rather than
+  // instead of them: those are assigned during render, so between a commit and
+  // the passive effect that bumps this counter they are the only two that have
+  // noticed the switch.
+  const selectionGenRef = useRef(0);
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingGraph, setLoadingGraph] = useState(false);
@@ -391,7 +411,21 @@ export function WorkflowsView({
     [approvals, result?.runId],
   );
   const askerNames = useAskerNames(client, company, runApprovalCards);
-  const [error, setError] = useState<string | null>(null);
+  // Issue #1704 (review): two load failures, two slots — they were one, and one
+  // was not enough to describe either honestly.
+  //
+  // `listError` is a COMPANY-wide condition: the workflow list would not load.
+  // `graphError` is about ONE workflow: its graph would not load. Sharing a slot
+  // meant a successful list read cleared a graph failure and vice versa, and it
+  // meant a selection change had to choose between two wrong answers — leave a
+  // graph failure up on the index it does not describe, or wipe a list failure
+  // exactly as the operator returns to the stale list it is about.
+  //
+  // So the lifetimes differ, and now they can: `graphError` is cleared by every
+  // selection change, `listError` only by a COMPANY change (the axis its own
+  // fetch is keyed on) or by a list read that succeeds.
+  const [listError, setListError] = useState<string | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   // Issue #259: the same dialog, hydrated from the selected graph. Separate
   // state from `createOpen` rather than a mode flag, so the create path keeps
@@ -580,6 +614,14 @@ export function WorkflowsView({
   // Which rendering the index uses, remembered across sessions — an operator
   // who prefers one has no reason to re-pick it every visit.
   const [indexMode, setIndexMode] = useState<IndexMode>(readIndexMode);
+  // Issue #1697: the index's other axis — the company's workflows, or their
+  // runs. Same remembered-preference treatment as `indexMode`.
+  const [indexTab, setIndexTab] = useState<IndexTab>(readIndexTab);
+  // Issue #1697: the run whose transcript sheet is open, or `null` when it's
+  // closed. Holds the run itself (not just an id) because the traces list
+  // already has the full `WorkflowRunOutcome` in hand — the sheet needs
+  // nothing this view would otherwise have to re-fetch just to open it.
+  const [traceRun, setTraceRun] = useState<WorkflowRunOutcome | null>(null);
   // Issue #303: the company-wide run page behind the index's health readings.
   //
   // Deliberately SEPARATE from `runs`, which is the selected workflow's history
@@ -763,10 +805,10 @@ export function WorkflowsView({
           if (prev !== null) reconciledSelectionRef.current = { id: null };
           return null;
         });
-        setError(null);
+        setListError(null);
       } catch (e) {
         if (!live) return;
-        setError(e instanceof Error ? e.message : "could not load workflows");
+        setListError(e instanceof Error ? e.message : "could not load workflows");
       } finally {
         if (live) setLoadingList(false);
       }
@@ -966,6 +1008,12 @@ export function WorkflowsView({
   }, [selectedId]);
   useEffect(() => {
     setMissingWorkflowId(null);
+    // Issue #1704 (review): the list failure is scoped to the company whose list
+    // failed. It must NOT be cleared by a workflow change — that is the axis the
+    // operator crosses to go and look at the stale list — but it must be cleared
+    // here, or "could not load workflows" from the company just left would sit
+    // over the next company's list while that list loads perfectly.
+    setListError(null);
   }, [company]);
 
   // Fetch the selected workflow's full graph.
@@ -984,14 +1032,14 @@ export function WorkflowsView({
         const g = await getWorkflow(client, company, selectedId);
         if (!live) return;
         setGraph(g);
-        setError(null);
+        setGraphError(null);
         // A successful re-read is exactly what clears a stale-graph warning:
         // whatever `version` we now hold is current.
         setConflict(null);
       } catch (e) {
         if (!live) return;
         setGraph(null);
-        setError(e instanceof Error ? e.message : "could not load the workflow graph");
+        setGraphError(e instanceof Error ? e.message : "could not load the workflow graph");
       } finally {
         if (live) setLoadingGraph(false);
       }
@@ -1212,6 +1260,11 @@ export function WorkflowsView({
     };
   }, [client, company, detailOpen, runsTick, runEventTick]);
 
+  useEffect(() => {
+    if (detailOpen || !indexRuns.some((run) => run.running)) return;
+    return startVisiblePolling(() => setRunsTick((n) => n + 1), 2_000);
+  }, [detailOpen, indexRuns]);
+
   // A company switch invalidates the whole page — another company's runs must
   // never be folded onto this one's cards, and `indexRunsLoaded` has to go back
   // to false so the cards say "Loading runs…" rather than "No recent runs"
@@ -1219,6 +1272,12 @@ export function WorkflowsView({
   useEffect(() => {
     setIndexRuns([]);
     setIndexRunsLoaded(false);
+    setTraceRun(null);
+    // Issue #1697: the open transcript names a run of the company being
+    // left. Left up, its header resolves `workflowId` against the NEW
+    // company's workflows — ids are not unique across companies — and its
+    // output fetch 404s against a run the new company's host never held.
+    setTraceRun(null);
   }, [company]);
 
   // The run page grouped by workflow, newest first.
@@ -1234,6 +1293,20 @@ export function WorkflowsView({
     }
     return byId;
   }, [indexRuns]);
+
+  // The traces sheet's run, kept LIVE (issue #1697 review): `traceRun` names
+  // which run is open by its `seq`, and this re-resolves that seq against the
+  // freshest `indexRuns` page on every render. Without it the sheet held the
+  // snapshot from the moment it was opened, so a run still in flight when
+  // clicked stayed "running" in the sheet forever — the index around it kept
+  // refreshing and settling, but the sheet never saw it. Falls back to the
+  // held snapshot when the run has aged off the capped page, which is the
+  // same degradation `indexRuns` itself already accepts.
+  const liveTraceRun = useMemo(
+    () =>
+      traceRun ? (indexRuns.find((r) => r.seq === traceRun.seq) ?? traceRun) : null,
+    [traceRun, indexRuns],
+  );
 
   // `input` is the trigger payload for THIS dispatch (issue #1204), handed in by
   // whichever control fired rather than read out of `request` state. The toolbar's
@@ -1703,6 +1776,10 @@ export function WorkflowsView({
   const handleFixWithCopilot = useCallback(
     async (run: WorkflowRunOutcome) => {
       if (!run.runId) return;
+      // Issue #1704 (review): the selection this request belongs to. Any switch
+      // away invalidates it permanently, including one the operator switches
+      // back from.
+      const startedAtGen = selectionGenRef.current;
       setFixingRunSeq(run.seq);
       setFixReason(null);
       try {
@@ -1710,17 +1787,30 @@ export function WorkflowsView({
           runId: run.runId,
           errorHint: run.error,
         });
+        // This reply is about a run of `run.workflowId` in `company`, and
+        // NEITHER outcome may land anywhere else.
+        //
+        // The correction arm has always checked this: the edit dialog binds to
+        // the SELECTED workflow's `graph` for its version token, so opening it
+        // after a switch would write this correction over a different workflow.
+        //
+        // Issue #1704: the un-fixable arm needs the same guard, and for a
+        // sharper reason than symmetry. Clearing `fixReason` on the switch is
+        // not enough on its own — the switch happens while this request is
+        // still in flight, so the clear runs FIRST and the assignment below
+        // would put the reason straight back, keyed by a `seq` that now names
+        // an unrelated run. The guard is what makes the clear stick.
+        if (
+          selectionGenRef.current !== startedAtGen ||
+          selectedIdRef.current !== run.workflowId ||
+          companyRef.current !== company
+        ) {
+          toast.message(
+            "Selection changed while the copilot was working — reopen Fix on that run to review its correction.",
+          );
+          return;
+        }
         if (res.automatable && res.workflow) {
-          // The edit dialog binds to the SELECTED workflow's `graph` for its
-          // version token; if the operator changed selection while the fix was in
-          // flight, opening it now would write the correction of `run.workflowId`
-          // over a different workflow. Abandon rather than save the wrong one.
-          if (selectedIdRef.current !== run.workflowId) {
-            toast.message(
-              "Selection changed while the copilot was working — reopen Fix on that run to review its correction.",
-            );
-            return;
-          }
           setPrefilledDraft({
             summary: res.summary,
             workflow: res.workflow,
@@ -1744,7 +1834,24 @@ export function WorkflowsView({
         // Only the run that set the slot may clear it — if a second Fix started
         // on another row while this one was in flight, this `finally` firing
         // first must not re-enable that still-running row's button.
-        setFixingRunSeq((current) => (current === run.seq ? null : current));
+        //
+        // Issue #1704: and only while that run's own workflow is still on
+        // screen. `seq` is allocated per company rather than per workflow, so
+        // after a switch `run.seq` can name a DIFFERENT workflow's run whose
+        // fix is genuinely running. The switch has already emptied this slot,
+        // so there is nothing here left for this request to clear anyway.
+        //
+        // Issue #1704 (review): and the generation, because after A → B → A the
+        // slot can be full again — with the operator's RETRY of this very run,
+        // whose `seq` is identical. Clearing on identity alone would switch that
+        // still-running row's spinner off and re-enable every Fix button.
+        if (
+          selectionGenRef.current === startedAtGen &&
+          selectedIdRef.current === run.workflowId &&
+          companyRef.current === company
+        ) {
+          setFixingRunSeq((current) => (current === run.seq ? null : current));
+        }
       }
     },
     [client, company],
@@ -1925,6 +2032,10 @@ export function WorkflowsView({
   // `result` too, but making it explicit here keeps both switch axes honest even
   // if the graph load is skipped or in flight.
   useEffect(() => {
+    // Issue #1704 (review): every reply still in flight belongs to the selection
+    // being torn down here, and stays invalid even if the operator comes back to
+    // it. See `selectionGenRef` for what identity alone cannot tell apart.
+    selectionGenRef.current += 1;
     setOptimistic(null);
     setOverlayRun(null);
     setActiveRunId(null);
@@ -1951,6 +2062,43 @@ export function WorkflowsView({
     // lifetime; leaving one behind is how "this console watched that run" came
     // to outlive the console's view of it.
     liveRanRef.current = new Set();
+    // Issue #1704: the two copilot-fix slots. Both are keyed by run `seq`, and
+    // `seq` is allocated per COMPANY rather than per workflow — so a value left
+    // behind does not merely go unread, it lands on whichever run of the newly
+    // selected workflow happens to share that number.
+    //
+    // `fixingRunSeq` is the worse of the two, because `RunHistoryPanel` disables
+    // EVERY row's Fix button while it is set (one fix at a time). A leaked one
+    // therefore does not just spin a row that is not fixing — it takes the
+    // affordance away from a workflow no fix was ever requested for, until an
+    // unrelated request the operator cannot see finishes.
+    //
+    // Clearing here is only half of it: the request that set them is still in
+    // flight and would write them back. `handleFixWithCopilot` carries the
+    // other half.
+    setFixingRunSeq(null);
+    setFixReason(null);
+    // Issue #1704: and the version-conflict banner — the last of the persistent
+    // banners still outliving the switch, after `result` (#528), `runRefusal`
+    // (#528/#514) and `runFailure` (#1007) were each cleared here in turn for
+    // exactly this reason. It states that the graph on screen is stale and
+    // offers a Reload that re-reads the NEW selection: a false claim with a
+    // remedy that quietly addresses something else. A successful graph read
+    // clears it — but a graph read that FAILS does not, which is precisely the
+    // case where the operator is left staring at it.
+    setConflict(null);
+    // Issue #1704: and the graph-load error, whose reach is wider still. It
+    // renders outside the `detailOpen` gate, so "could not load the workflow
+    // graph" about the workflow just left follows the operator all the way back
+    // to the index and sits over a list that loaded perfectly.
+    //
+    // Issue #1704 (review): `graphError` ONLY. This used to be one `error` slot
+    // shared with the workflow-list read, and clearing that here threw away a
+    // company-wide "could not load workflows" at the exact moment the operator
+    // returned to the list it describes — a stale list with nothing saying so.
+    // The list read is keyed on the company, so its failure is cleared on the
+    // company axis instead (see the `[company]` effect above).
+    setGraphError(null);
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.
@@ -2614,10 +2762,41 @@ export function WorkflowsView({
              act on the list rather than on any workflow in it. */
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <h1 className="text-sm font-semibold">Workflows</h1>
-              <Badge variant="secondary">{workflows.length}</Badge>
+              <h1 className="text-sm font-semibold">
+                {indexTab === "runs" ? "Runs" : "Workflows"}
+              </h1>
+              <Badge variant="secondary">
+                {indexTab === "runs" ? indexRuns.length : workflows.length}
+              </Badge>
             </div>
             <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              {/* Issue #1697: the graphs, or their runs — the index's other
+                  axis, alongside Cards/List. Segmented for the same reason
+                  that toggle is: one question, two answers. */}
+              <div className="flex items-center gap-1 rounded-lg border p-0.5">
+                {(
+                  [
+                    { value: "workflows", label: "Workflows", Icon: WorkflowIcon },
+                    { value: "runs", label: "Runs", Icon: History },
+                  ] as const
+                ).map(({ value, label, Icon }) => (
+                  <Button
+                    key={value}
+                    size="sm"
+                    variant={indexTab === value ? "secondary" : "ghost"}
+                    className="h-7 px-2"
+                    onClick={() => {
+                      setIndexTab(value);
+                      writeIndexTab(value);
+                    }}
+                    aria-pressed={indexTab === value}
+                    data-testid={`workflow-index-tab-${value}`}
+                  >
+                    <Icon className="mr-1.5 size-3.5" />
+                    {label}
+                  </Button>
+                ))}
+              </div>
               {/* Issue #1110: the index's Cards/List toggle, in the tab's one
                   toolbar. It used to sit in a header the index drew for itself,
                   which was fine while the index was a panel over the canvas and
@@ -2626,8 +2805,12 @@ export function WorkflowsView({
                   the duplicate.
 
                   Segmented rather than two loose buttons, because the pair is one
-                  question with two answers and reads as a switch. */}
-              {workflows.length > 0 && (
+                  question with two answers and reads as a switch.
+
+                  Issue #1697: only meaningful for the Workflows tab — the Runs
+                  tab is always a table, so this toggle would offer a choice it
+                  does not act on. */}
+              {indexTab === "workflows" && workflows.length > 0 && (
                 <div className="flex items-center gap-1 rounded-lg border p-0.5">
                   {(
                     [
@@ -2705,12 +2888,12 @@ export function WorkflowsView({
             <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
               <span>
                 {runRefusal.code === "inference_required"
-                  ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Connections → Inference, then run again."
+                  ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Inference, then run again."
                   : runRefusal.message}
               </span>
               {runRefusal.code === "inference_required" && (
                 <a
-                  href="#/settings/connections"
+                  href="#/settings/oauth"
                   className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                   data-testid="workflow-run-inference-cta"
                 >
@@ -2723,10 +2906,23 @@ export function WorkflowsView({
         </div>
       )}
 
-      {error && (
+      {/* Issue #1704 (review): the company-wide list failure, on the index and
+          on a detail view alike — a workflow open on screen does not make the
+          list behind it any less stale. First, because it is the wider claim. */}
+      {listError && (
         <div className="px-4 pt-3">
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
+          <Alert variant="destructive" data-testid="workflow-list-error">
+            <AlertDescription>{listError}</AlertDescription>
+          </Alert>
+        </div>
+      )}
+
+      {/* And the one about the workflow on screen. The selection-change effect
+          clears it, so it cannot outlive the workflow it names. */}
+      {graphError && (
+        <div className="px-4 pt-3">
+          <Alert variant="destructive" data-testid="workflow-graph-error">
+            <AlertDescription>{graphError}</AlertDescription>
           </Alert>
         </div>
       )}
@@ -2804,8 +3000,22 @@ export function WorkflowsView({
           panel makes that structural: the index cannot grow run chrome by
           accident, because the slot it would mount in does not exist there. */}
       {!detailOpen ? (
-        <div className="relative flex-1">
-          {!loadingList && workflows.length === 0 ? (
+        <div className="relative flex-1 min-h-0">
+          {indexTab === "runs" ? (
+            // Issue #1697: the company-wide run page, unscoped by workflow —
+            // the same request `runsByWorkflow` folds for the card health
+            // strips, read here as its own table instead. `loading` follows
+            // `indexRunsLoaded` rather than `loadingList`: the workflow list
+            // and the run page are two different requests, and a company
+            // with its workflows already loaded can still be waiting on runs.
+            <RunTracesList
+              runs={indexRuns}
+              workflows={workflows}
+              company={company}
+              loading={!indexRunsLoaded}
+              onSelectRun={setTraceRun}
+            />
+          ) : !loadingList && workflows.length === 0 ? (
             // Issue #813's on-ramp, which used to live behind the canvas's
             // empty selection. An empty company now lands here instead, so this
             // is where it has to be — and it is shown INSTEAD of the index
@@ -2855,7 +3065,11 @@ export function WorkflowsView({
             <WorkflowIndex
               workflows={workflows}
               runsByWorkflow={runsByWorkflow}
-              onSelect={(id) => setSelectedId(id)}
+              onSelect={(id) => {
+                setSelectedId(id);
+                setHistoryOpen(true);
+                setCopilotOpen(true);
+              }}
               mode={indexMode}
               loading={loadingList}
               runsLoaded={indexRunsLoaded}
@@ -2871,6 +3085,8 @@ export function WorkflowsView({
           leftRail={
             historyOpen && historySupported ? (
               <RunHistoryPanel
+                client={client}
+                company={company}
                 runs={historyRows}
                 graph={graph}
                 workflowName={selected?.name ?? selectedId ?? ""}
@@ -3157,6 +3373,23 @@ export function WorkflowsView({
         onConflict={setConflict}
         prefilledDraft={prefilledDraft}
       />
+
+      {/* Issue #1697: the traces list's transcript sheet. Top-level rather
+          than nested inside the `!detailOpen` branch — it is opened only from
+          the Runs tab, but keeping it mounted regardless of which index tab
+          is showing means switching tabs while it's open doesn't unmount it
+          out from under the operator. */}
+      <RunTraceSheet
+        client={client}
+        company={company}
+        run={liveTraceRun}
+        workflowName={
+          (liveTraceRun && workflows.find((w) => w.id === liveTraceRun.workflowId)?.name) ??
+          liveTraceRun?.workflowId ??
+          ""
+        }
+        onClose={() => setTraceRun(null)}
+      />
     </div>
   );
 }
@@ -3181,6 +3414,35 @@ function readIndexMode(): IndexMode {
 function writeIndexMode(mode: IndexMode): void {
   try {
     window.localStorage.setItem(INDEX_MODE_KEY, mode);
+  } catch {
+    // A preference that cannot be saved is not an error worth surfacing.
+  }
+}
+
+/** Which index the Workflows tab shows: the graphs, or their runs (issue
+ * #1697). Local state rather than a hash segment, same as {@link IndexMode} —
+ * `readWorkflowHash`'s two-segment-plus-query contract is deliberately narrow
+ * (see its own comment), and a preference this small does not need a
+ * shareable URL to earn a spot in it. */
+type IndexTab = "workflows" | "runs";
+
+/** Where the index's Workflows-or-Runs preference is remembered. */
+const INDEX_TAB_KEY = "oc.workflows.indexTab";
+
+/** The remembered tab, defaulting to the graphs — same best-effort guard as
+ * {@link readIndexMode}. */
+function readIndexTab(): IndexTab {
+  try {
+    return window.localStorage.getItem(INDEX_TAB_KEY) === "runs" ? "runs" : "workflows";
+  } catch {
+    return "workflows";
+  }
+}
+
+/** Remembers the index tab. Best-effort, for the same reason. */
+function writeIndexTab(tab: IndexTab): void {
+  try {
+    window.localStorage.setItem(INDEX_TAB_KEY, tab);
   } catch {
     // A preference that cannot be saved is not an error worth surfacing.
   }

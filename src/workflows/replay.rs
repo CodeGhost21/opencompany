@@ -136,6 +136,10 @@ use crate::ports::bound_node_output;
 
 use crate::runtime::workflow_resume::{PerformedCall, performed_in_input};
 
+use crate::workflows::caps::resolver::{
+    ChildGateRecord, ChildGateRegistry, GATE_NAMESPACE, child_id_of,
+};
+
 /// The host-private slug a replayed node invokes instead of its real tool.
 ///
 /// Namespaced with a `__opencompany` prefix that no toolbelt tool carries and no
@@ -316,6 +320,171 @@ pub(crate) fn outward_calls_performed(
     }
 
     (performed, unreplayable)
+}
+
+/// The ungated outward calls a paused child will repeat when its gate is
+/// approved (issue #617).
+///
+/// A `sub_workflow` child that stops at an approval gate pauses the *parent*:
+/// tinyflows reports the child's gates namespaced (`<node>::<gate>`, nested
+/// one level per child — `sub::nested::work` for a gate two levels down), and
+/// the continuation re-runs the parent, which re-runs every child from the
+/// top. Any outward call the child made before the gate therefore fires again —
+/// but unlike a top-level call, its result does not travel up when the child
+/// pauses (tinyflows drops the child's partial output on
+/// `ChildOutcome::Paused`), so there is nothing to replay. Report it the same
+/// way [`outward_calls_performed`] reports a top-level call it cannot replay,
+/// so the operator is warned that approving restarts the child from the top.
+///
+/// Each namespaced pending id is resolved through `registry` to the child graph
+/// the resolver actually gated — descending through nested namespaces, and
+/// resolving an expression-bound `workflow_id` against `trigger_input` where
+/// the engine's `once` scope allows — then every call **upstream-reachable**
+/// from the paused gate is examined. "Upstream-reachable" is read off the
+/// child's edges by walking backward from the gate; a call on an un-taken
+/// branch of a fan-out is over-reported, the same conservative direction the
+/// top-level [`outward_calls_performed`] takes when it reads "completed" from
+/// the run state rather than per-branch.
+///
+/// A `requires_approval` node this run's list has already approved is *not*
+/// treated as still-blocked: the engine executes an approved gate (it skips the
+/// interrupt only when the id is listed), so the call fires on this
+/// continuation and will fire again on the next — exactly what the operator
+/// must be warned about.
+pub(crate) fn child_calls_to_repeat(
+    parent: &WorkflowGraph,
+    pending: &[String],
+    registry: &ChildGateRegistry,
+    trigger_input: &Value,
+) -> Vec<UnreplayableCall> {
+    let approved = approved_ids(trigger_input);
+    let mut out = Vec::new();
+    for node_id in pending {
+        let mut segments: Vec<&str> = node_id.split(GATE_NAMESPACE).collect();
+        let Some(gate) = segments.pop() else {
+            continue;
+        };
+        let mut graph = parent.clone();
+        let mut record: Option<ChildGateRecord> = None;
+        let mut prefix = String::new();
+
+        // A nested child is restarted from its own root, so calls in every
+        // ancestor child before the next `sub_workflow` node are repeated too.
+        // Walk each intermediate graph before descending to the record below it.
+        for segment in segments {
+            let Some(child_id) = child_id_of(&graph, segment, Some(trigger_input)) else {
+                record = None;
+                break;
+            };
+            if let Some(ancestor) = record.as_ref() {
+                for call in
+                    child_calls_preceding(&ancestor.graph, segment, &approved, &prefix, &prefix)
+                {
+                    if !out.contains(&call) {
+                        out.push(call);
+                    }
+                }
+            }
+            let Some(next) = registry.get(&child_id) else {
+                record = None;
+                break;
+            };
+            prefix.push_str(segment);
+            prefix.push_str(GATE_NAMESPACE);
+            graph = next.graph.clone();
+            record = Some(next);
+        }
+
+        let Some(record) = record else {
+            continue;
+        };
+        // Keep the deepest-child node ids in their established local form;
+        // ancestor calls carry the namespace so equal local ids remain distinct.
+        for call in child_calls_preceding(&record.graph, gate, &approved, &prefix, "") {
+            if !out.contains(&call) {
+                out.push(call);
+            }
+        }
+    }
+    out
+}
+
+/// The ids this lineage has already approved, read off the continuation input
+/// the same way the engine's `approvals_for_child` reads them
+/// (`run.trigger.approvals`).
+fn approved_ids(trigger_input: &Value) -> std::collections::HashSet<String> {
+    trigger_input
+        .get("approvals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The outward calls in `child` that run before `gate` and are not themselves
+/// gated.
+///
+/// Every node from which `gate` is reachable by walking `edges` backward must
+/// have run (or be on the branch that ran) before the pause; everything past
+/// the gate is unreachable and excluded. A `requires_approval` node the gate
+/// pass marked is excluded too — the child restarts and *pauses at it again*
+/// rather than executing it — **unless its namespaced id (`namespace_prefix` +
+/// the node's own id) is already in `approved`**: an approved gate does
+/// execute, on this continuation, and will execute again on the next, so it is
+/// exactly the call the operator must be warned about (issue #617).
+///
+/// Classified with the same [`outward_call_of`] the top-level guard uses, so
+/// the two reports agree about what an "outward call" is. The child's authored
+/// `repeatable` declarations are not consulted (the resolver keeps the
+/// translated graph, not the authored file); an undeclared classification is
+/// the conservative direction for a warning.
+fn child_calls_preceding(
+    child: &WorkflowGraph,
+    gate: &str,
+    approved: &std::collections::HashSet<String>,
+    namespace_prefix: &str,
+    output_prefix: &str,
+) -> Vec<UnreplayableCall> {
+    let mut reached = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::from([gate.to_string()]);
+    while let Some(id) = queue.pop_front() {
+        if !reached.insert(id.clone()) {
+            continue;
+        }
+        for edge in &child.edges {
+            if edge.to_node == id {
+                queue.push_back(edge.from_node.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for node in &child.nodes {
+        if !reached.contains(&node.id) {
+            continue;
+        }
+        let is_gate = node
+            .config
+            .get("requires_approval")
+            .and_then(Value::as_bool)
+            == Some(true);
+        if is_gate && !approved.contains(&format!("{namespace_prefix}{}", node.id)) {
+            // The child restarts and pauses at this node again; it does not
+            // execute it.
+            continue;
+        }
+        let Some(slug) = outward_call_of(node, false) else {
+            continue;
+        };
+        out.push(UnreplayableCall {
+            node_id: format!("{output_prefix}{}", node.id),
+            slug,
+            why: "it runs inside a child workflow whose ungated calls are not carried up when \
+                  the child pauses, so approving restarts the child and calls it again",
+        });
+    }
+    out
 }
 
 /// Rewrites every node this lineage has already called so the continuation
@@ -540,6 +709,7 @@ mod tests {
     use super::*;
     use crate::ports::run_output::RUN_OUTPUT_MAX_BYTES;
     use crate::runtime::workflow_resume::CONTINUATION_PERFORMED_KEY;
+    use crate::workflows::caps::resolver::ChildGateRecord;
     use tinyflows::model::Node;
 
     use crate::company::{WorkflowEdgeDef, WorkflowNodeDef};
@@ -1091,5 +1261,272 @@ mod tests {
             .expect("encoded as a string");
         assert!(!encoded.starts_with('='), "{encoded}");
         assert_eq!(replayed_result(REPLAY_SLUG, args), Some(hostile));
+    }
+
+    // ---- Issue #617: child-gate repeat warnings ---------------------------
+
+    /// A parent graph running one child from a node named `sub`.
+    fn child_parent_graph(child_id: &str) -> WorkflowGraph {
+        graph(vec![node(
+            "sub",
+            NodeKind::SubWorkflow,
+            json!({ "workflow_id": child_id }),
+        )])
+    }
+
+    /// A child graph with an ungated POST then two sequential gated POSTs —
+    /// the shape the repeat warning exists for.
+    fn two_gate_child_graph() -> WorkflowGraph {
+        let mut g = graph(vec![
+            node(
+                "notify",
+                NodeKind::HttpRequest,
+                json!({ "method": "POST", "url": "https://api.test/notify" }),
+            ),
+            node(
+                "work",
+                NodeKind::HttpRequest,
+                json!({
+                    "method": "POST",
+                    "url": "https://api.test/work",
+                    "requires_approval": true,
+                }),
+            ),
+            node(
+                "work2",
+                NodeKind::HttpRequest,
+                json!({
+                    "method": "POST",
+                    "url": "https://api.test/work2",
+                    "requires_approval": true,
+                }),
+            ),
+            node("done", NodeKind::Transform, json!({})),
+        ]);
+        g.edges = vec![
+            tinyflows::model::Edge {
+                from_node: "notify".into(),
+                from_port: "main".into(),
+                to_node: "work".into(),
+                to_port: "main".into(),
+            },
+            tinyflows::model::Edge {
+                from_node: "work".into(),
+                from_port: "main".into(),
+                to_node: "work2".into(),
+                to_port: "main".into(),
+            },
+            tinyflows::model::Edge {
+                from_node: "work2".into(),
+                from_port: "main".into(),
+                to_node: "done".into(),
+                to_port: "main".into(),
+            },
+        ];
+        g
+    }
+
+    /// A registry holding `child`'s gated record.
+    fn child_registry(graph: WorkflowGraph) -> ChildGateRegistry {
+        let registry = ChildGateRegistry::default();
+        registry.record(
+            "child",
+            ChildGateRecord {
+                graph,
+                gated: Vec::new(),
+            },
+        );
+        registry
+    }
+
+    /// Issue #617. Two sequential gated nodes in one child: approving the first
+    /// makes it execute on the continuation (the engine skips the interrupt
+    /// only when the id is listed), the child then pauses at the second, and
+    /// approving that re-runs the child with BOTH approvals — so the first
+    /// gate's call fires on every hop. A `requires_approval` exclusion that
+    /// treats every such node as still-blocked would omit exactly the call the
+    /// operator must be warned about.
+    #[test]
+    fn an_approved_child_gate_that_will_fire_again_is_reported() {
+        let parent = child_parent_graph("child");
+        let pending = vec!["sub::work2".to_string()];
+        let input = json!({ "approvals": ["sub::work"] });
+
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &input,
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["notify", "work"], "{warned:?}");
+        assert!(
+            !warned.iter().any(|w| w.node_id == "work2"),
+            "the gate this run paused on is not yet approved, so it is excluded: {warned:?}"
+        );
+    }
+
+    /// The negative control: a not-yet-approved gate stays excluded. On the run
+    /// that parks it the child restarts and pauses at it again — it does not
+    /// execute — so reporting it would be a warning for a call that will not
+    /// happen.
+    #[test]
+    fn a_gate_this_run_has_not_cleared_stays_excluded() {
+        let parent = child_parent_graph("child");
+        let pending = vec!["sub::work".to_string()];
+
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &json!({}),
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["notify"], "{warned:?}");
+    }
+
+    /// Issue #617, nested ancestor calls are included too. A call in the
+    /// intermediate child has already happened before that child enters its
+    /// nested workflow, so approving the grandchild gate restarts and repeats
+    /// the intermediate call as well.
+    #[test]
+    fn a_nested_gate_warns_for_calls_in_ancestor_children() {
+        let mut ancestor = graph(vec![
+            node(
+                "notify_parent_child",
+                NodeKind::HttpRequest,
+                json!({ "method": "POST", "url": "https://api.test/ancestor" }),
+            ),
+            node(
+                "nested",
+                NodeKind::SubWorkflow,
+                json!({ "workflow_id": "b" }),
+            ),
+        ]);
+        ancestor.edges = vec![tinyflows::model::Edge {
+            from_node: "notify_parent_child".into(),
+            from_port: "main".into(),
+            to_node: "nested".into(),
+            to_port: "main".into(),
+        }];
+
+        let registry = ChildGateRegistry::default();
+        registry.record(
+            "a",
+            ChildGateRecord {
+                graph: ancestor,
+                gated: Vec::new(),
+            },
+        );
+        registry.record(
+            "b",
+            ChildGateRecord {
+                graph: two_gate_child_graph(),
+                gated: Vec::new(),
+            },
+        );
+
+        let warned = child_calls_to_repeat(
+            &child_parent_graph("a"),
+            &["sub::nested::work2".to_string()],
+            &registry,
+            &json!({ "approvals": ["sub::nested::work"] }),
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sub::notify_parent_child", "notify", "work"],
+            "{warned:?}"
+        );
+    }
+
+    /// `sub::nested::work`; the child whose graph holds `work` is the
+    /// grandchild, reachable only by descending the registry through the
+    /// intermediate `sub_workflow` node's `workflow_id`. The approved first
+    /// gate then reads `sub::nested::work` off the same namespace.
+    #[test]
+    fn a_two_level_child_namespace_warns_for_the_grandchilds_upstream() {
+        let registry = ChildGateRegistry::default();
+        registry.record(
+            "a",
+            ChildGateRecord {
+                graph: graph(vec![node(
+                    "nested",
+                    NodeKind::SubWorkflow,
+                    json!({ "workflow_id": "b" }),
+                )]),
+                gated: Vec::new(),
+            },
+        );
+        registry.record(
+            "b",
+            ChildGateRecord {
+                graph: two_gate_child_graph(),
+                gated: Vec::new(),
+            },
+        );
+        let parent = child_parent_graph("a");
+        let pending = vec!["sub::nested::work2".to_string()];
+        let input = json!({ "approvals": ["sub::nested::work"] });
+
+        let warned = child_calls_to_repeat(&parent, &pending, &registry, &input);
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["notify", "work"], "{warned:?}");
+    }
+
+    /// Issue #617, the dynamic half. A `workflow_id = "=item.target"` child is
+    /// keyed in the registry by the RESOLVED id, so the repeat walk must
+    /// resolve the same expression against the trigger input — the same way
+    /// [`child_gate_call`](crate::workflows::caps::resolver::child_gate_call)
+    /// does for the card — or the warning is silently dropped for a dynamic
+    /// child.
+    #[test]
+    fn an_expr_bound_child_gate_warns_for_the_resolved_children_calls() {
+        let parent = graph(vec![node(
+            "sub",
+            NodeKind::SubWorkflow,
+            json!({ "workflow_id": "=item.target" }),
+        )]);
+        let pending = vec!["sub::work".to_string()];
+        let input = json!({ "target": "child" });
+
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &input,
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["notify"], "{warned:?}");
+    }
+
+    /// A per-item expression-bound child cannot be reconstructed — the paused
+    /// id carries no item index to say which element's scope resolved the id —
+    /// so the walk falls back rather than describing the wrong child.
+    #[test]
+    fn a_per_item_expr_bound_child_id_falls_back_to_nothing() {
+        let parent = graph(vec![node(
+            "sub",
+            NodeKind::SubWorkflow,
+            json!({ "workflow_id": "=item.target", "execution": "per_item" }),
+        )]);
+        let pending = vec!["sub::work".to_string()];
+
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &json!({ "target": "child" }),
+        );
+
+        assert!(
+            warned.is_empty(),
+            "falls back rather than guessing: {warned:?}"
+        );
     }
 }

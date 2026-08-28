@@ -17,6 +17,36 @@ use crate::error::OpenCompanyError;
 #[derive(Debug)]
 pub struct ApiError(pub OpenCompanyError);
 
+/// A compact wrapper for a response that has already been rendered by a
+/// handler. Axum cannot use `Box<Response>` directly because it does not
+/// implement [`IntoResponse`]; this wrapper preserves that response unchanged.
+#[derive(Debug)]
+pub struct Rejection(Box<Response>);
+
+impl From<Response> for Rejection {
+    fn from(response: Response) -> Self {
+        Self(Box::new(response))
+    }
+}
+
+impl From<ApiError> for Rejection {
+    fn from(error: ApiError) -> Self {
+        Self(Box::new(error.into_response()))
+    }
+}
+
+impl From<OpenCompanyError> for Rejection {
+    fn from(error: OpenCompanyError) -> Self {
+        Self(Box::new(ApiError(error).into_response()))
+    }
+}
+
+impl IntoResponse for Rejection {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
 impl From<OpenCompanyError> for ApiError {
     fn from(error: OpenCompanyError) -> Self {
         Self(error)
@@ -131,7 +161,26 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use axum::body::to_bytes;
+    use axum::http::header::HeaderName;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn rejection_preserves_a_pre_rendered_response() {
+        let response = Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(HeaderName::from_static("set-cookie"), "session=token")
+            .body("redirect".into_response().into_body())
+            .unwrap();
+
+        let response = Rejection::from(response).into_response();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.headers()["set-cookie"], "session=token");
+        assert_eq!(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap()[..],
+            b"redirect"
+        );
+    }
 
     #[test]
     fn maps_variants_to_status_and_code() {
