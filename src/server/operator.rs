@@ -3236,13 +3236,13 @@ async fn attribution_audit_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
-    let (_viewer, _is_admin) = history_viewer(headers, state, company, peer).await?;
+    let (_viewer, is_admin) = history_viewer(headers, state, company, peer).await?;
     let record = runtime
         .store()
         .load(runtime.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
-    let audit = channel_attributed_replies(&runtime, &record).await?;
+    let audit = channel_attributed_replies(&runtime, &record, is_admin).await?;
     Ok(Json(AttributionAuditDto {
         replies: audit.replies,
         affected: audit.affected,

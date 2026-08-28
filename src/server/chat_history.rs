@@ -755,9 +755,18 @@ pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
         || record.resolve_roster_agent_id(agent_id).is_some()
 }
 
+/// `is_admin` gates the same admin-only rows [`history_for_desk`] and
+/// [`history_total_for_desk`] already exclude for a non-admin viewer (issue
+/// #1781 review, Codex P2): an owner-fallback report is invisible on the
+/// transcript and over SSE, but the raw `replies` count previously included
+/// it regardless of caller, so a Member watching the count tick up around an
+/// owner-fallback delivery could infer a hidden admin-only message exists.
+/// Excluded here — before `fold` — so a non-admin's count can never expose
+/// that inference.
 pub async fn channel_attributed_replies(
     runtime: &CompanyRuntime,
     record: &CompanyRecord,
+    is_admin: bool,
 ) -> Result<AttributionAudit, OpenCompanyError> {
     const PAGE: usize = 512;
     let mut audit = AttributionAudit::default();
@@ -771,7 +780,15 @@ pub async fn channel_attributed_replies(
             break;
         }
         let last = page[page.len() - 1].seq;
-        audit.fold(&page, |agent_id| is_known_author(agent_id, record));
+        if is_admin {
+            audit.fold(&page, |agent_id| is_known_author(agent_id, record));
+        } else {
+            let visible: Vec<StoredEvent> = page
+                .into_iter()
+                .filter(|stored| !is_admin_only_event(&stored.event))
+                .collect();
+            audit.fold(&visible, |agent_id| is_known_author(agent_id, record));
+        }
         cursor = EventSeq::new(last.value() + 1);
     }
     Ok(audit)
@@ -2551,5 +2568,75 @@ mod dead_card_test {
         .await
         .expect("total");
         assert_eq!(as_admin, 2, "an admin's total must count both rows");
+    }
+
+    /// Issue #1781 review (Codex P2, follow-up): `channel_attributed_replies`
+    /// must agree with `history_for_desk` / `history_total_for_desk` about
+    /// which rows a non-admin can see. Pre-fix, it had no `is_admin` param at
+    /// all — a Member polling `/chat/attribution-audit` around an
+    /// owner-fallback delivery watched `replies` tick up for a row neither
+    /// the transcript nor SSE ever showed them, confirming a hidden
+    /// admin-only message exists even though its content stayed hidden.
+    #[tokio::test]
+    async fn attribution_audit_excludes_the_owner_fallback_row_for_a_non_admin_but_counts_it_for_an_admin()
+     {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+        let record = runtime
+            .store()
+            .load(&id)
+            .await
+            .expect("load")
+            .expect("record exists");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "admin-only owner report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the owner-fallback report");
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: crate::runtime::OPERATOR_CHANNEL.to_string(),
+                    agent_id: crate::runtime::WORKFLOW_REPLY_AUTHOR.to_string(),
+                    text: "ordinary workflow report".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the ordinary report");
+
+        let as_member = channel_attributed_replies(&runtime, &record, false)
+            .await
+            .expect("audit");
+        assert_eq!(
+            as_member.replies, 1,
+            "a non-admin's replies count must match what history_for_desk would \
+             ever show them: {as_member:?}"
+        );
+
+        let as_admin = channel_attributed_replies(&runtime, &record, true)
+            .await
+            .expect("audit");
+        assert_eq!(as_admin.replies, 2, "an admin's count must count both rows");
     }
 }
