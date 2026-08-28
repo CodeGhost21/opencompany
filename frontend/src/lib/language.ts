@@ -286,12 +286,12 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // count is the whole difference between it and `edit` above.
   apply_patch: "Edit several files in its workspace at once",
   csv_export: "Save data as a spreadsheet file in its workspace",
-  // Hosting (issue #1079). Only the three that park need words here; the three
-  // read tools are `Reach::Nothing` and never reach an approval card.
+  // Hosting (issues #1079, #913). Only the tools that park need words here;
+  // the read tools are `Reach::Nothing` and never reach an approval card.
   //
   // Each label names the thing an operator is actually consenting to, because
-  // these are the cards where a vague one costs the most: two of them change
-  // what the public sees at an address, and the third can write secrets at a
+  // these are the cards where a vague one costs the most: three of them change
+  // what the public sees at an address, and the fourth can write secrets at a
   // third-party provider. "Use one of its tools" over a live deployment is the
   // failure this issue is about.
   hosting_launch_site: "Deploy a site to the public internet",
@@ -302,6 +302,17 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // afterwards for a build-time variable to take effect, so a label promising
   // one would be describing an act that has not happened.
   hosting_set_env: "Set environment variables on one of its sites",
+  // Worded as what the visitor gets, not as what the provider calls it. The
+  // provider's own verb is "promote", and an operator reading "Promote a
+  // deployment" on a card has to already know that promoting an old build is
+  // how a rollback is spelled. "Serve an earlier version" is the consequence:
+  // the site the public loads changes, and it changes to something older.
+  //
+  // No "(rollback)" gloss, and no mention of recovery. The card is read when
+  // the agent asks, which is not always after a bad deploy — an agent can
+  // propose this from a stale premise, and a label that pre-agrees it is a fix
+  // argues the operator into the approval the card exists to ask for.
+  hosting_rollback: "Serve an earlier version of one of its sites",
   // `mcp_registry_tool_call` is deliberately absent: EFFECT_LABELS already
   // names it and is consulted first, so an entry here would be unreachable.
 };

@@ -425,7 +425,21 @@ export type CompanyStreamEvent =
  */
 export const BUDGET_PAUSE_NOTICE_PREFIX = "⏸ Paused — out of credits:";
 
-/** Whether a chat message's text is the unauthored budget-pause system notice. */
+/**
+ * Whether a chat message's text is the **redeemable** budget-pause system
+ * notice — the one that gets an "Add credits & resend" CTA.
+ *
+ * Issue #1846 review (Codex #3870562586 / #3870562590): the host has a
+ * deliberate SIBLING prefix, `BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX`
+ * ("⏸ Paused — out of credits (add credits, then start this again):"), for the
+ * two paths that pause with no marker this CTA can redeem — the confined
+ * workflow copilot (no marker is ever parked) and an approval continuation
+ * (its marker is parked `background: true`, which the redeem route refuses).
+ * That prefix must NOT match here: those notices render as ordinary system
+ * bubbles precisely so no unusable button is drawn. Do not "fix" the near-miss
+ * by loosening this to a substring check or by matching both prefixes — the
+ * near-miss is the mechanism.
+ */
 export function isBudgetPauseNotice(text: string): boolean {
   return text.startsWith(BUDGET_PAUSE_NOTICE_PREFIX);
 }
