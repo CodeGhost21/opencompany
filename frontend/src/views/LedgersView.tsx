@@ -68,9 +68,11 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { listTasks, patchTask, type Task } from "@/api/tasks";
-import type { ApprovalSummary } from "@/api/types";
+import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
 import { LedgerBoard } from "@/views/LedgerBoard";
+import { useAskerNames } from "@/components/approval-card";
+import type { DecidedApproval } from "@/views/chat/model";
 import { TaskItem } from "@/views/TaskCard";
 import {
   BOARD_LEDGER,
@@ -78,7 +80,7 @@ import {
   columnsOf,
   labelFor,
 } from "@/lib/board-columns";
-import { taskApprovalBlock } from "@/lib/task-approvals";
+import { taskApprovalRows } from "@/lib/task-approvals";
 import {
   byline,
   composableFields,
@@ -196,8 +198,28 @@ interface Props {
   approvals?: readonly ApprovalSummary[];
   /** The feed's clock, for "blocked for 4m". Falls back to the browser's. */
   now?: number;
-  /** Opens the Approvals page filtered to one card (issue #883). */
-  onReviewApprovals?: (taskId: string) => void;
+  /**
+   * The console-wide decision state a blocked card decides through (#1891).
+   *
+   * The same four the shell already hands `WorkflowsView` for the run drawer,
+   * owned there for the same reason: an operator who decides on the board,
+   * steps over to Approvals and comes back must not find a card that forgot
+   * what they did. `decided` is fed by the `approval_resolved` frame as well as
+   * by this console's own resolves, which is what makes a decision taken on the
+   * page settle on the board with no reload.
+   *
+   * All optional, and absent means a read-only board: `onDecideApproval` is
+   * what a card checks before offering buttons at all.
+   */
+  decidingApprovals?: ReadonlyMap<string, Verdict>;
+  decidedApprovals?: Readonly<Record<string, DecidedApproval>>;
+  failedApprovals?: Record<string, string>;
+  /** Whether a detached approval continuation is still running for a card. */
+  onDecideApproval?: (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+  ) => void;
   /**
    * Re-reads the shared list (`useLedgerNav.refresh`) — called after the
    * switcher's in-place wizard declares a new one, so it shows up in the
@@ -244,6 +266,11 @@ export const RESERVED_SEGMENTS: readonly string[] = [
  * and this screen re-renders on every keystroke in its search box.
  */
 const EMPTY_APPROVALS: readonly ApprovalSummary[] = [];
+/** Stable defaults, so a board rendered without the decide bundle does not
+ *  churn every card's props on each poll (#1891). */
+const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+const EMPTY_DECIDED: Readonly<Record<string, DecidedApproval>> = {};
+const EMPTY_FAILED: Record<string, string> = {};
 
 /** The task ledger is operated as a board; declared ledgers are read as rows. */
 export function defaultLedgerMode(
@@ -276,7 +303,10 @@ export function LedgersView({
   taskEventTick,
   approvals = EMPTY_APPROVALS,
   now,
-  onReviewApprovals,
+  decidingApprovals = EMPTY_DECIDING,
+  decidedApprovals = EMPTY_DECIDED,
+  failedApprovals = EMPTY_FAILED,
+  onDecideApproval,
   onListsChanged,
 }: Props) {
   // The declare wizard, opened in place over whatever list is already on
@@ -373,6 +403,16 @@ export function LedgersView({
 
   /** The clock the "blocked since" labels measure against (issue #883). */
   const clock = now ?? Date.now();
+
+  /**
+   * Who asked for each parked approval, for the blocked cards (#1891).
+   *
+   * At the view rather than per card: `useAskerNames` keys on the *set* of
+   * asker ids, so one call over the company's queue is a single roster read
+   * however many columns hold blocked cards — and a card that mounts mid-poll
+   * finds the names already resolved instead of starting its own fetch.
+   */
+  const askerNames = useAskerNames(client, company, [...approvals]);
 
   /**
    * Why this ledger is showing nothing, when a filter is the reason (#1217).
@@ -1013,11 +1053,17 @@ export function LedgersView({
                   }
                   approvals={approvals}
                   now={clock}
+                  // #1891: a blocked card decides in place, through the shell's
+                  // one resolve. The same four the run drawer already receives.
+                  askerNames={askerNames}
+                  deciding={decidingApprovals}
+                  decided={decidedApprovals}
+                  failed={failedApprovals}
+                  onDecide={onDecideApproval}
                   // Resume has its own write since #1512: a paused card is
                   // already in the `working` phase, so routing it through
                   // `move` would be a no-op the operator could not see fail.
                   onResume={(entry) => void resume(entry)}
-                  onReview={onReviewApprovals}
                 />
               ) : (
                 <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
@@ -1215,8 +1261,12 @@ function BoardMode({
   taskFor,
   approvals,
   now,
+  askerNames,
+  deciding,
+  decided,
+  failed,
+  onDecide,
   onResume,
-  onReview,
 }: {
   ledger: LedgerSummary;
   entries: LedgerEntry[];
@@ -1238,10 +1288,23 @@ function BoardMode({
   approvals?: readonly ApprovalSummary[];
   /** The clock those "blocked for 4m" labels measure against. */
   now?: number;
+  /**
+   * Roster ids → names, resolved once for the whole board (#1891).
+   *
+   * Lifted to the view rather than run per card: `useAskerNames` keys on the
+   * set of asker ids, so one call over the company's queue is one roster read
+   * for every blocked column — and a card that mounts mid-poll finds the names
+   * already in hand instead of starting its own fetch.
+   */
+  askerNames: Map<string, string>;
+  /** The console-wide decision state a blocked card decides through (#1891). */
+  deciding: ReadonlyMap<string, Verdict>;
+  decided: Readonly<Record<string, DecidedApproval>>;
+  failed: Record<string, string>;
+  /** The shell's one resolve — absent when this board is read-only. */
+  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
   /** Re-dispatch a paused card. */
   onResume?: (entry: LedgerEntry) => void;
-  /** Open the approvals queue narrowed to one card (issue #883). */
-  onReview?: (taskId: string) => void;
 }) {
   return (
     <LedgerBoard
@@ -1257,11 +1320,14 @@ function BoardMode({
             <TaskItem
               task={task}
               dragging={dragging}
-              block={taskApprovalBlock(approvals ?? [], task.id)}
+              rows={taskApprovalRows(approvals ?? [], decided, task.id)}
               now={now ?? Date.now()}
+              askerNames={askerNames}
+              deciding={deciding}
+              failed={failed}
+              onDecide={onDecide}
               onOpen={() => onOpen(entry)}
               onResume={() => onResume?.(entry)}
-              onReview={onReview ? () => onReview(task.id) : undefined}
             />
           );
         }

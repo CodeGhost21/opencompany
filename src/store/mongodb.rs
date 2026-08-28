@@ -4451,6 +4451,37 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         Ok(true)
     }
 
+    /// Re-checks emptiness immediately before deleting, rather than trusting
+    /// a caller's earlier [`tree`](Self::tree) read. This store keeps no
+    /// cross-request lock — nothing here does — so it cannot close the window
+    /// the way [`FsOps`](crate::store::FsOps) does; it only narrows it to the
+    /// single round trip between this method's own fresh read and its
+    /// `delete_one`, instead of the whole of a caller's request.
+    async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        let nodes = self.workspace_nodes(company).await?;
+        if !nodes.contains_key(id) {
+            return Ok(false);
+        }
+        if nodes
+            .values()
+            .any(|node| node.parent_id.as_deref() == Some(id))
+        {
+            return Ok(false);
+        }
+        // Single document, non-recursive — the check above just proved this
+        // id has no children, so there is nothing else to remove with it.
+        let deleted = self
+            .collection("workspace_nodes")
+            .delete_one(doc! {"company_id": company.as_ref(), "node_id": id})
+            .await
+            .map_err(mongo_err)?;
+        if deleted.deleted_count == 0 {
+            return Ok(false);
+        }
+        self.drop_blobs(company, id, None).await?;
+        Ok(true)
+    }
+
     async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
         let count = self
             .collection("workspace_nodes")
