@@ -78,7 +78,6 @@ async function render(
       createElement(OperatorOverview, {
         client: host,
         company: "acme",
-        companyName: "Acme",
         feed,
         scope,
         ...(attemptEventTick === undefined ? {} : { attemptEventTick }),
@@ -173,7 +172,6 @@ describe("the operator overview landing page (#1321)", () => {
               url.includes("status=failed%2Cpaused") ? Promise.resolve([]) : Promise.resolve([run()]),
             ),
             company: "acme",
-            companyName: "Acme",
             feed: readyFeed,
             scope,
           }),
@@ -204,7 +202,6 @@ describe("the operator overview landing page (#1321)", () => {
         createElement(OperatorOverview, {
           client: client(Promise.resolve([])),
           company: "acme",
-          companyName: "Acme",
           feed: readyFeed,
           scope: scopeA,
         }),
@@ -223,7 +220,6 @@ describe("the operator overview landing page (#1321)", () => {
             url.includes("status=failed%2Cpaused") ? Promise.resolve([]) : Promise.resolve([failedAfterAOnly]),
           ),
           company: "acme",
-          companyName: "Acme",
           feed: readyFeed,
           scope: scopeB,
         }),
@@ -465,7 +461,6 @@ describe("the operator overview landing page (#1321)", () => {
         createElement(OperatorOverview, {
           client: host,
           company: "globex",
-          companyName: "Globex",
           feed: readyFeed,
           scope: { connection: "test-host", company: "globex" },
         }),
