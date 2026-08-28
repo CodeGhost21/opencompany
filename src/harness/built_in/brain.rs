@@ -1606,10 +1606,6 @@ impl HarnessBrain {
         self.settle_run_end(sink, TaskRunEnd::Failed, &text, 0)
             .await;
 
-        // A refusal ran no turn, so it published nothing.
-        self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
-            .await;
-
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
