@@ -234,6 +234,7 @@ export function ChatView({
    * the operator once the real desks landed (issue #370). `null` means "not
    * answered yet", so nothing resolves against a set the company doesn't have.
    */
+  const [desks, setDesks] = useState<Desk[] | null>(null);
   const [operator, setOperator] = useState<OperatorChannelDto | null>(null);
   const operatorRun = useRef(0);
   useEffect(() => {
