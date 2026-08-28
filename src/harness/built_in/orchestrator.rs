@@ -4785,7 +4785,7 @@ pub(crate) fn create_workflow_parameters_schema() -> Value {
                 },
                 "ownerDesk": {
                     "type": "string",
-                    "description": "Optional owning desk id or display name."
+                    "description": "Optional owning desk id. Use the stable desk id, not its display name."
                 },
                 "nodes": {
                     "type": "array",
