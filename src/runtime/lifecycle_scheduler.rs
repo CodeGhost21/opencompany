@@ -80,7 +80,7 @@ use crate::company::week1_nudge::{NUDGE_KIND, SEVEN_DAYS_MILLIS, user_saved_work
 use crate::ports::notifications::{Notification, Subject, SubjectKind};
 use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
-use crate::ports::users::UserRecord;
+use crate::ports::users::{UserRecord, UserStatus};
 use crate::runtime::CompanyRegistry;
 use crate::runtime::scheduler::Clock;
 use crate::server::ops::mailer::{MailCredentials, MailSender, OutboundEmail};
@@ -235,6 +235,16 @@ impl LifecycleScheduler {
                 }
             };
             for user in users {
+                if user.status != UserStatus::Active {
+                    // Retained for attribution but refused at login and on
+                    // every request (`UserStatus::Suspended`'s own docs) —
+                    // the same bar `workflows::delivery`'s admin-recipient
+                    // filter and `server::ops::mentions`'s advertised-user
+                    // filter both hold notification recipients to. A
+                    // suspended user can neither read the in-app row nor
+                    // act on the email, so nudging them is pure noise.
+                    continue;
+                }
                 if user.created_at_millis < self.cutoff_millis {
                     // Pre-deploy signup: the attribution gap makes "never
                     // saved a workflow" unanswerable for them. Never nudge.
@@ -448,6 +458,34 @@ mod test {
             )
             .await
             .expect("seed user");
+    }
+
+    async fn seed_suspended_user(
+        runtime: &CompanyRuntime,
+        id: &CompanyId,
+        uid: &str,
+        created_at: u64,
+    ) {
+        runtime
+            .users()
+            .upsert_user(
+                id,
+                &UserRecord {
+                    id: uid.to_string(),
+                    email: format!("{uid}@example.test"),
+                    display_name: None,
+                    avatar: None,
+                    role: UserRole::Member,
+                    status: UserStatus::Suspended,
+                    password_hash: None,
+                    must_change_password: false,
+                    created_at_millis: created_at,
+                    last_seen_at_millis: None,
+                    updated_at_millis: created_at,
+                },
+            )
+            .await
+            .expect("seed suspended user");
     }
 
     async fn create_workflow_for(runtime: &CompanyRuntime, id: &CompanyId, uid: &str) {
@@ -726,6 +764,38 @@ mod test {
             "pre-deploy signups are never nudged"
         );
         assert!(mail.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_suspended_user_past_day_seven_is_never_nudged() {
+        // UserStatus::Suspended: "retained for attribution, but refused at
+        // login and on every request" — a suspended user can neither read
+        // the in-app row nor act on the email, so a due-for-nudge suspended
+        // user must be skipped, not emailed and notified into a void.
+        let home = tmp_home();
+        let mail = RecordingMail::new();
+        let signup = real_now();
+        let (mut scheduler, rt, id) = scheduler_with_mail(
+            home.path(),
+            manifest(),
+            mail.clone(),
+            0,
+            signup + SEVEN_DAYS,
+        )
+        .await;
+        seed_suspended_user(&rt, &id, "user-1", signup).await;
+
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "a suspended user must never be nudged"
+        );
+        assert!(mail.sent.lock().unwrap().is_empty());
+        let feed = rt.notifications().list(&id, "user-1").await.unwrap();
+        assert!(
+            feed.is_empty(),
+            "no in-app row should be filed for a suspended user either"
+        );
     }
 
     #[tokio::test]
