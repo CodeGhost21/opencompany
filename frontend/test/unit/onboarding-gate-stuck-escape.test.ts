@@ -10,6 +10,7 @@ import { ApiError, type CompanyStatus, type TeamMemberDto } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import type { ConnectionId, LocalScope } from "@/connections/types";
+import { useActivationGate } from "@/onboarding/useActivationGate";
 
 /**
  * PR #1875 review finding, round 15.
@@ -113,6 +114,51 @@ function buildAdminCheckStuckClient(meCalls: { count: number }): OpenCompanyClie
       }
       if (path.includes("/activation")) {
         return Promise.resolve(INCOMPLETE_ACTIVATION);
+      }
+      return hang();
+    },
+    status: hang,
+    approvals: hang,
+    listDesks: hang,
+  };
+  return new Proxy(known, {
+    get(target, prop, receiver) {
+      if (prop in target) return Reflect.get(target, prop, receiver);
+      return hang;
+    },
+  }) as unknown as OpenCompanyClient;
+}
+
+const ACTIVATED: ActivationStatus = {
+  nameConfirmed: true,
+  integrationConnected: true,
+  workflowRunSucceeded: true,
+  isActivated: true,
+  activationCompletedAtMillis: 1_700_000_000_000,
+};
+
+/** Longer than `POLL_MS` (5000ms, `useActivationGate.ts`) — see `buildSlowActivationClient`. */
+const SLOW_READ_MS = 6000;
+
+/**
+ * `/activation` always *succeeds* — no rejection anywhere — but every call
+ * takes `SLOW_READ_MS`, longer than the hook's own poll interval. Isolates
+ * the generation/staleness race (PR #1875 review finding) from every test
+ * above, which all drive a rejection path: this proves the read itself never
+ * failing is not enough to guarantee it ever lands.
+ */
+function buildSlowActivationClient(activationCalls: { count: number }): OpenCompanyClient {
+  const known = {
+    baseUrl: "",
+    scopeFor: (company: string | null) => `/api/v1/companies/${company ?? ""}`,
+    listTeam: vi.fn(async () => STAFFED),
+    subscribeToEvents: () => () => {},
+    get: (path: string) => {
+      if (path.includes("/activation")) {
+        activationCalls.count += 1;
+        return new Promise<ActivationStatus>((resolve) => {
+          setTimeout(() => resolve(ACTIVATED), SLOW_READ_MS);
+        });
       }
       return hang();
     },
@@ -252,5 +298,74 @@ describe("a durable admin-check failure does not strand the operator either", ()
     // The operator must now have a way forward rather than an endless loader,
     // driven entirely by the admin check — activation never failed once.
     expect(container.textContent).toContain("Continue to the console");
+  });
+});
+
+/**
+ * PR #1875 review finding.
+ *
+ * `useActivationGate`'s `load` bumps `generation` on every call it starts,
+ * and discards a response whose captured `gen` no longer matches — the
+ * mechanism that lets a *later* read win over a stale one. `startVisiblePolling`
+ * is a bare, non-waiting `setInterval`, though: it has no idea whether the
+ * `load` it last called has returned. When a read consistently takes longer
+ * than `POLL_MS`, every tick starts a new call that bumps `generation` before
+ * the previous one can land — so every single response is discarded as
+ * stale, forever, and `checked` never settles. Every individual read
+ * "succeeds"; the operator is stuck behind the loader regardless, and neither
+ * `retrying` nor `stuck` ever fires, because nothing here is an error.
+ *
+ * The fix adds an in-flight guard: `load` declines to start a new call while
+ * one it started is still outstanding, so the interval's ticks in between are
+ * skipped rather than racing ahead of it. The first read is then left alone
+ * to land.
+ *
+ * Exercised directly against the hook rather than through `AppShell`
+ * (`Probe` below): `useActivationGate` takes no React context — it is a
+ * plain `client`/`company`/`enabled` function of its inputs — and the race
+ * lives entirely inside it, so mounting the full authenticated shell (which
+ * needs a `HostsProvider` this suite's minimal client double does not
+ * provide) would only be testing plumbing this bug has nothing to do with.
+ */
+function Probe({ client, company }: { client: OpenCompanyClient; company: string | null }): ReturnType<
+  typeof createElement
+> {
+  const gate = useActivationGate(client, company, true);
+  return createElement(
+    "div",
+    { "data-testid": "probe" },
+    JSON.stringify({ checked: gate.checked, isActivated: gate.status?.isActivated ?? null }),
+  );
+}
+
+describe("a slow-but-successful activation read is not starved by overlapping polls", () => {
+  it("lands once the interval stops racing ahead of the in-flight read", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const activationCalls = { count: 0 };
+    const client = buildSlowActivationClient(activationCalls);
+
+    await act(async () => {
+      root.render(createElement(Probe, { client, company: null }));
+    });
+
+    expect(container.textContent).toContain('"checked":false');
+
+    // Well past several 5s poll ticks and the 6s response latency each read
+    // takes — long enough that, without the guard, no response would ever
+    // have landed no matter how much further this ran.
+    for (let i = 0; i < 8; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+    }
+
+    // Exactly one call ever went out: the guard skipped every tick that
+    // landed while it was still outstanding, rather than starting a second
+    // (and third, and fourth…) that would each bump `generation` and discard
+    // the one before it.
+    expect(activationCalls.count).toBe(1);
+    // That one call was left alone to land, so the hook has activation's
+    // answer now instead of starving forever.
+    expect(container.textContent).toBe('{"checked":true,"isActivated":true}');
   });
 });

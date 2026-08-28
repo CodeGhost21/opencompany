@@ -113,6 +113,29 @@ export function useActivationGate(
    * a route it already learned does not exist for the lifetime of the mount.
    */
   const terminal = useRef(false);
+  /**
+   * True while a `getActivation` call started by this hook is still awaiting
+   * its response (PR #1875 review finding).
+   *
+   * `startVisiblePolling` (`lib/visible-poll.ts`) is a bare, non-waiting
+   * `setInterval` — it has no idea whether the `load` it last called has
+   * returned — so without this guard a read that consistently takes longer
+   * than `POLL_MS` (the host's whole-journal scan on an incomplete company,
+   * same class of cost `STUCK_AFTER_FAILURES`'s own doc calls out) starves
+   * forever: every tick starts a new call that bumps `generation` before the
+   * previous one can land, so `gen !== generation.current` discards every
+   * single response as stale, in perpetuity, and `checked` never settles.
+   * Unlike a caught failure this is not an error `resolveActivationReadError`
+   * or `STUCK_AFTER_FAILURES` ever sees — every individual read "succeeds",
+   * just always one generation too late — so nothing else in this hook would
+   * ever surface it.
+   *
+   * Guarding on this (skip starting a new call while one is already in
+   * flight) rather than skipping the *older* one that started it keeps the
+   * fix local to this hook: no change to the shared poller, which
+   * `ArtifactsTab` and the task-detail screen also depend on.
+   */
+  const inFlight = useRef(false);
   /** Pending fast retry from a read `resolveActivationReadError` did not settle. */
   const retryTimer = useRef<ReturnType<typeof setTimeout>>();
 
@@ -124,8 +147,9 @@ export function useActivationGate(
   };
 
   const load = useCallback(async () => {
-    if (activated.current || terminal.current) return;
+    if (activated.current || terminal.current || inFlight.current) return;
     clearRetry();
+    inFlight.current = true;
     const gen = ++generation.current;
     try {
       const next = await getActivation(client, company);
@@ -170,6 +194,12 @@ export function useActivationGate(
         if (gen !== generation.current) return;
         void load();
       }, ACTIVATION_READ_RETRY_MS);
+    } finally {
+      // Only the call that is still the current generation owns clearing the
+      // flag — a stale call that lost the `gen !== generation.current` race
+      // above must not clear it out from under whichever call is now current
+      // (see `inFlight`'s own doc for why that race exists at all).
+      if (gen === generation.current) inFlight.current = false;
     }
   }, [client, company]);
 
@@ -177,6 +207,7 @@ export function useActivationGate(
     if (!enabled) return;
     activated.current = false;
     terminal.current = false;
+    inFlight.current = false;
     setChecked(false);
     setStatus(null);
     setRetrying(false);
