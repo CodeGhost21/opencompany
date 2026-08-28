@@ -646,6 +646,11 @@ mod test {
         .expect("card")
     }
 
+    /// Gated with the tests below: parking a blocker needs
+    /// `CompanyRuntime::park_blocker`, which only the (openhuman-only)
+    /// planning pass calls in production. The `Rust (openhuman, tinymemory)`
+    /// lane runs these.
+    #[cfg(feature = "openhuman")]
     fn blocker_payload(task_id: &str) -> crate::ports::blockers::BlockerPayload {
         crate::ports::blockers::BlockerPayload {
             kind: crate::ports::blockers::BlockerKind::Infrastructure,
@@ -673,6 +678,7 @@ mod test {
     /// dropped without a record. The question that went unanswered rides back
     /// to To-do on the card, because the TTL expiring does not make the work
     /// possible — it only stops pretending somebody is about to answer.
+    #[cfg(feature = "openhuman")]
     #[tokio::test]
     async fn an_unanswered_blocker_returns_its_card_carrying_the_question() {
         let home_dir = tmp_home();
@@ -737,6 +743,7 @@ mod test {
     /// A card an operator has since moved is theirs. The expiry records the
     /// default-deny and leaves the board exactly where they put it — the same
     /// guard `advance_settled_card` applies one column over.
+    #[cfg(feature = "openhuman")]
     #[tokio::test]
     async fn an_expiry_does_not_drag_back_a_card_an_operator_has_moved() {
         let home_dir = tmp_home();

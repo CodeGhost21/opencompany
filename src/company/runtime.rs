@@ -1273,6 +1273,18 @@ impl CompanyRuntime {
     /// binds it, then the advisory event. A crash between the journal and the
     /// event replays as "still parked" and the console picks it up on its next
     /// feed refresh, which is the same trade `CycleRunner::park` documents.
+    ///
+    /// # Why this is feature-gated and its expiry half is not
+    ///
+    /// Its only caller is the planning pass, which is
+    /// `#[cfg(feature = "openhuman")]`, so on a default build this is a method
+    /// nobody can reach — and `-D dead_code` is right to say so.
+    ///
+    /// The *expiry* half of the same story — `unanswered_blocker` and the card
+    /// return it drives — stays ungated on purpose: the TTL sweep that runs it
+    /// is ungated, and a blocker parked by a gated build still has to expire
+    /// correctly on any build that later loads the same journal.
+    #[cfg(feature = "openhuman")]
     pub(crate) async fn park_blocker(
         &self,
         payload: &crate::ports::blockers::BlockerPayload,
