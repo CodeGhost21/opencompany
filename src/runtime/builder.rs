@@ -1625,6 +1625,40 @@ impl RuntimeBuilder {
         // brain never advertised the tool and the provider refused the call.
         let existing = store.load(&id).await?;
 
+        // Issue #1781 review (Codex P1): `register_company`'s `serve` boot loop
+        // always loads through `CompanyManifest::from_path_for_reload`, which
+        // relaxes the `RESERVED_AGENT_IDS`/`operator`-desk collision check so an
+        // already-running company survives a reservation rule that tightened
+        // after its `company.toml` was written (see that method's doc comment).
+        // That relaxation has no business covering a company this store has
+        // never recorded: `existing.is_none()` is the exact "last moment a first
+        // boot is distinguishable" the task-seeding gate below relies on, so it
+        // is also the right boundary for refusing a *newly authored* manifest
+        // that only loaded because the reload loader excused a rule it was
+        // never grandfathered under. `self.manifest` already passed the relaxed
+        // loader by construction, so the strict `validate()` below can only
+        // still find the reserved-id/name problems the relaxed pass
+        // deliberately skips — every other rule was already enforced at load
+        // time either way. A platform-provisioned tenant never reaches this
+        // arm: `POST /api/v1/companies` runs the strict `validate()` before a
+        // company is ever created (`src/server/provision.rs`), so `existing` is
+        // never `None` there with a manifest that has not already cleared it —
+        // this only guards a hand-authored `companies/<name>` directory served
+        // directly for the first time.
+        if existing.is_none() {
+            let problems = self.manifest.validate();
+            if !problems.is_empty() {
+                return Err(crate::OpenCompanyError::ManifestInvalid {
+                    path: self
+                        .seed_dir
+                        .clone()
+                        .map(|dir| dir.join("company.toml"))
+                        .unwrap_or_else(|| PathBuf::from("company.toml")),
+                    problems,
+                });
+            }
+        }
+
         // Issue #1796: the namespaces an operator granted from a connect
         // surface, carried across the rebuild under the same seed-wins rule as
         // the policy override — and needing it most of the three, because this
@@ -4732,6 +4766,69 @@ mod test {
             swapped.agent_context("cto").is_some(),
             "the swapped engine's scope partition must win over the handover's none"
         );
+    }
+
+    /// Issue #1781 review (Codex P1): `register_company`'s `serve` boot loop
+    /// always loads through `CompanyManifest::from_path_for_reload`, which
+    /// grandfathers a `RESERVED_AGENT_IDS` collision so an already-running
+    /// company survives a reservation rule that tightened after its
+    /// `company.toml` was written (`b80c45e2c`, `76c6cacdf`). That relaxation
+    /// was applied unconditionally, so a manifest hand-authored *after*
+    /// `operator` became reserved — one this store has never seen — booted
+    /// exactly as quietly as a genuine legacy one. `build()` now refuses this
+    /// case: `existing.is_none()` (no persisted record for this id) plus a
+    /// manifest that only clears the relaxed loader, never the strict one, is
+    /// not a restart to grandfather — it is a fresh authoring mistake.
+    #[tokio::test]
+    async fn first_boot_refuses_a_fresh_manifest_claiming_the_reserved_operator_agent_id() {
+        let home = tmp_home("opencompany-first-boot-reserved-id-");
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n",
+        )
+        .expect("manifest");
+
+        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .expect_err("a first-ever boot must not grandfather a brand new `operator` agent");
+        match err {
+            crate::OpenCompanyError::ManifestInvalid { problems, .. } => {
+                assert!(
+                    problems.iter().any(|p| p.contains("operator")),
+                    "expected a reserved-id problem, got: {problems:?}"
+                );
+            }
+            other => panic!("expected ManifestInvalid, got {other}"),
+        }
+    }
+
+    /// The twin of the test above, proving the fix does not regress
+    /// `b80c45e2c`'s grandfather case: a company that already has a persisted
+    /// record — i.e. `existing.is_some()`, a real restart — must still boot
+    /// even when its manifest claims the reserved `operator` agent id.
+    #[tokio::test]
+    async fn a_reboot_still_grandfathers_an_already_registered_operator_agent_id() {
+        let home = tmp_home("opencompany-reboot-reserved-id-");
+        let safe: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+                .expect("manifest");
+        RuntimeBuilder::new(home.path().to_path_buf(), safe)
+            .build()
+            .await
+            .expect("the first boot with a safe manifest must succeed and persist a record");
+
+        let reserved: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n",
+        )
+        .expect("manifest");
+        RuntimeBuilder::new(home.path().to_path_buf(), reserved)
+            .build()
+            .await
+            .expect(
+                "a company this store already has a record for must still reboot, \
+                 even with a manifest that only the relaxed loader would accept",
+            );
     }
 
     /// The mirror: switching to the base backend must drop the outgoing
