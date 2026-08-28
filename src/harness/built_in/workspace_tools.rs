@@ -2077,7 +2077,13 @@ impl Tool for WorkspaceCreateTool {
         // path ambiguous for **every** agent from then on, and the reserved
         // `Agents` root is exactly the path an agent must not be able to
         // shadow with a rival of its own.
-        if let Some(existing) = index.lookup(&normalized) {
+        if let Some(existing) = index.lookup(&normalized)
+            // The agent's own home is handled by the adopt-or-create path below,
+            // even when it was already present in this initial snapshot. This
+            // makes retries idempotent rather than rejecting the stale-looking
+            // folder before its ownership-aware adoption can run.
+            && !(kind == NodeKind::Folder && self.workspace.is_own_home(&segments))
+        {
             let what = match existing.first().map(|e| e.node.kind) {
                 Some(NodeKind::Folder) => "a folder",
                 _ => "a note",
