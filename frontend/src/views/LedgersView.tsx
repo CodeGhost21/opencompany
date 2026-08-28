@@ -479,6 +479,17 @@ export function LedgersView({
     }
     try {
       setTasks(await listTasks(client, company));
+      if (isBoard) {
+        const nextTasks = await listTasks(client, company);
+        const approvals = await Promise.all(
+          nextTasks
+            .filter((task) => task.stage === "paused")
+            .map((task) => listTaskApprovals(client, company, task.id).catch(() => [])),
+        );
+        setAuthoritativeApprovals(approvals.flat());
+      } else {
+        setAuthoritativeApprovals([]);
+      }
     } catch {
       // Leave whatever is already held: a stale decoration beats none.
     }
