@@ -3275,37 +3275,27 @@ impl HarnessBrain {
                     // console routes them to this thread; a delegated desk reply
                     // in this cycle rides the same operator thread, so it gets the
                     // same id.
-                    let chat_id = chat.as_deref();
-                    // Which conversation this turn answers (#1890): the channel,
-                    // and the thread within it. The message's own `parent` IS
-                    // the thread root — a reply is parented to its question's
-                    // parent, never to the question — so an unparented message
-                    // carries `None` and lands on the channel-level
-                    // conversation, exactly where every message went before the
-                    // root was part of the key.
                     //
-                    // `chat_id` is passed through AS THE OPERATOR SENT IT —
-                    // `None` when they addressed no desk — and is deliberately
-                    // NOT normalized to `DEFAULT_DESK` here. A codex review on
-                    // #1896 read the `if let Some(incoming) = turn_chat_id`
-                    // guard in `run_with_steer` and concluded an unaddressed
-                    // threaded message loses its root; it does not.
-                    // `turn_chat_id` is derived from the turn-stream route,
-                    // which already falls back to `DEFAULT_DESK` when the
-                    // caller addressed no desk (see `LiveRoute::Chat`'s
-                    // construction), so an unaddressed chat turn binds to
-                    // General and keeps its thread like any other.
+                    // Passed through AS THE OPERATOR SENT IT — `None` when they
+                    // addressed no desk — and deliberately NOT normalized to
+                    // `DEFAULT_DESK` (#1890). A codex review on #1896 read
+                    // `run_with_steer`'s `if let Some(incoming) = turn_chat_id`
+                    // guard and concluded an unaddressed threaded message loses
+                    // its root; it does not. `turn_chat_id` comes from the
+                    // turn-stream route, which already falls back to
+                    // `DEFAULT_DESK` (see `LiveRoute::Chat`'s construction), so
+                    // an unaddressed chat turn binds to General and keeps its
+                    // thread like any other.
                     //
-                    // Normalizing here instead would be actively wrong: this
-                    // same `chat_id` reaches card creation, a card's
+                    // Normalizing here would be actively wrong: this same
+                    // `chat_id` reaches card creation, a card's
                     // `origin_chat_id`, and `is_copilot_thread` — and a `None`
                     // origin means "no conversation raised this card", which
-                    // `chat_history::owns` treats as belonging to no desk at
-                    // all. Turning that into `Some("General")` would post
-                    // board-marker lines into the operator's main line, which
-                    // is the exact bug that arm is documented to prevent.
-                    let chat_target =
-                        crate::runtime::delegation::ChatTarget::in_thread(chat_id, *parent);
+                    // `chat_history::owns` routes to no desk on purpose.
+                    // Turning it into `Some("General")` posts board-marker lines
+                    // into the operator's main line, the exact bug that arm is
+                    // documented to prevent.
+                    let chat_id = chat.as_deref();
                     // Issue #989: the dispatch-start baseline for "did this
                     // responder write anything it did not publish?" — taken
                     // before the turn runs, for the same reason run_task's own
