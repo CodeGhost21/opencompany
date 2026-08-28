@@ -6,7 +6,7 @@ the synchronous `POST …/workflows/{wid}/run` body and every row of
 `GET …/workflows/runs`:
 
 ```text
-running | failed | stopped | stranded | blocked | undelivered | awaiting-approval | ok
+running | failed | stopped | stranded | blocked | undelivered | awaiting-approval | degraded | ok
 ```
 
 **Always serialized**, unlike the optional fields around it. Its whole purpose
