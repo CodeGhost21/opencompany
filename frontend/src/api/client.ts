@@ -570,21 +570,6 @@ export class OpenCompanyClient {
     return this.request<DeskDto[]>("GET", `${this.scope(company)}/desks`);
   }
 
-  /** Read the always-present, read-only Operator feed identity. */
-  getOperatorChannel(company?: string | null): Promise<OperatorChannelDto> {
-    return this.request<OperatorChannelDto>("GET", `${this.scope(company)}/operator-channel`);
-  }
-
-  /**
-   * The identity of the company's always-present, durable Operator feed
-   * (issue #1757 rework) — its own surface, not a desk. The console pins it
-   * below a divider in the chat rail rather than folding it into
-   * {@link listDesks}.
-   */
-  getOperatorChannel(company?: string | null): Promise<OperatorChannelDto> {
-    return this.request<OperatorChannelDto>("GET", `${this.scope(company)}/operator-channel`);
-  }
-
   /**
    * Add a teammate to a desk through the operator overlay (issue #72). The
    * teammate must be on the company roster; the desk must exist. Adding one
