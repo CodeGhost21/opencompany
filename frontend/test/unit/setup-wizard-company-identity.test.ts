@@ -6,7 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { SetupStatus } from "@/api/setup";
-import { SetupWizard, suggestedCompanyName } from "@/views/setup/SetupWizard";
+import {
+  SetupWizard,
+  shouldSeedTemplate,
+  suggestedCompanyName,
+} from "@/views/setup/SetupWizard";
 
 /**
  * What the wizard sends back about the company itself: its **name**, and
@@ -30,6 +34,13 @@ const TEMPLATE = {
   name: "Agentic Marketing Agency",
   agent_count: 8,
   output: "Campaigns across every channel",
+};
+
+const OTHER_TEMPLATE = {
+  id: "agentic_law_firm",
+  name: "Agentic Law Firm",
+  agent_count: 5,
+  output: "Filings and advice",
 };
 
 function status(over: Partial<SetupStatus> = {}): SetupStatus {
@@ -223,6 +234,72 @@ describe("what a finished wizard says the company is", () => {
     expect(body.company?.agents).toHaveLength(2);
   });
 
+  it("re-suggests the name when the template changes, unless it was typed", async () => {
+    const applied: { body?: unknown } = {};
+    const client = clientWith(
+      status({ templates: [TEMPLATE, OTHER_TEMPLATE] }),
+      "preset",
+      applied,
+    );
+    await walkToReview(client, TEMPLATE.id);
+    expect(
+      (container.querySelector('[data-testid="setup-company-name"]') as HTMLInputElement).value,
+    ).toBe(TEMPLATE.name);
+
+    // Back to Business, a different template, forward again.
+    for (let i = 0; i < 3; i += 1) {
+      // review -> advanced -> sign-in -> business.
+      await act(async () => {
+        button("Back").click();
+      });
+    }
+    await pickTemplate(OTHER_TEMPLATE.id);
+    // business -> sign-in -> advanced -> review. The sign-in answer survives
+    // going back, so the address step stays absent.
+    await next();
+    await next();
+    await next();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const name = container.querySelector('[data-testid="setup-company-name"]') as HTMLInputElement;
+    expect(
+      name.value,
+      "a suggestion nobody typed must not name the company they did pick",
+    ).toBe(OTHER_TEMPLATE.name);
+  });
+
+  it("keeps a typed name across a change of template", async () => {
+    const applied: { body?: unknown } = {};
+    const client = clientWith(
+      status({ templates: [TEMPLATE, OTHER_TEMPLATE] }),
+      "preset",
+      applied,
+    );
+    await walkToReview(client, TEMPLATE.id);
+    await fill("setup-company-name", "Northwind Studio");
+
+    for (let i = 0; i < 3; i += 1) {
+      // review -> advanced -> sign-in -> business.
+      await act(async () => {
+        button("Back").click();
+      });
+    }
+    await pickTemplate(OTHER_TEMPLATE.id);
+    // business -> sign-in -> advanced -> review. The sign-in answer survives
+    // going back, so the address step stays absent.
+    await next();
+    await next();
+    await next();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const name = container.querySelector('[data-testid="setup-company-name"]') as HTMLInputElement;
+    expect(name.value, "a name the operator typed is theirs").toBe("Northwind Studio");
+  });
+
   it("does not offer to edit a roster it is going to seed whole", async () => {
     await walkToReview(clientWith(status(), "preset", {}), TEMPLATE.id);
     expect(
@@ -248,5 +325,45 @@ describe("the name offered for a company nobody has named", () => {
 
   it("offers nothing when there is nothing to offer", () => {
     expect(suggestedCompanyName("   ", null)).toBe("");
+  });
+});
+
+describe("whether a finished wizard seeds a template or a designed company", () => {
+  const picked = {
+    hasCompany: false,
+    source: "preset" as const,
+    rosterEdited: false,
+    template: TEMPLATE.id,
+    credentialTested: false,
+    provider: "openrouter",
+  };
+
+  it("seeds the template an operator picked and did not edit", () => {
+    expect(shouldSeedTemplate(picked)).toBe(true);
+  });
+
+  it("designs instead once the roster has been edited", () => {
+    expect(shouldSeedTemplate({ ...picked, rosterEdited: true })).toBe(false);
+  });
+
+  it("designs instead for a curated roster, which is no template's", () => {
+    expect(shouldSeedTemplate({ ...picked, source: "fallback" })).toBe(false);
+    expect(shouldSeedTemplate({ ...picked, source: "model" })).toBe(false);
+  });
+
+  it("designs instead when a credential has to be carried", () => {
+    expect(shouldSeedTemplate({ ...picked, credentialTested: true })).toBe(false);
+  });
+
+  it("still seeds the template when the tested provider is managed", () => {
+    // The designed submit omits inference for `managed`, so the designed path
+    // would trade the template's roster, belt and prompts for nothing at all.
+    expect(
+      shouldSeedTemplate({ ...picked, credentialTested: true, provider: "managed" }),
+    ).toBe(true);
+  });
+
+  it("seeds nothing onto a host that already has a company", () => {
+    expect(shouldSeedTemplate({ ...picked, hasCompany: true })).toBe(false);
   });
 });

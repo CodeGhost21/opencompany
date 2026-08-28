@@ -228,6 +228,19 @@ export interface SetupInput {
    * is then permanent.
    */
   name?: string | null;
+  /**
+   * The address that will be able to sign in, for the template path.
+   *
+   * {@link DesignedCompany.adminEmail} carries the same thing for a designed
+   * company. This one exists because a seeded template has no designed company
+   * to carry it in, and no shipped template names an admin — so a template plus
+   * a sign-in mode would otherwise finish setup into a company nobody can
+   * administer.
+   *
+   * Snake case, unlike the camelCase inside {@link DesignedCompany}: the top
+   * level of this request is read field-for-field by the host.
+   */
+  admin_email?: string | null;
 }
 
 /** The company the wizard designed, as the review step hands it over. */

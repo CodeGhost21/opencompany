@@ -277,6 +277,18 @@ pub struct SetupRequest {
     ///
     /// [`company_name`]: crate::company::setup::manifest_from_setup
     pub name: Option<String>,
+    /// The address that will be able to sign in, for the template path.
+    ///
+    /// The designed path carries its own inside [`SetupCompany`], and that is
+    /// where this used to live exclusively — which was fine while a designed
+    /// company was the only thing the console ever sent. It is not any more: a
+    /// picked template is now seeded as itself, and no shipped product template
+    /// names an admin, so an operator who chose email sign-in and a template
+    /// would finish setup into a company they cannot administer.
+    ///
+    /// Ignored when the seeded manifest asks nobody to sign in — see
+    /// [`SeedOverrides::admin_email`](crate::desktop::SeedOverrides::admin_email).
+    pub admin_email: Option<String>,
     /// A company the wizard **designed**, from the operator's answers and the
     /// roster they reviewed.
     ///
@@ -934,7 +946,19 @@ async fn apply_inner(
             // template and no model tailored it, so what gets seeded is that
             // template — its roster, its tool belt, its prompts — instead of an
             // approximation rebuilt from a roster screen.
-            let id = crate::desktop::seed_company_named(state, template, chosen_name).await?;
+            let id = crate::desktop::seed_company_with(
+                state,
+                template,
+                crate::desktop::SeedOverrides {
+                    name: chosen_name,
+                    admin_email: req
+                        .admin_email
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|email| !email.is_empty()),
+                },
+            )
+            .await?;
             Some(id.as_ref().to_string())
         }
         _ => None,

@@ -95,6 +95,15 @@ async fn a_fresh_install_opens_the_wizard_and_can_complete_it() {
         1,
         "completing setup seeds exactly the company that was chosen: {listed:?}"
     );
+    // The company that was chosen, not merely *a* company: an apply that
+    // ignored the template, or seeded a different one, would satisfy the count
+    // above and nothing else here. Provenance rather than the id, because the
+    // id follows the company's name and the name is the operator's to change.
+    assert_eq!(
+        provenance(&base, &listed[0]).await.as_deref(),
+        Some(STARTER_TEMPLATE),
+        "the seeded company must be the template the wizard was told to use"
+    );
     assert_eq!(
         spec(&base).await["setup_complete"],
         serde_json::json!(true),
@@ -158,6 +167,23 @@ async fn companies(base: &str) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+/// Which template a company was seeded from, as the host reports it.
+async fn provenance(base: &str, id: &str) -> Option<String> {
+    let listed: serde_json::Value = reqwest::get(format!("{base}/api/v1/companies"))
+        .await
+        .expect("the companies route answers")
+        .json()
+        .await
+        .expect("a company list");
+    listed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|company| company["id"] == id)
+        .and_then(|company| company["template_provenance"]["source_id"].as_str())
+        .map(str::to_string)
 }
 
 /// Loads the roster again, retrying while the previous run's `flock` clears.

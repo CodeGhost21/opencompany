@@ -442,6 +442,7 @@ async fn a_write_to_an_env_owned_field_is_refused() {
             template: None,
             company: None,
             name: None,
+            admin_email: None,
         },
         &env,
     )
@@ -1149,6 +1150,47 @@ async fn applying_a_template_seeds_it_under_the_name_the_operator_chose() {
             .iter()
             .all(|role| seeded_roles.contains(role)),
         "a renamed template is still that template's roster: {seeded_roles:?}"
+    );
+}
+
+/// A template seed carries the address that will administer it.
+///
+/// No shipped product template names an admin, so on a host that asks people to
+/// sign in, seeding one without this produces a company nobody can administer:
+/// setup completes, email sign-in is on, and the address the operator typed two
+/// screens earlier is ineligible. Only reachable since a picked template began
+/// being seeded as itself — before that every company came through the designed
+/// path, which has always written it.
+#[tokio::test]
+async fn a_template_seed_names_the_operator_as_its_admin() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "agentic_law_firm",
+            "admin_email": "ada@example.com",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = crate::ports::types::CompanyId::new("agentic-law-firm");
+    let record = state
+        .registry()
+        .get(&id)
+        .expect("the seeded company is registered")
+        .store()
+        .load(&id)
+        .await
+        .expect("the bundle is readable")
+        .expect("the bundle exists");
+    assert_eq!(
+        record.manifest.users.admins,
+        vec!["ada@example.com".to_string()],
+        "a company that lists nobody cannot be signed into"
     );
 }
 

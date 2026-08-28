@@ -172,6 +172,49 @@ interface Props {
 }
 
 /**
+ * Whether a finished wizard should hand the host a **template slug** rather than
+ * a designed company.
+ *
+ * Pure, and exported, because this one boolean decides what an operator
+ * actually gets: a template seeded whole — its roster, its `[tools]` belt, its
+ * prompts, its provenance — or a company rebuilt from the review screen, which
+ * can carry none of those and is capped at six teammates.
+ *
+ * The rules, and why each is here:
+ *
+ * - **A host with a company seeds nothing.** Setup must never hand an operator
+ *   a second starter company on a re-run.
+ * - **Only a `preset` roster.** A designed team was built for *them*; shipping
+ *   the template instead would throw the design pass away. A `fallback` roster
+ *   is the curated team matched from their answers, which is not any template's.
+ * - **Only an untouched one.** Edits exist nowhere but the review screen, so an
+ *   edited roster has to travel as a designed company.
+ * - **Only when no credential is carried.** The designed path writes the tested
+ *   provider onto the manifest and stores the key against the company; a
+ *   template seed has nowhere to put either, and silently dropping a key the
+ *   operator just watched pass is the worse trade.
+ * - **Except `managed`, which carries nothing.** The designed submit omits
+ *   inference entirely for that provider, because the host already reaches it.
+ *   Taking the designed path there trades the template away for a credential
+ *   that was never going to be written — a pure loss, and an invisible one,
+ *   since the review screen shows the template's roster either way.
+ */
+export function shouldSeedTemplate(input: {
+  hasCompany: boolean;
+  source: "model" | "fallback" | "preset" | null;
+  rosterEdited: boolean;
+  template: string;
+  credentialTested: boolean;
+  provider: string;
+}): boolean {
+  if (input.hasCompany) return false;
+  if (input.source !== "preset") return false;
+  if (input.rosterEdited) return false;
+  if (!input.template.trim()) return false;
+  return !input.credentialTested || input.provider === "managed";
+}
+
+/**
  * The name to offer for a company nobody has named yet.
  *
  * Mirrors what the host derives when no name is sent (`company_name` in
@@ -236,6 +279,15 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * arrives, so the field arrives answered rather than as one more question.
    */
   const [companyName, setCompanyName] = useState("");
+  /**
+   * Whether the name on screen is the operator's or ours.
+   *
+   * A suggestion has to be *replaceable*, and "is it blank?" cannot tell the
+   * two apart: picking one template, going back, and picking another left the
+   * first template's name in the field — no longer blank, never typed, and
+   * about to become the second company's permanent id.
+   */
+  const [nameTouched, setNameTouched] = useState(false);
   /**
    * Whether the operator has changed the proposed roster.
    *
@@ -509,21 +561,24 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       // Suggested, never imposed: the field is editable and this only fills a
       // blank one, so an operator who has already named their company does not
       // watch it change under them when they go back and re-design.
-      setCompanyName(
-        (current) =>
-          current.trim() ||
+      // Re-suggested on every design, and only over a suggestion: a name the
+      // operator typed survives going back and changing their mind about the
+      // template, and a name they never typed does not.
+      if (!nameTouched) {
+        setCompanyName(
           suggestedCompanyName(
             draft.industry,
             status?.templates.find((candidate) => candidate.id === template)?.name ?? null,
           ),
-      );
+        );
+      }
     } catch (err: unknown) {
       setDesignError(err instanceof Error ? err.message : String(err));
       setRoster(null);
     } finally {
       setDesigning(false);
     }
-  }, [client, draft, template, provider, tested, values.tinyhumans_api_key]);
+  }, [client, draft, template, nameTouched, status, provider, tested, values.tinyhumans_api_key]);
 
   const submit = useCallback(async () => {
     if (!status) return;
@@ -535,30 +590,24 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     setSaveError(null);
     setBuilt(roster?.agents.length ?? null);
     try {
-      // An untouched template roster goes back as the template it came from.
-      //
-      // The host can then seed that company properly — the roster it ships,
-      // the `[tools]` belt it declares, the prompts in its own directory —
-      // where a designed company is rebuilt from this screen alone and can
-      // carry none of that. The moment the operator edits a row it *has* to be
-      // the designed path instead: their edits exist nowhere but here.
-      const seedTemplate =
-        status.companies.length === 0 &&
-        roster?.source === "preset" &&
-        !rosterEdited &&
-        template.trim().length > 0 &&
-        // A working credential is only carried by the designed path, which
-        // writes the provider onto the manifest and stores the key against the
-        // company. A template seed has nowhere to put either, so a tested model
-        // keeps the designed path — the roster is the same one on screen, and
-        // silently dropping a key the operator just watched pass is the worse
-        // trade. Reachable when a model answers and its answer is unusable, so
-        // the source is `preset` while `tested` is fine.
-        tested.kind !== "ok";
+      const seedTemplate = shouldSeedTemplate({
+        hasCompany: status.companies.length > 0,
+        source: roster?.source ?? null,
+        rosterEdited,
+        template,
+        credentialTested: tested.kind === "ok",
+        provider,
+      });
 
       const result = await submitSetup(client, {
         fields: changed,
         name: companyName.trim() || null,
+        // Sent for either path. The designed company carries its own copy
+        // below; a seeded template has no other way to learn it, and no shipped
+        // template names an admin — so without this, choosing a template *and*
+        // a sign-in finishes setup into a company the operator cannot
+        // administer.
+        admin_email: email.trim() || null,
         template: seedTemplate ? template : null,
         company:
           status.companies.length === 0 && roster && !seedTemplate
@@ -991,7 +1040,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
             designError={designError}
             roster={roster}
             name={companyName}
-            onName={setCompanyName}
+            onName={(next) => {
+              setCompanyName(next);
+              setNameTouched(true);
+            }}
             onRoster={(next) => {
               setRoster(next);
               // Any edit takes the template path off the table — see
