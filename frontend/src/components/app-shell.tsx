@@ -105,7 +105,7 @@ import {
   mergeHistoryInOrder,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
@@ -119,9 +119,11 @@ import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
 import {
+  channelForThread,
   channelIdForThread,
   deskFromDto,
   dmChannelId,
+  dmThreadId,
   HISTORY_UNSTARTED,
   type DecidedApproval,
   type HistoryHydration,
@@ -429,8 +431,31 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
-  if (desks[0]) map[MAIN_THREAD_ID] = desks[0].id;
-  for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
+  // The company's main line has a channel of its own now — the built-in
+  // `#general` (issue #1743) — so it maps to itself, under every spelling the
+  // host journals it under (`""`, `main`, `General`, `general`).
+  //
+  // The main line used to be seeded with the first desk's id instead: with no
+  // `#general` channel to land in, it was parked on whichever desk sorted
+  // first, so it would still be somewhere the operator could find it. That is
+  // now actively wrong — an unaddressed message and its reply were rendered in
+  // `#engineering`, complete with an unread badge, while the host's own
+  // history for that desk was empty. Verified in a browser before and after.
+  //
+  // Resolved through `channelIdForThread` rather than answered here, so there
+  // is one rule and not two: a blueprint desk grandfathered under a General id
+  // owns the line in its own company, and `buildChannels` renders no built-in
+  // channel beside it — pointing these spellings at a `main` nothing renders
+  // parks live frames and their unread badges where they cannot be opened.
+  for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) {
+    const channelId = channelIdForThread(spelling, desks, members);
+    if (channelId) map[spelling] = channelId;
+  }
+  // `dmThreadId`, not `m.id`: a teammate whose id is a General spelling is
+  // addressed on `dm:<id>`, and the host emits its live frames under that key.
+  // Seeded bare, `channelForThread` could place neither that DM's reply nor its
+  // working indicator anywhere at all (issue #1743).
+  for (const threadId of [...desks.map((d) => d.id), ...members.map(dmThreadId)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
   }
@@ -1093,7 +1118,9 @@ export function AppShell({
         else channelsByThread.set(threadId, [{ channelId }]);
       }
       // Every resolved thread gets its own fetch, even when nothing renders as
-      // a channel — the main line is a thread with no Chat channel. And every
+      // a channel — a workflow run is a thread with no Chat channel. (The main
+      // line used to be the example here; since issue #1743 it has `#general`.)
+      // And every
       // channel's backing thread is in `threadIds`, so the union is the full
       // set, each exactly once (issue #1690).
       [...new Set([...threadIds, ...channelsByThread.keys()])].forEach((threadId) =>
@@ -1129,11 +1156,47 @@ export function AppShell({
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
-        setFirstDeskChannelId(chatDesks[0]?.id ?? null);
+        // The channel `ChatView` lands on when the hash names none, which since
+        // issue #1743 is the built-in `#general` rather than the first desk —
+        // the two must agree, or a line with nowhere else to go lands in a
+        // channel the operator is not looking at. Resolved rather than
+        // hard-coded, for the reason `generalChannelId` gives: a grandfathered
+        // blueprint desk owns the line in its own company, and `main` is then
+        // not a channel at all.
+        setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
         const threadIds = resolved.map((t) => t.id);
         const channels = [
+          // `#general` is not in the desk list (it is not a desk), so its
+          // history has to be named here or nothing would rehydrate it on
+          // reload — the one channel every company has would come back empty.
+          {
+            channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,
+            threadId: MAIN_THREAD_ID,
+          },
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-          ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+          // A DM's history is fetched under the teammate's **own id** — but
+          // that id is not always this DM's address. A manifest may declare a
+          // teammate whose id is a General spelling (`mint_agent_id` reserves
+          // `main` and `General`, but a blueprint is not something this console
+          // overrules), and `GET chat/history?desk=main` then returns the
+          // *folded General conversation*, not that teammate's transcript:
+          // `is_general_chat` has folded `""`, `main`, `General` and `general`
+          // into one conversation since issue #65. Naming `dm:<id>` as its
+          // channel therefore poured the company-wide line into that DM on
+          // every reload, and — before the resolver below was reordered — left
+          // `#general` itself with no hydration target at all.
+          //
+          // Resolved through `channelIdForThread` so the one rule that decides
+          // where a thread renders decides it here too (issue #1743). For every
+          // ordinary teammate that is exactly `dm:<id>`, unchanged.
+          ...roster.map((m) => ({
+            channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
+            // The address the DM is actually written under. Bare, this fetched
+            // the folded General history for a teammate whose id is a General
+            // spelling, so its own transcript could never be recovered after a
+            // reload (issue #1743).
+            threadId: dmThreadId(m),
+          })),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         // SSE remains the fast path. This catches a persisted channel message
@@ -1152,9 +1215,21 @@ export function AppShell({
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
         setChatChannelByThread(channelMap(fallbackDesks, []));
-        setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
+        // Exactly what the success path above does, and for the same reason:
+        // the landing channel is `#general`, always. This used to read
+        // `fallbackDesks[0]?.id`, which agreed only by accident — the fallback
+        // set's first row happened to be a fabricated `main` desk. That row is
+        // gone (it made a console-invented desk indistinguishable from a
+        // blueprint one), so the rule is named here rather than inferred from
+        // whichever desk sorts first.
+        setFirstDeskChannelId(MAIN_THREAD_ID);
         const threadIds = defaultThreads().map((t) => t.id);
-        const channels = fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id }));
+        const channels = [
+          // `#general` is in no desk list, here as above — without naming it,
+          // the one channel every company has would not rehydrate on reload.
+          { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
+          ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
+        ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         rehydrateAll();
         disposeRehydratePolling = startVisiblePolling(rehydrateAll, 5000);
@@ -1301,7 +1376,7 @@ export function AppShell({
               return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
             }),
           );
-          const channelId = chatChannelByThreadRef.current[threadId];
+          const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
           // The thread settled before the desks/roster effect populated its
           // channel id — on a cold load, or the moment after a company switch
           // (issue #1701). The `threads` fold above still ran; park the id so
@@ -1684,7 +1759,7 @@ export function AppShell({
    */
   const onThreadViewed = useCallback(
     (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
-      const channelId = chatChannelByThreadRef.current[threadId];
+      const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
       if (!channelId) return;
       onChannelViewed(
         channelId,
@@ -1752,7 +1827,10 @@ export function AppShell({
    * next — #368's bug, re-introduced one surface over.
    */
   const noteInChannel = (threadId: string | null | undefined, line: string) => {
-    const target = threadId ? chatChannelByThread[threadId] : undefined;
+    // Through `channelForThread`, not a bare index: the host accepts any casing
+    // of a General spelling and echoes back the one the caller used, so a map
+    // of four literals misses `MAIN` from an API client (issue #1743).
+    const target = threadId ? (channelForThread(chatChannelByThread, threadId) ?? undefined) : undefined;
     if (!target) {
       noteSystem(line);
       return;
@@ -1809,7 +1887,11 @@ export function AppShell({
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op, the
       // same as the thread store above: better silent than in the wrong place.
-      const channelId = chatChannelByThread[event.chatId];
+      // `channelForThread`, for the reason `noteInChannel` gives: the map holds
+      // four literal General spellings and the host echoes whatever casing the
+      // caller addressed, so a bare index drops the live reply and it appears
+      // only when polling recovers the durable history (issue #1743).
+      const channelId = channelForThread(chatChannelByThread, event.chatId);
       if (!channelId) return;
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
@@ -2663,7 +2745,6 @@ export function AppShell({
             <OperatorOverview
               client={client}
               company={company}
-              companyName={feed.status.name}
               feed={feed}
               scope={scope}
               // Issue #1015: re-read the run panels when a run parks or fails
@@ -2780,6 +2861,19 @@ export function AppShell({
               // than only counting it. The feed the sidebar badge already polls,
               // so the screen says what it is waiting on with no second request.
               parked={feed.approvals}
+              // Issue #1891: and decided here too, not only named. The same
+              // bundle the board and the run drawer get, so a verdict given on
+              // any of the three settles on the others with no reload. Named
+              // as this route's own props rather than the `…Approvals` suffix
+              // the section views take: it is a thin wrapper whose props mirror
+              // `TaskDetailView`'s, which has no other kind of decision to
+              // qualify these against.
+              deciding={decidingApprovals}
+              decided={decidedApprovals}
+              failed={failedApprovals}
+              onDecide={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -2852,11 +2946,25 @@ export function AppShell({
               // second request.
               approvals={feed.approvals}
               now={feed.now}
-              // Issue #883: "Review" on a blocked card opens the queue narrowed
-              // to that card. Through `navigate` rather than `setView` so the
-              // filter lands in the hash and survives a refresh and the Back
-              // button, like every other sub-page.
-              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // Issue #1891: a blocked card decides in place rather than only
+              // reporting that it is blocked. The same four maps the run drawer
+              // receives, owned here for the same reason — an operator who
+              // decides on the board, steps over to Approvals and comes back
+              // must not find a card that forgot what they did. `decided` is
+              // fed by the `approval_resolved` frame as well as by this
+              // console's own resolves, so a decision taken on the page settles
+              // on the board with no reload.
+              //
+              // This replaces `onReviewApprovals`: the card's own "View
+              // details" is an `href` built with `withHostParam`, which lands
+              // the same `#/approvals/<taskId>` in the hash — surviving a
+              // refresh and the Back button — without a callback to route it.
+              decidingApprovals={decidingApprovals}
+              decidedApprovals={decidedApprovals}
+              failedApprovals={failedApprovals}
+              onDecideApproval={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
               // Lists, which reads the same instance) with no reload.

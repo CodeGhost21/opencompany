@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::Result;
@@ -332,6 +333,101 @@ enum JournalRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The two facts a blocked agent node's continuation needs — its workflow id
+    /// and the paused run's trigger input — stashed durably at park time so an
+    /// approval can re-dispatch the run **after a restart** (issue #1816,
+    /// Stage 2).
+    ///
+    /// The runtime's in-memory
+    /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue) is
+    /// the fast path; this record is what the builder re-arms it from at boot
+    /// (see [`blocked_stashes`](RuntimeJournal::blocked_stashes)). Written from
+    /// the one place — the runner's block-settle — that holds the workflow id,
+    /// the trigger input and the blocked-node list together, exactly where the
+    /// in-memory stash is armed. The parked tool-call effect itself carries no
+    /// workflow lineage, which is why this is a dedicated record rather than a
+    /// widening of [`ApprovalParked`](Self::ApprovalParked).
+    BlockedNodeStashed {
+        /// The per-(run, node) turn key its parked calls also armed the
+        /// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)
+        /// under, so a released batch and this stash name the same block.
+        turn: String,
+        /// The workflow whose run blocked, to load the graph for the re-run.
+        workflow_id: String,
+        /// The paused run's own trigger input, replayed unchanged — the grant the
+        /// approve minted is what lets the identical gated call pass on the re-run.
+        input: Value,
+        /// Epoch-millis the block was stashed.
+        at_millis: u64,
+    },
+    /// A blocked-node stash whose run has been re-dispatched (or whose block was
+    /// wholly refused): the paired terminator for
+    /// [`BlockedNodeStashed`](Self::BlockedNodeStashed), so a resolved block does
+    /// not rehydrate a duplicate continuation on the next boot (issue #1816).
+    BlockedNodeReleased {
+        /// The turn key whose stash this drops.
+        turn: String,
+    },
+    /// At least one of a blocked agent node's parked calls has been approved,
+    /// banked durably the moment that decision lands (issue #1816).
+    ///
+    /// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)'s
+    /// batch only carries the verdicts a single process happened to hold in
+    /// memory when the turn's last decision released it — a restart between
+    /// two decisions on the same node drops the earlier ones from that batch
+    /// exactly as [`WorkflowGateQueue`](crate::runtime::workflow_gates::WorkflowGateQueue)'s
+    /// own docs describe. That queue can afford the loss: the workflow graph
+    /// replay re-parks whatever the batch forgot, so the operator is asked
+    /// again rather than never. A blocked agent node has no such re-park —
+    /// [`resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)
+    /// either spawns the continuation or does not, once — so losing an earlier
+    /// approval from the batch would silently strand a grant the operator
+    /// already minted: an approved tool call that runs to redeem it never
+    /// executes and nothing re-asks. This record is the fact the batch cannot
+    /// carry, kept durable on its own so a restart mid-decision cannot erase
+    /// it. Written from the same place [`ContinuationQueue::decide`] is told
+    /// about the verdict, not deferred to release time, so it survives a
+    /// restart that lands on any decision but the last.
+    BlockedNodeApproved {
+        /// The turn key whose node had at least one call approved.
+        turn: String,
+    },
+    /// A blocked agent node's continuation is about to be launched (issue
+    /// #1825), written by
+    /// [`spawn_blocked_node_continuation`](crate::runtime::workflow_resume::spawn_blocked_node_continuation)
+    /// itself, immediately after the run is admitted
+    /// ([`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin)) and
+    /// immediately before its detached task is actually launched — and,
+    /// either way, well before
+    /// [`resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)
+    /// retires the stash via [`BlockedNodeReleased`](Self::BlockedNodeReleased).
+    ///
+    /// That retirement is the pair of facts (`blocked_stashes` and
+    /// `blocked_node_approvals`) that would otherwise tell a restart "this
+    /// stash is ready to dispatch" — exactly as true after a real dispatch
+    /// whose release-write failed as it is before any dispatch at all. Without
+    /// a marker recorded on the success side of admission,
+    /// `reconcile_stranded_blocked_nodes` cannot distinguish the two and would
+    /// re-spawn a continuation that already ran, potentially repeating token
+    /// spend or unprotected upstream work a second time. This record is that
+    /// marker.
+    ///
+    /// **Ordering, precisely.** The write sits between admission and launch
+    /// rather than after the whole spawn call returns (as the first cut of
+    /// this fix had it) because the launched task is detached — its caller
+    /// never awaits it — so a marker written only after the *call* returns
+    /// races the entire run, however long it takes, not a moment's gap. Between
+    /// admission and launch there is no further `.await`, so the crash window
+    /// this leaves is the width of this write's own append landing, nothing
+    /// more: a crash there can still leave the two out of sync (a marker with
+    /// nothing yet launched to justify it, which strands the turn rather than
+    /// duplicating it — the opposite, and cheaper, failure), but a crash
+    /// after the write cannot land inside a run this record does not already
+    /// know about.
+    BlockedNodeDispatched {
+        /// The turn key whose node's continuation has been spawned.
+        turn: String,
+    },
 }
 
 impl JournalRecord {
@@ -412,26 +508,47 @@ impl JournalRecord {
             // same trade `GrantConsumed` accepted four arms up: one flush on a
             // record written at operator-decision scale.
             //
-            // **Deliberately NOT extended to an agent node's gated tool call**,
-            // though those park inside a workflow run too and strand it just as
-            // badly. Flushing them would buy nothing: their continuation needs
-            // the workflow id and trigger input, which the tool-call effect does
-            // not carry, so `BlockedNodeQueue` stashes them **in memory** and
-            // — unlike the gate queue — does not rehydrate from the journal at
-            // all (`blocked_nodes`, stated there as the #899 Stage-1 boundary).
-            // A durable record whose continuation died with the process is a
-            // flush that changes nothing, and it would read as a fix. Making
-            // that path survive is #899 Stage 2.
+            // The card for an agent node's gated tool call used to stay
+            // `Process` here on the theory that the continuation it strands is
+            // durable a different way (issue #1816): the two facts the
+            // continuation needs are written at park time as a dedicated
+            // host-durable `BlockedNodeStashed` record and re-armed into
+            // `BlockedNodeQueue` at boot, so a restart between park and approve
+            // re-dispatches the run from that record — once the operator has
+            // decided.
             //
-            // Keyed on the effect kind rather than on `run_id`, which cannot do
-            // this job: `run_id` is stamped with a *task attempt* id at the
-            // dispatch boundary and with a *workflow run* id by `gate_effect`,
-            // so `is_some()` also selects card runs and blocked-node parks —
-            // the two cases this must not widen to. `WORKFLOW_APPROVE_KIND` is
-            // minted in exactly one place, for exactly the parks whose loss
-            // strands a run nothing will re-enter.
+            // "Once the operator has decided" is exactly what a lost card takes
+            // away, and nothing gives it back. `BlockedNodeQueue::rearm`
+            // restores the stash, but a stash with no matching card is not a
+            // pending decision: it is invisible to the operator (`pending()`
+            // and `parked_turns()` both replay from this same record, so a
+            // lost line is a lost row on both) and invisible to
+            // `reconcile_stranded_blocked_nodes`, which only resumes a turn
+            // already durably marked in `blocked_node_approvals` — a set this
+            // park's own loss keeps empty, because nobody ever got the chance
+            // to approve it. A restart between the park and the decision does
+            // not strand the *continuation* (#1816 covers that); it strands the
+            // *question*, permanently, with no re-park coming — the identical
+            // failure the workflow-gate arm below exists to close, one caller
+            // down. So this park needs that arm's durability for that arm's
+            // reason, bought the same way: human-approval scale, one flush per
+            // blocked node.
+            //
+            // Keyed on `run_id.is_some()` rather than the effect kind, because
+            // a blocked-node park's kind is the tool name itself and varies per
+            // call — there is no fixed tag to match the way
+            // `WORKFLOW_APPROVE_KIND` is one. `run_id` already carries the
+            // distinction that matters: `ApprovalRequestQueue::stamp_run` stamps
+            // it with the task-attempt id at the dispatch boundary for exactly a
+            // workflow node's own gated call, and deliberately leaves a chat
+            // turn's own park — which DOES re-park on its next attempt — at
+            // `None`. `gate_effect` stamps the workflow gate's own park with a
+            // run id too, so `is_some()` alone already covers it; the explicit
+            // kind check is kept so that arm's own reasoning stays legible
+            // without depending on this one.
             Self::ApprovalParked { effect, .. }
-                if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND =>
+                if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND
+                    || effect.run_id.is_some() =>
             {
                 Durability::Host
             }
@@ -471,6 +588,33 @@ impl JournalRecord {
             // host crash, it was.
             Self::CycleStarted { .. } => Durability::Process,
             Self::CycleFinished { .. } => Durability::Process,
+            // Issue #1816: the whole point of the record is to outlive the
+            // process — and, on a hosted tenant whose journal store is the
+            // shared database, the container. `Process` would leave it
+            // page-cache-resident and lost with the pod, which is precisely the
+            // failure that stranded parked tasks on the ~90-min staging cron.
+            // Written at human-approval scale (one per blocked node), so the
+            // flush is invisible — the same trade the workflow-gate park makes
+            // for its own continuation facts one arm up.
+            Self::BlockedNodeStashed { .. } => Durability::Host,
+            // The terminator must be at least as durable as the record it
+            // retires: if the stash survived a crash but its release did not,
+            // the next boot would rehydrate a stash whose run already
+            // re-dispatched and could double-spawn under a boot sweep. Host, to
+            // match `BlockedNodeStashed`.
+            Self::BlockedNodeReleased { .. } => Durability::Host,
+            // Protects against exactly the failure `BlockedNodeStashed` does —
+            // the fact this exists to carry is only needed across the same
+            // restart window, and a `Process`-tier write could be lost to the
+            // same pod-roll that motivated the stash's own Host tier, silently
+            // reopening the gap this record closes.
+            Self::BlockedNodeApproved { .. } => Durability::Host,
+            // Issue #1825: the same tier as `BlockedNodeStashed` for the same
+            // reason — this is the fact that makes a `BlockedNodeReleased`
+            // write failure safe rather than a double-dispatch, so a
+            // `Process`-tier write that a pod-roll could still drop would
+            // reopen exactly the gap it exists to close.
+            Self::BlockedNodeDispatched { .. } => Durability::Host,
         }
     }
 }
@@ -839,6 +983,83 @@ struct State {
     /// live set, so retaining a revoked one would hand back a permission the
     /// operator explicitly took away — on every restart, silently.
     standing_grants: HashMap<GrantId, StandingGrant>,
+    /// Blocked agent-node continuation facts still awaiting re-dispatch, keyed by
+    /// the per-(run, node) turn key (issue #1816, Stage 2).
+    ///
+    /// A [`BlockedNodeStashed`](JournalRecord::BlockedNodeStashed) inserts, its
+    /// paired [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased) removes
+    /// — the same start-inserts / terminator-removes shape
+    /// [`grants`](Self::grants) uses, and for the same reason: a replayed entry is
+    /// handed straight back to the live
+    /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue) at
+    /// boot, so retaining a released one would rehydrate a run that already
+    /// re-dispatched.
+    blocked_stashes: HashMap<String, BlockedStash>,
+    /// Blocked agent-node turns with at least one approved decision banked so
+    /// far, keyed the same as [`blocked_stashes`](Self::blocked_stashes)
+    /// (issue #1816).
+    ///
+    /// Inserted by [`BlockedNodeApproved`](JournalRecord::BlockedNodeApproved)
+    /// and removed by its stash's paired
+    /// [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased) — the release
+    /// that retires the stash also retires whatever this set knows about it,
+    /// so a turn never lingers here past the continuation it describes.
+    blocked_node_approvals: HashSet<String>,
+    /// Blocked agent-node turns whose continuation has already been spawned
+    /// once, keyed the same as [`blocked_stashes`](Self::blocked_stashes)
+    /// (issue #1825).
+    ///
+    /// Inserted by
+    /// [`BlockedNodeDispatched`](JournalRecord::BlockedNodeDispatched), the
+    /// moment [`resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)'s
+    /// spawn attempt actually succeeds — before that call goes on to retire the
+    /// stash via [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased),
+    /// which is the write `retire_blocked_stash` treats as best-effort. If that
+    /// later write fails, `blocked_stashes` and `blocked_node_approvals` both
+    /// survive a restart exactly as if nothing had been dispatched, and without
+    /// this set `reconcile_stranded_blocked_nodes` cannot tell that apart from
+    /// the genuine stranded case — it would re-spawn a continuation that
+    /// already ran.
+    ///
+    /// # Deliberately *not* retired by `BlockedNodeReleased` (finding `3877914597`)
+    ///
+    /// Unlike [`blocked_node_approvals`](Self::blocked_node_approvals), a turn
+    /// entered here is permanent for the life of the process and every future
+    /// replay — the same shape [`executed`](Self::executed) already uses, for
+    /// the same reason. A workflow-gate blocked-node card's own
+    /// [`ApprovalParked`](JournalRecord::ApprovalParked) is `Durability::Host`,
+    /// but [`ApprovalResolved`](JournalRecord::ApprovalResolved) is always
+    /// `Durability::Process`: a host crash can lose only the resolution and
+    /// leave that card durably reopened as a "ghost" *after* its continuation
+    /// already ran to completion and its own `BlockedNodeReleased` already
+    /// landed. `resume_blocked_agent_node`'s guard against a ghost decision
+    /// (issue #1825, finding `3877718169`) reads only this set, so a version
+    /// that cleared the turn out of it on release (as this one used to) made
+    /// that guard read `false` for exactly the case it exists to catch — the
+    /// ghost then fell through to the "no stash on this host" branch, which
+    /// tells the operator to re-run the workflow by hand, manually repeating
+    /// the very side effect the guard exists to prevent automatically. One
+    /// leaked turn key per completed blocked node is the accepted cost of
+    /// closing that, the same trade `executed` already makes.
+    blocked_node_dispatched: HashSet<String>,
+}
+
+/// One blocked agent node's durable continuation facts (issue #1816).
+#[derive(Clone, Debug)]
+struct BlockedStash {
+    workflow_id: String,
+    input: Value,
+    /// Whether this stash's `BlockedNodeStashed` append has actually landed
+    /// (issue #1825, P1 — found by chatgpt-codex-connector).
+    ///
+    /// Set on insert by [`replay`](RuntimeJournal::replay), since a record it
+    /// folds is durable by construction. Starts `false` for a live insert made
+    /// by [`record_blocked_node_stashed`](RuntimeJournal::record_blocked_node_stashed)
+    /// ahead of its own append, and flips to `true` only once that append
+    /// actually returns `Ok`. The settle-time fallback call reads this — not
+    /// mere presence in the map — to decide whether there is still an append
+    /// worth retrying.
+    durable: bool,
 }
 
 impl State {
@@ -1142,6 +1363,42 @@ impl RuntimeJournal {
             }
             JournalRecord::CycleFinished { cycle_id, .. } => {
                 state.open_cycles.remove(&cycle_id);
+            }
+            // Issue #1816: start inserts, terminator removes — the same shape as
+            // grants. A `BlockedNodeReleased` for a turn this journal never
+            // stashed removes nothing, which is correct: a pre-#1816 line has no
+            // stash to retire, so none can be sitting in the map.
+            JournalRecord::BlockedNodeStashed {
+                turn,
+                workflow_id,
+                input,
+                ..
+            } => {
+                state.blocked_stashes.insert(
+                    turn,
+                    BlockedStash {
+                        workflow_id,
+                        input,
+                        // A record `replay` folds is durable by construction —
+                        // it was read back from the journal it describes.
+                        durable: true,
+                    },
+                );
+            }
+            JournalRecord::BlockedNodeReleased { turn } => {
+                state.blocked_stashes.remove(&turn);
+                state.blocked_node_approvals.remove(&turn);
+                // `blocked_node_dispatched` is deliberately NOT retired here —
+                // see that field's own doc comment (finding `3877914597`). A
+                // ghost decision can still reach this turn after this very
+                // release replays, and the guard it feeds needs the tombstone
+                // to still be standing when it does.
+            }
+            JournalRecord::BlockedNodeApproved { turn } => {
+                state.blocked_node_approvals.insert(turn);
+            }
+            JournalRecord::BlockedNodeDispatched { turn } => {
+                state.blocked_node_dispatched.insert(turn);
             }
         }
     }
@@ -1462,6 +1719,243 @@ impl RuntimeJournal {
             .values()
             .filter_map(|p| p.cycle.clone())
             .collect()
+    }
+
+    /// Every blocked agent-node stash still awaiting re-dispatch, as
+    /// `(turn, workflow_id, input)` (issue #1816, Stage 2).
+    ///
+    /// The builder folds this at boot into the live
+    /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)
+    /// (via [`rearm`](crate::runtime::blocked_nodes::BlockedNodeQueue::rearm)) so
+    /// an approval landing after a restart finds the run to continue, the way
+    /// [`pending`](Self::pending) feeds the gate queue's re-arm. Only stashes
+    /// whose paired [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased)
+    /// has not replayed are returned — a re-dispatched run does not come back.
+    pub fn blocked_stashes(&self) -> Vec<(String, String, Value)> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_stashes
+            .iter()
+            .map(|(turn, stash)| (turn.clone(), stash.workflow_id.clone(), stash.input.clone()))
+            .collect()
+    }
+
+    /// Stashes a blocked agent node's continuation facts durably (issue #1816).
+    ///
+    /// Called from `HarnessAgentRunner::park_gated_calls` at park time, in
+    /// lockstep with the in-memory
+    /// [`BlockedNodeQueue::arm`](crate::runtime::blocked_nodes::BlockedNodeQueue::arm)
+    /// (issue #1825, P1 second follow-up) — and again, redundantly, from the
+    /// runner's block-settle pass, which called this first and alone until
+    /// that follow-up. Both calls for one node carry the same `(turn,
+    /// workflow_id, input)`, so once the append has actually landed the
+    /// second call is a first-write-wins no-op rather than a second source of
+    /// truth — the same tier `arm` itself skips at for the identical reason,
+    /// now applied one durability level up so the settle pass's fallback call
+    /// does not double every blocked node's `BlockedNodeStashed` write
+    /// forever. Best-effort at the call site either way: a failed durable
+    /// write leaves the in-memory stash serving the common (no-restart) case,
+    /// exactly as a failed gate journal leaves its live queue in place.
+    ///
+    /// # Retrying a failed first append (issue #1825, P1 — found by
+    /// chatgpt-codex-connector)
+    ///
+    /// The in-memory insert below lands before the append that durably backs
+    /// it, so a transient failure on the park-time call still leaves `turn` in
+    /// `blocked_stashes` — otherwise a resolve landing before the settle-time
+    /// fallback would find no stash to release even though the in-memory arm
+    /// (this call's sibling) says the node is blocked. But that same
+    /// in-memory presence used to be read as "already durable": the
+    /// settle-time fallback's call would see the entry, assume its own append
+    /// was the redundant second write, and return without ever appending —
+    /// so the durable record was never retried, and a restart landing before
+    /// the run re-dispatches rehydrates nothing for an approval card that is
+    /// still sitting there, clickable. [`BlockedStash::durable`] is what closes
+    /// that: it is only set once an append for this stash has actually
+    /// returned `Ok`, so a call that finds the turn present but not yet
+    /// durable retries the append instead of skipping it.
+    pub async fn record_blocked_node_stashed(
+        &self,
+        turn: &str,
+        workflow_id: &str,
+        input: &Value,
+    ) -> Result<()> {
+        {
+            let mut state = self.state.lock().expect("journal state poisoned");
+            match state.blocked_stashes.get(turn) {
+                Some(existing) if existing.durable => {
+                    // Already durably recorded — either this run's own
+                    // park-time write already landed and the settle pass is
+                    // the redundant call, or a retry of this same call raced
+                    // itself. Either way the facts are identical (one node
+                    // parks under one turn), so a second durable append would
+                    // only double the flush for no new information.
+                    return Ok(());
+                }
+                Some(_) => {
+                    // In memory, but its first durable append never landed —
+                    // fall through and retry below instead of returning early
+                    // and leaving the in-memory state misrepresent durability
+                    // forever.
+                }
+                None => {
+                    state.blocked_stashes.insert(
+                        turn.to_string(),
+                        BlockedStash {
+                            workflow_id: workflow_id.to_string(),
+                            input: input.clone(),
+                            durable: false,
+                        },
+                    );
+                }
+            }
+        }
+        self.append(&JournalRecord::BlockedNodeStashed {
+            turn: turn.to_string(),
+            workflow_id: workflow_id.to_string(),
+            input: input.clone(),
+            at_millis: crate::ports::now_millis(),
+        })
+        .await?;
+        // Reached only once the append actually landed. A concurrent release
+        // (the turn resolved and retired between the block above and here)
+        // leaves nothing for `and_modify` to touch — correctly: there is no
+        // stash left to mark durable, and none should be resurrected here.
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_stashes
+            .entry(turn.to_string())
+            .and_modify(|stash| stash.durable = true);
+        Ok(())
+    }
+
+    /// Retires a blocked-node stash once its run has re-dispatched (or its block
+    /// was wholly refused), so a later boot does not rehydrate it (issue #1816).
+    ///
+    /// Also retires the turn from `blocked_node_approvals`, mirroring what
+    /// replaying this same record does in [`replay`](Self::replay) — the
+    /// doc-stated invariant on that field is that a turn never lingers there
+    /// past the continuation it describes. Without this, a live release left
+    /// the turn banked in that set for the rest of the process's life: a
+    /// long-running tenant would accumulate one stale key per completed
+    /// block, invisible until the next full reload replayed the same record
+    /// correctly.
+    ///
+    /// `blocked_node_dispatched` is the one exception — deliberately left
+    /// standing here, matching [`replay`](Self::replay)'s own fold. See that
+    /// field's doc comment (finding `3877914597`) for why a live release
+    /// clearing its own dispatch tombstone reopens the exact ghost-redispatch
+    /// gap issue #1825 exists to close.
+    pub async fn record_blocked_node_released(&self, turn: &str) -> Result<()> {
+        {
+            let mut state = self.state.lock().expect("journal state poisoned");
+            state.blocked_stashes.remove(turn);
+            state.blocked_node_approvals.remove(turn);
+        }
+        self.append(&JournalRecord::BlockedNodeReleased {
+            turn: turn.to_string(),
+        })
+        .await
+    }
+
+    /// Every blocked-node turn durably known to have at least one approved
+    /// decision banked (issue #1816).
+    ///
+    /// The builder folds this at boot into the live
+    /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)
+    /// (via [`mark_approved`](crate::runtime::blocked_nodes::BlockedNodeQueue::mark_approved),
+    /// once per turn) alongside [`blocked_stashes`](Self::blocked_stashes), so a
+    /// restart that landed between an approval and the node's last decision
+    /// still knows that approval happened when the last one lands.
+    pub fn blocked_node_approvals(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_node_approvals
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Records durably that a blocked agent node's turn has at least one
+    /// approved decision, the moment that decision lands (issue #1816).
+    ///
+    /// Called beside [`ContinuationQueue::decide`](crate::runtime::continuation::ContinuationQueue::decide),
+    /// not deferred to the turn's release — the whole point is to survive a
+    /// restart that lands on a decision that is not the turn's last, which is
+    /// exactly the window release-time bookkeeping cannot cover. Idempotent by
+    /// construction (a set insert), so a node whose second call is also
+    /// approved writes this again harmlessly.
+    pub async fn record_blocked_node_approved(&self, turn: &str) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_node_approvals
+            .insert(turn.to_string());
+        self.append(&JournalRecord::BlockedNodeApproved {
+            turn: turn.to_string(),
+        })
+        .await
+    }
+
+    /// Every blocked-node turn durably known to have already had its
+    /// continuation spawned once (issue #1825).
+    ///
+    /// [`CompanyRuntime::reconcile_stranded_blocked_nodes`](crate::company::runtime::CompanyRuntime::reconcile_stranded_blocked_nodes)
+    /// checks this before re-spawning an approved-but-still-rehydrated stash:
+    /// without it, a boot cannot tell "never dispatched" apart from "dispatched,
+    /// but its `BlockedNodeReleased` write failed" — both leave the same
+    /// `blocked_stashes` + `blocked_node_approvals` pair behind. See
+    /// [`BlockedNodeDispatched`](JournalRecord::BlockedNodeDispatched) for the
+    /// full reasoning.
+    pub fn blocked_node_dispatched(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_node_dispatched
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Whether `turn`'s continuation has already been durably marked
+    /// dispatched (issue #1825, finding `3877718169`).
+    ///
+    /// A single-lookup twin of [`blocked_node_dispatched`](Self::blocked_node_dispatched),
+    /// for callers that only need one turn's membership rather than the whole
+    /// set — [`CompanyRuntime::resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)'s
+    /// own guard checks this on every live decision reaching a blocked node,
+    /// not once per boot the way [`CompanyRuntime::reconcile_stranded_blocked_nodes`](crate::company::runtime::CompanyRuntime::reconcile_stranded_blocked_nodes)
+    /// does, so cloning the full set on every call would be waste for no
+    /// reason a `HashSet::contains` doesn't already avoid.
+    pub fn is_blocked_node_dispatched(&self, turn: &str) -> bool {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_node_dispatched
+            .contains(turn)
+    }
+
+    /// Records durably that a blocked agent node's continuation has been
+    /// spawned, the moment the spawn attempt actually succeeds (issue #1825).
+    ///
+    /// Called from [`CompanyRuntime::resume_blocked_agent_node`](crate::company::runtime::CompanyRuntime::resume_blocked_agent_node)'s
+    /// `Ok(())` arm, **before** it calls `retire_blocked_stash` — so this
+    /// record lands even when that call's own durable write later fails.
+    /// Idempotent by construction (a set insert), matching
+    /// [`record_blocked_node_approved`](Self::record_blocked_node_approved).
+    pub async fn record_blocked_node_dispatched(&self, turn: &str) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocked_node_dispatched
+            .insert(turn.to_string());
+        self.append(&JournalRecord::BlockedNodeDispatched {
+            turn: turn.to_string(),
+        })
+        .await
     }
 
     /// The turn that parked `id`, if it is one this journal recorded
@@ -3783,6 +4277,15 @@ mod test {
                 at_millis: 9,
                 error: None,
             },
+            JournalRecord::BlockedNodeStashed {
+                turn: "t".into(),
+                workflow_id: "w".into(),
+                input: serde_json::json!({}),
+                at_millis: 10,
+            },
+            JournalRecord::BlockedNodeReleased { turn: "t".into() },
+            JournalRecord::BlockedNodeApproved { turn: "t".into() },
+            JournalRecord::BlockedNodeDispatched { turn: "t".into() },
         ]
     }
 
@@ -3818,12 +4321,12 @@ mod test {
     /// pinned separately below (issue #1145) — deliberately not by loosening
     /// this list, which is the assertion that would have stopped noticing.
     #[test]
-    fn host_durable_kinds_are_exactly_the_three_that_could_repeat_an_action() {
+    fn host_durable_kinds_are_exactly_the_seven_that_could_repeat_an_action() {
         let all = every_record_kind();
         let tags: HashSet<String> = all.iter().map(record_tag).collect();
         assert_eq!(
             tags.len(),
-            13,
+            17,
             "every JournalRecord variant must appear once in every_record_kind"
         );
 
@@ -3836,13 +4339,18 @@ mod test {
         assert_eq!(
             host,
             vec![
+                "BlockedNodeApproved".to_string(),
+                "BlockedNodeDispatched".to_string(),
+                "BlockedNodeReleased".to_string(),
+                "BlockedNodeStashed".to_string(),
                 "EffectExecuted".to_string(),
                 "GrantConsumed".to_string(),
                 "StandingGrantRevoked".to_string()
             ],
-            "the host-durable set is these three kinds and nothing else; \
-             widening it taxes the hot path, narrowing it lets an effect duplicate \
-             or a spent grant re-arm"
+            "the host-durable set is these seven kinds and nothing else; \
+             widening it taxes the hot path, narrowing it lets an effect duplicate, \
+             a spent grant re-arm, or a blocked node's stash/approval/dispatch survive a \
+             process restart but not the host crash it also promises to survive"
         );
     }
 
@@ -3893,6 +4401,45 @@ mod test {
                  taxes the approval path for a question that comes back on its own"
             );
         }
+    }
+
+    /// **Issue #1825** (Codex finding `3866158654`). A blocked agent-node's
+    /// gated tool call park is host-durable too — the same reasoning as
+    /// `only_a_workflow_gate_park_is_host_durable` above, one caller down:
+    /// `BlockedNodeStashed` durably carries the continuation, but nothing
+    /// regenerates a lost `ApprovalParked` card, so a card lost to a host
+    /// crash between park and approve strands the question forever with no
+    /// re-park coming.
+    ///
+    /// Discriminated by `run_id` rather than `kind`, because a blocked node's
+    /// park carries the tool's own name — it varies per call, unlike
+    /// `WORKFLOW_APPROVE_KIND`. See `ApprovalRequestQueue::stamp_run`'s doc for
+    /// why `run_id` is exactly the field a workflow-dispatched call has and a
+    /// chat turn's own call does not.
+    #[test]
+    fn a_blocked_node_tool_call_park_is_host_durable_too() {
+        let mut blocked_node_park = parked_with_kind("shell");
+        let JournalRecord::ApprovalParked { effect, .. } = &mut blocked_node_park else {
+            panic!("parked_with_kind always returns ApprovalParked");
+        };
+        effect.run_id = Some("run-1".to_string());
+        assert_eq!(
+            blocked_node_park.durability(),
+            Durability::Host,
+            "a blocked node's card is the only durable record that can put its \
+             decision in front of the operator again — losing it strands the \
+             stash `BlockedNodeStashed` keeps alive behind a question nobody can \
+             answer"
+        );
+
+        // A chat turn's own gated call carries no `run_id` (`stamp_run` leaves
+        // it `None`) and must not be swept up by the widened arm above — it
+        // still re-parks on its own next attempt.
+        assert_eq!(
+            parked_with_kind("shell").durability(),
+            Durability::Process,
+            "a chat-turn park has no run_id and re-asks on its own"
+        );
     }
 
     /// **Issue #392**: a host-durable record's append really does take the
@@ -4032,6 +4579,234 @@ mod test {
             retry.is_err(),
             "the retry must re-attempt the commit and surface the failure again, \
              never take the already-committed early return and report success"
+        );
+    }
+
+    /// A live release must retire a turn from `blocked_node_approvals` exactly
+    /// as replaying its `BlockedNodeReleased` record does — the doc-stated
+    /// invariant on the field itself: "a turn never lingers here past the
+    /// continuation it describes."
+    ///
+    /// `record_blocked_node_released` used to remove only from
+    /// `blocked_stashes`, leaving the turn's entry in
+    /// `blocked_node_approvals` for the rest of the process's life — a
+    /// long-running tenant that parks and approves many blocked nodes
+    /// accumulates one stale key per release, unlike a fresh reload, which
+    /// (via `replay`) always retires both together. Calling the live method
+    /// directly, with no restart in between, isolates exactly that gap.
+    #[tokio::test]
+    async fn release_retires_the_turn_from_blocked_node_approvals_live() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        journal
+            .record_blocked_node_stashed("turn-1", "wf-1", &serde_json::json!({}))
+            .await
+            .unwrap();
+        journal
+            .record_blocked_node_approved("turn-1")
+            .await
+            .unwrap();
+        assert_eq!(journal.blocked_node_approvals(), vec!["turn-1".to_string()]);
+
+        journal
+            .record_blocked_node_released("turn-1")
+            .await
+            .unwrap();
+        assert!(
+            journal.blocked_node_approvals().is_empty(),
+            "a released turn must not linger in the live approval set — it \
+             must be retired the moment release lands, not only on the next \
+             reload's replay"
+        );
+    }
+
+    /// The mirror image of the test above: unlike `blocked_node_approvals`,
+    /// a live release must **not** retire the turn from
+    /// `blocked_node_dispatched` (finding `3877914597`).
+    ///
+    /// `resume_blocked_agent_node`'s guard against a ghost decision (issue
+    /// #1825, finding `3877718169`) reads only this set to tell "already
+    /// dispatched" apart from "genuinely nothing left on this host". A ghost
+    /// `ApprovalResolved` can reach that guard *after* the turn's own
+    /// continuation already ran to completion and its `BlockedNodeReleased`
+    /// already landed — a host crash loses only the process-durable
+    /// resolution while the host-durable park, approve, and dispatch facts
+    /// all survive. If release cleared this set too (as it used to, mirroring
+    /// `blocked_node_approvals` above), the guard would read `false` for
+    /// exactly that case and the ghost would fall through into the "no stash
+    /// on this host" branch, which tells the operator to re-run the workflow
+    /// by hand — manually repeating the tool call the continuation already
+    /// ran once. Proven live and across a reload, since the guard's only
+    /// caller reads a freshly-replayed journal at boot.
+    #[tokio::test]
+    async fn release_does_not_retire_the_turn_from_blocked_node_dispatched_live() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        journal
+            .record_blocked_node_stashed("turn-1", "wf-1", &serde_json::json!({}))
+            .await
+            .unwrap();
+        journal
+            .record_blocked_node_approved("turn-1")
+            .await
+            .unwrap();
+        journal
+            .record_blocked_node_dispatched("turn-1")
+            .await
+            .unwrap();
+        assert!(journal.is_blocked_node_dispatched("turn-1"));
+
+        journal
+            .record_blocked_node_released("turn-1")
+            .await
+            .unwrap();
+        assert!(
+            journal.is_blocked_node_dispatched("turn-1"),
+            "the dispatch tombstone must survive its own turn's release — a \
+             ghost decision reaching this turn after release is exactly the \
+             case issue #1825's guard exists to catch, and the guard reads \
+             this set"
+        );
+
+        // A fresh reload's replay must fold the same record the same way.
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert!(
+            reloaded.is_blocked_node_dispatched("turn-1"),
+            "replay must agree with the live path — the boot-time \
+             reconciler and the live resume guard cannot disagree about \
+             whether a turn was already dispatched"
+        );
+    }
+
+    /// A [`JournalStore`] whose `append_journal` fails exactly once — the
+    /// park-time write's transient failure — then passes every later append
+    /// straight through to an in-memory backend, including a retry of the
+    /// very same record. Mirrors `FailNJournalStore` in
+    /// `blocked_node_continuation_test`, scoped down to this module's own
+    /// unit tests via [`RuntimeJournal::with_store`].
+    struct FailOnceJournalStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    impl FailOnceJournalStore {
+        fn new() -> Self {
+            Self {
+                inner: crate::ports::journal::MemoryJournalStore::default(),
+                failed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl JournalStore for FailOnceJournalStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: Durability,
+        ) -> crate::Result<()> {
+            if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "FailOnceJournalStore: forced failure on the first append".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// Issue #1825 (P1 — found by chatgpt-codex-connector): a park-time
+    /// `record_blocked_node_stashed` whose first durable append fails
+    /// transiently must have that append retried by the settle-time fallback
+    /// call, not silently skipped.
+    ///
+    /// # The bug this reproduces
+    ///
+    /// The in-memory insert lands before the append that backs it durably, so
+    /// the first (failing) call still leaves `turn` in `blocked_stashes` —
+    /// that half is correct and load-bearing (a resolve landing before settle
+    /// must still find an in-memory stash to release). But the early-return
+    /// guard used to read that in-memory presence as proof the append had
+    /// already landed: the settle-time fallback's call (the *same*
+    /// `(turn, workflow_id, input)`, by construction) would see the entry,
+    /// assume it was the redundant second write, and return `Ok(())` without
+    /// ever appending. A restart between that skipped retry and the run
+    /// re-dispatching then replays no `BlockedNodeStashed` line at all — the
+    /// approval card is still there, clickable, but `BlockedNodeQueue::rearm`
+    /// has nothing to rebuild the stash from.
+    ///
+    /// # Why this proves the fix
+    ///
+    /// `FailOnceJournalStore` fails only the very first append, so the second
+    /// `record_blocked_node_stashed` call — standing in for the settle-time
+    /// fallback — hits a store that is willing to succeed. Pre-fix, the
+    /// early-return means that willingness is never tested: the assertion
+    /// that a fresh reload actually replays the stash fails, because nothing
+    /// durable was ever written. Post-fix the second call retries the append,
+    /// it lands, and a reload rehydrates `turn-1`.
+    #[tokio::test]
+    async fn a_stash_whose_first_durable_append_failed_is_retried_and_lands() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(FailOnceJournalStore::new());
+        let journal = RuntimeJournal::with_store(store.clone(), company.clone());
+        let input = serde_json::json!({ "request": "quarterly numbers" });
+
+        // Park time: the first append fails transiently. The in-memory stash
+        // still has to be there for a fast resolve to release, so this must
+        // not be lost even though the call itself reports an error.
+        let first = journal
+            .record_blocked_node_stashed("turn-1", "wf-1", &input)
+            .await;
+        assert!(
+            first.is_err(),
+            "the forced first-append failure must surface, not be swallowed"
+        );
+        assert_eq!(
+            journal.blocked_stashes(),
+            vec![("turn-1".to_string(), "wf-1".to_string(), input.clone())],
+            "the in-memory stash must still be there after a failed append — a resolve \
+             landing before the next retry has to find it"
+        );
+
+        // Settle time: the fallback calls the same method with the same
+        // facts. The store is willing to succeed now — the fix must actually
+        // retry the append instead of taking the early return.
+        let second = journal
+            .record_blocked_node_stashed("turn-1", "wf-1", &input)
+            .await;
+        assert!(
+            second.is_ok(),
+            "the retry must re-attempt the durable append rather than silently reporting \
+             success off the in-memory presence alone: {second:?}"
+        );
+
+        // The proof that it actually landed, not merely that `Ok` came back:
+        // a fresh journal over the same store replays the stash from the
+        // durable line.
+        let reloaded = RuntimeJournal::with_store(store, company);
+        reloaded.load().await.unwrap();
+        assert_eq!(
+            reloaded.blocked_stashes(),
+            vec![("turn-1".to_string(), "wf-1".to_string(), input)],
+            "a restart must rehydrate this stash — the retried append is the only durable \
+             record of it, and pre-fix it was never written at all"
         );
     }
 }

@@ -4434,10 +4434,14 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         }
         // Single document, non-recursive — the check above just proved this
         // id has no children, so there is nothing else to remove with it.
-        self.collection("workspace_nodes")
+        let deleted = self
+            .collection("workspace_nodes")
             .delete_one(doc! {"company_id": company.as_ref(), "node_id": id})
             .await
             .map_err(mongo_err)?;
+        if deleted.deleted_count == 0 {
+            return Ok(false);
+        }
         self.drop_blobs(company, id, None).await?;
         Ok(true)
     }

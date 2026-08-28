@@ -83,6 +83,7 @@ import {
   channelTitle,
   deskFromDto,
   dmChannelId,
+  dmThreadId,
   findChannel,
   firstChannel,
   historyReady,
@@ -1119,8 +1120,10 @@ export function ChatView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `client`/`company`
     // intentionally excluded: this effect's job is "a new notice appeared",
-    // not "the client changed"; a client/company change already clears
-    // `transcripts` (and therefore this map) via the boot/company-switch path.
+    // not "the client changed". A client/company change is handled by the
+    // reset effect above, which empties this map; `transcripts` resetting in
+    // `AppShell` then re-derives `budgetPauseMessageIdByAgent`, so this effect
+    // re-runs with the new scope's notices.
   }, [budgetPauseMessageIdByAgent]);
 
   // An open thread only makes sense while its parent is on screen; switching
@@ -1257,7 +1260,38 @@ export function ChatView({
   // (`responder_for` in `src/harness/brain.rs`), which is exactly what a DM's
   // `member.id` is, so a DM addresses that teammate the same way a desk
   // addresses its lead. It is also the id every live turn frame carries.
-  const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
+  //
+  // **Except** a teammate whose id is itself a General spelling. The host folds
+  // the bare key to the company's line before it ever reaches the roster —
+  // deliberately, so `main` cannot be captured by a teammate called `main` —
+  // and a DM composed here was therefore written and answered in `#general`,
+  // under a transcript its own DM could not read back. `mint_agent_id` reserves
+  // these spellings, but a manifest can still declare one, so this is
+  // grandfathered state rather than a hypothesis. That one DM is addressed
+  // prefixed, which `chat_responder` unwraps and resolves
+  // (`chat_responder("dm:main") == Some("main")`), and which
+  // `channelIdForThread` maps back. Every other DM keeps the bare id issue #364
+  // re-keyed it onto.
+  const activeThreadId =
+    active.kind === "channel" ? active.id : active.member && dmThreadId(active.member);
+  /**
+   * Whether the active channel is a **host desk** — the thing every desk
+   * affordance below is derived from.
+   *
+   * Asked of the desk list, not of the id's spelling. The built-in `#general`
+   * (issue #1743) is the one channel carrying `memberIds` that is not a desk,
+   * and it is in no desk list, so this excludes it for the reason it should be
+   * excluded rather than by matching its name. A blueprint that declares
+   * `[[group_chat]] id = "general"` is the case an id test gets wrong: the host
+   * grandfathers it (`is_general_channel` is guarded on `!desk_exists`), so it
+   * is a real desk with a real lead that the org chart holds — and spelling
+   * alone would have hidden both.
+   *
+   * `desks` is `null` until `/desks` answers, and the fallback desks carry no
+   * `memberIds`, so neither offers an affordance either way.
+   */
+  const activeIsDesk =
+    active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
   /**
    * The turn this channel is waiting on, if any (issue #983).
@@ -2160,13 +2194,21 @@ export function ChatView({
               people={companyPeople}
               presence={presence}
               leadId={
-                // An `auto` channel has no lead (issue #1835): its memberIds
-                // are the channel's membership in the host's order, not a
-                // hierarchy, so badging [0] would state a rank nothing
-                // confers — the host's own `desk_lead` is `None` for it.
-                active.kind === "channel" && !active.leadless
-                  ? active.memberIds?.[0]
-                  : undefined
+                  // Two different channels have no lead, and both have to be
+                  // excluded here.
+                  //
+                  // The built-in `#general` (issue #1743) is not a desk at all:
+                  // its `memberIds` are the roster in roster order, so `[0]` is
+                  // whoever happens to be listed first. `activeIsDesk` asks the
+                  // desk list rather than the id's spelling, which is why it
+                  // answers correctly for a blueprint desk that claims the line.
+                  //
+                  // An `auto` channel (issue #1835) *is* a desk, but a leadless
+                  // one: its members are the host's order, not a hierarchy, and
+                  // the host's own `desk_lead` is `None` for it.
+                  //
+                  // Either way, badging `[0]` states a rank nothing confers.
+                  activeIsDesk && !active.leadless ? active.memberIds?.[0] : undefined
               }
               loading={loadingTeam}
               fromHost={fromHost}
@@ -2186,6 +2228,22 @@ export function ChatView({
                * nothing to open. Both simply get no link rather than one that
                * lands nowhere.
                *
+               * Nor is the built-in `#general` (issue #1743), which *does*
+               * carry `memberIds` — the whole roster, derived — and would
+               * otherwise have passed this test and opened `#/company/main` on
+               * a desk that does not exist. It is deliberately not a desk: it
+               * has no lead, no hierarchy, and no membership to manage, and the
+               * host refuses every desk write aimed at it with a reason. The
+               * rule this file already follows (`api/setup.ts:58`) is not to
+               * offer a control that will be refused, so there is no link and
+               * no disabled one either — absence is the honest state.
+               *
+               * Decided by {@link activeIsDesk} — whether the desk list holds
+               * this id — rather than by the id's spelling. A blueprint that
+               * declares `[[group_chat]] id = "general"` keeps a real desk with
+               * a real lead, which the host lists and the org chart holds; an
+               * id test would have hidden that desk's lead and its link.
+               *
                * A desk's channel id **is** its desk id (`deskFromDto`), so
                * there is no mapping to keep in step. Written to the hash rather
                * than routed through a callback, as `ArtifactsTab`'s "Open in
@@ -2193,7 +2251,7 @@ export function ChatView({
                * only hands chat a chat-scoped navigate.
                */
               onManageDesk={
-                active.kind === "channel" && active.memberIds
+                activeIsDesk && active.memberIds
                   ? () => {
                       window.location.hash = `/company/${active.id}`;
                     }

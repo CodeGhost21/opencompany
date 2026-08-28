@@ -42,7 +42,8 @@ import {
   type ApprovalSummary,
   type GrantScope,
 } from "@/api/types";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { MAIN_THREAD_ID } from "@/lib/chat";
+import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
@@ -54,7 +55,13 @@ import {
 import { fromDto, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { workflowHref } from "@/lib/task-output";
-import { channelIdForThread, deskFromDto, dmChannelId } from "@/views/chat/model";
+import {
+  channelForThread,
+  channelIdForThread,
+  deskFromDto,
+  dmChannelId,
+  memberForThread,
+} from "@/views/chat/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -250,7 +257,8 @@ export function ApprovalMeta({
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;
-  const conversationChannelId = a.thread ? (chatChannelByThread?.[a.thread] ?? null) : null;
+  const conversationChannelId =
+    a.thread && chatChannelByThread ? channelForThread(chatChannelByThread, a.thread) : null;
   const workflowId = workflowIdForApproval(a);
   const workflowRunHref =
     workflowId && a.workflow_run_id ? workflowHref(workflowId, a.workflow_run_id) : null;
@@ -429,8 +437,15 @@ function workflowIdForApproval(approval: ApprovalSummary): string | null {
  * returns nothing at all and inherits the meta line's muted grey, which keeps
  * the quiet case exactly as it shipped — the emphasis is only worth anything if
  * most cards do not have it.
+ *
+ * Exported for the board card (#1891), which paints the deadline without the
+ * rest of {@link ApprovalMeta}: a `w-65` column has no room for the origin
+ * pills, and "Open the card" on the card you are already looking at is the same
+ * redundancy `OutputLinkRow` exists to avoid. The *tone* is not the board's to
+ * re-decide, though — a surface that invented its own amber would be the one
+ * place a passing deadline looked routine.
  */
-function deadlineToneClass(tone: DeadlineTone): string | undefined {
+export function deadlineToneClass(tone: DeadlineTone): string | undefined {
   if (tone === "passed") return "font-medium text-status-failed-text";
   if (tone === "soon") return "font-medium text-status-blocked-text";
   return undefined;
@@ -545,10 +560,37 @@ export function approvalThreadLink(
   const channelId = channelIdForThread(approval.thread, desks, members);
   if (!channelId) return null;
 
-  const desk = desks.find((candidate) => candidate.id === approval.thread);
+  // Looked up by the **resolved channel**, not by the raw thread id. They are
+  // the same string for an ordinary desk, and deliberately different when a
+  // blueprint desk is grandfathered onto the company-wide line: an approval
+  // raised under `main` resolves to that desk's channel, and asking for a desk
+  // called `main` would find nothing and label it "Origin unavailable" — on a
+  // conversation whose transcript is right there on screen.
+  const desk = desks.find((candidate) => candidate.id === channelId);
   if (desk) return { channelId, label: `#${desk.channel}` };
 
-  const member = members.find((candidate) => candidate.id === approval.thread);
+  // The built-in `#general` channel (issue #1743), which is deliberately in no
+  // desk list — so the scan above can never name it, and an approval raised on
+  // the company's main line resolved to a channel and then failed to find a
+  // label, leaving "Origin unavailable" on the one channel every company has.
+  // After the desk scan, deliberately: a blueprint desk that authored one of
+  // the General ids keeps its own name, exactly as `channelIdForThread` keeps
+  // it its own thread.
+  //
+  // Guarded on a non-empty desk list because that is how this file already
+  // encodes "the topology is unknown": a failed `/desks` read resolves to `[]`
+  // (an empty *response* falls back to `defaultDesks()`), and a failed read
+  // must not be guessed at — `ChatView` surfaces the error and renders no rail,
+  // so a link into it would land nowhere.
+  if (channelId === MAIN_THREAD_ID && desks.length > 0) {
+    return { channelId, label: `#${GENERAL_CHANNEL}` };
+  }
+
+  // Matched through `dmThreadId`, not against the bare id: a DM for a teammate
+  // whose id is a General spelling records its thread as `dm:<id>`, and a raw
+  // comparison returned `null` — so the Approvals page called the origin
+  // unavailable for a conversation it could perfectly well link to (#1743).
+  const member = memberForThread(members, approval.thread);
   return member ? { channelId: dmChannelId(member), label: member.name } : null;
 }
 

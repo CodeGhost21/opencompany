@@ -156,6 +156,40 @@ pub(crate) fn budget_pause_notice(pause: &crate::harness::BudgetPause) -> String
     format!("{BUDGET_PAUSE_NOTICE_PREFIX} {}", pause.summary)
 }
 
+/// The non-redeemable sibling of [`BUDGET_PAUSE_NOTICE_PREFIX`] (issue #1846
+/// review, Codex #3870562586 / #3870562590).
+///
+/// The console renders its "Add credits & resend" CTA off
+/// [`BUDGET_PAUSE_NOTICE_PREFIX`] alone — there is no structured wire field to
+/// key on yet, as that constant's own doc says. Two paths pause WITHOUT a
+/// marker the generic chat redeem can honour:
+///
+/// * the **confined workflow copilot** — `run_confined` bypasses `run_inner`,
+///   the only place that parks a marker, and `CONFINED_AGENT_ID` names no
+///   addressable teammate, so there is nothing to redeem and nothing safe to
+///   replay; and
+/// * an **approval continuation** — it runs through `run_steered_background`,
+///   so `run_inner` parks its marker with `background: true`, a shape
+///   `redeem_budget_pause` refuses outright
+///   (`src/server/ops/budget_pause.rs`).
+///
+/// Emitting the redeemable prefix on either put a button on screen that could
+/// only ever fail — a 404 for the first (no marker exists), a 400 for the
+/// second (the marker exists and is refused). This prefix carries the SAME
+/// information and deliberately does not match the console's
+/// `isBudgetPauseNotice`, so the notice renders as an ordinary system bubble
+/// with no unusable action on it. Pinned by
+/// `a_confined_copilot_pause_offers_no_redeem_cta` and
+/// `an_approval_continuation_pause_offers_no_redeem_cta`.
+pub(crate) const BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX: &str =
+    "⏸ Paused — out of credits (add credits, then start this again):";
+
+/// The unauthored bubble for a budget pause that carries no redeemable marker.
+/// See [`BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX`].
+pub(crate) fn budget_pause_notice_no_resend(pause: &crate::harness::BudgetPause) -> String {
+    format!("{BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX} {}", pause.summary)
+}
+
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
@@ -324,13 +358,20 @@ fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
 /// it to the copilot as an ordinary answer — exactly the #966 misattribution
 /// class `system_notice` exists to prevent, just one call site short of it.
 ///
-/// Emits the SAME unauthored notice copy the interactive path shows, with no
-/// CTA (nothing was parked to redeem) — the honest middle ground the review
-/// asked for, between a fabricated copilot reply and a redemption this agent
-/// id can never honour.
+/// Emits the unauthored notice through
+/// [`budget_pause_notice_no_resend`] — the honest middle ground between a
+/// fabricated copilot reply and a redemption this agent id can never honour.
+///
+/// Issue #1846 review (Codex #3870562586): this used to emit
+/// [`budget_pause_notice`], whose prefix is exactly what the console keys its
+/// "Add credits & resend" button off. The doc above already claimed "with no
+/// CTA" — but nothing enforced it, so the button rendered anyway and, with no
+/// marker ever parked for `CONFINED_AGENT_ID`, every click did a GET that
+/// returned `null` followed by a POST that 404'd. The no-resend prefix makes
+/// the claim true.
 fn confined_turn_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
     match &outcome.budget_paused {
-        Some(pause) => system_notice(budget_pause_notice(pause)),
+        Some(pause) => system_notice(budget_pause_notice_no_resend(pause)),
         None => confined_bubble(outcome),
     }
 }
@@ -734,10 +775,21 @@ impl HarnessBrain {
             // fires, so the bubble rendered as a normal (if oddly-worded)
             // answer with no "Add credits & resend" CTA — even though a
             // marker was sitting there, parked and redeemable, the whole time.
-            // Swap in the SAME notice text the interactive and confined-turn
-            // paths already emit so the console recognises and renders it.
+            // Swap in the unauthored pause notice so the bubble reads as the
+            // runtime terminal state it is rather than as an answer.
+            //
+            // Issue #1846 review (Codex #3870562590): the NO-RESEND prefix,
+            // not the redeemable one. `run_steered_background` means
+            // `run_inner` parks this marker with `background: true`, and
+            // `redeem_budget_pause` refuses exactly that shape
+            // (`src/server/ops/budget_pause.rs`) — so offering the CTA here
+            // reserved the marker, restored it, and returned 400 on every
+            // click. Resuming an approval continuation needs the grant's own
+            // identity, which the generic chat-message redeem path does not
+            // carry; until it does, the honest surface is a notice with no
+            // button rather than a button that cannot work.
             Ok(outcome) => match &outcome.budget_paused {
-                Some(pause) => budget_pause_notice(pause),
+                Some(pause) => budget_pause_notice_no_resend(pause),
                 None => outcome.reply,
             },
             Err(err) => {
@@ -2527,6 +2579,15 @@ impl HarnessBrain {
         {
             return responder;
         }
+        // The built-in `#general` channel (issue #1743) — the one key that
+        // resolves to nobody *on purpose*. `chat_responder` declines it so both
+        // callers answer as their own orchestrator, which is what this host has
+        // always done for the company's main line. It is not the #884 case the
+        // warning below exists for: nothing was misaddressed, so logging it
+        // would bury the real misroutes under the console's most-used channel.
+        if crate::server::chat_history::is_general_chat(Some(chat)) {
+            return self.responder.clone();
+        }
         tracing::warn!(
             company = %self.record().id,
             chat = %chat,
@@ -2543,10 +2604,36 @@ impl HarnessBrain {
     /// broadcast from the console's default thread — which sends
     /// `chat: "main"`, an alias `resolve_desk_id` does not know — expands
     /// against the General desk rather than no desk at all.
-    fn everyone_desk(chat: Option<&str>) -> &str {
+    ///
+    /// **A real desk answering to that key wins, whatever it is spelled like.**
+    /// A blueprint may declare `[[group_chat]] id = "main"` (or `"general"`),
+    /// which this host grandfathers — `is_general_channel` is guarded on
+    /// `!desk_exists`, so the desk keeps its members and `responder_for` routes
+    /// to its lead. Folding that key to `General` asks `resolve_desk_id` for a
+    /// name no such desk has, which misses, and `@everyone` then expands to the
+    /// **whole roster** instead of the desk that was actually addressed — a
+    /// broadcast escaping the scope of the one case the fold exists to keep
+    /// working. Asking the record first costs one lookup and cannot be wrong.
+    fn everyone_desk(record: &CompanyRecord, chat: Option<&str>) -> String {
         match chat {
-            Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => chat,
-            _ => crate::server::ops::language::DEFAULT_DESK,
+            Some(chat)
+                if record.resolve_desk_id(chat).is_some()
+                    || !crate::server::chat_history::is_general_chat(Some(chat)) =>
+            {
+                chat.to_string()
+            }
+            // A General alias resolves to whichever desk claims the line, not
+            // to the literal `DEFAULT_DESK`. A blueprint desk declared
+            // `id = "main", name = "Front office"` claims it by id, so
+            // `resolve_desk_id("General")` misses and the guard above falls
+            // through — and expanding `@everyone` against a desk called
+            // `General` that does not exist scoped the broadcast to the entire
+            // roster, while the channel it was posted in is that desk and its
+            // lead answers there. The alias and the raw key have to name the
+            // same membership or `@everyone` means two different things in one
+            // channel (issue #1743).
+            _ => crate::runtime::delegation_tools::general_claimant(record)
+                .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
         }
     }
 
@@ -3162,10 +3249,10 @@ impl HarnessBrain {
                     // `resolve_desk_id` does not recognise that console-only
                     // alias, so a broadcast from the main thread would otherwise
                     // expand against no desk at all.
-                    let addressed_desk = Self::everyone_desk(chat.as_deref());
+                    let addressed_desk = Self::everyone_desk(&self.record(), chat.as_deref());
                     let also_mentioned = crate::runtime::mentions::mentioned_agents(
                         &self.record(),
-                        addressed_desk,
+                        &addressed_desk,
                         mentions,
                         Some(&responder),
                     );
@@ -3510,6 +3597,223 @@ impl HarnessBrain {
                         channel_responses.push(message);
                     }
                 }
+                CompanyEvent::ScheduleFired { prompt, .. } => {
+                    let responder = self.responder_for(None);
+                    // A scheduled tick drives a real turn, so it needs the same
+                    // scaffolding an operator message gets: stale MCP failures
+                    // cleared before it (nothing leaks from a prior turn), a
+                    // live publish claim while it runs, and its own MCP
+                    // failures re-skinned onto the reply afterwards.
+                    self.deps.mcp_failures.clear();
+                    // Issue #989: capture the workspace before the scheduled
+                    // turn, so a capped turn can recover files it wrote but
+                    // never offered to publish.
+                    let cap_scan_workspace =
+                        agent_workspace(&self.deps.workspace_root, &self.record().id, &responder);
+                    let cap_scan_baseline = WorkspaceSnapshot::take(&cap_scan_workspace);
+                    // Issue #445: claim the publish queue for this conversation,
+                    // so a file the scheduled turn publishes is drained below
+                    // instead of being staged into a queue nothing reaches.
+                    // Claimed only when both stores the drain needs are wired —
+                    // the claim is a promise to record, and one that cannot be
+                    // kept must not be made, or the tool goes back to issuing
+                    // receipts nothing honours.
+                    let publish_claim =
+                        (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
+                            self.deps
+                                .pending_publishes
+                                .claim(publish::PublishDestination::Conversation)
+                        });
+                    // Drive the same routed turn an operator message gets, so a
+                    // responder bound to a named harness runs there and an
+                    // unavailable default fails loudly instead of silently
+                    // falling back to the embedded engine — the router's job.
+                    let run_turn = self.run_turn();
+                    let record = self.record();
+                    let turn = self
+                        .delegation_runner(run_turn.as_ref(), &record)
+                        .handle_operator_message(&responder, prompt, None)
+                        .await?;
+                    let mut responses = vec![OutboundMessage {
+                        message_id: None,
+                        task_id: turn.spawned_task,
+                        // The reply lands on the General desk — the destination
+                        // — and the responder is its author. Fusing the two into
+                        // `channel` made reload history route the same reply to
+                        // General while journaling the wrong author; they are
+                        // separate facts (issue #885).
+                        channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                        agent: Some(responder.clone()),
+                        text: turn.reply,
+                        reply_to: None,
+                        steps: turn.steps,
+                        mentions: Vec::new(),
+                    }];
+                    responses.extend(turn.bubbles);
+                    // Issue #926/#1032, scheduled edition: a turn that paused at
+                    // its step cap or halted for spend says so in its own
+                    // sibling bubble, exactly as the operator path does. Here
+                    // the journal is the turn's only durable record — the
+                    // operator channel is in-memory for a cron tick — so
+                    // omitting them would present interrupted scheduled work as
+                    // a completed answer. Unauthored on the operator path; here
+                    // they must carry an author to be journaled at all, so they
+                    // take the same system author `system_notice` uses.
+                    if turn.hit_iteration_cap {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    if let Some(halt) = &turn.halted_for_spend {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: spend_halt_notice(halt),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    // Drain what the scheduled turn published (#445) and file it
+                    // onto the card the turn opened — or a freshly minted one —
+                    // exactly as an operator turn's publish is filed.
+                    let spawned_task = responses[0].task_id.clone();
+                    let published = self.deps.pending_publishes.drain();
+                    let published_sources: Vec<String> = published
+                        .iter()
+                        .map(|publish| publish.source.clone())
+                        .collect();
+                    let mut published_card = self
+                        .file_conversation_batch(
+                            &responder,
+                            spawned_task.as_deref(),
+                            Some(crate::server::ops::language::DEFAULT_DESK),
+                            publish_claim.is_some(),
+                            published,
+                            &mut responses[0].text,
+                        )
+                        .await;
+                    // Issue #989: a capped scheduled turn gets the same
+                    // unpublished-file recovery as an operator turn. The nudge
+                    // is deliberately limited to iteration caps, not spend
+                    // halts: spending another model turn after a budget brake
+                    // would defeat that brake. The scheduled path has no
+                    // operator present to notice a stranded workspace file, so
+                    // silently leaving it behind would lose a deliverable.
+                    if turn.hit_iteration_cap {
+                        let changed = cap_scan_baseline.changed_since(&cap_scan_workspace);
+                        let unpublished = publish::unpublished(&changed.files, &published_sources);
+                        if !unpublished.is_empty() {
+                            let nudge_control = SteerControl::new();
+                            let _declined = self
+                                .nudge_for_unpublished(
+                                    run_turn.as_ref(),
+                                    &responder,
+                                    prompt,
+                                    &responses[0].text,
+                                    &unpublished,
+                                    changed.partial,
+                                    &nudge_control,
+                                    None,
+                                )
+                                .await;
+                            let nudge_published = self.deps.pending_publishes.drain();
+                            if let Some(card_id) = self
+                                .file_conversation_batch(
+                                    &responder,
+                                    spawned_task.as_deref(),
+                                    Some(crate::server::ops::language::DEFAULT_DESK),
+                                    publish_claim.is_some(),
+                                    nudge_published,
+                                    &mut responses[0].text,
+                                )
+                                .await
+                            {
+                                published_card = published_card.or(Some(card_id));
+                            }
+                        }
+                    }
+                    drop(publish_claim);
+                    // `published_card` wins over the turn's own card, the same
+                    // rule the operator path applies (#463): it names the card
+                    // the deliverable actually landed on, which is usually the
+                    // turn's card but the freshly minted replacement when that
+                    // card was deleted mid-turn.
+                    if let Some(card_id) = published_card {
+                        responses[0].task_id = Some(card_id);
+                    }
+                    // Re-skin any MCP tool-call failures from the scheduled turn
+                    // as error steps on the reply's timeline — one surface, one
+                    // renderer. Runs before the reply is journaled, so the
+                    // journal order reads failure-then-reply.
+                    self.surface_mcp_failures(&mut responses[0].steps, None)
+                        .await?;
+                    // Issue #561, scheduled edition: if this scheduled turn
+                    // gated more calls than one turn may raise, park the batch
+                    // and journal the overflow notice here. The after-loop
+                    // `park_approval_requests` below routes its notice to the
+                    // in-memory operator adapter, which a cron tick has no live
+                    // operator reading, so the warning that some approvals were
+                    // permanently discarded would otherwise vanish from the only
+                    // surface that records a scheduled turn. Draining here
+                    // leaves the after-loop call with an empty queue, so the
+                    // notice is never raised twice.
+                    if let Some(notice) = self.park_approval_requests(host).await? {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: notice,
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    if let Some(events) = self.deps.events.as_ref() {
+                        for response in &mut responses {
+                            // Per-bubble authorship: a delegation bubble names
+                            // its own speaker; the primary bubble is the
+                            // responder's, and the responder is the fallback a
+                            // bubble without an author needs.
+                            let agent_id =
+                                response.agent.clone().unwrap_or_else(|| responder.clone());
+                            match events
+                                .append(
+                                    &record.id,
+                                    CompanyEvent::AgentReply {
+                                        parent: None,
+                                        task_id: response.task_id.clone(),
+                                        chat_id: crate::server::ops::language::DEFAULT_DESK
+                                            .to_string(),
+                                        agent_id,
+                                        text: response.text.clone(),
+                                        steps: response.steps.clone(),
+                                        mentions: Vec::new(),
+                                        mention_depth: 0,
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(seq) => response.message_id = Some(seq.value().to_string()),
+                                Err(err) => tracing::warn!(
+                                    error = %err,
+                                    "failed to journal a scheduled reply; the bubble has no durable id"
+                                ),
+                            }
+                        }
+                    }
+                    channel_responses.extend(responses);
+                }
                 _ => {}
             }
         }
@@ -3785,6 +4089,212 @@ description = "Runs Acme."
         assert_eq!(result.new_traces.len(), 1);
         // Single cost-accounting site: the cycle result carries no ledger delta.
         assert!(result.ledger_deltas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_gets_an_agent_reply() {
+        // A cron tick (`ScheduleFired`) must drive a real turn and surface its
+        // reply, not fall through the match and vanish — the same guarantee an
+        // operator message gets. Without this arm a scheduled prompt ran to
+        // nowhere: the turn produced an answer that was never journaled, so the
+        // desk history had no record it fired.
+        let dir = tempfile::tempdir().unwrap();
+        let brain = brain_over_mock(dir.path());
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 1);
+        // The mock provider prefixes the routed prompt, proving the turn ran
+        // through the agent rather than falling through the match.
+        assert!(
+            result.channel_responses[0].text.contains("daily standup"),
+            "{:?}",
+            result.channel_responses[0].text
+        );
+        assert_eq!(result.new_traces.len(), 1);
+    }
+
+    /// A cron tick's reply is journaled onto the General desk under the
+    /// responder's name, and the returned bubble is stamped with the journaled
+    /// event's sequence — the same contract an operator reply's bubble carries
+    /// (issue #885: destination and author are separate facts).
+    #[tokio::test]
+    async fn schedule_fired_journals_an_agent_reply_on_the_general_desk() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone());
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        // The reply lands on the General desk, authored by the responder —
+        // destination and author stay separate.
+        assert_eq!(result.channel_responses.len(), 1);
+        let bubble = &result.channel_responses[0];
+        assert_eq!(bubble.channel, crate::server::ops::language::DEFAULT_DESK);
+        assert_eq!(bubble.agent.as_deref(), Some("ceo"));
+
+        // The journal holds one AgentReply, on the General desk, attributed to
+        // the responder — not to the channel the reply was routed over.
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let reply = events
+            .iter()
+            .find(|e| matches!(&e.event, CompanyEvent::AgentReply { .. }))
+            .expect("a scheduled reply was journaled");
+        match &reply.event {
+            CompanyEvent::AgentReply {
+                chat_id,
+                agent_id,
+                text,
+                ..
+            } => {
+                assert_eq!(chat_id, crate::server::ops::language::DEFAULT_DESK);
+                assert_eq!(agent_id, "ceo");
+                assert!(text.contains("daily standup"), "{text}");
+            }
+            _ => unreachable!(),
+        }
+
+        // The returned bubble carries the appended event's sequence as its
+        // durable id.
+        assert_eq!(bubble.message_id, Some(reply.seq.value().to_string()));
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_journals_halt_notices() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let outcome = crate::harness::built_in::TurnOutcome {
+            reply: "checkpoint".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: true,
+            // Test fixture, not the ACP fold (PR #1880 review).
+            abnormal_stop: None,
+            halted_for_spend: Some(crate::harness::SpendHalt {
+                agent: "ceo".to_string(),
+                spent_usd: 1.25,
+                cap_usd: 1.0,
+            }),
+            // This fixture scripts a SPEND halt; a budget pause is the separate
+            // signal added in issue #1846 and is not what it exercises.
+            budget_paused: None,
+        };
+        let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
+            .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
+                outcome,
+                approval_requests: None,
+            })));
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 3);
+        assert!(
+            result.channel_responses[1]
+                .text
+                .contains("maximum number of steps")
+        );
+        assert!(result.channel_responses[2].text.contains("spend cap"));
+        assert!(
+            result
+                .channel_responses
+                .iter()
+                .skip(1)
+                .all(|response| response.agent.as_deref() == Some(crate::ports::SYSTEM_AUTHOR))
+        );
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let replies: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.event, CompanyEvent::AgentReply { .. }))
+            .collect();
+        assert_eq!(replies.len(), 3, "all scheduled notices are durable");
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_journals_approval_overflow_notice() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let brain = brain_with_queue_and_events(dir.path(), requests.clone(), log.clone())
+            .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
+                outcome: crate::harness::built_in::TurnOutcome {
+                    reply: "checkpoint".to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: false,
+                    // Test fixture, not the ACP fold (PR #1880 review).
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                },
+                approval_requests: Some(requests.clone()),
+            })));
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(result.channel_responses.len(), 2);
+        let notice = &result.channel_responses[1];
+        assert!(
+            notice.text.contains("further gated tool call"),
+            "{}",
+            notice.text
+        );
+        assert_eq!(notice.agent.as_deref(), Some(crate::ports::SYSTEM_AUTHOR));
+        assert_eq!(requests.queued(), 0);
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        assert!(events.iter().any(|event| {
+            matches!(&event.event, CompanyEvent::AgentReply { text, .. } if text.contains("further gated tool call"))
+        }));
     }
 
     #[tokio::test]
@@ -6296,11 +6806,103 @@ members = ["engineer"]
     /// other General-desk spellings — to the General desk id before expanding.
     #[test]
     fn everyone_desk_folds_the_main_thread_alias_to_general() {
-        assert_eq!(HarnessBrain::everyone_desk(None), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("main")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("General")), "General");
-        assert_eq!(HarnessBrain::everyone_desk(Some("eng_desk")), "eng_desk");
+        let record = record_with_desk();
+        assert_eq!(HarnessBrain::everyone_desk(&record, None), "General");
+        assert_eq!(HarnessBrain::everyone_desk(&record, Some("")), "General");
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("main")),
+            "General"
+        );
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("General")),
+            "General"
+        );
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record, Some("eng_desk")),
+            "eng_desk"
+        );
+    }
+
+    /// A blueprint that declares a desk under one of the General spellings is
+    /// grandfathered by this host — `is_general_channel` is guarded on
+    /// `!desk_exists`, the desk keeps its members, and `responder_for` routes
+    /// to its lead. The fold must not run over it: asking `resolve_desk_id`
+    /// for the *name* `General` misses a desk called anything else, and
+    /// `@everyone` would then expand to the whole roster instead of the two
+    /// people actually on the line — a broadcast escaping the scope of the one
+    /// case the fold exists to preserve.
+    #[test]
+    fn a_grandfathered_general_desk_keeps_its_own_membership() {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+
+[[group_chat]]
+id = "main"
+name = "Front office"
+members = ["ceo", "engineer"]
+"#,
+        )
+        .expect("valid manifest");
+        let mut record = record_with_desk();
+        record.manifest.group_chats = manifest.group_chats;
+
+        // The raw key, not the General fold: this desk answers to it.
+        assert_eq!(HarnessBrain::everyone_desk(&record, Some("main")), "main");
+
+        // Every folded alias names the same membership as the raw key. A desk
+        // that claims the line by *id* is missed by `resolve_desk_id("General")`,
+        // so the alias used to fall through to a `General` desk that does not
+        // exist — scoping `@everyone` to the whole roster in a channel whose
+        // own lead answers (issue #1743).
+        for alias in ["", "General", "general", "MAIN"] {
+            assert_eq!(
+                HarnessBrain::everyone_desk(&record, Some(alias)),
+                "main",
+                "the alias {alias:?} must scope @everyone to the claiming desk"
+            );
+        }
+        // And with no such desk, the fold still applies as before.
+        assert_eq!(
+            HarnessBrain::everyone_desk(&record_with_desk(), Some("main")),
+            "General"
+        );
+
+        let mentions = [crate::ports::types::Mention {
+            target: crate::ports::types::MentionTarget::Everyone,
+            text: "@everyone".to_string(),
+            offset: 0,
+            quiet: false,
+        }];
+        let expanded = crate::runtime::mentions::mentioned_agents(
+            &record,
+            &HarnessBrain::everyone_desk(&record, Some("main")),
+            &mentions,
+            None,
+        );
+        assert_eq!(
+            expanded,
+            vec!["ceo".to_string(), "engineer".to_string()],
+            "a broadcast stays inside the desk that was addressed"
+        );
+        assert!(
+            !expanded.contains(&"chief".to_string()),
+            "and does not reach a teammate who is not on it: {expanded:?}"
+        );
     }
 
     /// The default responder is the `orchestrator`-tier agent, even when it is
@@ -6338,6 +6940,118 @@ members = ["engineer"]
         let (brain, _tasks) = brain_with_desk(dir.path());
         assert_eq!(brain.responder_for(Some("engineer")), "engineer");
         assert_eq!(brain.responder_for(Some("chief")), "chief");
+    }
+
+    // ── Issue #1743: who answers the built-in `#general` channel ──
+
+    /// An **overlay** desk that took a General spelling before those were
+    /// reserved must not answer the company-wide line.
+    ///
+    /// `create_desk` accepted `main` until issue #1743, so this is persisted
+    /// state rather than a hypothesis. Such a desk is already hidden from
+    /// `GET .../desks` and refused every mutation, but hiding a desk does not
+    /// stop it routing: `desk_lead` resolves through
+    /// `CompanyRecord::resolve_desk_id`, which used to match it, so the console
+    /// rendered `#general` and named the orchestrator as who answers while this
+    /// desk's lead answered instead. The resolver declines the key now, and the
+    /// arm below it hands the line back to the orchestrator.
+    #[test]
+    fn responder_for_does_not_let_a_hidden_overlay_desk_answer_the_general_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        brain.mutate_record(|r| {
+            r.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "main".into(),
+                name: "Front office".into(),
+                description: None,
+                responder: Default::default(),
+                members: vec!["engineer".into()],
+            })
+        });
+        for spelling in ["", "main", "Main", "general", "General"] {
+            assert_eq!(
+                brain.responder_for(Some(spelling)),
+                "chief",
+                "the orchestrator answers the company-wide line as {spelling:?}"
+            );
+        }
+        // The desk is not retired — it simply has no General key any more, and
+        // the desk it is still routes to its own lead.
+        assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+    }
+
+    /// A **teammate** whose id is a General spelling keeps its DM, and does not
+    /// take the company-wide line with it (issue #1743).
+    ///
+    /// `mint_agent_id` reserves `main` and `General`, but a manifest can still
+    /// declare one, and a manifest is not something this host overrules. Before
+    /// this, `resolve_roster_agent_id` matched the bare key and that teammate
+    /// answered every unaddressed message — while `GET chat/history?desk=main`
+    /// returned the *folded General conversation* (`is_general_chat` has folded
+    /// `""`, `main`, `General` and `general` into one since issue #65). The
+    /// responder and the transcript disagreed about whose conversation it was.
+    /// The bare key is the line; `dm:<id>` is the teammate.
+    #[test]
+    fn responder_for_gives_the_general_line_to_the_orchestrator_not_a_teammate_called_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        brain.mutate_record(|r| {
+            r.overlay_agents.push(OverlayAgent {
+                id: "main".into(),
+                name: "Mainard".into(),
+                role: "Analyst".into(),
+                description: None,
+                tools: None,
+                model: None,
+                harness: None,
+            })
+        });
+        assert!(
+            brain.record().is_roster_agent("main"),
+            "the teammate really is on the roster, so the old arm would have matched"
+        );
+        assert_eq!(
+            brain.responder_for(Some("main")),
+            "chief",
+            "the bare key is the company's line, whatever a teammate is called"
+        );
+        assert_eq!(
+            brain.responder_for(Some("dm:main")),
+            "main",
+            "and the teammate keeps its own DM, addressed the way the console addresses one"
+        );
+    }
+
+    /// The grandfathered case the two tests above must not break: a
+    /// `[[group_chat]]` the **blueprint** declares under a General spelling is
+    /// the company's own General desk, and its lead still answers it.
+    #[test]
+    fn responder_for_still_routes_a_blueprint_general_desk_to_its_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let declared = toml::from_str::<CompanyManifest>(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+
+[[group_chat]]
+id = "main"
+name = "Front office"
+members = ["engineer"]
+"#,
+        )
+        .expect("valid manifest")
+        .group_chats;
+        brain.mutate_record(|r| r.manifest.group_chats.extend(declared));
+        assert_eq!(
+            brain.responder_for(Some("main")),
+            "engineer",
+            "a blueprint desk keeps the line and its lead keeps answering it"
+        );
     }
 
     // ── Issue #884 D2: an unresolvable chat key is no longer silent ──
@@ -8005,11 +8719,17 @@ members = ["eng1", "eng2"]
     /// granting agent exactly as an ordinary paused message would — proven
     /// below by reading it straight off `BudgetPauseSet`. Before this fix, the
     /// bubble `redispatch_granted_call` built from that outcome carried
-    /// `outcome.reply` (the budget-paused placeholder text) verbatim, which
-    /// does not start with `BUDGET_PAUSE_NOTICE_PREFIX` — so the console's
-    /// `isBudgetPauseNotice` check never recognised it, and the operator saw
-    /// an ordinary-looking reply with no "Add credits & resend" CTA for a
-    /// marker that was sitting there, parked and redeemable, the whole time.
+    /// `outcome.reply` (the budget-paused placeholder text) verbatim, so the
+    /// operator saw an ordinary-looking reply rather than the runtime's own
+    /// pause notice.
+    ///
+    /// Issue #1846 review (Codex #3870562590): the notice it now carries is the
+    /// NO-RESEND one. The marker asserted below is real but not redeemable —
+    /// `run_steered_background` parks it with `background: true`, the one shape
+    /// `redeem_budget_pause` refuses (`src/server/ops/budget_pause.rs`) — so
+    /// the redeemable prefix would have drawn a CTA that returned 400 on every
+    /// click. Both prefixes are asserted: matching the new one is only half the
+    /// contract, since the console branches on the old one.
     #[tokio::test]
     async fn a_budget_paused_approval_continuation_surfaces_the_notice_and_parks_a_marker() {
         let dir = tempfile::tempdir().unwrap();
@@ -8050,9 +8770,17 @@ members = ["eng1", "eng2"]
         let bubble = &result.channel_responses[0];
         assert_eq!(bubble.channel, "ceo");
         assert!(
-            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
-            "the console's SystemPill only renders the highlighted pause card for this exact \
-             prefix — got: {}",
+            bubble
+                .text
+                .starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "an approval continuation parks a background marker the redeem route refuses, so \
+             its notice must carry the non-redeemable prefix — got: {}",
+            bubble.text
+        );
+        assert!(
+            !bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: this prefix is what the console keys its \"Add credits & \
+             resend\" CTA off, and this marker's redeem returns 400: {}",
             bubble.text
         );
         assert!(
@@ -8061,9 +8789,9 @@ members = ["eng1", "eng2"]
             bubble.text
         );
 
-        // And a re-issue marker really was parked for the granting agent —
-        // the CTA this notice's text is asking the console to render would
-        // have nothing to redeem otherwise.
+        // And a re-issue marker really was parked for the granting agent: the
+        // notice is non-redeemable because of HOW it was parked (background),
+        // not because nothing was parked at all.
         let marker = crate::runtime::grants::budget_pauses_for(&CompanyId::new("acme"))
             .peek("ceo")
             .expect("run_steered_background parks a marker on the same terms run_inner does");
@@ -8578,6 +9306,66 @@ members = ["eng1", "eng2"]
     impl HarnessModel for SteeringProvider {
         fn telemetry_provider_id(&self) -> String {
             "steering".to_string()
+        }
+    }
+
+    /// A deterministic turn result for scheduled-cycle edge-case tests.
+    struct FixedOutcomeTurn {
+        outcome: crate::harness::built_in::TurnOutcome,
+        approval_requests: Option<crate::harness::policy::ApprovalRequestQueue>,
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for FixedOutcomeTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            if let Some(requests) = &self.approval_requests {
+                for index in 0..(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
+                    requests.push(crate::harness::policy::ApprovalRequest {
+                        tool: format!("test_tool_{index}"),
+                        reason: "test approval".to_string(),
+                        effect: Effect {
+                            kind: format!("test_tool_{index}"),
+                            group: crate::ports::types::EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({ "index": index }),
+                            agent: None,
+                            run_id: None,
+                        },
+                    });
+                }
+            }
+            Ok(self.outcome.clone())
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.run(company, agent_id, message, chat_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.run(company, agent_id, message, None).await
         }
     }
 
@@ -10384,16 +11172,90 @@ agent = "claude"
             "the pre-fix defect: falling through to confined_bubble would attribute the pause \
              notice to the copilot itself"
         );
+        // Issue #1846 review (Codex #3870562586): the NO-RESEND prefix. This
+        // assertion used to require `BUDGET_PAUSE_NOTICE_PREFIX`, which is
+        // precisely what the console keys its "Add credits & resend" button
+        // off — and `run_confined` never parks a marker, so that button could
+        // only ever 404. Asserting the negative too: the whole defect is the
+        // two prefixes being conflated, and a test that only checked the new
+        // one would still pass if the redeemable prefix were ever made a
+        // prefix of it.
         assert!(
-            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
-            "the console's SystemPill only renders the highlighted pause card for this exact \
-             prefix: {}",
+            bubble
+                .text
+                .starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "a confined pause parks no marker, so it must carry the non-redeemable prefix: {}",
+            bubble.text
+        );
+        assert!(
+            !bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: this prefix renders an Add-Credits CTA whose GET returns null \
+             and whose POST 404s, because CONFINED_AGENT_ID never has a marker: {}",
             bubble.text
         );
         assert!(
             bubble.text.to_ascii_lowercase().contains("add credits"),
             "the actionable ask survives into the notice: {}",
             bubble.text
+        );
+    }
+
+    /// Issue #1846 review (Codex #3870562590) — **the regression.** An approval
+    /// continuation that pauses for credits must not advertise a redeem the
+    /// server refuses.
+    ///
+    /// The continuation runs through `run_steered_background`, so `run_inner`
+    /// parks its marker with `background: true`, and `redeem_budget_pause`
+    /// rejects exactly that shape with a 400 (`src/server/ops/budget_pause.rs`).
+    /// Emitting `BUDGET_PAUSE_NOTICE_PREFIX` therefore put a button on screen
+    /// that reserved the marker, restored it, and failed — every single click.
+    ///
+    /// This pins the notice BUILDER rather than driving a whole continuation:
+    /// the defect is entirely in which prefix that arm chooses, and the two
+    /// constants are what the console branches on.
+    #[test]
+    fn an_approval_continuation_pause_offers_no_redeem_cta() {
+        let pause = crate::harness::BudgetPause {
+            agent: "maya".to_string(),
+            summary: "Add credits to your account, then start this again.".to_string(),
+        };
+
+        let notice = budget_pause_notice_no_resend(&pause);
+
+        assert!(
+            notice.starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "{notice}"
+        );
+        assert!(
+            !notice.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: a background-parked marker is refused by the redeem route, so \
+             this prefix's CTA can only ever return 400: {notice}"
+        );
+        assert!(
+            notice.to_ascii_lowercase().contains("add credits"),
+            "the operator still has to be told the lever: {notice}"
+        );
+        assert!(
+            notice.contains(&pause.summary),
+            "the provider's own summary survives into the notice: {notice}"
+        );
+    }
+
+    /// The two prefixes must stay genuinely distinct: the console decides
+    /// whether to render an actionable button by `startsWith`, so if the
+    /// redeemable prefix were ever edited to become a prefix of the
+    /// non-redeemable one, every no-resend notice would silently regain the
+    /// broken CTA. Cheap coupling test, mirrored on the frontend by
+    /// `isBudgetPauseNotice`'s own fixtures.
+    #[test]
+    fn the_redeemable_and_no_resend_prefixes_are_not_prefixes_of_each_other() {
+        assert!(
+            !BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "a no-resend notice would match `isBudgetPauseNotice` and regain the CTA"
+        );
+        assert!(
+            !BUDGET_PAUSE_NOTICE_PREFIX.starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "a redeemable notice would stop matching and lose its working CTA"
         );
     }
 

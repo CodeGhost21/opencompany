@@ -3976,6 +3976,46 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         Ok(true)
     }
 
+    async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        // `parent_id` and `adopted` live inside `node_json`, not as their own
+        // columns (see the `workspace_nodes` table def), so both the existence
+        // check and the has-child check go through the same deserializing
+        // helper the rest of this backend's workspace methods use — a raw SQL
+        // `WHERE parent_id = ?` against this table is a "no such column" error,
+        // not a narrowing filter.
+        let nodes = self.workspace_nodes(&tx, company)?;
+        let Some(node) = nodes.get(id) else {
+            return Ok(false);
+        };
+        // An adopted folder has a second writer whose create has not landed yet
+        // (issue #1839). The flag-read here and the flag-write in
+        // `adopt_or_create_folder` both happen under an IMMEDIATE transaction on
+        // this same table, so they serialize: once an adoption has stamped
+        // `adopted`, this refuses — closing the race on this backend rather than
+        // narrowing it, matching `FsOps`'s guard.
+        if node.adopted {
+            return Ok(false);
+        }
+        if nodes.values().any(|n| n.parent_id.as_deref() == Some(id)) {
+            return Ok(false);
+        }
+        // Single document, non-recursive — the reads above, taken under this
+        // same IMMEDIATE transaction, already proved `id` exists, is unadopted
+        // and is childless, so a plain delete-by-key is enough.
+        let removed = tx
+            .execute(
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+            )
+            .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(removed > 0)
+    }
+
     async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
         let conn = self.conn();
         let count: i64 = conn
