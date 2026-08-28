@@ -572,10 +572,21 @@ mod test {
             tokio::spawn(async move { rebuild_company(&state_for_task, &id_for_task).await });
 
         // Give the spawned task every chance to reach the blocked
-        // `quiesce()` await before the write below lands.
-        for _ in 0..50 {
-            tokio::task::yield_now().await;
-        }
+        // `quiesce()` await before the write below lands. A fixed yield
+        // count only hopes the spawned task got scheduled in time; this
+        // instead polls `is_quiesced()`, which `quiesce()` sets *before*
+        // ever awaiting `serial` (`CompanyRuntime::quiesce`'s own doc), so
+        // seeing it flip proves `rebuild_company` actually reached that
+        // point rather than merely having had the chance to (CodeRabbit,
+        // PR #1875 review). Bounded so a real regression here fails fast
+        // instead of hanging the suite.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !outgoing.is_quiesced() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("rebuild_company never reached quiesce() before the timeout");
 
         // The concurrent write: lock, load-modify-save, unlock — exactly the
         // shape `PUT …/logo` takes (`src/server/ops/company_logo.rs`).
