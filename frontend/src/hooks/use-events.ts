@@ -281,6 +281,7 @@ export type CompanyStreamEvent =
       workflowId: string;
       runId: string;
       scheduled: boolean;
+      startedBy: "operator" | "schedule" | { agent: string };
     }
   // Issue #382: a non-trigger node began executing. Structural ids only — the
   // node has not run, so there is no status or duration, and never any input.
