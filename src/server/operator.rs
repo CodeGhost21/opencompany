@@ -249,25 +249,29 @@ struct OperatorChannelDto {
 /// for the one grandfathered company shape where a roster teammate already
 /// owns that id — so this and delivery
 /// (`workflows::delivery::send_to_channel_adapter`) always agree on where the
-/// feed lives. A company that fails to load, or has no record yet, still gets
-/// the default id, so the console always has a channel to point its history
-/// read at.
-async fn operator_channel(scope: ScopedCompany) -> Json<OperatorChannelDto> {
+/// feed lives. A company with no record yet still gets the default id, so the
+/// console always has a channel to point its history read at — but a store
+/// read failure is propagated as an error rather than silently answered with
+/// the default id: for the grandfathered collision-fallback company, treating
+/// a transient failure as "no record" would label the operator's real
+/// `operator-feed` transcript as `operator` while delivery keeps targeting the
+/// collision-aware address once the store recovers.
+async fn operator_channel(
+    scope: ScopedCompany,
+) -> Result<Json<OperatorChannelDto>, crate::server::Rejection> {
     let id = scope
         .runtime
         .store()
         .load(scope.id())
-        .await
-        .ok()
-        .flatten()
+        .await?
         .map(|record| record.operator_feed_channel().to_string())
         .unwrap_or_else(|| crate::runtime::OPERATOR_CHANNEL.to_string());
-    Json(OperatorChannelDto {
+    Ok(Json(OperatorChannelDto {
         id,
         name: "Operator".to_string(),
         description: "Workflow reports and notifications — what happened and what needs you"
             .to_string(),
-    })
+    }))
 }
 
 /// The path of a desk sub-resource (`desk_id`).
@@ -6048,6 +6052,63 @@ mode = "full"
         assert!(
             !body.contains("read-only"),
             "a store outage must not be misreported as the ordinary read-only refusal: {body}"
+        );
+    }
+
+    /// CodeRabbit review (PR #1781, P2): `operator_channel` used to fold a
+    /// `store().load()` failure into "no record" via `.ok().flatten()`, and
+    /// answer the default `operator` id anyway. For an upgraded company whose
+    /// grandfathered `operator` teammate requires the `operator-feed`
+    /// collision address, that silently mislabels the teammate's `operator`
+    /// transcript as the system feed while a transient outage lasts — and the
+    /// console would show it as healthy the whole time. This proves the fix:
+    /// a real load failure now propagates as an error instead of defaulting.
+    ///
+    /// Corrupts `company.toml` on disk after the app is built (rather than
+    /// mocking `CompanyStore`) to exercise the real `FsCompanyStore::load`
+    /// error path — same technique as
+    /// `a_failing_store_load_is_not_collapsed_into_the_read_only_refusal`
+    /// above.
+    #[tokio::test]
+    async fn operator_channel_propagates_a_store_load_failure_instead_of_defaulting() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Baseline: before any corruption, the route answers the default id.
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(channel["id"], "operator");
+
+        // Corrupt the on-disk manifest so the next `store().load()` fails
+        // instead of returning `Some(record)` or `None`.
+        let toml_path = crate::store::Bundle::new(&home, &CompanyId::new("acme")).company_toml();
+        tokio::fs::write(&toml_path, b"not valid toml [[[")
+            .await
+            .expect("corrupt company.toml");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/operator-channel")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a store load failure must propagate as itself, not the default operator id"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(
+            body["id"], "operator",
+            "a store outage must not be silently answered as the healthy default channel: {body}"
         );
     }
 
