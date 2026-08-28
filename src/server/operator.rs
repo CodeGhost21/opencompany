@@ -2649,7 +2649,7 @@ async fn join_chat_turn(
 ///
 /// Runs inside the spawned turn (issue #882) so the record survives a client or
 /// proxy that gave up waiting.
-async fn journal_chat_replies(
+pub(crate) async fn journal_chat_replies(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
     desk: &str,
