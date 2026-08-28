@@ -4580,11 +4580,7 @@ impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
             id: args.id,
             name: args.name,
             description: args.description,
-            // Issue #1862 prerequisite: not carried, same reason `schedule` /
-            // `on_error` / `retry` / `repeatable` above are not — an
-            // agent-authored graph gets no owning desk from this tool; an
-            // operator assigns one afterwards through the write route.
-            owner_desk: None,
+            owner_desk: args.owner_desk,
             nodes,
             edges: args
                 .edges
