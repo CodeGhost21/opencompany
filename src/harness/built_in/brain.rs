@@ -4248,14 +4248,15 @@ description = "Runs Acme."
             reply: "checkpoint".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: true,
+            // Test fixture, not the ACP fold (PR #1880 review).
+            abnormal_stop: None,
             halted_for_spend: Some(crate::harness::SpendHalt {
                 agent: "ceo".to_string(),
                 spent_usd: 1.25,
                 cap_usd: 1.0,
             }),
-            // Added by #1846 after these fixtures were written; neither is what
-            // this test is about — it exercises the spend halt.
-            abnormal_stop: None,
+            // This fixture scripts a SPEND halt; a budget pause is the separate
+            // signal added in issue #1846 and is not what it exercises.
             budget_paused: None,
         };
         let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
@@ -4314,9 +4315,10 @@ description = "Runs Acme."
                     reply: "checkpoint".to_string(),
                     steps: Vec::new(),
                     hit_iteration_cap: false,
+                    // Test fixture, not the ACP fold (PR #1880 review).
+                    abnormal_stop: None,
                     halted_for_spend: None,
                     // Added by #1846 after these fixtures were written.
-                    abnormal_stop: None,
                     budget_paused: None,
                 },
                 approval_requests: Some(requests.clone()),
