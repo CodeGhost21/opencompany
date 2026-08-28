@@ -399,6 +399,26 @@ impl CompanyManifest {
                 problems.push(format!(
                     "{label} has an invalid `id` — use snake_case (lowercase letters, digits, and underscores, starting with a letter)."
                 ));
+            } else if crate::ports::types::RESERVED_AGENT_IDS
+                .iter()
+                .any(|reserved| agent.id.eq_ignore_ascii_case(reserved))
+            {
+                // Issue #1757 follow-up: `RESERVED_AGENT_IDS` already stops a
+                // console-minted teammate from taking one of these ids
+                // (`CompanyRecord::mint_agent_id`), but a manifest agent's id
+                // comes straight from the TOML and was never checked against
+                // the same list — so `operator`, `agents`, `desks`, or
+                // `system` could still be declared here and collide with the
+                // built-in surface each one names (the desk list, the
+                // workspace roots, or the runtime's own author id). The
+                // `operator` case additionally has its own dedicated message
+                // below (group chats), because a group chat and an agent
+                // collide with it in different, more specific ways; this arm
+                // covers the agent side for the whole reserved set.
+                problems.push(format!(
+                    "{label} uses the reserved id `{}`, which OpenCompany keeps for its own use — choose a different id.",
+                    agent.id
+                ));
             } else if !seen.insert(agent.id.as_str()) {
                 problems.push(format!(
                     "agent `id` `{}` is used more than once — ids must be unique.",
@@ -454,6 +474,18 @@ impl CompanyManifest {
             } else if !is_snake_case(&chat.id) {
                 problems.push(format!(
                     "{label} has an invalid `id` — use snake_case (lowercase letters, digits, and underscores, starting with a letter)."
+                ));
+            } else if chat.id == crate::runtime::channel::OPERATOR_CHANNEL {
+                // Issue #1757: `operator` is the reserved id of the built-in,
+                // read-only Operator system channel — every company gets one,
+                // listed and durable. A manifest desk claiming that id would be
+                // indistinguishable from it in the desk list, and every message
+                // sent there would be refused by the read-only guard in
+                // `chat_and_emit` (`src/server/operator.rs`), which treats any
+                // `chat_id == OPERATOR_CHANNEL` as the system feed regardless of
+                // where it came from.
+                problems.push(format!(
+                    "{label} uses the id `operator`, which is reserved for the built-in Operator channel — choose a different id."
                 ));
             } else if !chat_ids.insert(chat.id.as_str()) {
                 problems.push(format!(
@@ -1789,6 +1821,70 @@ mod tests {
         let problems = manifest.validate();
         assert!(problems.iter().any(|p| p.contains("snake_case")));
         assert!(problems.iter().any(|p| p.contains("more than once")));
+    }
+
+    /// Issue #1757: `operator` is reserved for the built-in, read-only
+    /// Operator system channel. A manifest desk claiming it would be
+    /// indistinguishable from the system channel in the desk list, and every
+    /// message sent there would be refused by `chat_and_emit`'s read-only
+    /// guard (`src/server/operator.rs`), which does not know or care where a
+    /// `chat_id == OPERATOR_CHANNEL` came from.
+    #[test]
+    fn rejects_a_group_chat_claiming_the_reserved_operator_id() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Operator\"\nmembers = [\"ceo\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("reserved") && p.contains("operator")),
+            "{problems:?}"
+        );
+    }
+
+    /// Follow-up to the group-chat guard above: `RESERVED_AGENT_IDS` already
+    /// stops a console-minted teammate from taking `system`
+    /// (`mint_agent_id`), but a manifest agent's id is read straight from the
+    /// TOML and this loop never consulted the same list — so a manifest could
+    /// still declare `id = "system"` and collide with the runtime's own
+    /// author id (`SYSTEM_AUTHOR`, issue #966): `senderOf` reads `agent_id`
+    /// by value and would render every subsequent system notice as that
+    /// teammate.
+    #[test]
+    fn rejects_a_manifest_agent_claiming_a_reserved_id() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"system\"\nrole = \"whatever\"\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("reserved") && p.contains("system")),
+            "{problems:?}"
+        );
+    }
+
+    /// The same guard covers every entry in `RESERVED_AGENT_IDS`, not just
+    /// `system` — `operator`, `agents`, and `desks` are equally live manifest
+    /// agent ids until this check runs.
+    #[test]
+    fn rejects_every_reserved_id_as_a_manifest_agent_id() {
+        for reserved in crate::ports::types::RESERVED_AGENT_IDS {
+            let manifest = parse(&format!(
+                "[company]\nname = \"X\"\n[[agent]]\nid = \"{reserved}\"\nrole = \"whatever\"\n"
+            ));
+            let problems = manifest.validate();
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("reserved") && p.contains(reserved)),
+                "id {reserved:?} should have been rejected: {problems:?}"
+            );
+        }
     }
 
     #[test]

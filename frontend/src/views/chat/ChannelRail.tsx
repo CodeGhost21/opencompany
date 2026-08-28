@@ -1,5 +1,14 @@
 import { useState } from "react";
-import { ChevronRight, CircleDot, Hash, Lock, PanelRight, Plus, SquarePen } from "lucide-react";
+import {
+  ChevronRight,
+  CircleDot,
+  Hash,
+  Lock,
+  PanelRight,
+  Plus,
+  Radio,
+  SquarePen,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -149,20 +158,68 @@ export function ChannelRail({
         )}
       </div>
 
-      {sections.map((section) => (
-        <Section
-          key={section.id}
-          section={section}
-          onAdd={section.id === "channels" ? onAddChannel : undefined}
-          activeId={activeId}
-          unread={unread}
-          mentions={mentions}
-          onSelect={onSelect}
-          open={resolvedOpenSections[section.id] ?? true}
-          onToggle={() => toggleSection(section.id)}
-        />
-      ))}
+      {sections.map((section) =>
+        section.id === "operator" ? (
+          <PinnedOperatorRow
+            key={section.id}
+            channel={section.channels[0]}
+            active={section.channels[0]?.id === activeId}
+            onSelect={onSelect}
+          />
+        ) : (
+          <Section
+            key={section.id}
+            section={section}
+            onAdd={section.id === "channels" ? onAddChannel : undefined}
+            activeId={activeId}
+            unread={unread}
+            mentions={mentions}
+            onSelect={onSelect}
+            open={resolvedOpenSections[section.id] ?? true}
+            onToggle={() => toggleSection(section.id)}
+          />
+        ),
+      )}
     </aside>
+  );
+}
+
+/**
+ * The Operator feed's row (issue #1757 rework): pinned below a divider,
+ * outside every collapsible section, rather than folded into the Channels
+ * list `Section` renders. No add door (channel creation stays scoped to the
+ * Channels section's own `onAdd`), no member count, no unread/mention
+ * badges — the feed carries none of those concepts, being a single
+ * read-only broadcast rather than an addressable, multi-party line.
+ */
+function PinnedOperatorRow({
+  channel,
+  active,
+  onSelect,
+}: {
+  channel: Channel | undefined;
+  active: boolean;
+  onSelect: (id: string) => void;
+}) {
+  if (!channel) return null;
+  return (
+    <div className="mt-2 border-t px-2 pt-2">
+      <button
+        type="button"
+        onClick={() => onSelect(channel.id)}
+        aria-current={active ? "page" : undefined}
+        title={channelSubtitle(channel) ?? undefined}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+          active
+            ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+            : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
+        )}
+      >
+        <ChannelIcon channel={channel} />
+        <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+      </button>
+    </div>
   );
 }
 
@@ -399,6 +456,11 @@ function ChannelIcon({ channel }: { channel: Channel }) {
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );
   }
+  // The Operator feed is a broadcast, not an addressable line — `#` implies a
+  // channel you post into, which this one refuses (issue #1757 rework). A
+  // distinct glyph is the honest mark, the same way `Lock` already distinguishes
+  // a private channel from an ordinary one.
+  if (channel.system) return <Radio className="size-4 shrink-0 opacity-70" aria-hidden />;
   const Icon = channel.private ? Lock : Hash;
   return <Icon className="size-4 shrink-0 opacity-70" aria-hidden />;
 }

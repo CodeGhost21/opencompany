@@ -849,6 +849,19 @@ pub enum CompanyEvent {
         /// Who resolved it.
         by: Actor,
     },
+    /// An operator extended a parked approval's deadline (issue #1805).
+    ///
+    /// The audit counterpart to the extend lever: it says *who* bought a stalled
+    /// request more time and *when*, so a run that would have default-denied over
+    /// a weekend leaves a trail naming the person who kept it alive. Thin like
+    /// [`ApprovalParked`](Self::ApprovalParked) — the moved deadline itself is
+    /// projected onto the card from the journal, not carried on the event.
+    ApprovalExtended {
+        /// The approval whose deadline was pushed out.
+        approval_id: ApprovalId,
+        /// Who extended it.
+        by: Actor,
+    },
     /// Feedback was filed against the company.
     FeedbackFiled {
         /// Free-form feedback text.
@@ -1909,6 +1922,7 @@ impl CompanyEvent {
             Self::A2aTaskReceived { .. } => "A2aTaskReceived",
             Self::ApprovalParked { .. } => "ApprovalParked",
             Self::ApprovalResolved { .. } => "ApprovalResolved",
+            Self::ApprovalExtended { .. } => "ApprovalExtended",
             Self::FeedbackFiled { .. } => "FeedbackFiled",
             Self::PaymentReceived { .. } => "PaymentReceived",
             Self::LifecycleChanged { .. } => "LifecycleChanged",
@@ -2046,6 +2060,7 @@ impl CompanyEvent {
             | Self::A2aTaskReceived { .. }
             | Self::ApprovalParked { .. }
             | Self::ApprovalResolved { .. }
+            | Self::ApprovalExtended { .. }
             | Self::FeedbackFiled { .. }
             | Self::PaymentReceived { .. }
             | Self::LifecycleChanged { .. }
@@ -3070,17 +3085,23 @@ pub struct OverlayAgent {
     pub description: Option<String>,
     /// The per-teammate tool grant: a manifest `[[agent]].tools`-style glob list,
     /// **intersected** with the company's `[tools].allow` at roster-build time
-    /// (issue #661 / L5). An **empty** list is the standard company-wide grant
-    /// (every allowed tool), exactly as an omitted manifest `tools` line is —
-    /// never "no tools". The intersection is narrow-only: this can restrict a
-    /// teammate below the company grant, never widen it past it.
+    /// (issue #661 / L5). Three distinct states, made representable by issue
+    /// #1804 (epic #1817, Rung 2):
     ///
-    /// `#[serde(default)]` keeps every overlay record written before this field
-    /// existed deserializing unchanged (as an empty list → standard grant), and
-    /// `skip_serializing_if` keeps the common empty case out of the persisted
-    /// JSON so a standard-grant teammate serializes exactly as it did before.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<String>,
+    /// * `None` — **inherit** the company's standard grant (every allowed tool).
+    ///   The default, and how every overlay record written before #1804 (which
+    ///   had no `tools` key, or serialized `[]` under the old `Vec` field)
+    ///   deserializes, so no existing teammate moves.
+    /// * `Some(vec![])` — an **explicit no-tools** grant: this teammate reaches
+    ///   nothing. Newly reachable in #1804.
+    /// * `Some(globs)` — **narrow** to those globs. The intersection is
+    ///   narrow-only: this can restrict a teammate below the company grant, never
+    ///   widen it past it.
+    ///
+    /// `skip_serializing_if = "Option::is_none"` keeps a standard-grant teammate
+    /// serializing exactly as it did before (no `tools` key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     /// A per-agent model override, carried the same way as
     /// [`Agent::model`](crate::company::types::Agent) — see that field's docs.
     /// `None` (the default, and how every record written before this field
@@ -3122,6 +3143,18 @@ pub struct OverlayAgent {
 /// **At most one entry per `agent_id`** — mutate through
 /// [`CompanyRecord::upsert_agent_override`] rather than pushing, for the reason
 /// [`CompanyRecord::upsert_budget_override`] gives.
+/// Deserializes a present field into `Some(inner)` — so an explicit `null`
+/// becomes `Some(None)` rather than collapsing to `None` — while a companion
+/// `#[serde(default)]` maps an absent field to `None`. The three-way distinction
+/// [`AgentOverride::tools`] relies on: absent / `null` / a value.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentOverride {
     /// The manifest teammate this edit applies to.
@@ -3135,13 +3168,31 @@ pub struct AgentOverride {
     /// The teammate's description. `Some("")` is the operator clearing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// The teammate's requested tool globs, replacing the manifest's
-    /// `[[agent]].tools` line. An empty list means the company's standard grant
-    /// — the same "empty is not nothing" rule the manifest field carries — and
-    /// is still intersected with `[tools].allow`, so this can only narrow a
-    /// teammate within a grant the company already made.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<String>>,
+    /// The teammate's requested tool grant, replacing the manifest's
+    /// `[[agent]].tools` line — a **double option** since issue #1804, because
+    /// the manifest field it overrides is itself now a three-state
+    /// [`Option<Vec<String>>`](crate::company::Agent::tools) and "leave it alone"
+    /// has to stay apart from "override it to standard":
+    ///
+    /// | value | means |
+    /// |---|---|
+    /// | `None` | not overridden — the manifest `tools` line flows through unchanged |
+    /// | `Some(None)` | override to **inherit** the company's standard grant |
+    /// | `Some(Some(vec![]))` | override to an **explicit no-tools** grant (deny-all) |
+    /// | `Some(Some(globs))` | override to **narrow** to those globs |
+    ///
+    /// The inner value is assigned verbatim onto
+    /// [`Agent::tools`](crate::company::Agent::tools) by
+    /// [`CompanyRecord::effective_manifest_agent`], so the manifest field's own
+    /// three-state contract carries the meaning; this layer only adds "was it set
+    /// at all". Still intersected with `[tools].allow` at read time, so it can
+    /// only ever narrow a teammate within a grant the company already made.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tools: Option<Option<Vec<String>>>,
     /// The operator's replacement persona prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -3940,10 +3991,11 @@ impl OverlayBlob {
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
 /// free the roster leaves them: the always-present operator channel, the two
-/// workspace system roots, and the author the runtime speaks under.
+/// workspace system roots, the author the runtime speaks under, and the two
+/// spellings of the built-in `#general` channel.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the four moves this list with it instead of quietly
+/// rename of any of them moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
 ///
@@ -3954,11 +4006,23 @@ impl OverlayBlob {
 /// `agent_slug("System")` produces it — which is what separates it from
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
-pub const RESERVED_AGENT_IDS: [&str; 4] = [
+///
+/// [`MAIN_THREAD_ID`](crate::server::chat_history::MAIN_THREAD_ID) and
+/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK) join them for
+/// issue #1743, and both are ordinary slugs — a teammate named "Main" or
+/// "General" mints straight onto one. That id is a chat address: `responder_for`
+/// checks roster ids before it falls back to the orchestrator, so the teammate
+/// would answer every unaddressed message on the company-wide line, and the
+/// console would render the line's transcript as that teammate's DM. Desk ids
+/// and names are already excluded a few lines below; these are the two keys
+/// that route like a desk without being one.
+pub const RESERVED_AGENT_IDS: [&str; 6] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
+    crate::server::chat_history::MAIN_THREAD_ID,
+    crate::server::ops::language::DEFAULT_DESK,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -4324,6 +4388,20 @@ impl CompanyRecord {
     /// id, searching the manifest desks first and then the operator-created
     /// overlay desks. Lets the harness route to overlay desks by the same
     /// id-or-name key it already accepts for manifest desks.
+    ///
+    /// **An overlay desk never answers to a General spelling** (issue #1743).
+    /// `POST .../desks` accepted `general` and `main` — and the display name
+    /// `General` — until that issue, so an upgraded record can hold one, and it
+    /// would otherwise take over routing for the built-in `#general` channel:
+    /// `responder_for` would answer as its lead while the console showed the
+    /// company-wide line, and `@everyone` there would name only its members.
+    /// Keyed on the **key being asked for**, not on the desk, so such a desk
+    /// still routes normally under its own non-General id — this narrows one
+    /// question, it does not retire a desk.
+    ///
+    /// A desk the *manifest* declares is matched first and is unaffected: a
+    /// blueprint that authored the company's General desk keeps it, which is
+    /// the grandfathering this host has always honoured.
     pub fn resolve_desk_id(&self, key: &str) -> Option<String> {
         self.manifest
             .group_chats
@@ -4331,8 +4409,20 @@ impl CompanyRecord {
             .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
             .map(|c| c.id.clone())
             .or_else(|| {
+                if crate::server::chat_history::is_general_chat(Some(key)) {
+                    return None;
+                }
                 self.overlay_desks
                     .iter()
+                    // ...and an overlay desk whose **own id** is a General
+                    // spelling is excluded whatever it is asked for. The guard
+                    // above only narrows the queried key, so `{id: "main", name:
+                    // "Front office"}` was still reachable by its display name —
+                    // resolving to an id that `GET .../desks` filters out and
+                    // that every desk mutation refuses. Its lead would answer,
+                    // and the reply would be journaled under a thread the
+                    // console renders no channel for.
+                    .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
@@ -6650,7 +6740,7 @@ mod test {
             name: "Nova".into(),
             role: "Growth".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -6659,24 +6749,47 @@ mod test {
         assert!(!record.is_roster_agent("ghost"));
     }
 
-    /// Issue #661 / L5 serde: the new per-teammate `tools` grant is optional and
-    /// empty-by-default on the wire, so an overlay record written before the
-    /// field existed deserializes unchanged, and a standard-grant teammate
-    /// serializes exactly as it did before (no `tools` key).
+    /// Issue #661 / L5 serde, updated for #1804's three-state grant: an absent
+    /// `tools` key deserializes to `None` (the standard grant) and a `None`
+    /// grant serializes with no `tools` key — so a record written before the
+    /// field existed round-trips unchanged. The two new states are wire-visible:
+    /// an explicit deny-all (`Some(vec![])`) serializes as `tools: []` (present,
+    /// NOT skipped), and a narrowed grant serializes its list.
     #[test]
-    fn overlay_agent_tools_defaults_empty_and_skips_when_empty() {
-        // An old record with no `tools` key deserializes to an empty grant.
+    fn overlay_agent_tools_three_state_serde_round_trip() {
+        // An old record with no `tools` key deserializes to `None` (standard).
         let legacy: OverlayAgent =
             serde_json::from_str(r#"{"id":"a","name":"A","role":"r"}"#).expect("legacy overlay");
-        assert!(legacy.tools.is_empty());
+        assert_eq!(legacy.tools, None);
 
-        // An empty grant is omitted from the serialized form — a standard-grant
+        // A `None` grant is omitted from the serialized form — a standard-grant
         // teammate is byte-for-byte what it was before this field existed.
         let value = serde_json::to_value(&legacy).unwrap();
         assert!(
             value.get("tools").is_none(),
-            "an empty grant must not serialize a `tools` key: {value}"
+            "a None (standard) grant must not serialize a `tools` key: {value}"
         );
+
+        // An explicit deny-all IS on the wire, as `tools: []` — it must NOT be
+        // skipped, or it would read back as the standard grant (the inversion).
+        let denied = OverlayAgent {
+            id: "d".into(),
+            name: "D".into(),
+            role: "r".into(),
+            description: None,
+            tools: Some(Vec::new()),
+            model: None,
+            harness: None,
+        };
+        let denied_value = serde_json::to_value(&denied).unwrap();
+        assert_eq!(
+            denied_value.get("tools"),
+            Some(&serde_json::json!([])),
+            "an explicit deny-all must serialize `tools: []`, not skip the key: {denied_value}"
+        );
+        let denied_round: OverlayAgent =
+            serde_json::from_str(&serde_json::to_string(&denied).unwrap()).unwrap();
+        assert_eq!(denied_round.tools, Some(Vec::new()));
 
         // A non-empty grant round-trips in order.
         let scoped = OverlayAgent {
@@ -6684,13 +6797,16 @@ mod test {
             name: "S".into(),
             role: "r".into(),
             description: None,
-            tools: vec!["docs.*".into(), "email".into()],
+            tools: Some(vec!["docs.*".into(), "email".into()]),
             model: None,
             harness: None,
         };
         let round: OverlayAgent =
             serde_json::from_str(&serde_json::to_string(&scoped).unwrap()).unwrap();
-        assert_eq!(round.tools, vec!["docs.*".to_string(), "email".to_string()]);
+        assert_eq!(
+            round.tools,
+            Some(vec!["docs.*".to_string(), "email".to_string()])
+        );
     }
 
     /// A record with one manifest agent and no desks, for the minting tests.
@@ -6708,7 +6824,7 @@ mod test {
             name: name.into(),
             role: "Worker".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -6806,9 +6922,16 @@ mod test {
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
         assert_eq!(record.mint_agent_id("System"), "system_2");
+        // Issue #1743: both spellings of the built-in `#general` channel. A
+        // teammate minted onto one becomes the answer to every unaddressed
+        // message on the company-wide line — `responder_for` checks roster ids
+        // before falling back to the orchestrator — and the console renders
+        // that line's transcript as the teammate's DM.
+        assert_eq!(record.mint_agent_id("Main"), "main_2");
+        assert_eq!(record.mint_agent_id("General"), "general_2");
         assert_eq!(
             RESERVED_AGENT_IDS,
-            ["operator", "agents", "desks", "system"]
+            ["operator", "agents", "desks", "system", "main", "General"]
         );
     }
 
@@ -6851,7 +6974,7 @@ mod test {
             name: "Dana Designer".into(),
             role: "Designer".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -6896,7 +7019,7 @@ mod test {
             name: "ceo".into(),
             role: "Growth".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -6918,7 +7041,7 @@ mod test {
                 name: "Dana Designer".into(),
                 role: "Designer".into(),
                 description: None,
-                tools: Vec::new(),
+                tools: None,
                 model: None,
                 harness: None,
             });
@@ -7271,7 +7394,7 @@ mod test {
         );
         assert_eq!(
             analyst.tools,
-            vec!["workspace.read".to_string()],
+            Some(vec!["workspace.read".to_string()]),
             "and so must an untouched tool line"
         );
         // The blueprint itself is never rewritten — that is the whole point of
@@ -7309,14 +7432,15 @@ mod test {
         });
         record.upsert_agent_override(AgentOverride {
             agent_id: "analyst".to_string(),
-            tools: Some(vec!["composio".to_string()]),
+            // Double-option since #1804: `Some(Some(globs))` narrows.
+            tools: Some(Some(vec!["composio".to_string()])),
             ..Default::default()
         });
 
         assert_eq!(record.overlay_agent_edits.len(), 1);
         let analyst = record.effective_agent("analyst").unwrap();
         assert_eq!(analyst.role, "Chief Vibes", "the earlier edit survives");
-        assert_eq!(analyst.tools, vec!["composio".to_string()]);
+        assert_eq!(analyst.tools, Some(vec!["composio".to_string()]));
     }
 
     /// A removed teammate is off the roster everywhere the roster is read: the
@@ -7441,7 +7565,7 @@ mod test {
             name: "Shane".to_string(),
             role: "Growth".to_string(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -7661,7 +7785,7 @@ mod test {
             name: "Alex".into(),
             role: "Writer".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -7768,7 +7892,7 @@ mod test {
             ),
             (
                 "tools",
-                Box::new(|e: &mut AgentOverride| e.tools = Some(vec!["docs.*".to_string()])),
+                Box::new(|e: &mut AgentOverride| e.tools = Some(Some(vec!["docs.*".to_string()]))),
             ),
             (
                 "instructions",
@@ -7851,6 +7975,144 @@ mod test {
             record.effective_desk_members("growth"),
             vec!["eng".to_string(), "ceo".to_string()]
         );
+    }
+
+    /// An **overlay** desk never answers to a General spelling (issue #1743).
+    ///
+    /// `POST .../desks` accepted `general`, `main` and the display name
+    /// `General` until that issue, so an upgraded record can be carrying one.
+    /// Every routing decision on the built-in `#general` channel funnels
+    /// through this one resolver — `desk_lead` → `responder_for` picks who
+    /// answers, and `mentioned_agents` picks who `@everyone` names — so a desk
+    /// that resolves here takes the company-wide line over: the console shows
+    /// `#general` while that desk's lead answers it, and a broadcast meant for
+    /// the whole roster reaches only that desk's members.
+    ///
+    /// Keyed on the **key being asked for**, not on the desk, which is what
+    /// keeps this a narrowing of one question rather than a retirement: the
+    /// same desk still resolves under its own non-General id.
+    #[test]
+    fn an_overlay_desk_does_not_answer_to_a_general_spelling() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        record.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "General".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["ceo".into()],
+        });
+
+        for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
+            assert_eq!(
+                record.resolve_desk_id(spelling),
+                None,
+                "an overlay desk must not answer to {spelling:?}"
+            );
+        }
+        // Both desks still exist and still route under their own ids — this
+        // narrows one question, it does not take a desk away.
+        assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+        assert!(record.desk_exists("main"));
+        assert_eq!(
+            record.effective_desk_members("main"),
+            vec!["eng".to_string()]
+        );
+    }
+
+    /// ...and it must not be reachable by its **display name** either.
+    ///
+    /// The guard narrows the key being asked for, so `{id: "main", name: "Front
+    /// office"}` slipped through it: `Front office` is not a General spelling,
+    /// the name match fired, and the resolver returned `main` — an id that
+    /// `GET .../desks` filters out and that every desk mutation refuses. Its
+    /// lead would answer, and the reply would be journaled under a thread the
+    /// console renders no channel for: a conversation with no way back.
+    ///
+    /// An overlay desk on a General id is unaddressable by design; it must be
+    /// unaddressable by *every* address.
+    #[test]
+    fn an_overlay_desk_on_a_general_id_is_unreachable_by_name_too() {
+        let mut record = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            Vec::new(),
+        );
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        assert_eq!(
+            record.resolve_desk_id("Front office"),
+            None,
+            "an overlay desk whose id shadows General must not answer to its name"
+        );
+        assert_eq!(
+            record.resolve_desk_id("front office"),
+            None,
+            "nor case-folded"
+        );
+        assert_eq!(record.resolve_desk_id("main"), None, "nor to the id itself");
+        // An ordinary overlay desk is untouched — this narrows one desk, not the rule.
+        let mut ordinary = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            Vec::new(),
+        );
+        ordinary.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        assert_eq!(
+            ordinary.resolve_desk_id("Front office").as_deref(),
+            Some("ops")
+        );
+        assert_eq!(ordinary.resolve_desk_id("ops").as_deref(), Some("ops"));
+    }
+
+    /// A desk the **manifest** declares under a General spelling is the
+    /// blueprint's own General desk, and this host has always honoured it
+    /// (issue #1743). The narrowing above is about overlay desks only; the
+    /// manifest arm of the resolver is searched first and is untouched.
+    #[test]
+    fn a_blueprint_desk_still_owns_a_general_spelling() {
+        let record = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
+             [[group_chat]]\nid = \"main\"\nname = \"Front office\"\nmembers = [\"eng\"]\n",
+            Vec::new(),
+        );
+        assert_eq!(record.resolve_desk_id("main").as_deref(), Some("main"));
+        assert_eq!(
+            record.effective_desk_members("main"),
+            vec!["eng".to_string()]
+        );
+        // And by display name, the other spelling `resolve_desk_id` matches.
+        let named = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"General\"\nmembers = [\"ceo\"]\n",
+            Vec::new(),
+        );
+        assert_eq!(named.resolve_desk_id("General").as_deref(), Some("ops"));
+        assert_eq!(named.resolve_desk_id("general").as_deref(), Some("ops"));
     }
 
     /// The overlay blob round-trips operator-created desks through its persisted

@@ -255,8 +255,10 @@ export function destinationTargetProblem(
   //
   // #981: the same sentence the host's save-time rejection carries, so an author
   // who trips the pre-flight and an author who trips the 400 are told the same
-  // thing. `operator` is no longer in the list the host serves — it never was a
-  // delivery target — so this is what now catches it.
+  // thing. `operator` used to be excluded from the list the host serves, since
+  // it was an in-memory response surface delivery refused by name — but since
+  // #1757 it is a durable, journal-backed channel every company wires, so it is
+  // a real target like any other and this check accepts it the same way.
   //
   // Gated on `status === "ready"`, NOT on the list being non-empty. Those were
   // the same test until the host started answering `[]` for a company with no
@@ -2617,10 +2619,10 @@ function NodeRow({
               <>
                 {/* #813: pick from the channels this company can actually
                     deliver to, instead of a free-text box that only fails at
-                    delivery time. #981: the host no longer includes `operator`
-                    in that list — it is an in-memory response surface with no
-                    durable reader, and delivery refuses it by name — so the
-                    picker can no longer offer it. */}
+                    delivery time. #1757: the list now includes `operator` —
+                    it is a durable, journal-backed channel every company
+                    wires, not the in-memory surface #981 once excluded — so
+                    the picker offers it like any other real target. */}
                 <Select
                   value={node.destinationTarget || ""}
                   onValueChange={(v) => {

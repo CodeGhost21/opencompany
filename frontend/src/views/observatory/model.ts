@@ -14,6 +14,16 @@ export function runState(run: ObservatoryRun): SpanState {
   switch (run.status) {
     case "succeeded":
       return "done";
+    // A by-design decline (issue #1809) is a clean terminal outcome, not a
+    // failure and not still in flight — but it is not a success either, so it
+    // must not paint "done"'s green. `RunTimeline` and `AgentRuns` already
+    // give `declined` the same neutral tone `cancelled` wears; here that is
+    // "idle", the closed vocabulary's own word for "nothing is happening and
+    // nothing went wrong" (the tone `stopped`/`stranded` wear in
+    // `run-health.ts`) — never red, and never the `default` "running" that
+    // would leave a settled attempt reading as live forever.
+    case "declined":
+      return "idle";
     case "failed":
     case "cancelled":
       return "failed";
@@ -177,6 +187,8 @@ export interface NodeOutcome {
   succeeded: number;
   failed: number;
   blocked: number;
+  /** By-design refusals (issue #1809) — never folded into `succeeded`. */
+  declined: number;
 }
 
 /**
@@ -184,17 +196,27 @@ export interface NodeOutcome {
  *
  * `blocked` is counted apart from `failed` deliberately: a node waiting on a
  * person has not gone wrong, and folding the two would send an operator hunting
- * a bug in the node that most often needs a click.
+ * a bug in the node that most often needs a click. `declined` is counted apart
+ * from `succeeded` for the same reason in reverse (issue #1809): a node the
+ * compiler refused to automate has not succeeded, and folding it in would tell
+ * an operator a gate is healthy when it is actually the one being declined.
  */
 export function byNode(runs: ObservatoryRun[]): NodeOutcome[] {
   const map = new Map<string, NodeOutcome>();
   for (const run of runs) {
     const nodeId = run.nodeId;
     if (!nodeId) continue;
-    const row = map.get(nodeId) ?? { nodeId, succeeded: 0, failed: 0, blocked: 0 };
+    const row = map.get(nodeId) ?? {
+      nodeId,
+      succeeded: 0,
+      failed: 0,
+      blocked: 0,
+      declined: 0,
+    };
     const state = runState(run);
     if (state === "failed") row.failed += 1;
     else if (state === "blocked") row.blocked += 1;
+    else if (state === "idle") row.declined += 1;
     else if (state === "done") row.succeeded += 1;
     map.set(nodeId, row);
   }

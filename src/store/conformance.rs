@@ -162,18 +162,24 @@ fn sample_policy_override() -> crate::ports::types::PolicyOverride {
 /// dropped it would delete the teammate on the next restart, and on a hosted
 /// tenant there would be nothing to restore from.
 ///
-/// Deliberately **two** rows that differ in their optional fields, because the
-/// field's whole point is that those states stay apart across a round-trip:
+/// Deliberately **three** rows that differ in their optional fields, because the
+/// field's whole point is that those states stay apart across a round-trip. Since
+/// issue #1804 `tools` is a three-state grant, and all three must survive:
 ///
-/// - `aria_stone` has a `description` and a **narrowed** `tools` grant. Both are
-///   `skip_serializing_if`-elided when empty, so a backend that persisted only
-///   the required `id`/`name`/`role` triple would still round-trip a bare agent
-///   and pass. This row is what makes that fail.
-/// - `pax_ivory` has `description: None` and an **empty** `tools` list, which
-///   means the standard company-wide grant rather than "no tools" (see
+/// - `aria_stone` has a `description` and a **narrowed** `tools` grant
+///   (`Some(globs)`). Both are `skip_serializing_if`-elided when absent, so a
+///   backend that persisted only the required `id`/`name`/`role` triple would
+///   still round-trip a bare agent and pass. This row is what makes that fail.
+/// - `pax_ivory` has `description: None` and an **absent** `tools` grant
+///   (`None`), which means the standard company-wide grant — the teammate keeps
+///   tracking `[tools].allow` (see
 ///   [`OverlayAgent::tools`](crate::ports::types::OverlayAgent::tools)). A
-///   backend that rehydrated the absent key as anything other than empty would
-///   silently re-scope that teammate's tool belt.
+///   backend that rehydrated the absent key as `Some(vec![])` would silently
+///   demote that teammate to a deny-all belt.
+/// - `nix_slate` has an **explicit empty** `tools` grant (`Some(vec![])`), which
+///   since #1804 is a deliberate **deny-all** — the opposite of `None`. A backend
+///   that collapsed `Some(vec![])` into `None` (or dropped the empty array) would
+///   silently re-grant that teammate the whole company belt.
 fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
     use crate::ports::types::OverlayAgent;
     vec![
@@ -182,9 +188,10 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             name: "Aria Stone".to_string(),
             role: "Head of Support".to_string(),
             description: Some("Answers customer mail and escalates refunds.".to_string()),
-            tools: vec!["docs.*".to_string(), "web".to_string()],
+            tools: Some(vec!["docs.*".to_string(), "web".to_string()]),
             // Both set, so a backend that drops either fails here — the same
-            // reason `tools` is non-empty on this one and empty on the next.
+            // reason `tools` is a narrowed `Some` here, `None` on the next, and
+            // an explicit empty `Some(vec![])` on the third.
             model: Some("claude-sonnet-4".to_string()),
             harness: Some("claude".to_string()),
         },
@@ -193,10 +200,24 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             name: "Pax Ivory".to_string(),
             role: "Analyst".to_string(),
             description: None,
-            tools: Vec::new(),
+            // `None` = inherit the standard company-wide grant. Must rehydrate
+            // as `None`, never as `Some(vec![])` (which since #1804 is deny-all).
+            tools: None,
             // The absent half of the pair: `None` must rehydrate as `None`,
             // never as an empty string pinning the teammate to a nameless
             // harness.
+            model: None,
+            harness: None,
+        },
+        OverlayAgent {
+            id: "nix_slate".to_string(),
+            name: "Nix Slate".to_string(),
+            role: "Contractor".to_string(),
+            description: None,
+            // Explicit empty list = deliberate deny-all (issue #1804), the
+            // opposite of `None`. Must survive as `Some(vec![])`, never collapse
+            // to `None` (which would silently re-grant the whole company belt).
+            tools: Some(Vec::new()),
             model: None,
             harness: None,
         },
@@ -258,7 +279,7 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
         name: Some("Robin".to_string()),
         role: Some("Chief Vibes".to_string()),
         description: Some(String::new()),
-        tools: Some(vec!["docs.*".to_string()]),
+        tools: Some(Some(vec!["docs.*".to_string()])),
         instructions: Some("Be exceedingly concise and decisive.".to_string()),
         // A dropped avatar reads as "nobody has chosen", so the teammate's face
         // would silently revert to the hashed default on the next restart — the
@@ -446,7 +467,7 @@ pub async fn assert_isolation_by_company(
     );
     assert_eq!(
         aria.tools,
-        vec!["docs.*".to_string(), "web".to_string()],
+        Some(vec!["docs.*".to_string(), "web".to_string()]),
         "the teammate's narrowed tool grant decayed into the standard company grant"
     );
     let pax = loaded
@@ -454,9 +475,20 @@ pub async fn assert_isolation_by_company(
         .iter()
         .find(|agent| agent.id == "pax_ivory")
         .expect("the standard-grant teammate survived save/load");
-    assert!(
-        pax.tools.is_empty(),
-        "the standard-grant teammate came back with a narrowed tool belt"
+    assert_eq!(
+        pax.tools, None,
+        "the standard-grant teammate (None) came back as a narrowed or deny-all belt"
+    );
+    let nix = loaded
+        .overlay_agents
+        .iter()
+        .find(|agent| agent.id == "nix_slate")
+        .expect("the deny-all teammate survived save/load");
+    assert_eq!(
+        nix.tools,
+        Some(Vec::new()),
+        "the deny-all teammate (Some(vec![])) collapsed into None and silently \
+         re-gained the whole company grant"
     );
     // And the round-tripped teammate is on the roster, which is what the overlay
     // is for: a backend could persist the rows and still fail to make them count.
@@ -5262,6 +5294,32 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
         .unwrap();
     assert_eq!(never_ran.status, RunStatus::Cancelled);
     assert_eq!(never_ran.started_at_millis, None);
+
+    // A by-design decline (issue #1809) is terminal and round-trips like any
+    // other settle: neither an error nor a plain success, so the store must
+    // persist and read it back exactly. Kept on its own company so it does not
+    // perturb the r1..r4 list-count assertions below.
+    let gamma = CompanyId::new("gamma");
+    runs.create_run(&gamma, spec("g1", "card")).await.unwrap();
+    let declined = runs
+        .finish_run(
+            &gamma,
+            "g1",
+            RunOutcome::new(RunStatus::Declined)
+                .with_error("better done once than built into a workflow"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(declined.status, RunStatus::Declined);
+    assert!(
+        declined.finished_at_millis.is_some(),
+        "Declined is terminal, so it carries a finish time"
+    );
+    assert_eq!(
+        runs.get_run(&gamma, "g1").await.unwrap(),
+        Some(declined),
+        "a declined run round-trips byte-identically"
+    );
 
     // -- the step trace ------------------------------------------------------
 

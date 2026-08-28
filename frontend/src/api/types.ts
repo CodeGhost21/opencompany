@@ -218,6 +218,23 @@ export interface DeskDto {
 }
 
 /**
+ * `GET {scope}/operator-channel` — the identity of the company's
+ * always-present, durable Operator feed (issue #1757 rework): a read-only
+ * "what happened" feed aggregating workflow-run reports and the owner/
+ * no-mailbox fallback. Its own surface, not a desk — the console pins it
+ * below a divider in the chat rail instead of folding it into `GET
+ * {scope}/desks`. Mirrors `OperatorChannelDto` in `src/server/operator.rs`.
+ */
+export interface OperatorChannelDto {
+  /** The channel id — the `desk` query param `chat/history` reads through. */
+  id: string;
+  /** Always "Operator" — the console's pinned-row label. */
+  name: string;
+  /** The channel's purpose line, shown under the name in the pinned row. */
+  description: string;
+}
+
+/**
  * Body for `POST {scope}/desks` — create a desk. `name` is required; `id` is
  * derived from the name when omitted; `members` are optional roster teammate
  * ids (the first becomes the lead).
@@ -700,6 +717,22 @@ export const GRANT_DURATIONS: { label: string; millis: number }[] = [
  * structurally unable to be widened into an argument-matching rule, and why this
  * list needs no redaction of its own.
  */
+/**
+ * A durable re-issue marker (issue #1846), as
+ * `GET {scope}/agents/{agentId}/budget-pause` and its `/redeem` twin return
+ * it. Parked when a turn pauses for lack of inference budget/credits;
+ * redeeming re-dispatches `message` from the top on `chatId` (not true
+ * resume — see the endpoint's doc comment in `src/server/ops/budget_pause.rs`).
+ */
+export interface BudgetPauseMarker {
+  id: string;
+  agent: string;
+  chatId?: string;
+  message: string;
+  summary: string;
+  atMillis: number;
+}
+
 export interface StandingGrant {
   id: string;
   /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
@@ -1118,12 +1151,15 @@ export interface AgentDetailDto {
  *
  * The distinction is the point: `requested` is what the agent's own `tools`
  * line asks for, `companyAllow` is the ceiling it is intersected with, and
- * `effective` is what the agent actually holds. An **empty `requested` means
- * the company's standard grant**, not "no tools", so a surface that renders the
- * request alone reports the opposite of the truth for exactly those agents.
+ * `effective` is what the agent actually holds. Since issue #1804 `requested`
+ * is three-state: **`null` means the company's standard grant** (the agent
+ * lists no tools of its own and inherits `[tools].allow`), an **empty array
+ * `[]` is a deliberate deny-all** (holds nothing), and a **non-empty array
+ * narrows**. A surface that treats `null` and `[]` alike reports the opposite
+ * of the truth for exactly those agents.
  */
 export interface AgentToolsDto {
-  requested: string[];
+  requested: string[] | null;
   companyAllow: string[];
   /**
    * The ceiling contributed by the desks this agent sits on — the union of
@@ -1191,8 +1227,16 @@ export interface EditAgentInput {
   model?: string | null;
   /** Which declared harness this teammate runs on. */
   harness?: string | null;
-  /** The teammate's own tool-grant globs. */
-  tools?: string[];
+  /**
+   * The teammate's own tool-grant globs, three-state since issue #1804 (like a
+   * double-`Option` on the wire): `undefined` leaves the grant untouched,
+   * `null` resets it to the standard company-wide grant, an empty array `[]` is
+   * a deliberate deny-all (holds nothing), and a non-empty array narrows. The
+   * four are different on the wire (`JSON.stringify` keeps `null`/`[]`, drops
+   * `undefined`) and must never be collapsed, or a partial save would silently
+   * re-scope a grant the operator did not touch.
+   */
+  tools?: string[] | null;
 }
 
 /** One declared or detected harness. */

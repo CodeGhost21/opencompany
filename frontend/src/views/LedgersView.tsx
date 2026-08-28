@@ -101,6 +101,7 @@ import {
 } from "@/api/ledgers";
 import { inlineCode } from "@/lib/inline-code";
 import { Markdown } from "@/components/markdown";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -638,10 +639,29 @@ export function LedgersView({
     }
   };
 
+  /*
+    The page's name before its switcher can exist (codex review, #1785). Both
+    guards below used to return above the header, so a fresh `#/ledgers/<slug>`
+    and a console with no company selected each rendered with no `h1` at all.
+
+    A plain title rather than the real header: the loaded one *is* the list
+    switcher, and a switcher with no list to switch between is a control that
+    lies. `ledger?.title` is used when it is already known — the second guard
+    fires while the rows load, by which point the list itself has resolved —
+    and "Lists" when it is not, which is the honest name for a page that does
+    not yet know which one it is showing.
+  */
+  // Same gutter as the loaded header below, so the title does not shift 8px
+  // sideways the moment the board arrives.
+  const loadingHeader = <PageHeader gutter="px-6" title={ledger?.title ?? "Lists"} />;
+
   if (!company) {
     return (
-      <div className="p-6 text-sm text-muted-foreground">
-        Pick a company to see its lists.
+      <div className="flex h-full min-h-0 flex-col">
+        {loadingHeader}
+        <div className="p-6 text-sm text-muted-foreground">
+          Pick a company to see its lists.
+        </div>
       </div>
     );
   }
@@ -652,29 +672,37 @@ export function LedgersView({
   // did rather than a flash of "not found" before the list catches up.
   if ((ledgersLoading && !ledger) || (reading && !read)) {
     return (
-      <div className="space-y-3 p-6">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-40 w-full" />
+      <div className="flex h-full min-h-0 flex-col">
+        {loadingHeader}
+        <div className="space-y-3 p-6">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-40 w-full" />
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 p-6">
-      <header className="flex flex-wrap items-start gap-3">
-        <div className="min-w-[16rem] flex-1 space-y-1">
-          {/* The page's own title is the switcher (issue #1284): no new
-              element added, one click to any other list, and the menu
-              includes where you already are rather than only offering
-              somewhere else to go. Still a real `<h1>` — the interactive
-              affordance is the `<button>` inside it, not the heading itself,
-              so a screen reader still announces "heading level 1: Goals"
-              rather than losing the page's landmark structure to a button. */}
-          {/* A flex row, because the trigger inside is a flex button: as
-              ordinary inline content the count badge wrapped to a line of its
-              own and cost back the space this header just saved. */}
-          <h1 className="flex flex-wrap items-center gap-2 text-xl font-semibold">
-            <DropdownMenu>
+    <div className="flex h-full min-h-0 flex-col">
+      {/*
+        Issue #1763: the page header, with the list switcher as the title.
+
+        The title is still a real level-one heading — the interactive affordance is the
+        `<button>` inside it, not the heading (issue #1284) — and the count
+        rides beside it, which is the shape `PageHeader` gives every page.
+
+        "About this list" goes to `children` rather than `description`: it is
+        a `<details>`, and the description renders into a `<p>`.
+      */}
+      <PageHeader
+        // The body below is `p-6`, so the header's default `px-4` put the title
+        // and actions 8px outside the board content they belong to. Before this
+        // page had a `PageHeader` at all its heading lived inside that same
+        // wrapper and lined up; `ManageListsView` passes the same gutter for the
+        // same reason.
+        gutter="px-6"
+        title={
+          <DropdownMenu>
               <DropdownMenuTrigger
                 render={
                   <button
@@ -739,58 +767,23 @@ export function LedgersView({
                   Manage lists
                 </DropdownMenuItem>
               </DropdownMenuContent>
-            </DropdownMenu>
-            {/* How much is live here, beside the name — the one fact about a
-                list that changes, and the one the switcher already shows for
-                every *other* list while saying nothing about the open one. */}
-            {ledger && (
-              <span
-                title={`${ledger.open} open`}
-                className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
-              >
-                {ledger.open}
-              </span>
-            )}
-          </h1>
-          {!ledger && (
-            <p className="text-sm text-muted-foreground">
-              This list does not exist, or was retired. Pick another from the
-              title menu.
-            </p>
-          )}
-          {ledger && (
-            // The purpose lives in here now (issue #1349). It is a fixed
-            // sentence about the engine — "this ledger is written through the
-            // board, not with `record_entry`" — written for whoever declares a
-            // list, not for the operator working one, and it was holding two
-            // permanent lines above the board on the console's most-visited
-            // screen. Read once, then never again; a disclosure is what that
-            // shape of text is for.
-            <details className="text-xs text-muted-foreground">
-              <summary className="w-fit cursor-pointer select-none rounded px-1 py-0.5 hover:bg-accent/50 hover:text-foreground">
-                About this list
-              </summary>
-              <div className="mt-1 max-w-prose space-y-1 px-1">
-                <p>{inlineCode(ledger.purpose)}</p>
-                <p>
-                  Renders into <code>{ledger.derived}</code>
-                </p>
-                {!isWritable(ledger) && (
-                  <p className="flex items-start gap-1.5">
-                    <Lock className="mt-0.5 size-3 shrink-0" />
-                    <span>
-                      Rows here are opened elsewhere:{" "}
-                      {inlineCode(ledger.writtenBy)}. You can still move one
-                      between columns — that goes through the board, which is
-                      what makes it start work.
-                    </span>
-                  </p>
-                )}
-              </div>
-            </details>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
+          </DropdownMenu>
+        }
+        /* How much is live here, beside the name — the one fact about a list
+           that changes, and the one the switcher already shows for every
+           *other* list while saying nothing about the open one. */
+        trailing={
+          ledger && (
+            <span
+              title={`${ledger.open} open`}
+              className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
+            >
+              {ledger.open}
+            </span>
+          )
+        }
+        actions={
+          <>
           <Button
             variant="outline"
             size="sm"
@@ -836,9 +829,48 @@ export function LedgersView({
                 </Button>
               )
             ))}
-        </div>
-      </header>
-
+          </>
+        }
+      >
+          {!ledger && (
+            <p className="text-sm text-muted-foreground">
+              This list does not exist, or was retired. Pick another from the
+              title menu.
+            </p>
+          )}
+          {ledger && (
+            // The purpose lives in here now (issue #1349). It is a fixed
+            // sentence about the engine — "this ledger is written through the
+            // board, not with `record_entry`" — written for whoever declares a
+            // list, not for the operator working one, and it was holding two
+            // permanent lines above the board on the console's most-visited
+            // screen. Read once, then never again; a disclosure is what that
+            // shape of text is for.
+            <details className="text-xs text-muted-foreground">
+              <summary className="w-fit cursor-pointer select-none rounded px-1 py-0.5 hover:bg-accent/50 hover:text-foreground">
+                About this list
+              </summary>
+              <div className="mt-1 max-w-prose space-y-1 px-1">
+                <p>{inlineCode(ledger.purpose)}</p>
+                <p>
+                  Renders into <code>{ledger.derived}</code>
+                </p>
+                {!isWritable(ledger) && (
+                  <p className="flex items-start gap-1.5">
+                    <Lock className="mt-0.5 size-3 shrink-0" />
+                    <span>
+                      Rows here are opened elsewhere:{" "}
+                      {inlineCode(ledger.writtenBy)}. You can still move one
+                      between columns — that goes through the board, which is
+                      what makes it start work.
+                    </span>
+                  </p>
+                )}
+              </div>
+            </details>
+          )}
+      </PageHeader>
+      <div className="flex min-h-0 flex-1 flex-col gap-4 p-6">
       {error && (
         <Alert variant="destructive">
           <AlertTriangle className="size-4" />
@@ -1067,6 +1099,7 @@ export function LedgersView({
             </>
           )}
         </section>
+      </div>
       </div>
 
       {composing && ledger && (
@@ -1317,7 +1350,7 @@ function EntryCard({
       }}
     >
       <CardContent
-        className="space-y-2 p-4"
+        className="space-y-2"
         data-testid={`ledger-entry-${entry.id}`}
       >
         <div className="flex flex-wrap items-start gap-2">

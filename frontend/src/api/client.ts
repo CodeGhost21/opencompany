@@ -45,8 +45,10 @@ import {
   type FinancesDto,
   type GrantScope,
   type HarnessDto,
+  type BudgetPauseMarker,
   type InboxDto,
   type InboxMessageDto,
+  type OperatorChannelDto,
   type PageManifestDto,
   type ResolveReceipt,
   type SetBudgetInput,
@@ -569,6 +571,16 @@ export class OpenCompanyClient {
   }
 
   /**
+   * The identity of the company's always-present, durable Operator feed
+   * (issue #1757 rework) — its own surface, not a desk. The console pins it
+   * below a divider in the chat rail rather than folding it into
+   * {@link listDesks}.
+   */
+  getOperatorChannel(company?: string | null): Promise<OperatorChannelDto> {
+    return this.request<OperatorChannelDto>("GET", `${this.scope(company)}/operator-channel`);
+  }
+
+  /**
    * Add a teammate to a desk through the operator overlay (issue #72). The
    * teammate must be on the company roster; the desk must exist. Adding one
    * already on the desk is a 409.
@@ -878,6 +890,66 @@ export class OpenCompanyClient {
       body,
     );
     return isResolveReceipt(answer) ? answer : (answer as ChatResponse);
+  }
+
+  /**
+   * The parked budget-pause marker for an agent (issue #1846), or `null` when
+   * nothing is paused. Read-only — does not consume the marker.
+   */
+  getBudgetPause(
+    agentId: string,
+    company?: string | null,
+  ): Promise<BudgetPauseMarker | null> {
+    return this.request<BudgetPauseMarker | null>(
+      "GET",
+      `${this.scope(company)}/agents/${encodeURIComponent(agentId)}/budget-pause`,
+    );
+  }
+
+  /**
+   * The Add-Credits CTA (issue #1846): redeems the parked marker and
+   * re-dispatches the original message. Not true resume (#561) — a fresh
+   * turn runs from the top on the same chat thread the pause happened on.
+   *
+   * `expectedId` is the marker id the caller last read via
+   * {@link getBudgetPause} (issue #1846 review, Codex #3866418876 /
+   * #3866802268) — sent as `?id=` so the server can refuse with a `409` when
+   * a background turn (a workflow node, an unstreamed task) has since
+   * overwritten the SAME agent's marker with one that has no chat
+   * destination, rather than silently re-dispatching whatever is parked NOW
+   * under the assumption it is still what the operator clicked. Omitted only
+   * for a caller with no prior read to compare against, in which case the
+   * server falls back to its pre-fix unconditional redeem.
+   */
+  redeemBudgetPause(
+    agentId: string,
+    company?: string | null,
+    expectedId?: string | null,
+  ): Promise<BudgetPauseMarker> {
+    const qs = expectedId ? `?id=${encodeURIComponent(expectedId)}` : "";
+    return this.request<BudgetPauseMarker>(
+      "POST",
+      `${this.scope(company)}/agents/${encodeURIComponent(agentId)}/budget-pause/redeem${qs}`,
+    );
+  }
+
+  /**
+   * Push a parked approval's deadline out to a fresh full TTL window (#1805),
+   * so a stalled run does not default-deny before someone can decide it.
+   *
+   * Returns the approval's **new** default-deny instant (epoch-millis) — the
+   * number the card's countdown will now project — so the caller can redraw the
+   * deadline without re-fetching the whole approvals list. A 404 means there was
+   * nothing to extend: an unknown id, or one that has since resolved or expired,
+   * which the caller should treat by refreshing the list rather than as a
+   * failure to report.
+   */
+  async extendApproval(approvalId: string, company?: string | null): Promise<number> {
+    const answer = await this.request<{ expiresAtMillis: number }>(
+      "POST",
+      `${this.scope(company)}/approvals/${encodeURIComponent(approvalId)}/extend`,
+    );
+    return answer.expiresAtMillis;
   }
 
   /** The live standing permissions, newest first (#374). */

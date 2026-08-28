@@ -95,11 +95,25 @@ pub fn company_id_from_name(name: &str) -> CompanyId {
     })
 }
 
+/// Narrows one glob list against the company `allow`-list: keeps only the
+/// requests the allow-list actually covers. The primitive both the agent level
+/// and the desk level are built from, so "narrow-only" is one function rather
+/// than a rule each site re-implements.
+fn narrow(allow: &[String], globs: &[String]) -> Vec<String> {
+    globs
+        .iter()
+        .filter(|tool| allow_covers(allow, tool))
+        .cloned()
+        .collect()
+}
+
 /// Computes a company's effective tool grants: the company-wide
 /// `[tools].allow` narrowed by per-agent `tools` (most-restrictive-wins).
 ///
-/// An agent with no explicit `tools` inherits the full company allow-list; an
-/// agent that lists tools contributes only those covered by the allow-list. The
+/// The per-agent three states (issue #1804): an agent with **no** explicit
+/// `tools` (`None`) inherits the full company allow-list; an agent with an
+/// **explicit empty** grant (`Some(vec![])`) contributes nothing; an agent that
+/// lists globs (`Some(globs)`) contributes only those the allow-list covers. The
 /// result is the de-duplicated union across the roster, preserving order. A
 /// company with no roster yields the allow-list unchanged.
 pub fn effective_grants(manifest: &CompanyManifest) -> Vec<String> {
@@ -109,15 +123,7 @@ pub fn effective_grants(manifest: &CompanyManifest) -> Vec<String> {
     }
     let mut grants: Vec<String> = Vec::new();
     for agent in &manifest.agents {
-        if agent.tools.is_empty() {
-            grants.extend(allow.iter().cloned());
-        } else {
-            for tool in &agent.tools {
-                if allow_covers(allow, tool) {
-                    grants.push(tool.clone());
-                }
-            }
-        }
+        grants.extend(agent_effective_grants(allow, agent.tools.as_deref()));
     }
     dedup(grants)
 }
@@ -134,15 +140,23 @@ pub fn effective_grants(manifest: &CompanyManifest) -> Vec<String> {
 /// the *same* function or the console would show an operator a tool list the
 /// harness does not actually grant — which is precisely the verification gap
 /// #264 was filed about.
-pub(crate) fn agent_effective_grants(allow: &[String], agent_tools: &[String]) -> Vec<String> {
-    let grants: Vec<String> = if agent_tools.is_empty() {
-        allow.to_vec()
-    } else {
-        agent_tools
-            .iter()
-            .filter(|tool| allow_covers(allow, tool))
-            .cloned()
-            .collect()
+pub(crate) fn agent_effective_grants(
+    allow: &[String],
+    agent_tools: Option<&[String]>,
+) -> Vec<String> {
+    // The single behavioural flip of issue #1804 (epic #1817, Rung 2). `None`
+    // and `Some(vec![])` used to be one indistinguishable "empty" that both
+    // resolved to the full company grant — so an agent an operator had emptied
+    // held *everything*. They are now distinct at the type level and resolve on
+    // opposite sides: absent inherits the standard grant, an explicit empty list
+    // is a real, deliberate deny-all.
+    let grants: Vec<String> = match agent_tools {
+        // Absent → inherit the company's standard grant (every allowed tool).
+        None => allow.to_vec(),
+        // Explicit empty → no tools. The state that used to be unrepresentable.
+        Some([]) => Vec::new(),
+        // Listed globs → narrow, intersected with the allow-list (narrow-only).
+        Some(globs) => narrow(allow, globs),
     };
     dedup(grants)
 }
@@ -178,7 +192,7 @@ pub(crate) fn agent_effective_grants(allow: &[String], agent_tools: &[String]) -
 pub(crate) fn agent_scoped_grants(
     allow: &[String],
     desk_allows: &[&[String]],
-    agent_tools: &[String],
+    agent_tools: Option<&[String]>,
 ) -> Vec<String> {
     // No desk states a ceiling (the common case, and every pre-existing
     // manifest) → the desk level is skipped entirely and this is exactly the
@@ -186,10 +200,23 @@ pub(crate) fn agent_scoped_grants(
     let ceiling: Vec<String> = if desk_allows.iter().all(|desk| desk.is_empty()) {
         allow.to_vec()
     } else {
+        // The desk level keeps "empty = no ceiling = the full company grant" —
+        // the documented union sharp edge (a desk with no `tools` widens the
+        // union back to `allow`). The issue #1804 "empty = deny-all" flip is an
+        // *agent*-level rule, not a desk-level one: desks combine additively, so
+        // an empty desk still means "this desk adds no restriction", never "this
+        // desk grants nothing". Reached through `narrow` directly rather than
+        // `agent_effective_grants`, which would now read an empty desk as deny.
         dedup(
             desk_allows
                 .iter()
-                .flat_map(|desk| agent_effective_grants(allow, desk))
+                .flat_map(|desk| {
+                    if desk.is_empty() {
+                        allow.to_vec()
+                    } else {
+                        narrow(allow, desk)
+                    }
+                })
                 .collect(),
         )
     };
@@ -587,6 +614,7 @@ pub struct RuntimeBuilder {
     run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
     deep_trace: Option<Arc<dyn crate::ports::deep_trace::DeepTraceStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
+    tracker: Option<Arc<dyn crate::analytics::Tracker>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
     notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
@@ -726,6 +754,7 @@ impl RuntimeBuilder {
             run_output_store: None,
             deep_trace: None,
             usage: None,
+            tracker: None,
             skills: None,
             read_state: None,
             notifications: None,
@@ -1131,6 +1160,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Points this company's analytics at `tracker` (issue #1739).
+    ///
+    /// The default is [`NullTracker`](crate::analytics::NullTracker), which is
+    /// what a desktop or self-hosted instance keeps: the whole hosted-only
+    /// posture is that a builder nobody called this on reports nothing. The
+    /// `serve` path calls it once, with the process-wide tracker chosen by
+    /// [`analytics::mixpanel::build`](crate::analytics::mixpanel::build).
+    pub fn with_analytics(mut self, tracker: Arc<dyn crate::analytics::Tracker>) -> Self {
+        self.tracker = Some(tracker);
+        self
+    }
+
     /// Swaps the per-person channel read markers (default: fs-backed).
     pub fn with_read_state(
         mut self,
@@ -1427,9 +1468,9 @@ impl RuntimeBuilder {
     /// Preserve the pre-upgrade scope of persisted overlay teammates whose
     /// grant was left unstated.
     ///
-    /// An empty `OverlayAgent.tools` means "inherit the whole company
+    /// A `None` `OverlayAgent.tools` means "inherit the whole company
     /// allow-list", and it keeps tracking that list across rebuilds on purpose
-    /// — an operator who left the line empty asked for whatever the company
+    /// — an operator who left the line unstated asked for whatever the company
     /// allows. When a manifest upgrade widens the allow-list into a BYO
     /// real-money namespace (issue #788) that the previous manifest did not
     /// grant, that tracking hands billing to a teammate that never asked for
@@ -1438,13 +1479,19 @@ impl RuntimeBuilder {
     /// teammates — a company that already granted the namespace keeps its
     /// tracking, and one that still does not is untouched.
     ///
+    /// Only the **inherit** state is frozen. A `Some(vec![])` teammate is an
+    /// explicit deny-all since issue #1804 — it tracks nothing and a widened
+    /// allow-list confers it nothing — so it is deliberately left alone.
+    ///
     /// The console's per-agent edit half ([`AgentOverride`]) is covered the
-    /// same way. `tools: Some([])` is its stored spelling of "give this
-    /// teammate the company's standard grant" — the same empty-means-standard
-    /// rule — and an override row is otherwise carried across a rebuild
-    /// verbatim, so a teammate an operator reset to the standard grant before
-    /// the upgrade would silently follow the widened allow-list into the new
-    /// namespace. Its empty line is frozen to the previous allow-list too.
+    /// same way. `tools: Some(None)` is its stored spelling of "reset this
+    /// teammate to the company's standard grant" (the inherit state), and an
+    /// override row is otherwise carried across a rebuild verbatim, so a
+    /// teammate an operator reset to the standard grant before the upgrade would
+    /// silently follow the widened allow-list into the new namespace. Its
+    /// inherit line is frozen to the previous allow-list too — while a
+    /// `Some(Some(vec![]))` deny-all override is, like the overlay case, left
+    /// untouched.
     fn preserve_pre_upgrade_grant_scope(
         overlay_agents: Vec<OverlayAgent>,
         overlay_agent_edits: Vec<AgentOverride>,
@@ -1466,8 +1513,11 @@ impl RuntimeBuilder {
         let overlay_agents = overlay_agents
             .into_iter()
             .map(|mut agent| {
-                if agent.tools.is_empty() {
-                    agent.tools = previous.tools.allow.clone();
+                // `None` = inherit (tracks the allow-list) → freeze. `Some([])`
+                // deny-all and `Some(globs)` narrow both state their own scope
+                // and are left untouched.
+                if agent.tools.is_none() {
+                    agent.tools = Some(previous.tools.allow.clone());
                 }
                 agent
             })
@@ -1475,8 +1525,11 @@ impl RuntimeBuilder {
         let overlay_agent_edits = overlay_agent_edits
             .into_iter()
             .map(|mut edit| {
-                if edit.tools.as_ref().is_some_and(Vec::is_empty) {
-                    edit.tools = Some(previous.tools.allow.clone());
+                // `Some(None)` = an override that resets to the standard grant
+                // (the inherit state) → freeze. `Some(Some(_))` states its own
+                // scope, and `None` is "not overridden" — neither is touched.
+                if matches!(edit.tools, Some(None)) {
+                    edit.tools = Some(Some(previous.tools.allow.clone()));
                 }
                 edit
             })
@@ -1688,6 +1741,14 @@ impl RuntimeBuilder {
             .map(|h| h.inbox.clone())
             .or(self.inbox)
             .unwrap_or_else(|| Arc::new(FsInboxStore::new(home.clone())));
+        // Issue #1739. Bound before the ops struct because two places need it:
+        // the usage-meter wrapper inside `ops`, and the runtime itself. Defaults
+        // to the no-op tracker, which is what every build that has not opted in
+        // keeps.
+        let tracker = self
+            .tracker
+            .clone()
+            .unwrap_or_else(crate::analytics::null_tracker);
         // The WS3 console ports default to a single shared fs backend.
         let fs_ops = Arc::new(FsOps::new(home.clone()));
         // Chosen before the ops struct because two of its members need it: the
@@ -1768,7 +1829,16 @@ impl RuntimeBuilder {
                     .run_output_store
                     .clone()
                     .unwrap_or_else(|| fs_ops.clone()),
-                usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
+                // Issue #1739: every metered sample — per-turn from the
+                // harness cost hook, per-cycle from the hosted brain, or a
+                // counted OAuth/search call — passes through this port, so
+                // wrapping it here instruments all of them and changes not one
+                // call site. The wrapper is a no-op with the default
+                // `NullTracker`; see `analytics::meter`.
+                usage: Arc::new(crate::analytics::TrackingUsageMeter::new(
+                    self.usage.unwrap_or_else(|| fs_ops.clone()),
+                    tracker.clone(),
+                )),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 read_state: self.read_state.unwrap_or_else(|| fs_ops.clone()),
                 notifications: self.notifications.unwrap_or_else(|| fs_ops.clone()),
@@ -2283,7 +2353,12 @@ impl RuntimeBuilder {
                     Arc::new(ManifestApprovalGate::new(self.manifest.policy.clone()))
                 });
                 for pending in journal.pending() {
-                    gate.rehydrate(pending.id, pending.effect, pending.at_millis);
+                    // Rehydrate from the deadline anchor, not `at_millis`
+                    // (issue #1805): for a never-extended approval the two are
+                    // equal, but for an extended one the anchor carries the
+                    // operator's pushed-out deadline, so the live sweeper comes
+                    // back enforcing the extension instead of the original park.
+                    gate.rehydrate(pending.id, pending.effect, pending.deadline_anchor_millis);
                 }
                 gate
             }
@@ -2953,17 +3028,29 @@ impl RuntimeBuilder {
                                 // no rebuild. The default harness's own
                                 // `[harness.inference]` beats the company-level
                                 // `[inference]` — the same precedence a named
-                                // harness gets — while the scope stays the
-                                // default one so the flat legacy secret keys keep
-                                // working for the company's default harness.
-                                provider: Arc::new(TenantProvider::new(
-                                    id.clone(),
-                                    secrets.clone(),
-                                    self.manifest
-                                        .default_harness_inference()
-                                        .unwrap_or_else(|| self.manifest.inference.clone()),
-                                    env_default.clone(),
-                                )),
+                                // harness gets. The scope stays `is_default` so
+                                // the flat legacy secret keys keep working, but
+                                // carries the default harness's *real* id (not
+                                // the generic `HarnessScope::default()` sentinel)
+                                // so an unavailable-model error names the actual
+                                // harness whose `[harness.inference]` is in play,
+                                // not a placeholder the operator's manifest never
+                                // wrote (Codex review on #1824's #1811 follow-up).
+                                provider: Arc::new(
+                                    TenantProvider::new(
+                                        id.clone(),
+                                        secrets.clone(),
+                                        self.manifest
+                                            .default_harness_inference()
+                                            .unwrap_or_else(|| self.manifest.inference.clone()),
+                                        env_default.clone(),
+                                    )
+                                    .with_scope(
+                                        inference::HarnessScope::default_harness(
+                                            self.manifest.default_harness_id(),
+                                        ),
+                                    ),
+                                ),
                                 // Static fallback only; `HarnessPool::run` reads
                                 // the live slug from the provider per turn.
                                 provider_slug: "managed".to_string(),
@@ -3147,24 +3234,40 @@ impl RuntimeBuilder {
                                     // before their first sign-in mints a user
                                     // record. `None` off the hosted serve path.
                                     bootstrap_admin: self.bootstrap_admin.clone(),
-                                    // The operator adapter is an interactive
-                                    // response surface, not a workflow delivery
-                                    // destination: its buffer has no durable
-                                    // reader. Desk and provider adapters are the
-                                    // accepted workflow write paths. The rule
-                                    // itself lives next to the operator-channel
-                                    // constant (issue #981) so this set, the
-                                    // set the console's picker offers and the
-                                    // set delivery accepts cannot disagree.
-                                    channels: channels
-                                        .iter()
-                                        .filter(|channel| {
-                                            crate::runtime::channel::is_deliverable_channel(
-                                                channel.channel_id(),
-                                            )
-                                        })
-                                        .cloned()
-                                        .collect(),
+                                    // Swap the *interactive* operator adapter for
+                                    // the DURABLE one (issue #1757). The in-memory
+                                    // operator is a response surface with no
+                                    // durable reader, so it is dropped by
+                                    // **identity** (its `operator` id) and the
+                                    // journal-backed `DurableOperatorChannel` is
+                                    // pushed under the same id in its place — so a
+                                    // report to `operator` (an `owner` fallback or
+                                    // an explicit `channel` target) lands durably
+                                    // in the standing Operator channel. The durable
+                                    // one is added ONLY here, never to the
+                                    // interactive `channels` above, so it can never
+                                    // double-journal a `route_response` reply. The
+                                    // result is exactly the picker set
+                                    // (`deliverable_channel_ids`) by membership —
+                                    // the #981 equality invariant, now with
+                                    // `operator` on both sides.
+                                    channels: {
+                                        let mut delivery_channels: Vec<Arc<dyn ChannelAdapter>> =
+                                            channels
+                                                .iter()
+                                                .filter(|channel| {
+                                                    channel.channel_id() != OPERATOR_CHANNEL
+                                                })
+                                                .cloned()
+                                                .collect();
+                                        delivery_channels.push(Arc::new(
+                                            crate::runtime::channel::DurableOperatorChannel::new(
+                                                id.clone(),
+                                                events.clone(),
+                                            ),
+                                        ));
+                                        delivery_channels
+                                    },
                                     // Issue #227: the same gate and journal the
                                     // runtime gets below — one approvals queue,
                                     // so a report parked by a workflow lands in
@@ -3568,6 +3671,7 @@ impl RuntimeBuilder {
             grants,
         );
         runtime.set_memory_decorators(scratch_context, memory_scopes);
+        runtime.set_tracker(tracker);
 
         // The seed dir is the company's on-disk source directory
         // (`companies/<name>`); record it so read resolvers can find committed
@@ -4250,7 +4354,8 @@ mod test {
                 name: "Clerk".to_string(),
                 role: "Data Entry".to_string(),
                 description: None,
-                tools: Vec::new(),
+                // `None` = inherit (tracks the allow-list) — the state that freezes.
+                tools: None,
                 model: None,
                 harness: None,
             },
@@ -4259,7 +4364,7 @@ mod test {
                 name: "Finance Help".to_string(),
                 role: "Assistant".to_string(),
                 description: None,
-                tools: vec!["docs.*".to_string()],
+                tools: Some(vec!["docs.*".to_string()]),
                 model: None,
                 harness: None,
             },
@@ -4273,22 +4378,25 @@ mod test {
         );
 
         assert_eq!(
-            migrated[0].tools, old.tools.allow,
-            "an empty line is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+            migrated[0].tools,
+            Some(old.tools.allow.clone()),
+            "an absent (inherit) line is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
         );
         assert_eq!(
             migrated[1].tools,
-            vec!["docs.*".to_string()],
+            Some(vec!["docs.*".to_string()]),
             "a stated grant is untouched"
         );
     }
 
-    /// The console's per-agent edit half carries the same empty-means-standard
-    /// rule (`AgentOverride.tools = Some([])` is "give this teammate the
-    /// company's standard grant"), so an upgrade into a BYO namespace must
-    /// freeze its empty line to the previous allow-list as well — otherwise the
-    /// override, copied across the rebuild verbatim, replaces the new
-    /// manifest's explicit non-billing `tools` line with the widened list.
+    /// The console's per-agent edit half carries the same inherit-freeze rule.
+    /// Since #1804 `AgentOverride.tools` is a double-option: `Some(None)` is the
+    /// "reset this teammate to the company's standard grant" spelling (the
+    /// inherit state), so an upgrade into a BYO namespace must freeze it to the
+    /// previous allow-list as well — otherwise the override, copied across the
+    /// rebuild verbatim, replaces the new manifest's explicit non-billing
+    /// `tools` line with the widened list. `Some(Some([]))` (deny-all) and
+    /// `Some(Some(globs))` (narrow) state their own scope and are left untouched.
     #[test]
     fn an_upgrade_into_chargebee_freezes_an_empty_agent_override_scope() {
         let old: CompanyManifest = toml::from_str(
@@ -4308,14 +4416,15 @@ mod test {
         let edits = vec![
             AgentOverride {
                 agent_id: "tax_preparer".to_string(),
-                // The stored spelling of "reset to the company's standard
-                // grant" — what the console writes for an empty tools list.
-                tools: Some(Vec::new()),
+                // The stored spelling of "reset to the company's standard grant"
+                // since #1804 — `Some(None)`, the inherit state. (An empty list
+                // is `Some(Some(vec![]))`, a deny-all, and is NOT frozen.)
+                tools: Some(None),
                 ..Default::default()
             },
             AgentOverride {
                 agent_id: "brand_strategist".to_string(),
-                tools: Some(vec!["docs.*".to_string()]),
+                tools: Some(Some(vec!["docs.*".to_string()])),
                 ..Default::default()
             },
         ];
@@ -4324,13 +4433,13 @@ mod test {
             RuntimeBuilder::preserve_pre_upgrade_grant_scope(Vec::new(), edits, Some(&old), &new);
 
         assert_eq!(
-            migrated[0].tools.as_deref().unwrap(),
-            old.tools.allow,
-            "an empty override is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
+            migrated[0].tools,
+            Some(Some(old.tools.allow.clone())),
+            "an inherit override (Some(None)) is frozen to its pre-upgrade scope rather than silently inheriting chargebee"
         );
         assert_eq!(
-            migrated[1].tools.as_deref().unwrap(),
-            vec!["docs.*".to_string()],
+            migrated[1].tools,
+            Some(Some(vec!["docs.*".to_string()])),
             "a stated override grant is untouched"
         );
     }
@@ -4356,7 +4465,8 @@ mod test {
             name: "Clerk".to_string(),
             role: "Data Entry".to_string(),
             description: None,
-            tools: Vec::new(),
+            // `None` = inherit / tracks the allow-list.
+            tools: None,
             model: None,
             harness: None,
         }];
@@ -4369,8 +4479,8 @@ mod test {
         );
 
         assert!(
-            migrated[0].tools.is_empty(),
-            "no BYO namespace was newly conferred, so tracking is preserved"
+            migrated[0].tools.is_none(),
+            "no BYO namespace was newly conferred, so the inherit line keeps tracking (stays None)"
         );
     }
 
@@ -5026,7 +5136,12 @@ mod test {
             let company = strings(company);
             let desk_owned: Vec<Vec<String>> = desks.iter().map(|d| strings(d)).collect();
             let desk_refs: Vec<&[String]> = desk_owned.iter().map(Vec::as_slice).collect();
-            agent_scoped_grants(&company, &desk_refs, &strings(agent))
+            // An empty per-agent slice is "no line of its own" → `None` (inherit)
+            // since #1804, NOT `Some(&[])` (which is a deny-all). A test that
+            // wants the deny-all case calls `agent_scoped_grants` directly.
+            let agent = strings(agent);
+            let agent_tools = (!agent.is_empty()).then_some(agent.as_slice());
+            agent_scoped_grants(&company, &desk_refs, agent_tools)
         }
 
         /// No desk and no per-agent list: the company grant passes through
@@ -5037,6 +5152,22 @@ mod test {
             assert_eq!(scope(&["*", "search"], &[], &[]), ["*", "search"]);
             assert_eq!(scope(&["*", "search"], &[&[]], &[]), ["*", "search"]);
             assert_eq!(scope(&["*", "search"], &[&[], &[]], &[]), ["*", "search"]);
+        }
+
+        /// The #1804 contract inversion at the resolver: an **explicit empty**
+        /// agent grant (`Some(&[])`) is a deny-all — it resolves to nothing,
+        /// the opposite of `None` (inherit), even under a wide-open company and
+        /// no desk ceiling.
+        #[test]
+        fn an_explicit_empty_agent_grant_is_a_deny_all() {
+            let company = strings(&["*", "search"]);
+            // `None` inherits the whole company grant…
+            assert_eq!(agent_scoped_grants(&company, &[], None), ["*", "search"]);
+            // …but an explicit empty list holds nothing.
+            assert_eq!(
+                agent_scoped_grants(&company, &[], Some(&[])),
+                Vec::<String>::new()
+            );
         }
 
         /// The middle level does the work the feature exists for: a department
@@ -5116,9 +5247,11 @@ mod test {
                 (&["docs.*", "web"][..], &["web"][..]),
                 (&["docs.*"][..], &["shell"][..]),
             ] {
+                let agent_owned = strings(agent);
+                let agent_tools = (!agent_owned.is_empty()).then_some(agent_owned.as_slice());
                 assert_eq!(
-                    agent_scoped_grants(&strings(company), &[&[], &[]], &strings(agent)),
-                    agent_effective_grants(&strings(company), &strings(agent)),
+                    agent_scoped_grants(&strings(company), &[&[], &[]], agent_tools),
+                    agent_effective_grants(&strings(company), agent_tools),
                     "company={company:?} agent={agent:?}"
                 );
             }
@@ -5604,7 +5737,7 @@ mod test {
             // like any teammate that requests nothing — not something this
             // bundle's author decided, so not something this test pins.
             for agent in manifest.agents.iter().filter(|agent| !agent.global) {
-                let grants = agent_effective_grants(&manifest.tools.allow, &agent.tools);
+                let grants = agent_effective_grants(&manifest.tools.allow, agent.tools.as_deref());
                 assert!(
                     grants_cover(&grants, "workspace"),
                     "{company}/{} must reach the workspace tools; effective grants: {grants:?}",
@@ -5632,7 +5765,7 @@ mod test {
                 // (`mcp:*`, `mcp:notion`) while `grants_cover` only understands the
                 // dot form, so it answers `false` for a grant list that plainly
                 // contains `mcp:*`.
-                if agent.tools.iter().any(|tool| tool == "mcp:*") {
+                if agent.tools.iter().flatten().any(|tool| tool == "mcp:*") {
                     assert!(
                         grants
                             .iter()
@@ -7552,11 +7685,19 @@ needs_reason = true
         assert!(runtime.channels.iter().any(|c| c.channel_id() == "email"));
 
         // The accessor the console's channel picker reads (#813) names the
-        // openhuman-backed provider channel and NOT `operator`: delivery
-        // refuses the operator adapter by name, so offering it as a
-        // destination would offer the one target guaranteed to fail (#981).
+        // openhuman-backed provider channel AND `operator`: since issue #1757 the
+        // operator channel is a durable delivery target, so it is offered like
+        // any other real channel.
         let deliverable = runtime.deliverable_channel_ids();
-        assert_eq!(deliverable, vec!["email".to_string()], "{deliverable:?}");
+        assert!(
+            deliverable.contains(&"email".to_string()),
+            "{deliverable:?}"
+        );
+        assert!(
+            deliverable.contains(&"operator".to_string()),
+            "{deliverable:?}"
+        );
+        assert_eq!(deliverable.len(), 2, "{deliverable:?}");
 
         // A granted call routes through the OpenHuman transport.
         let result = runtime
@@ -7588,14 +7729,13 @@ needs_reason = true
         assert_eq!(runtime.channels.len(), 1);
         assert_eq!(runtime.channels[0].channel_id(), "operator");
         // The accessor the console's channel picker reads (#813): `operator` is
-        // the only wired adapter here, and it is not a delivery target — so a
-        // workflow on this runtime has NOWHERE to deliver, and the honest
-        // answer is an empty picker (#981). It previously answered
-        // `["operator"]`, which is what put the guaranteed-to-fail target in
-        // front of authors.
-        assert!(
-            runtime.deliverable_channel_ids().is_empty(),
-            "an operator-only runtime has no workflow delivery channel: {:?}",
+        // the only wired adapter here, and since issue #1757 it is a durable
+        // delivery target — so an operator-only runtime can still deliver, to the
+        // standing Operator channel. The picker answers `["operator"]`.
+        assert_eq!(
+            runtime.deliverable_channel_ids(),
+            vec!["operator".to_string()],
+            "an operator-only runtime delivers to its Operator channel: {:?}",
             runtime.deliverable_channel_ids()
         );
 
@@ -7697,7 +7837,8 @@ needs_reason = true
         assert!(ids.contains(&"research"));
 
         // Both desks are real delivery targets — they write to the company's
-        // durable event log — and `operator` is not one of them (#981).
+        // durable event log — and since issue #1757 so is `operator`, whose
+        // report now lands durably in the standing Operator channel.
         let deliverable = runtime.deliverable_channel_ids();
         assert!(
             deliverable.contains(&"engineering".to_string()),
@@ -7708,27 +7849,83 @@ needs_reason = true
             "{deliverable:?}"
         );
         assert!(
-            !deliverable.contains(&"operator".to_string()),
-            "{deliverable:?}"
+            deliverable.contains(&"operator".to_string()),
+            "operator is now a durable, offerable delivery channel: {deliverable:?}"
         );
     }
 
-    /// **The invariant that would have caught #981.** The picker's set and the
-    /// delivery layer's set are produced by the same `build()`, from the same
-    /// adapters, and must be the same list.
+    /// Issue #1781 review (Codex P2): a grandfathered manifest desk at the
+    /// literal id `operator` predates `company/manifest.rs`'s "operator is
+    /// reserved" validation (which only runs at upload/create time, never at
+    /// boot) and still wires **both** the built-in `OperatorChannel` and a
+    /// `DeskChannel("operator")` into `runtime.channels` — `desk_exists`
+    /// resolves the manifest group chat and the desk-wiring loop has no idea
+    /// the built-in channel already claimed the same id. `deliverable_channel_ids`
+    /// must not leak that internal duplication to the console: it feeds
+    /// `/workflows/wired-channels`, and `WorkflowCreateDialog` renders one
+    /// `SelectItem` per id — a repeated `operator` collides as a React key.
+    #[tokio::test]
+    async fn deliverable_channel_ids_dedupes_a_grandfathered_operator_desk() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            [[group_chat]]
+            id = "operator"
+            name = "Operator"
+            members = ["ceo"]
+            "#,
+        );
+        let runtime = RuntimeBuilder::new(dir.path(), manifest)
+            .build()
+            .await
+            .unwrap();
+
+        // Both adapters really are present internally — this asserts the
+        // fixture reaches the collision state the fix has to survive, not just
+        // that the picker happens to look right for some other reason.
+        let operator_channels = runtime
+            .channels
+            .iter()
+            .filter(|c| c.channel_id() == "operator")
+            .count();
+        assert_eq!(
+            operator_channels, 2,
+            "fixture must actually wire both the built-in Operator channel and \
+             the grandfathered desk under the same id"
+        );
+
+        let deliverable = runtime.deliverable_channel_ids();
+        let operator_count = deliverable.iter().filter(|id| *id == "operator").count();
+        assert_eq!(
+            operator_count, 1,
+            "operator must appear exactly once in the picker's set — ordering \
+             preserved, duplicates dropped: {deliverable:?}"
+        );
+    }
+
+    /// **The invariant that would have caught #981, restored by #1757.** The
+    /// picker's set (`deliverable_channel_ids`) and the delivery layer's set
+    /// (`WorkflowDeliveryDeps.channels`) are produced by the same `build()`, and
+    /// must have the **same membership** — an author must never be offered a
+    /// target the runner refuses, nor be refused a target the picker offers.
     ///
-    /// They were not. `WorkflowDeliveryDeps.channels` dropped `operator` with an
-    /// inline filter while the accessor the console reads returned every adapter
-    /// — so an author was offered a destination the runner refuses by name, and
-    /// nothing in the build asserted the two agreed. Pinning them together is
-    /// what makes a future divergence a test failure rather than a run that
-    /// reports `channel-not-wired` for a target the console suggested.
+    /// #981 broke it by excluding `operator` from one side only; my earlier #1757
+    /// cut broke it the other way (operator in delivery, not the picker). Now
+    /// `operator` is a first-class durable channel on **both** sides, so the two
+    /// sets match by membership again. Order differs by construction — the picker
+    /// reads the interactive runtime channels (operator first), delivery swaps in
+    /// the durable operator last — so this compares as sets, not sequences.
     ///
     /// Needs the harness arm, because that is the only site that wires
     /// `WorkflowDeliveryDeps` at all.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn the_picker_set_equals_the_delivery_deps_the_same_build_wired() {
+    async fn the_picker_set_and_the_delivery_deps_have_the_same_membership() {
         use crate::harness::HarnessPool;
 
         let home_dir = tmp_home("oc-981-invariant-");
@@ -7782,21 +7979,29 @@ needs_reason = true
             .map(|channel| channel.channel_id().to_string())
             .collect();
 
+        // Same membership on both sides, order-independent.
+        let picker = runtime.deliverable_channel_ids();
+        let picker_set: std::collections::BTreeSet<&String> = picker.iter().collect();
+        let deps_set: std::collections::BTreeSet<&String> = deps_channels.iter().collect();
         assert_eq!(
-            runtime.deliverable_channel_ids(),
-            deps_channels,
-            "the destination picker offers a set the delivery layer does not accept"
+            picker_set, deps_set,
+            "the picker and the delivery layer must offer/accept the same channels: \
+             picker={picker:?} delivery={deps_channels:?}"
         );
-        // Not vacuous in either direction: the runtime really did wire the
-        // operator adapter, and the desk really is deliverable.
+        // Not vacuous: both really carry the desk AND `operator`, so the equality
+        // is proving inclusion of both, not an empty match.
+        assert!(picker.contains(&"engineering".to_string()), "{picker:?}");
+        assert!(
+            picker.contains(&OPERATOR_CHANNEL.to_string()),
+            "operator is a first-class deliverable channel now: {picker:?}"
+        );
         assert!(
             runtime
                 .channels
                 .iter()
                 .any(|channel| channel.channel_id() == OPERATOR_CHANNEL),
-            "the operator adapter must be wired, or the exclusion proves nothing"
+            "the interactive operator adapter must be wired, or the equality proves nothing"
         );
-        assert_eq!(deps_channels, vec!["engineering".to_string()]);
     }
 
     /// A desk added to `company.toml` since the last boot is wired on this one.

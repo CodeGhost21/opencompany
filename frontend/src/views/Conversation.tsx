@@ -18,6 +18,7 @@ import { AssistantRuntimeProvider } from "@assistant-ui/react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { TurnStep } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { ChatMessage } from "@/lib/chat";
@@ -122,7 +123,7 @@ export function Conversation({
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
-      <h1 className="sr-only">Conversation</h1>
+      <PageHeader hidden title="Conversation" />
       <ThreadList
         threads={threads}
         activeId={active.id}
@@ -228,6 +229,7 @@ function ChatPane({
       <AssistantRuntimeProvider runtime={runtime}>
         <Transcript
           contact={thread.contact}
+          readOnly={thread.readOnly}
           onAddToBoard={(m) => void addToBoard(m)}
           addingId={addingId}
           onDismissCard={(id) => void dismissCard(id)}

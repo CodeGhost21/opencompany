@@ -458,11 +458,12 @@ test("the channel destination is a picker of wired channels, not free text (#813
 }) => {
   // #813 defect 4: typing a channel id that isn't wired only failed at delivery.
   // The target is now a picker whose options are the company's wired channels.
-  // #981: `operator` is deliberately never one of them — it is an in-memory
-  // response surface with no durable reader, so delivery refuses it by name
-  // and the picker no longer offers it. `engineering` is the e2e harness
-  // company's desk channel (`companies/e2e_harness/company.toml`), so it is
-  // always in the wired set instead.
+  // `engineering` is the e2e harness company's desk channel
+  // (`companies/e2e_harness/company.toml`), so it is always in the wired set.
+  // `operator` is too, as of #1757: it moved from an in-memory response
+  // surface delivery refused by name (#981) to a durable, journal-backed
+  // channel every company wires, so the picker now lists it as a real target
+  // alongside the desk channels rather than hiding it.
   const dialog = await openCreateDialog(page);
   await dialog.getByRole("button", { name: "Add node" }).click();
   const kind = dialog.getByLabel("Node kind").nth(1);
@@ -471,11 +472,11 @@ test("the channel destination is a picker of wired channels, not free text (#813
   await dialog.getByLabel("Send report to").click();
   await page.getByRole("option", { name: /^Channel/ }).click();
 
-  // The channel target is a combobox offering the wired desk channel, never
-  // the undeliverable `operator` surface.
+  // The channel target is a combobox offering both the wired desk channel and
+  // the durable operator channel.
   await dialog.getByLabel("Channel id").click();
   await expect(page.getByRole("option", { name: "engineering" })).toBeVisible();
-  await expect(page.getByRole("option", { name: "operator" })).not.toBeVisible();
+  await expect(page.getByRole("option", { name: "operator" })).toBeVisible();
 });
 
 test("submitting with an empty id surfaces the validation message on-screen (#813)", async ({

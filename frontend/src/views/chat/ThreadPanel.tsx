@@ -7,6 +7,7 @@ import type { MessageIntent } from "@/api/tasks";
 import type { AttachmentDto, CognitionState } from "@/api/types";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
+import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { MessageAttachments } from "./MessageAttachments";
 import { MessageComposer } from "./MessageComposer";
@@ -38,6 +39,16 @@ interface Props {
    * composer's outside-channel warning. Absent when membership is unknown.
    */
   channelMemberIds?: string[];
+  /**
+   * Whether the channel this thread belongs to is read-only (issue #1757's
+   * Operator channel, `Boolean(channel?.system)` in `ChatView`). The main
+   * composer already disables on this, but a thread has its own composer —
+   * so without this a durable Operator report could still be opened as a
+   * thread and replied to there, only for the server's read-only guard to
+   * reject it after the text was written. Absent means "no such channel is
+   * open", the same as the main composer's default.
+   */
+  readOnly?: boolean;
   /**
    * Your own avatar reference, so your lines in this thread wear your face
    * (issue #1729).
@@ -94,6 +105,18 @@ interface Props {
    * it had been removed (CodeRabbit and codex both caught it on PR #1740).
    */
   cognition?: CognitionState | null;
+  /**
+   * The Add-Credits CTA (issue #1846 review, Codex #3870168372). A
+   * budget-pause notice is journaled with the thread's `parent` set when the
+   * exhausted turn was answering a reply, and `buildTimelineItems` routes any
+   * message with a `parentId` out of the main channel timeline and into this
+   * thread — so a thread-parented notice's CTA has to render HERE, not just
+   * in `MessageTimeline`, or it is unreachable no matter how the operator
+   * scrolls the main channel.
+   */
+  onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
+  redeemingBudgetPauseAgent?: string | null;
+  latestBudgetPauseMessageIdByAgent?: Map<string, string>;
 }
 
 /**
@@ -111,6 +134,7 @@ export function ThreadPanel({
   sending,
   mentionables,
   channelMemberIds,
+  readOnly,
   youAvatar,
   resolveAttachmentUrl,
   onSend,
@@ -118,6 +142,9 @@ export function ThreadPanel({
   typingNames = [],
   onTyping,
   cognition,
+  onRedeemBudgetPause,
+  redeemingBudgetPauseAgent,
+  latestBudgetPauseMessageIdByAgent,
 }: Props) {
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
@@ -139,6 +166,9 @@ export function ThreadPanel({
           youAvatar={youAvatar}
           resolveAttachmentUrl={resolveAttachmentUrl}
           cognition={cognition}
+          onRedeemBudgetPause={onRedeemBudgetPause}
+          redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+          latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
         />
         <div className="flex items-center gap-2 px-4 py-2">
           <span className="text-xs font-medium text-muted-foreground">
@@ -155,6 +185,9 @@ export function ThreadPanel({
             youAvatar={youAvatar}
             resolveAttachmentUrl={resolveAttachmentUrl}
             cognition={cognition}
+            onRedeemBudgetPause={onRedeemBudgetPause}
+            redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+            latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
           />
         ))}
       </div>
@@ -162,16 +195,23 @@ export function ThreadPanel({
       <TypingLine names={typingNames} />
       <MessageComposer
         compact
-        placeholder="Reply…"
-        disabled={sending}
+        placeholder={readOnly ? "This channel is read-only" : "Reply…"}
+        disabled={sending || readOnly}
         mentionables={mentionables}
         channelMemberIds={channelMemberIds}
-        onSend={onSend}
+        // Belt to the composer's brace: `disabled` already keeps the UI from
+        // calling this, but a read-only thread never reaches the real
+        // `onSend` — and therefore never calls `client.chat` — even if
+        // something upstream bypasses the disabled input (issue #1757).
+        onSend={readOnly ? noopSend : onSend}
         onTyping={onTyping}
       />
     </aside>
   );
 }
+
+/** The no-op `onSend` a read-only [`ThreadPanel`] wires its composer to. */
+function noopSend() {}
 
 function Line({
   channel,
@@ -180,6 +220,9 @@ function Line({
   youAvatar,
   resolveAttachmentUrl,
   cognition,
+  onRedeemBudgetPause,
+  redeemingBudgetPauseAgent,
+  latestBudgetPauseMessageIdByAgent,
 }: {
   channel: Channel;
   members: TeamMember[];
@@ -187,6 +230,9 @@ function Line({
   youAvatar?: string;
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
   cognition?: CognitionState | null;
+  onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
+  redeemingBudgetPauseAgent?: string | null;
+  latestBudgetPauseMessageIdByAgent?: Map<string, string>;
 }) {
   // Four arguments, not three: `youAvatar` is the last parameter, and omitting
   // it left your own line with no avatar to seed from but the name "You" —
@@ -198,8 +244,26 @@ function Line({
   const placeholder = echoMarkerFor(message, sender, cognition);
 
   if (sender.kind === "system") {
+    // Issue #1846 review (Codex #3870168372): a budget-pause notice gets the
+    // SAME highlighted card + CTA `MessageRow` renders in the main timeline
+    // — see `BudgetPauseNoticeCard`'s own doc for why this thread panel is
+    // sometimes the ONLY place such a notice is visible at all. Falls back
+    // to the plain system line for every other system message.
+    // Called as a plain function, not as JSX: `BudgetPauseNoticeCard` is a
+    // pure "maybe-render" component (no hooks, no state) that returns `null`
+    // for a non-notice message — JSX-invoking it (`<BudgetPauseNoticeCard
+    // .../>`) would always produce a truthy element descriptor regardless of
+    // what it renders internally, defeating the `??` fallback below.
+    const budgetPauseCard = BudgetPauseNoticeCard({
+      message,
+      onRedeemBudgetPause,
+      redeemingBudgetPauseAgent,
+      latestBudgetPauseMessageIdByAgent,
+    });
     return (
-      <p className="px-4 py-1 text-center text-xs text-muted-foreground">{message.text}</p>
+      budgetPauseCard ?? (
+        <p className="px-4 py-1 text-center text-xs text-muted-foreground">{message.text}</p>
+      )
     );
   }
 

@@ -540,19 +540,19 @@ fn a_deskless_teammate_minted_with_no_scope_never_inherits_billing() {
     ] {
         let manifest = load_company(company);
         // The state that makes the escalation reachable: a minter scoped only by
-        // its desk has an empty `tools` line, so "copy the minter's line" stores
-        // an empty grant on a teammate that sits on no desk.
-        let deskless = agent_scoped_grants(&manifest.tools.allow, &[], &[]);
+        // its desk has an absent (`None`) `tools` line, so "copy the minter's
+        // line" stores an inherit grant on a teammate that sits on no desk.
+        let deskless = agent_scoped_grants(&manifest.tools.allow, &[], None);
         assert!(
             grants_chargebee_explicit(&deskless),
-            "{company}: precondition — an empty line on no desk must resolve to \
+            "{company}: precondition — an absent line on no desk must resolve to \
              the company ceiling, or this test proves nothing"
         );
 
         // What both creation paths now store instead.
         match creation_default_grants(&manifest.tools.allow) {
             CreationGrant::Narrowed(narrowed) => {
-                let resolved = agent_scoped_grants(&manifest.tools.allow, &[], &narrowed);
+                let resolved = agent_scoped_grants(&manifest.tools.allow, &[], Some(&narrowed));
                 assert!(
                     !grants_chargebee_explicit(&resolved),
                     "{company}: a minted teammate must not inherit billing: {resolved:?}"
@@ -793,7 +793,7 @@ fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
             .filter(|chat| chat.members.iter().any(|member| member == id))
             .map(|chat| chat.tools.as_slice())
             .collect();
-        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, agent.tools.as_deref());
 
         assert!(
             grants_workspace_write_explicit(&grants),
@@ -867,7 +867,7 @@ fn a_marketing_biller_can_be_named_from_the_console() {
             .filter(|chat| chat.members.iter().any(|member| member == id))
             .map(|chat| chat.tools.as_slice())
             .collect();
-        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, agent.tools.as_deref());
         assert!(
             !grants_chargebee_explicit(&grants),
             "{id}: a shipped marketing teammate must not hold billing tools; \
@@ -882,7 +882,7 @@ fn a_marketing_biller_can_be_named_from_the_console() {
         .iter()
         .find(|agent| agent.id == "brand_strategist")
         .unwrap();
-    let mut override_tools = brand.tools.clone();
+    let mut override_tools = brand.tools.clone().unwrap_or_default();
     override_tools.push("chargebee".to_string());
     let strategy = manifest
         .group_chats
@@ -890,7 +890,7 @@ fn a_marketing_biller_can_be_named_from_the_console() {
         .find(|chat| chat.id == "strategy")
         .unwrap();
     let desk_refs: Vec<&[String]> = vec![strategy.tools.as_slice()];
-    let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &override_tools);
+    let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, Some(&override_tools));
     assert!(
         grants_chargebee_explicit(&grants),
         "the console override naming the biller must survive the desk layer; \
@@ -939,7 +939,7 @@ fn the_software_company_ships_billing_that_reaches_nobody_yet() {
             .filter(|chat| chat.members.contains(&agent.id))
             .map(|chat| chat.tools.as_slice())
             .collect();
-        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, agent.tools.as_deref());
         assert!(
             !grants_chargebee_explicit(&grants),
             "{}: a shipped teammate must not hold billing tools; effective              grants: {grants:?}",
@@ -954,7 +954,7 @@ fn the_software_company_ships_billing_that_reaches_nobody_yet() {
         .iter()
         .find(|agent| agent.id == "customer_support")
         .expect("customer_support is on this roster");
-    let mut named = support.tools.clone();
+    let mut named = support.tools.clone().unwrap_or_default();
     named.push("chargebee".to_string());
     let desk_refs: Vec<&[String]> = manifest
         .group_chats
@@ -966,7 +966,7 @@ fn the_software_company_ships_billing_that_reaches_nobody_yet() {
         })
         .map(|chat| chat.tools.as_slice())
         .collect();
-    let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &named);
+    let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, Some(&named));
     assert!(
         grants_chargebee_explicit(&grants),
         "an operator naming the biller from the console must reach billing; \
@@ -1009,7 +1009,7 @@ fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
             .find(|agent| agent.id == id)
             .unwrap_or_else(|| panic!("{id} is a member of the creative desk"));
         assert!(
-            !agent.tools.is_empty(),
+            agent.tools.as_deref().is_some_and(|t| !t.is_empty()),
             "{id}: the `chargebee` exclusion must ride on the member's own \
              `tools` line, not only on the creative desk ceiling"
         );
@@ -1017,7 +1017,7 @@ fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
         // Seated on the creative desk AND the unrestricted strategy desk: the
         // union would otherwise be the company grant.
         let desk_refs: Vec<&[String]> = vec![creative.tools.as_slice(), strategy.tools.as_slice()];
-        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, &agent.tools);
+        let grants = agent_scoped_grants(&manifest.tools.allow, &desk_refs, agent.tools.as_deref());
         assert!(
             !grants_chargebee_explicit(&grants),
             "{id}: cross-seating a creative member onto an unrestricted desk \
@@ -1100,10 +1100,10 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
                 with_destination += 1;
                 assert_eq!(
                     destination.kind, "channel",
-                    "{label} uses destination kind `{}`. `owner` reports \
-                     Failed/OwnerFallbackFailed on a tenant with no mailbox — every freshly \
-                     provisioned one — and `email` would hardcode a recipient into a \
-                     shipped template.",
+                    "{label} uses destination kind `{}`. A seeded template routes to a real \
+                     desk channel: `owner` on a no-mailbox tenant now lands on the operator \
+                     channel (issue #1757) rather than the desk a template means to post in, \
+                     and `email` would hardcode a recipient into a shipped template.",
                     destination.kind
                 );
                 let target = destination.target.as_deref().unwrap_or("");

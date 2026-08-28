@@ -19,6 +19,8 @@ export interface Thread {
   /** Short blurb shown under the name when the thread has no messages yet. */
   blurb: string;
   messages: ChatMessage[];
+  /** Whether the composer for this thread is disabled. */
+  readOnly?: boolean;
 }
 
 /** Avatar tones rotated across desk threads. */
@@ -59,15 +61,9 @@ export function defaultThreads(): Thread[] {
   ];
 }
 
-/**
- * Build the chat list from the company's real desks (issue #53): the main line
- * (the orchestrator) first, then one thread per desk keyed by its id. Falls back
- * to {@link defaultThreads} when the company defines no desks (or the fetch
- * failed and returned an empty list), so the console always renders something.
- */
-export function threadsFromDesks(desks: DeskDto[]): Thread[] {
-  if (desks.length === 0) return defaultThreads();
-  const deskThreads: Thread[] = desks.map((desk, i) => ({
+/** One `Thread` for a single `/desks` entry. */
+function deskThread(desk: DeskDto, i: number): Thread {
+  return {
     id: desk.id,
     contact: {
       name: desk.name,
@@ -76,8 +72,18 @@ export function threadsFromDesks(desks: DeskDto[]): Thread[] {
     },
     blurb: desk.description ?? "A desk of your company",
     messages: [],
-  }));
-  return [mainThread(), ...deskThreads];
+  };
+}
+
+/**
+ * Build the chat list from the company's real desks (issue #53): the main line
+ * (the orchestrator) first, then one thread per desk keyed by its id. Falls back
+ * to {@link defaultThreads} when the company defines none, so the console
+ * always renders something.
+ */
+export function threadsFromDesks(desks: DeskDto[]): Thread[] {
+  if (desks.length === 0) return defaultThreads();
+  return [mainThread(), ...desks.map(deskThread)];
 }
 
 /**

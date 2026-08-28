@@ -3610,7 +3610,7 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
         name: "Helper".to_string(),
         role: "Assistant".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
         model: None,
         harness: None,
     };
@@ -8986,6 +8986,7 @@ async fn the_export_document_is_built_from_the_redacted_detail() {
             runtime: runtime.clone(),
             actor: None,
             may_read_contents: false,
+            is_admin: false,
         },
         &id,
     )
@@ -9008,6 +9009,7 @@ async fn the_export_document_is_built_from_the_redacted_detail() {
             runtime: runtime.clone(),
             actor: None,
             may_read_contents: true,
+            is_admin: true,
         },
         &id,
     )
