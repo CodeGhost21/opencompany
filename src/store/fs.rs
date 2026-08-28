@@ -502,6 +502,29 @@ pub(crate) mod fault_probe {
             .remove(&key(path))
     }
 
+    static FAIL_NEXT_COMMIT: LazyLock<Mutex<HashSet<PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    /// Arms a one-shot failure for the next [`commit_staged`] of `path`,
+    /// i.e. the rename/`sync_parent_dir` step rather than the staging write
+    /// (issue #1828 review, ninth round). Lets a test drive the case where
+    /// the *first* file of a two-file save is already published and the
+    /// second commit then fails.
+    pub(crate) fn fail_next_commit(path: &Path) {
+        FAIL_NEXT_COMMIT
+            .lock()
+            .expect("fault-probe poisoned")
+            .insert(key(path));
+    }
+
+    /// Consumes the armed commit failure for `path`, if any.
+    pub(crate) fn should_fail_commit(path: &Path) -> bool {
+        FAIL_NEXT_COMMIT
+            .lock()
+            .expect("fault-probe poisoned")
+            .remove(&key(path))
+    }
+
     static FAIL_NEXT_EXISTS_CHECK: LazyLock<Mutex<HashSet<PathBuf>>> =
         LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -962,6 +985,13 @@ async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
 /// flushes the parent directory. See that function's doc comment for why
 /// the two are split.
 async fn commit_staged(path: &Path, tmp: PathBuf) -> Result<()> {
+    #[cfg(test)]
+    if fault_probe::should_fail_commit(path) {
+        return Err(io_err(
+            path,
+            std::io::Error::other("injected test failure (fault_probe commit)"),
+        ));
+    }
     let owned_path = path.to_path_buf();
 
     // One `spawn_blocking` for the rename-then-sync pair rather than two
@@ -1492,6 +1522,26 @@ impl CompanyStore for FsCompanyStore {
         };
         guard.watch(&toml_tmp);
         if updating_existing_bundle {
+            // The two commits are independent renames, so publishing
+            // `company.toml` and then failing to publish `meta.json` would
+            // return `Err` with the manifest change already durable — a save
+            // that reports failure while a logo or name edit persists, and a
+            // mixed record when the call changed both files (issue #1828
+            // review, ninth round). Snapshot the manifest we are about to
+            // overwrite so that failure can put it back. The file is a small
+            // TOML document, so holding it in memory beats managing another
+            // temp path.
+            let previous_toml = match tokio::fs::read(&bundle.company_toml()).await {
+                Ok(bytes) => Some(bytes),
+                // Nothing to roll back to; `updating_existing_bundle` was
+                // decided by a probe that can race a concurrent delete.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    remove_staged(&toml_tmp).await;
+                    remove_staged(&meta_tmp).await;
+                    return Err(io_err(&bundle.company_toml(), e));
+                }
+            };
             if let Err(e) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
                 remove_staged(&toml_tmp).await;
                 remove_staged(&meta_tmp).await;
@@ -1499,6 +1549,38 @@ impl CompanyStore for FsCompanyStore {
             }
             if let Err(e) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
                 remove_staged(&meta_tmp).await;
+                if let Some(previous) = previous_toml {
+                    // Best-effort: the caller is already being told the save
+                    // failed, so a failed rollback must not mask the original
+                    // error — but it must be loud, because it is the one case
+                    // that leaves the record genuinely mixed.
+                    match stage_atomic_bytes(&bundle.company_toml(), &previous).await {
+                        Ok(rollback_tmp) => {
+                            guard.watch(&rollback_tmp);
+                            if let Err(rollback_err) =
+                                commit_staged(&bundle.company_toml(), rollback_tmp.clone()).await
+                            {
+                                remove_staged(&rollback_tmp).await;
+                                tracing::error!(
+                                    path = %bundle.company_toml().display(),
+                                    error = %rollback_err,
+                                    "[store] could not restore the previous manifest after a \
+                                     failed meta.json commit — the bundle is left with the new \
+                                     manifest and the old meta.json"
+                                );
+                            }
+                        }
+                        Err(rollback_err) => {
+                            tracing::error!(
+                                path = %bundle.company_toml().display(),
+                                error = %rollback_err,
+                                "[store] could not stage the previous manifest to roll back after \
+                                 a failed meta.json commit — the bundle is left with the new \
+                                 manifest and the old meta.json"
+                            );
+                        }
+                    }
+                }
                 return Err(e);
             }
         } else {
@@ -3585,6 +3667,89 @@ mod test {
     /// first-time publish — the same fault as the very first round's test
     /// above, which already proves the *live* files stay safe — and, in
     /// addition to that, assert no `*.tmp-*` file is left anywhere under the
+    /// **Issue #1828 review, ninth round**: on the update path the two files
+    /// are published by two independent renames, `company.toml` first. If the
+    /// `meta.json` commit then fails, the manifest edit is already durable
+    /// while `save` returns `Err` — so a logo or name change persists even
+    /// though the caller was told the save failed, and a call that changed
+    /// both files leaves a mixed record.
+    ///
+    /// Drives it with `fault_probe::fail_next_commit`, which fails the
+    /// rename step rather than the staging write, and asserts the manifest
+    /// on disk is the one from before the failed save.
+    #[tokio::test]
+    async fn a_failed_meta_commit_rolls_the_published_manifest_back() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record_named = |name: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: {
+                let mut m = sample_manifest();
+                m.company.name = name.to_string();
+                m
+            },
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        // First publish, so the next save takes the update path.
+        store
+            .save(&record_named("Before"))
+            .await
+            .expect("first publish");
+        let published = std::fs::read_to_string(bundle.company_toml()).expect("manifest on disk");
+        assert!(
+            published.contains("Before"),
+            "precondition: the first save must have published the original name"
+        );
+
+        // Now fail only the *second* commit of the update.
+        fault_probe::fail_next_commit(&bundle.meta_json());
+        let err = store.save(&record_named("After")).await;
+        assert!(
+            err.is_err(),
+            "the injected meta.json commit failure must propagate out of save"
+        );
+
+        let after = std::fs::read_to_string(bundle.company_toml()).expect("manifest on disk");
+        assert!(
+            after.contains("Before") && !after.contains("After"),
+            "a save that reported failure must not leave its manifest edit \
+             published — found {after}"
+        );
+
+        let orphans = std::fs::read_dir(bundle.company_toml().parent().unwrap())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(
+            orphans, 0,
+            "the rollback must not leave its own temp behind"
+        );
+    }
+
     /// **Issue #1828 review, eighth round**: the guard closed the "dropped
     /// mid-stage" hole, but its first version disarmed *before* awaiting the
     /// error path's `remove_staged`. Aborting the task inside that await
