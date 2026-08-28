@@ -4469,10 +4469,12 @@ impl CompanyRecord {
     /// Ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL)
     /// itself. Diverted to
     /// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
-    /// whenever anything grandfathered already holds the literal id
-    /// `operator`: a roster **teammate** — `is_roster_agent` true (still on
-    /// the roster) **or** [`is_retired`](Self::is_retired) true (removed
-    /// since) — or a real **desk** (`desk_exists` true). Using
+    /// whenever anything grandfathered already holds the literal id **or
+    /// display name** `operator`: a roster **teammate** — `is_roster_agent`
+    /// true (still on the roster) **or** [`is_retired`](Self::is_retired)
+    /// true (removed since) — or a real **desk**
+    /// ([`resolve_desk_id`](Self::resolve_desk_id) matches it, by id or
+    /// case-insensitive name). Using
     /// `OPERATOR_CHANNEL` for either would put that other surface's own
     /// transcript and the public "what happened" system feed on one address:
     /// for a teammate, a post to the visible read-only feed could reach
@@ -4508,8 +4510,23 @@ impl CompanyRecord {
     /// [`CompanyRuntime::ensure_desk_writable`](crate::company::runtime::CompanyRuntime::ensure_desk_writable)
     /// resolves `OPERATOR_CHANNEL` against `desk_exists`/`is_roster_agent`
     /// directly, independent of this divert.
+    ///
+    /// Checking `desk_exists` alone (id only) missed a desk grandfathered
+    /// under a harmless id but the display name `Operator` — the validator
+    /// reserves that name outright for new manifests
+    /// (`CompanyManifest::validate`), but `from_path_for_reload` admits an
+    /// existing one (issue #1757 postdates real companies, same carve-out as
+    /// the id case above), and `server::operator::resolve_desk` matches a
+    /// `?desk=` selector by id *or* case-insensitive name — the same rule
+    /// [`resolve_desk_id`](Self::resolve_desk_id) implements. Left
+    /// undiverted, the pinned console row's `?desk=operator` read would
+    /// resolve to that desk's own transcript instead of the system feed
+    /// (issue #1781 review, CodeRabbit P2 follow-up).
     pub fn operator_feed_channel(&self) -> &'static str {
         if self.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+            || self
+                .resolve_desk_id(crate::runtime::channel::OPERATOR_CHANNEL)
+                .is_some()
             || self.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL)
             || self.is_retired(crate::runtime::channel::OPERATOR_CHANNEL)
         {
@@ -9000,6 +9017,37 @@ mod test {
              same address, the same way a roster teammate holding it does — \
              otherwise the pinned Operator row and the desk share one id and \
              `findChannel` always resolves it to the desk"
+        );
+    }
+
+    /// PR #1781 review follow-up (Codex P2, second pass): a desk grandfathered
+    /// at a harmless id but the display name `Operator` must divert the feed
+    /// exactly like the same-id case above — `desk_exists` alone (id-only)
+    /// missed it. `from_path_for_reload` already admits this exact shape
+    /// (`from_path_for_reload_grandfathers_a_group_chat_named_operator` in
+    /// `company::manifest`), and `server::operator::resolve_desk` matches a
+    /// `?desk=operator` selector by name as readily as by id, so the pinned
+    /// console row would resolve to this desk's own transcript instead of the
+    /// system feed if the divert never fired.
+    #[test]
+    fn operator_feed_channel_diverts_off_a_grandfathered_desks_own_operator_name() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"legacy_ops\"\nname = \"Operator\"\nmembers = []\n";
+        let record = desk_record(manifest, Vec::new());
+        assert!(
+            !record.desk_exists(crate::runtime::OPERATOR_CHANNEL),
+            "fixture must actually be in the id-is-free, name-collides state \
+             this test exercises, or it is not distinguishing this case from \
+             `operator_feed_channel_diverts_off_a_grandfathered_desks_own_operator_line`"
+        );
+        assert!(!record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL));
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "a desk named \"Operator\" must divert the feed off that address \
+             even though its id is free — `resolve_desk` shadows by name too, \
+             so the pinned Operator row would otherwise resolve to this \
+             desk's own transcript"
         );
     }
 }
