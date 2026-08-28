@@ -199,25 +199,43 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     overlay_created: false,
                 }
             });
-            let overlay_desks = record.overlay_desks.iter().map(|desk| {
-                let members = record.effective_desk_members(&desk.id);
-                // For an overlay desk the founding members are `desk.members`;
-                // anything beyond them came from the desk-member overlay.
-                let overlay_members = members
-                    .iter()
-                    .filter(|m| !desk.members.contains(m))
-                    .cloned()
-                    .collect();
-                DeskDto {
-                    id: desk.id.clone(),
-                    name: desk.name.clone(),
-                    description: desk.description.clone(),
-                    members,
-                    overlay_members,
-                    responder: desk.responder,
-                    overlay_created: true,
-                }
-            });
+            // An overlay desk whose own **id** is a General spelling is not
+            // projected (issue #1781 review, Codex P2) — the grandfathered
+            // shape `POST .../desks` accepted `general` / `main` ids under
+            // before issue #1743 reserved them. `CompanyRecord::resolve_desk_id`
+            // already excludes exactly this desk from routing (see its own
+            // filter, same `is_general_chat(Some(&d.id))` check), so listing it
+            // here would show the console a desk `buildChannels` treats as the
+            // company-wide line — offering edit/delete controls and a member
+            // list that has nothing to do with where a message to it actually
+            // routes (the built-in `#general`, per `resolve_desk_id`'s
+            // fallback). Nothing is lost by hiding it: its transcript is
+            // already folded into `#general` by `is_general_chat`, and that
+            // channel's membership is the whole roster, a superset of whatever
+            // this desk held.
+            let overlay_desks = record
+                .overlay_desks
+                .iter()
+                .filter(|desk| !crate::server::chat_history::is_general_chat(Some(&desk.id)))
+                .map(|desk| {
+                    let members = record.effective_desk_members(&desk.id);
+                    // For an overlay desk the founding members are `desk.members`;
+                    // anything beyond them came from the desk-member overlay.
+                    let overlay_members = members
+                        .iter()
+                        .filter(|m| !desk.members.contains(m))
+                        .cloned()
+                        .collect();
+                    DeskDto {
+                        id: desk.id.clone(),
+                        name: desk.name.clone(),
+                        description: desk.description.clone(),
+                        members,
+                        overlay_members,
+                        responder: desk.responder,
+                        overlay_created: true,
+                    }
+                });
             manifest_desks.chain(overlay_desks).collect()
         })
         // A company that failed to load surfaces no desks — the console falls
@@ -5295,6 +5313,67 @@ mode = "full"
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
         assert_eq!(desks[0]["overlayMembers"][0], "eng");
+    }
+
+    /// Issue #1781 review (Codex P2): an overlay desk whose own id is a
+    /// General spelling (`general` or `main`) must not appear in `GET
+    /// .../desks` — `POST .../desks` has refused those ids since issue #1743,
+    /// so the only way one exists is a company upgraded from before that
+    /// guard, and `CompanyRecord::resolve_desk_id` already excludes exactly
+    /// this desk from routing. Listing it anyway would let `buildChannels`
+    /// (frontend) treat it as the company-wide line and suppress the real
+    /// built-in `#general` — showing edit/delete controls and a membership
+    /// list that has nothing to do with where a message actually lands.
+    ///
+    /// Seeded directly on the stored record, not through `POST .../desks`:
+    /// that route's own guard means this shape can only be reached by data
+    /// that predates it, exactly the grandfathered case this proves.
+    #[tokio::test]
+    async fn list_desks_hides_an_overlay_desk_shadowing_general() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut record = runtime.store().load(&id).await.unwrap().unwrap();
+        record.overlay_desks.push(OverlayDesk {
+            id: "general".to_string(),
+            name: "General".to_string(),
+            description: None,
+            members: vec!["ceo".to_string()],
+            responder: ResponderMode::Lead,
+        });
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".to_string(),
+            name: "Front office".to_string(),
+            description: None,
+            members: vec!["eng".to_string()],
+            responder: ResponderMode::Lead,
+        });
+        runtime.store().save(&record).await.unwrap();
+
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let desks = get_desks(&app, &cookie).await;
+        let ids: Vec<&str> = desks
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect();
+
+        assert!(
+            !ids.contains(&"general"),
+            "an overlay desk at the reserved `general` id must not be listed: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"main"),
+            "an overlay desk at the reserved `main` id must not be listed: {ids:?}"
+        );
+        // The manifest desk and a non-shadowing overlay desk are unaffected —
+        // this narrows one id, it does not hide desks generally.
+        assert!(ids.contains(&"studio"), "unrelated desk dropped: {ids:?}");
     }
 
     /// Removing an overlay member drops it from the merged view; a manifest
