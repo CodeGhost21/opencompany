@@ -940,7 +940,13 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             // comment 3875167298). It always wins over leaked text/reasoning,
             // independent of how the turn finished.
             content = refusal;
-        } else if genuinely_finished && content.is_empty() {
+        } else if genuinely_finished
+            && content.is_empty()
+            && matches!(
+                payload.pointer("/choices/0/message/content"),
+                None | Some(serde_json::Value::Null)
+            )
+        {
             // Reasoning-model fallback: a reasoning-only turn returns
             // `content: null` with the visible text under `reasoning` /
             // `reasoning_content` (string or array-of-parts). Only promote it
@@ -949,6 +955,16 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             // chain of thought is not a final answer, and promoting it here
             // would hand downstream consumers a partial or incorrect thought
             // as if it were.
+            //
+            // `content.is_empty()` alone is not enough to detect the
+            // reasoning-only shape: it is also true for an explicit
+            // `content: ""` or a non-text content array (e.g. an image-only
+            // part) — both a genuine, visible provider response that
+            // `extract_content_text` simply can't render as text. Requiring
+            // the *raw* field to be absent/null before promoting keeps that
+            // response from being silently swapped for leaked
+            // chain-of-thought (CodeRabbit review on #1779, comment
+            // 3877224319).
             content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
             if content.is_empty() {
                 content =
@@ -2387,6 +2403,62 @@ mod tests {
             model_response_from_payload(payload).expect("reasoning_content-only turn parses");
         assert_eq!(resp.text(), "The answer is 42.");
         assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// An explicit `content: ""` (not `null`) is a *visible* empty response,
+    /// not the documented reasoning-only shape — `extract_content_text`
+    /// reduces both to the same empty string, so the old `content.is_empty()`
+    /// check could not tell them apart and promoted `reasoning` anyway. That
+    /// substitutes internal chain-of-thought for whatever unsupported/empty
+    /// response the provider actually sent, the same class of bug the
+    /// refusal-precedence guard above exists to prevent, just triggered by an
+    /// empty string instead of a populated field (CodeRabbit review on
+    /// #1779, comment 3877224319).
+    #[test]
+    fn explicit_empty_string_content_does_not_promote_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "The user wants help with something I should decline."
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("explicit empty-string content must not promote reasoning");
+        assert!(
+            !err.to_string().contains("decline"),
+            "leaked reasoning must not appear in the error, got: {err}"
+        );
+    }
+
+    /// Same gap as above, via the array-content path: a non-text content
+    /// array (e.g. an image-only part) extracts to an empty string too, but
+    /// the raw field is neither absent nor `null` — it is the provider's
+    /// actual (just non-text) response, and must not be silently swapped for
+    /// leaked reasoning (CodeRabbit review on #1779, comment 3877224319).
+    #[test]
+    fn non_text_array_content_does_not_promote_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } }
+                    ],
+                    "reasoning": "The user wants help with something I should decline."
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("non-text array content must not promote reasoning");
+        assert!(
+            !err.to_string().contains("decline"),
+            "leaked reasoning must not appear in the error, got: {err}"
+        );
     }
 
     /// A genuinely empty turn truncated by `finish_reason: "length"` (max_tokens
