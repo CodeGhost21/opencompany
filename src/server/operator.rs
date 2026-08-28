@@ -3340,21 +3340,52 @@ async fn react_to_message(
     // has never existed — none of which any reader could render, and all of
     // which would sit in the log forever claiming otherwise.
     let target = runtime.events().read_from(company, message_seq, 1).await?;
-    let is_message = target
-        .first()
-        .filter(|stored| stored.seq == message_seq)
-        .is_some_and(|stored| {
-            matches!(
-                stored.event,
-                CompanyEvent::OperatorMessage { .. } | CompanyEvent::AgentReply { .. }
-            )
-        });
+    let matched = target.first().filter(|stored| stored.seq == message_seq);
+    let is_message = matched.is_some_and(|stored| {
+        matches!(
+            stored.event,
+            CompanyEvent::OperatorMessage { .. } | CompanyEvent::AgentReply { .. }
+        )
+    });
     if !is_message {
         return Err(
             ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}")))
                 .into_response()
                 .into(),
         );
+    }
+    // An owner-fallback report is admin-only exactly as it is on reload
+    // (`history_for_desk`) and over the live SSE feed (`project_event_for_viewer`,
+    // issue #1781 review, Codex P1) — a Member must not be able to react to a
+    // message they cannot read. Refused with the same 404 the missing-target
+    // branch above answers, not a 403: distinguishing "hidden" from "does not
+    // exist" would let a Member enumerate which sequence numbers hold an
+    // admin-only report by probing this endpoint, which is exactly the gap the
+    // sequence-id-based `seq` param opens (PR #1781 review).
+    let admin_only = matches!(
+        matched.map(|stored| &stored.event),
+        Some(CompanyEvent::AgentReply { agent_id, .. })
+            if agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+    );
+    if admin_only {
+        let is_admin = match &by {
+            Some(actor) if actor.kind == ActorKind::User => {
+                crate::server::users::routes::current_user(headers, state, company, peer)
+                    .await
+                    .is_some_and(|principal| principal.role.may_administer())
+            }
+            // No person behind this credential — a platform/machine bearer —
+            // already carries full, unrestricted access everywhere else this
+            // distinction is drawn (`history_viewer`, `ScopedCompany::is_admin`).
+            _ => true,
+        };
+        if !is_admin {
+            return Err(
+                ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}")))
+                    .into_response()
+                    .into(),
+            );
+        }
     }
     runtime
         .events()
@@ -7286,6 +7317,60 @@ mode = "full"
         // A multi-code-point emoji is still one reaction, and is accepted.
         assert_eq!(
             post_reaction(&app, &cookie, &target, "👩‍💻", true).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// PR #1781 review: `history_for_desk` (reload) and `project_event_for_viewer`
+    /// (live SSE) both already hide an owner-fallback report from a non-admin —
+    /// this proves the reaction route agrees, rather than letting a Member
+    /// react to (and thereby confirm the existence and sequence position of) a
+    /// report they cannot read. Answered with the same 404 an unknown sequence
+    /// gets, not a 403, so probing this endpoint cannot distinguish "hidden"
+    /// from "never existed".
+    #[tokio::test]
+    async fn reactions_refuse_a_target_that_is_an_admin_only_report() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let report = runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: "operator".into(),
+                    agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+                    text: "no admin has a mailbox".into(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let app = router(state);
+        let member_cookie = crate::server::test_support::member_cookie("acme");
+        let admin_cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // A Member gets the same 404 an unknown message would.
+        assert_eq!(
+            post_reaction(
+                &app,
+                &member_cookie,
+                &report.value().to_string(),
+                "👍",
+                true
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+        // An admin may react to it normally.
+        assert_eq!(
+            post_reaction(&app, &admin_cookie, &report.value().to_string(), "👍", true).await,
             StatusCode::NO_CONTENT
         );
     }
