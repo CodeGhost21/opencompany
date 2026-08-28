@@ -784,13 +784,27 @@ export function ChatView({
    * absent until the client/company changed or the page reloaded. See
    * `fetchWithOneRetry`'s doc for why the retry itself lives there rather
    * than inline.
+   *
+   * `fetchWithOneRetry` already collapses a genuine fetch failure to `null`
+   * (issue #1781 review, tinysweeper): that and a 2xx response that simply
+   * is not `OperatorChannelDto`-shaped both degrade to no pinned row here,
+   * on purpose — see `isOperatorChannelDto`'s doc comment. But a non-`null`
+   * value that still fails the shape check is a schema drift the fetch
+   * itself did not report as an error, so it is logged (not surfaced —
+   * still the same silent degrade) to keep that distinct from an ordinary
+   * offline/older-host miss.
    */
   const operatorRun = useRef(0);
   useEffect(() => {
     const run = ++operatorRun.current;
     setOperator(null);
     void fetchWithOneRetry(() => client.getOperatorChannel(company)).then((dto) => {
-      if (run === operatorRun.current && isOperatorChannelDto(dto)) setOperator(dto);
+      if (run !== operatorRun.current) return;
+      if (isOperatorChannelDto(dto)) {
+        setOperator(dto);
+      } else if (dto !== null) {
+        console.debug("[ChatView] getOperatorChannel returned an unexpected shape", dto);
+      }
     });
   }, [client, company]);
 

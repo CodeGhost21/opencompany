@@ -48,6 +48,23 @@ describe("chat channel history polling", () => {
     expect(chatView).not.toContain("client.getOperatorChannel(company)\n      .then(");
   });
 
+  /**
+   * PR #1781 review (Codex, comment 3878749061): the `.then` callback checked
+   * `isOperatorChannelDto(dto)` but had no `else` — a 2xx response that is not
+   * `OperatorChannelDto`-shaped (schema drift, not a fetch failure) was
+   * silently indistinguishable from the ordinary offline/older-host miss.
+   * Source-wiring-pinned the same way the retry above is (no render harness
+   * for this component in this repo): the mismatched-shape arm must be
+   * logged, and only the `dto !== null` (i.e. not the already-collapsed
+   * fetch-failure) case must log.
+   */
+  it("ChatView logs a mismatched Operator channel shape instead of dropping it silently", () => {
+    expect(chatView).toContain(
+      'console.debug("[ChatView] getOperatorChannel returned an unexpected shape", dto)',
+    );
+    expect(chatView).toContain("} else if (dto !== null) {");
+  });
+
   // The polling merge is `mergeHistoryInOrder` — the same reconstruction rule
   // the cold mount and every 5s tick share, which is what the source-wiring
   // test above arms but cannot itself observe. These exercise the real
