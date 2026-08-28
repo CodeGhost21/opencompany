@@ -3101,7 +3101,8 @@ async fn history_viewer(
     let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => {
-            let is_admin = state
+            let is_admin = runtime
+                .users()
                 .get_user(company, &actor.id)
                 .await
                 .map_err(|_| crate::server::Rejection::from(unauthorized_response()))?
