@@ -912,6 +912,12 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// `www.googleapis.com/batch/drive/v3`, a product-scoped batch endpoint —
 /// another sibling of `/drive/`, not a deeper path under it, same shape as
 /// `/upload/drive/`. It needs its own prefix in Drive's set too.
+///
+/// Calendar has the same batch-endpoint gap as Drive (PR #1780 review, round
+/// 9): `www.googleapis.com/batch/calendar/v3` is a sibling of `/calendar/`,
+/// not a deeper path under it. Calendar's prefix set only had `/calendar/`,
+/// so a batch request bypassed deflection the same way Drive's did before
+/// round 8.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
         "github" => &[("api.github.com", &[]), ("uploads.github.com", &[])],
@@ -921,7 +927,7 @@ fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'stat
         ],
         "googlecalendar" => &[
             ("calendar.googleapis.com", &[]),
-            ("www.googleapis.com", &["/calendar/"]),
+            ("www.googleapis.com", &["/calendar/", "/batch/calendar/"]),
         ],
         "googledrive" => &[
             ("drive.googleapis.com", &[]),
@@ -1770,6 +1776,13 @@ mod tests {
     /// standard REST URL most examples and agents actually curl,
     /// `www.googleapis.com/calendar/v3/...`, passed straight through with no
     /// credential instead of being deflected to Composio.
+    ///
+    /// PR #1780 review (round 9): like Drive's `/batch/drive/` sibling prefix
+    /// (round 8), Calendar's batch endpoint on the shared gateway,
+    /// `www.googleapis.com/batch/calendar/v3`, is a sibling of `/calendar/`,
+    /// not a deeper path under it. Before this fix `googlecalendar`'s prefix
+    /// set had no `/batch/calendar/` entry, so a batch request passed
+    /// straight through instead of being deflected.
     #[test]
     fn calendar_deflection_on_the_legacy_host_is_scoped_to_calendar_paths() {
         let connected = vec!["googlecalendar".to_string()];
@@ -1796,6 +1809,12 @@ mod tests {
             )
             .is_some(),
             "the dedicated Calendar host stays deflected unscoped"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://www.googleapis.com/batch/calendar/v3")
+                .is_some(),
+            "the batch endpoint on the legacy gateway host must also be deflected, the same as \
+             Drive's sibling /batch/drive/ prefix"
         );
     }
 
