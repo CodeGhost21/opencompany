@@ -6392,8 +6392,11 @@ async fn the_queue_resolves_ownership_the_same_way_the_card_does() {
         )
         .await
         .unwrap();
-    // Stamped Unlinked, parked under this card's own attempt. The card read
-    // claims it, so the queue must too — the correction runs both ways.
+    // Stamped Unlinked *and* carrying a run id — which `workflow_run_of` reads
+    // as a workflow park, because the two id spaces are indistinguishable by
+    // value. The card read claims it (it checks membership in this card's own
+    // attempt ids, which the queue has no way to do); the queue leaves it
+    // alone rather than risk relabelling a workflow approval onto a card.
     runtime
         .journal
         .record_parked(
@@ -6438,8 +6441,10 @@ async fn the_queue_resolves_ownership_the_same_way_the_card_does() {
     );
     assert_eq!(
         owner_of("appr-attempt-2"),
-        json!({ "link": "task", "id": "t-1" }),
-        "and claims a park the cycle stamped Unlinked",
+        json!({ "link": "unlinked" }),
+        "an Unlinked park carrying a run id is a workflow park by `workflow_run_of`'s \
+         rule, and the queue must not claim it for a card on the strength of an id \
+         whose space it cannot identify",
     );
     assert_eq!(
         owner_of("appr-stamped"),
@@ -6447,24 +6452,40 @@ async fn the_queue_resolves_ownership_the_same_way_the_card_does() {
         "a park with no attempt keeps the link it was stamped with",
     );
 
-    // The pinning half: what the card shows is what the queue says is its own.
+    // The pinning half, and it is a **subset** rather than an equality, which is
+    // the honest shape of the guarantee.
+    //
+    // The queue may never claim an approval the card does not — that direction
+    // is the defect, and it is what puts a decision the operator should not
+    // have in front of them. It may fall short: `approval_owner` asks whether a
+    // run is among *this card's* attempts, which the queue cannot ask without
+    // per-card state, so where the id space is ambiguous the queue abstains.
+    // The cost of abstaining is a blocked row the board does not draw; the cost
+    // of the other direction is deciding somebody else's request.
     let (_, card) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
-    let mut on_card: Vec<&str> = card["approvals"]
+    let on_card: std::collections::HashSet<&str> = card["approvals"]
         .as_array()
         .unwrap()
         .iter()
         .map(|a| a["id"].as_str().unwrap())
         .collect();
-    on_card.sort_unstable();
-    let mut from_queue: Vec<&str> = queue
+    let from_queue: std::collections::HashSet<&str> = queue
         .iter()
         .filter(|row| row["task"] == json!({ "link": "task", "id": "t-1" }))
         .map(|row| row["id"].as_str().unwrap())
         .collect();
-    from_queue.sort_unstable();
-    assert_eq!(
-        on_card, from_queue,
-        "the two reads must not disagree about which approvals belong to t-1",
+    assert!(
+        from_queue.is_subset(&on_card),
+        "the queue must never put an approval on a card the card itself disowns: \
+         queue={from_queue:?} card={on_card:?}",
+    );
+    assert!(
+        from_queue.contains("appr-stamped"),
+        "and must still carry the unambiguous ones: {from_queue:?}",
+    );
+    assert!(
+        !from_queue.contains("appr-elsewhere"),
+        "least of all the one parked under another card's attempt: {from_queue:?}",
     );
 }
 

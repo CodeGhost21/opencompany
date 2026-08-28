@@ -37,6 +37,23 @@
 //! A park with **no** attempt keeps its stamped link untouched. That is the
 //! fallback arm of the same rule, and leaving it alone is what keeps a chat
 //! turn, a scheduler tick and a pre-#242 park reading exactly as they did.
+//!
+//! # Which parks the caller may hand over
+//!
+//! Only ones whose `run_id` is genuinely a **task attempt**. `Effect::run_id`
+//! holds two id spaces — an attempt and, on the workflow path, a workflow run —
+//! and `generate_id` is only process-locally unique, so the value cannot say
+//! which it is; `workflow_run_of` discriminates on the recorded park site
+//! instead. Handing a workflow run id to `owners` would let a collision with a
+//! persisted attempt id resolve to that attempt's card, relabelling a workflow
+//! approval onto a card no owner claims — on the surface that now decides
+//! (#1895 review). `CompanyRuntime::pending_approvals_resolved` filters with
+//! that same predicate before building either map.
+//!
+//! Which makes the guarantee a **subset**, not an equality: the queue never
+//! claims an approval the card would disown, and abstains where the id space is
+//! ambiguous. `approval_owner` can be exact there because it asks whether a run
+//! is among *one card's* attempts; the queue has no per-card state to ask with.
 
 use std::collections::HashMap;
 

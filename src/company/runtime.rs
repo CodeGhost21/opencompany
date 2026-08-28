@@ -2925,14 +2925,34 @@ impl CompanyRuntime {
         use std::collections::{HashMap, HashSet};
 
         let mut summaries = self.pending_approvals();
-        // Approval id → the attempt that parked it, for the parks naming one.
-        // Read from the journal rather than the summaries because `run_id` is
-        // deliberately not on the wire: `workflow_run_id` carries only the
-        // workflow half, precisely so a task attempt is never read as a run.
+        // Approval id → the **task attempt** that parked it.
+        //
+        // `Effect::run_id` holds two id spaces — a task attempt (#242) and, on
+        // the workflow path, a workflow run — and `generate_id` is only
+        // process-locally unique, so the value alone cannot say which
+        // ([`workflow_run_of`] says exactly this). Resolving a workflow run id
+        // against the run store is therefore not merely useless but unsafe: a
+        // collision with a persisted attempt id would find that attempt's card
+        // and relabel a workflow approval onto it — inventing a card for a
+        // request no card owns, on the surface that now decides.
+        //
+        // So the park *site* discriminates, through the one predicate that
+        // already encodes the rule rather than a second copy of it: a park
+        // `workflow_run_of` claims is a workflow park and is left alone. What
+        // remains is a park linked to a card, where `run_id` is unambiguously
+        // an attempt — which is exactly the misattribution case this exists to
+        // correct, a park stamped with one card while its attempt belongs to
+        // another.
+        //
+        // Conservative in the ambiguous direction, the same way
+        // `workflow_run_of` is: the cost of under-claiming is a blocked row the
+        // board does not draw, and of over-claiming is an operator deciding
+        // another owner's request from this card. Those are not comparable.
         let attempts: HashMap<String, String> = self
             .journal
             .pending()
             .into_iter()
+            .filter(|p| workflow_run_of(p).is_none())
             .filter_map(|p| {
                 p.effect
                     .run_id
