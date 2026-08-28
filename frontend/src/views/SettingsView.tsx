@@ -252,7 +252,13 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
   );
 }
 
-function LifecycleControls({
+/**
+ * Exported (rather than kept view-local) so the Reset / Start clean button's
+ * gating and click wiring can be rendered and asserted on directly, without
+ * pulling in every other card `SettingsView` composes
+ * (`settings-lifecycle-reset-button.test.ts`).
+ */
+export function LifecycleControls({
   client,
   company,
   feed,
