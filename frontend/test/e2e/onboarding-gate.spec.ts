@@ -18,10 +18,27 @@ import { expect, test, type Page, type Route } from "@playwright/test";
  * shared company always-activated by construction, so this spec drives the
  * gate through response mocking instead of trying to talk the real company out
  * of the flag the rest of the suite depends on it holding.
+ *
+ * # Why the paths below are patterns, not one literal string
+ *
+ * `OpenCompanyClient.scope()` (`src/api/client.ts`) answers `/api/v1/company`
+ * only when it has no company id at all; the moment a connection carries one —
+ * which every real connection does once it has discovered the single company
+ * on this host, `e2e-harness-co` — every request goes to the scoped
+ * `/api/v1/companies/{id}/…` form instead. A route registered only for the
+ * unscoped shorthand never matches here, so the mock silently misses and the
+ * page falls through to the *real* `GET …/activation` — which this host
+ * answers `isActivated: true` (the `OPENCOMPANY_SKIP_ACTIVATION_GATE` stamp
+ * above), not the `INCOMPLETE` this spec means to drive. The gate never
+ * renders, "blocks the shell…" and "'skip for now'…" both fail waiting on a
+ * step that never mounts, and only "does not reappear on reload…" happens to
+ * pass — it wants `isActivated: true` anyway, which the real route already
+ * answers on its own. Matching both shapes is what `scopeFor` itself
+ * promises callers, so the mock now honours the same contract the app does.
  */
 
-const ACTIVATION_PATH = "**/api/v1/company/activation";
-const COMPANY_PATCH_PATH = "**/api/v1/company";
+const ACTIVATION_PATH = /\/api\/v1\/(?:companies\/[^/]+|company)\/activation$/;
+const COMPANY_PATCH_PATH = /\/api\/v1\/(?:companies\/[^/]+|company)$/;
 
 const INCOMPLETE = {
   nameConfirmed: false,
