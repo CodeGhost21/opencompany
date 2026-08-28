@@ -77,6 +77,23 @@ describe("folding a workflow node's live tool frames (issue #1702)", () => {
     expect(row.seq).toBe(0);
   });
 
+  it("keeps the result summary, which is all an ACP node reports", () => {
+    // The chat timeline carried `result` and this reducer dropped it — fine
+    // while only the built-in harness streamed, since its rows lean on the
+    // argument-derived `detail`. An ACP tool call puts no arguments on the
+    // wire, so `result` is the whole of what its finished row can say
+    // (PR #1904 review).
+    const nodes = liveNodes(
+      fold([
+        toolCall({}),
+        toolResult({ detail: undefined, result: "42 lines" }),
+      ]),
+    );
+    expect(nodes[0].rows).toHaveLength(1);
+    expect(nodes[0].rows[0].result).toBe("42 lines");
+    expect(nodes[0].rows[0].status).toBe("ok");
+  });
+
   it("ignores a frame that belongs to a different run", () => {
     const nodes = liveNodes(
       fold([toolCall({ workflowRunId: "some-other-run" })]),

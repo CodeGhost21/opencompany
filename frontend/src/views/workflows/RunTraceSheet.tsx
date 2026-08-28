@@ -234,6 +234,15 @@ function LiveActivityList({ nodes, live }: { nodes: LiveNode[]; live: boolean })
                     {row.detail}
                   </span>
                 )}
+                {/* What came back. An ACP node reports only this — it has no
+                    arguments on the wire to derive a `detail` from — so
+                    without it such a row says a call finished and nothing
+                    about what it found. */}
+                {row.result && (
+                  <span className="truncate text-muted-foreground">
+                    {row.result}
+                  </span>
+                )}
                 {typeof row.elapsedMs === "number" && (
                   <span className="ml-auto shrink-0 text-muted-foreground">
                     {row.elapsedMs} ms

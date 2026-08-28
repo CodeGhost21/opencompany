@@ -390,7 +390,23 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
 
     for update in turn.updates {
         match update {
-            AcpUpdate::MessageChunk(text) => reply.push_str(&text),
+            AcpUpdate::MessageChunk(text) => {
+                // Visible assistant text closes an open thinking run, so a
+                // turn that thinks, says something, then thinks again shows
+                // two `Thinking` rows rather than one that spans the answer.
+                //
+                // This arm used to fall straight through to `reply`, which
+                // made this fold the odd one out twice over (PR #1904
+                // review): the built-in harness's own `fold_steps` closes a
+                // thinking run on `TextDelta` for exactly this reason, and
+                // the live mapper beside this one closes it on
+                // `MessageChunk`. Leaving it open here meant the live
+                // timeline could show a second `Thinking` row that vanished
+                // when the reply landed and replaced it — the operator
+                // watching work disappear.
+                thinking = false;
+                reply.push_str(&text);
+            }
             AcpUpdate::ThoughtChunk => {
                 // One step for a run of thoughts, not one per chunk: a model
                 // emits these by the hundred, and a timeline of them is noise.
@@ -1638,6 +1654,37 @@ mod test {
                 .iter()
                 .all(|s| s.kind != TurnStepKind::ToolCall)
         );
+    }
+
+    #[test]
+    fn thinking_around_assistant_text_folds_and_streams_the_same_way() {
+        // The divergence PR #1904's review caught: the live mapper closed a
+        // thinking run on assistant text and `fold` did not, so this sequence
+        // streamed two `Thinking` rows and folded one — the second row
+        // vanishing the moment the reply replaced the live timeline.
+        let updates = vec![
+            AcpUpdate::ThoughtChunk,
+            AcpUpdate::MessageChunk("partly there. ".into()),
+            AcpUpdate::ThoughtChunk,
+            AcpUpdate::MessageChunk("done".into()),
+        ];
+
+        let mut state = LiveState::default();
+        let live = updates
+            .iter()
+            .filter_map(|u| live_frame_from(u, &mut state))
+            .count();
+
+        let outcome = fold(turn(updates));
+        let folded = outcome
+            .steps
+            .iter()
+            .filter(|s| s.kind == TurnStepKind::Thinking)
+            .count();
+
+        assert_eq!(folded, 2, "text closes a thinking run, so this is two");
+        assert_eq!(live, folded, "and the live view says the same");
+        assert_eq!(outcome.reply, "partly there. done");
     }
 
     #[test]

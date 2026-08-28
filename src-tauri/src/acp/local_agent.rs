@@ -409,12 +409,6 @@ impl LocalAcpAgent {
         }
     }
 
-    /// Drops a record that did not load, so the next cold start does not
-    /// re-attempt a session the adapter has already said it does not have.
-    fn forget_session_record(&self, company: &CompanyId, agent_id: &str) {
-        let _ = std::fs::remove_file(self.session_record_path(company, agent_id));
-    }
-
     /// Re-opens the conversation this pair had last time, if it can.
     ///
     /// The gap this closes: the `sessions` map below lives in memory, and a
@@ -475,13 +469,28 @@ impl LocalAcpAgent {
                 Some((session_id, loaded))
             }
             Err(error) => {
+                // The record is deliberately **kept**. A failed load does not
+                // establish that the session is gone: `AcpClient::call`
+                // answers `Gone` for an adapter that exited and `Io` for a
+                // failed stdio write, and neither is the adapter saying it
+                // has no such session. Dropping the record on those would
+                // throw away the only pointer to a conversation that is still
+                // there — and the `session/new` below is about to fail
+                // against the same dead client, so the next start would find
+                // nothing to resume and begin fresh for good.
+                //
+                // Keeping it costs nothing in the definitive case either:
+                // `session/new` overwrites the record the moment it succeeds,
+                // so a genuinely dead session is replaced rather than retried
+                // forever. The bound on the wasted work is one refused load
+                // per cold start, and only while every `session/new` is also
+                // failing.
                 tracing::info!(
                     company = %company.as_ref(),
                     agent = %agent_id,
                     %error,
                     "[acp] could not resume the previous conversation; starting a fresh one"
                 );
-                self.forget_session_record(company, agent_id);
                 None
             }
         }
@@ -517,6 +526,7 @@ impl LocalAcpAgent {
         // for the teammate, which is not the same thing as the first turn the
         // teammate has ever run.
         let resumed = self.resume_session(client, company, agent_id, root).await;
+        let was_resumed = resumed.is_some();
         let (id, raw) = match resumed {
             Some(resumed) => resumed,
             None => {
@@ -561,17 +571,28 @@ impl LocalAcpAgent {
         // a missed error.
         //
         // A *resumed* session takes the same pass, against `session/load`'s
-        // own response: an operator who changed the model between runs would
-        // otherwise keep talking to the old one, since the session was
-        // configured by a process that is no longer running. It stays
-        // best-effort — an adapter whose load response advertises no model
-        // option leaves the resumed session on whatever it was created with,
-        // which is still a working teammate, not a broken one.
-        let desired = self.agent_models.get(agent_id).or(self
-            .env
-            .is_empty()
-            .then_some(self.model.as_ref())
-            .flatten());
+        // own response — but it may NOT take the `self.env` short-circuit
+        // (PR #1904 review). The env var configures a subprocess at spawn,
+        // which is how a *new* session arrives on the harness's model without
+        // an explicit call; it cannot reach back into a session some earlier
+        // process already created and configured.
+        //
+        // The case that breaks: a teammate had a per-agent override, an
+        // admin removes it, the roster rebuilds. `self.env` is still non-empty
+        // (it carries the harness default for `claude`), so the short-circuit
+        // yields `None`, nothing is sent — and the resumed session keeps the
+        // session-scoped override the operator just deleted. Confirmed live
+        // that `session/load` restores that config: its response carries the
+        // same `configOptions` model entry, `currentValue` and all.
+        //
+        // So a resumed session always falls back to the harness's own model,
+        // and only a *fresh* one trusts the spawn to have handled it.
+        let harness_default = if was_resumed {
+            self.model.as_ref()
+        } else {
+            self.env.is_empty().then_some(self.model.as_ref()).flatten()
+        };
+        let desired = self.agent_models.get(agent_id).or(harness_default);
         if let Some(model) = desired
             && let Some(config_id) = model_config_id(&raw, model)
         {
@@ -834,20 +855,29 @@ mod test {
     }
 
     #[test]
-    fn a_forgotten_record_is_not_retried() {
-        // What happens after the adapter says it no longer holds the session:
-        // re-attempting it on every later cold start would spend a failing
-        // round trip before every first turn, forever.
+    fn a_new_session_replaces_the_one_that_would_not_load() {
+        // Why a failed `session/load` does NOT delete the record (PR #1904
+        // review): a load can fail because the adapter *exited*, which says
+        // nothing about whether the session still exists — and the
+        // `session/new` that follows is about to fail against the same dead
+        // client. Deleting there would throw away the only pointer to a
+        // recoverable conversation.
+        //
+        // What makes keeping it safe is this: a session that really is gone
+        // gets overwritten the moment a replacement is opened, so the stale
+        // id cannot be retried forever.
         let dir = tempfile::tempdir().unwrap();
         let agent = agent(dir.path());
         let acme = CompanyId::new("acme");
         std::fs::create_dir_all(dir.path().join("acme").join("ceo")).unwrap();
 
-        agent.write_session_record(&acme, "ceo", "sess-1");
-        agent.forget_session_record(&acme, "ceo");
-        assert_eq!(agent.read_session_record(&acme, "ceo"), None);
-        // Idempotent: forgetting what was never remembered is not an error.
-        agent.forget_session_record(&acme, "ceo");
+        agent.write_session_record(&acme, "ceo", "sess-dead");
+        agent.write_session_record(&acme, "ceo", "sess-new");
+        assert_eq!(
+            agent.read_session_record(&acme, "ceo"),
+            Some("sess-new".to_string()),
+            "the replacement is what the next start resumes"
+        );
     }
 
     #[test]

@@ -1368,6 +1368,20 @@ export function AppShell({
             scopeRef.current.client !== client
           ) return;
           const hydrated = fromHistory(entries);
+          // The turn is over, so its transient tool rows have served their
+          // purpose — the durable record just folded in is what stands now.
+          //
+          // `injectAgentReply` does this for a turn that *answered*, and for a
+          // long time that covered everything a console would see. A turn that
+          // settles **failed** journals a `TurnFailed` line and emits no
+          // `agent_reply`, so nothing cleared its rows: a detached POST has
+          // already resolved, `onSendEnd` has already run, and the live
+          // timeline sat under the channel claiming work was in flight until
+          // the next send or a reload (PR #1904 review). Harmless while ACP
+          // published no rows at all; not harmless now that it does.
+          setLiveStepsByThread((prev) =>
+            prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+          );
           setThreads((ts) =>
             ts.map((t) => {
               if (t.id !== threadId) return t;
