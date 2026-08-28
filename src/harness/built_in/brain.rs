@@ -1607,9 +1607,15 @@ impl HarnessBrain {
             .await;
 
         let Some(origin) = card.origin_chat_id.clone() else {
+            // A refusal has no relay, but its terminal outcome still belongs
+            // on the task timeline.
+            self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
+                .await;
             return Ok(None);
         };
         let relay = lifecycle::relay_reply(&card, &orchestrator, &orchestrator, origin);
+        self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
+            .await;
         Ok(Some(relay))
     }
 
