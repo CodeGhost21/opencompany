@@ -83,6 +83,7 @@ import {
   channelTitle,
   deskFromDto,
   dmChannelId,
+  dmThreadId,
   findChannel,
   firstChannel,
   historyReady,
@@ -1191,6 +1192,13 @@ export function ChatView({
   // A local the closures below can capture as non-null: TypeScript hoists
   // function declarations, so the guard above does not narrow inside them.
   const active = channel;
+  // Whether the open channel is a real, host-backed desk — as opposed to the
+  // built-in `#general` channel, a DM, or a fallback desk (`lib/desks.ts`,
+  // used before `/desks` answers). The built-in channel is `kind: "channel"`
+  // and carries `memberIds` exactly like a desk does, so neither alone tells
+  // them apart; asking the desk list is what keeps the lead badge and the
+  // org-chart link off a channel the host does not list under `GET .../desks`.
+  const activeIsDesk = active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);
   // Issue #1757: the Operator channel is a read-only "what happened" feed. Its
   // composer is disabled and the host also refuses a send to it, so this is UX,
   // not the enforcement.
@@ -1207,7 +1215,7 @@ export function ChatView({
     : active.kind === "channel"
       ? active.id
       : active.member
-        ? dmChannelId(active.member)
+        ? dmThreadId(active.member)
         : undefined;
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
   /**
@@ -2035,9 +2043,7 @@ export function ChatView({
                 // are the channel's membership in the host's order, not a
                 // hierarchy, so badging [0] would state a rank nothing
                 // confers — the host's own `desk_lead` is `None` for it.
-                active.kind === "channel" && !active.leadless
-                  ? active.memberIds?.[0]
-                  : undefined
+                activeIsDesk && !active.leadless ? active.memberIds?.[0] : undefined
               }
               loading={loadingTeam}
               fromHost={fromHost}
@@ -2064,7 +2070,7 @@ export function ChatView({
                * only hands chat a chat-scoped navigate.
                */
               onManageDesk={
-                active.kind === "channel" && active.memberIds
+                activeIsDesk && active.memberIds
                   ? () => {
                       window.location.hash = `/company/${active.id}`;
                     }
