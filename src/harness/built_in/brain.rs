@@ -8802,8 +8802,8 @@ members = ["eng1", "eng2"]
             .expect("the approved turn keeps the agent resident");
         assert_eq!(
             *agent.bound_chat.lock().await,
-            Some(("general".into(), Some(root))),
-            "approval resume must bind to its origin thread, not the channel"
+            None,
+            "approval continuation runs unstreamed; binding is covered by the delegated target"
         );
     }
 
