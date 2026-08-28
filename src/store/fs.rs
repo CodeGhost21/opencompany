@@ -1665,6 +1665,40 @@ impl FsCompanyStore {
 impl CompanyStore for FsCompanyStore {
     async fn load(&self, id: &CompanyId) -> Result<Option<CompanyRecord>> {
         let bundle = self.bundle(id);
+
+        // Issue #1828 review, finding on comment 3879048530: `commit_lock` in
+        // `save` (above) only serializes the *commit* phase across a
+        // cancelled caller's orphaned detached task — it says nothing about
+        // `load`, which used to read `company.toml`/`meta.json` straight off
+        // disk with no lock at all. A fresh caller's `company_write_lock` is
+        // freed the instant a cancelled caller's frame drops, so a fresh
+        // load-mutate-save cycle (every real call site — `policy.rs`,
+        // `team.rs`, …) could call `load` immediately, while the previous
+        // caller's orphaned commit was still parked mid-rename, and read the
+        // pre-commit record. That fresh caller's own `save` still blocks on
+        // `commit_lock` until the orphaned commit finishes, so the two
+        // commits never interleave on disk — but the fresh caller had
+        // already merged its change onto stale data, so its save durably
+        // *reverted* the orphaned commit's already-landed change the instant
+        // it finally landed. A lost update, not a file-corruption race:
+        // `commit_lock` alone cannot see it, because both commits still
+        // succeed, in the correct order, on well-formed files.
+        //
+        // Acquiring and releasing the same `path_lock(bundle.dir())` the
+        // commit phase holds, before reading either file, is a barrier:
+        // `load` cannot return until any commit already in flight for this
+        // bundle has fully finished renaming. It is safe to release
+        // immediately rather than hold it across both reads below — the
+        // per-company `company_write_lock` every load-mutate-save caller
+        // acquires before `load` and keeps through `save` rules out any
+        // *other* legitimate writer starting a new commit before this same
+        // caller's own `save` reaches `commit_lock`, so the only commit this
+        // barrier ever needs to wait out is the one already in flight when
+        // `load` was called.
+        {
+            let _commit_barrier = path_lock(bundle.dir()).lock_owned().await;
+        }
+
         let toml_path = bundle.company_toml();
         let toml_src = match tokio::fs::read_to_string(&toml_path).await {
             Ok(src) => src,
@@ -4508,6 +4542,164 @@ mod test {
             loaded.lifecycle, "archived",
             "the live, awaited save must win — not the cancelled one whose \
              detached commit was merely still in flight"
+        );
+    }
+
+    /// **Issue #1828 review, finding on comment 3879048530**: `commit_lock`
+    /// (above) only serializes the *commit* phase — it says nothing about
+    /// `load`, which reads `company.toml`/`meta.json` straight off disk with
+    /// no lock at all. A fresh caller's `company_write_lock` is freed the
+    /// instant a cancelled caller's frame drops, so a fresh load-mutate-save
+    /// cycle (every real call site — `policy.rs`, `team.rs`, …) can call
+    /// `load` immediately, while the previous caller's orphaned commit is
+    /// still parked mid-rename, and read the pre-commit record. That fresh
+    /// caller's own `save` then blocks on `commit_lock` until the orphaned
+    /// commit finishes, so the two commits never interleave — but the fresh
+    /// caller already merged its change onto stale data, so its save durably
+    /// *reverts* the orphaned commit's already-landed change the instant it
+    /// finally lands. This is a lost update, not a file-corruption race, so
+    /// `commit_lock` alone cannot see it: both commits still succeed, in the
+    /// correct order, on well-formed files.
+    ///
+    /// Reuses `stall_probe::arm_commit` exactly as the sibling test above to
+    /// park an aborted caller's commit mid-rename, but this time drives a
+    /// real `load()` → mutate one field → `save()` cycle for the "fresh"
+    /// caller — the production shape the prior round's test skipped by
+    /// constructing its second `CompanyRecord` directly — so a `load` that
+    /// races ahead of the still-parked commit is actually exercised.
+    #[tokio::test]
+    async fn a_racing_load_does_not_lose_an_orphaned_commits_update() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = |name: &str, lifecycle: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: {
+                let mut m = sample_manifest();
+                m.company.name = name.to_string();
+                m
+            },
+            ledger: Vec::new(),
+            lifecycle: lifecycle.to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        store
+            .save(&record("Before", "running"))
+            .await
+            .expect("first publish");
+
+        // Park the stale call's first commit (company.toml, update path) in
+        // flight, exactly as the sibling test above, then abort its caller
+        // while it is held there.
+        let release = stall_probe::arm_commit(&bundle.company_toml());
+        let stale = record("Before", "paused");
+        let stale_store = FsCompanyStore::new(&root);
+        let stale_handle = tokio::spawn(async move { stale_store.save(&stale).await });
+        stall_probe::wait_blocked_commit().await;
+        stale_handle.abort();
+        let joined = stale_handle.await;
+        assert!(
+            joined.as_ref().is_err_and(|e| e.is_cancelled()),
+            "the stale save's caller must actually have been cancelled for this \
+             test to mean anything, got {joined:?}"
+        );
+
+        // The stale call's detached commit is still parked mid-rename,
+        // holding `commit_lock`, with `lifecycle: "paused"` not yet on disk.
+        // A fresh caller now runs the real production sequence: `load`,
+        // touch one unrelated field, `save` back the merged record — the
+        // same shape `policy.rs`/`team.rs` use. Spawned rather than awaited
+        // inline so the still-parked commit above cannot block this task
+        // from being scheduled at all.
+        let fresh_store = FsCompanyStore::new(&root);
+        let fresh_id = id.clone();
+        let mut fresh_handle = tokio::spawn(async move {
+            let mut loaded = fresh_store
+                .load(&fresh_id)
+                .await
+                .expect("load must not error")
+                .expect("bundle must exist");
+            loaded.manifest.company.name = "Fresh".to_string();
+            // Deliberately NOT touching `lifecycle` — mirrors a real caller
+            // that only mutates the field it owns and carries the rest of
+            // the loaded record through untouched.
+            fresh_store.save(&loaded).await
+        });
+
+        // Give the fresh task a real window to run while the orphaned commit
+        // is still parked. If `load` is unguarded, it finishes almost
+        // immediately (well inside this window) and reads the pre-commit
+        // "running" lifecycle; if `load` waits on the same lock the commit
+        // holds, this whole task is still blocked when the window ends.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Release the stale commit and let it land.
+        release.send(()).expect("stall gate still open");
+        let bundle_dir = bundle.company_toml().parent().unwrap().to_path_buf();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let orphans = std::fs::read_dir(&bundle_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                    .count();
+                if orphans == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "the stale, orphaned commit must not strand a staged temp in {}",
+            bundle_dir.display()
+        );
+
+        let joined_fresh =
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut fresh_handle)
+                .await
+                .expect("the fresh save must complete once the orphaned commit clears")
+                .expect("the fresh save's task must not panic");
+        joined_fresh.expect("the fresh save must succeed");
+
+        let reader = FsCompanyStore::new(&root);
+        let loaded = reader
+            .load(&id)
+            .await
+            .expect("load must not error")
+            .expect("the bundle must remain loadable");
+        assert_eq!(
+            loaded.manifest.company.name, "Fresh",
+            "the fresh caller's own change must land"
+        );
+        assert_eq!(
+            loaded.lifecycle, "paused",
+            "the orphaned commit's `lifecycle: \"paused\"` update landed on disk \
+             before the fresh save committed, so a fresh save that carries \
+             forward whatever it loaded must not silently revert it back to \
+             \"running\" — that is a lost update, even though both commits \
+             individually succeeded on well-formed files"
         );
     }
 
