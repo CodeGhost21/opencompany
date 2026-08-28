@@ -477,6 +477,31 @@ pub(crate) mod fault_probe {
             .remove(&key(path))
     }
 
+    static FAIL_MID_WRITE: LazyLock<Mutex<HashSet<PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    /// Arms a one-shot failure for the next [`stage_atomic_bytes`]'s
+    /// `File::create` to *succeed* and the write that follows it to fail
+    /// (issue #1828 review, seventh round). Unlike [`fail_next_write`],
+    /// which fails before any filesystem call, this simulates the failure
+    /// mode that actually leaves a temp file behind: the create succeeded,
+    /// so a `.tmp-*` file already exists, and only the subsequent
+    /// `write_all`/`sync_data` fails.
+    pub(crate) fn fail_next_mid_write(path: &Path) {
+        FAIL_MID_WRITE
+            .lock()
+            .expect("fault-probe poisoned")
+            .insert(key(path));
+    }
+
+    /// Consumes the armed mid-write failure for `path`, if any.
+    pub(crate) fn should_fail_mid_write(path: &Path) -> bool {
+        FAIL_MID_WRITE
+            .lock()
+            .expect("fault-probe poisoned")
+            .remove(&key(path))
+    }
+
     static FAIL_NEXT_EXISTS_CHECK: LazyLock<Mutex<HashSet<PathBuf>>> =
         LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -873,6 +898,17 @@ async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
             #[cfg(test)]
             stall_probe::maybe_block(&owned_path);
             let mut file = std::fs::File::create(&owned_tmp).map_err(|e| io_err(&owned_tmp, e))?;
+            // Test-only: see `fault_probe::fail_next_mid_write`. Simulates a
+            // write/fsync failure *after* the temp file already exists on
+            // disk, which `fault_probe::should_fail` above cannot — it only
+            // fires before any filesystem call.
+            #[cfg(test)]
+            if fault_probe::should_fail_mid_write(&owned_path) {
+                return Err(io_err(
+                    &owned_tmp,
+                    std::io::Error::other("injected test failure (fault_probe mid-write)"),
+                ));
+            }
             file.write_all(&bytes).map_err(|e| io_err(&owned_tmp, e))?;
             // Before the rename, deliberately — see the recipe on
             // `write_atomic_bytes`'s doc comment.
@@ -889,6 +925,23 @@ async fn stage_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
         .await
         .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))
         .and_then(|inner| inner);
+
+        // Issue #1828 review, seventh round: a write failure is not only
+        // reachable via a dropped `rx`. If `File::create` above succeeded
+        // and `write_all`/`sync_data` then failed, `result` is `Err` even
+        // though the caller is still there awaiting it — `tx.send` below
+        // succeeds, so the old `is_err()`-only check never ran cleanup, and
+        // the caller only ever receives the `Err`, never `tmp`, so nothing
+        // downstream (`commit_staged` / `remove_staged`) can reclaim it
+        // either. Reclaim it here, unconditionally, whenever the write
+        // itself failed — before even trying to send, since a failed send
+        // still needs the same cleanup and this makes it happen exactly
+        // once either way.
+        if result.is_err() {
+            remove_staged(&cleanup_tmp).await;
+            let _ = tx.send(result);
+            return;
+        }
 
         // `rx` (and the caller awaiting it) is gone: the write already
         // landed on disk, so reclaim it here instead of leaving it for a
@@ -3562,6 +3615,48 @@ mod test {
             "cancelling the caller must not strand the temp file \
              stage_atomic_bytes already wrote and fsynced — it sat in {} \
              for the whole timeout",
+            bundle_dir.display()
+        );
+    }
+
+    /// **Issue #1828 review, seventh round**: the sixth round's cleanup only
+    /// fires when `tx.send` fails, i.e. when the caller is gone. It does
+    /// nothing for the other way `result` can be `Err`: `File::create`
+    /// succeeds (the temp file now exists on disk) and `write_all` or
+    /// `sync_data` then fails. The caller is still there and gets the
+    /// `Err`, but never gets `tmp` back, so nothing downstream can call
+    /// `remove_staged` for it either — the fully-created, partially-written
+    /// temp file is orphaned even though nothing was cancelled.
+    ///
+    /// `fault_probe::fail_next_mid_write` proves it: unlike
+    /// `fail_next_write`, which fails before any filesystem call, this lets
+    /// `File::create` succeed and fails right after, so a `.tmp-*` file is
+    /// on disk when the injected failure hits. Pre-fix that file survives
+    /// the failed call; post-fix `stage_atomic_bytes` removes it itself
+    /// before returning `Err`.
+    #[tokio::test]
+    async fn a_write_failure_after_create_does_not_strand_the_temp_file() {
+        let root_dir = tmp_root();
+        let target = root_dir.path().join("bundle").join("company.toml");
+
+        fault_probe::fail_next_mid_write(&target);
+
+        let err = stage_atomic_bytes(&target, b"hello").await;
+        assert!(
+            err.is_err(),
+            "the injected mid-write failure must propagate out of stage_atomic_bytes"
+        );
+
+        let bundle_dir = target.parent().unwrap();
+        let has_orphan = std::fs::read_dir(bundle_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp-"));
+        assert!(
+            !has_orphan,
+            "a write failure after File::create succeeded must not strand \
+             the temp file it already created in {}",
             bundle_dir.display()
         );
     }
