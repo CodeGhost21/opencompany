@@ -233,6 +233,7 @@ export interface Channel {
    * absent falls back to the whole roster (issue #369).
    */
   memberIds?: string[];
+<<<<<<< HEAD
   /**
    * Whether this channel has **no lead** (issue #1835): an `auto` desk, whose
    * answerer is picked per message. `memberIds[0]` carries no rank here, so a
@@ -240,6 +241,8 @@ export interface Channel {
    * a channel by definition. Absent/false for every lead desk and DM.
    */
   leadless?: boolean;
+=======
+>>>>>>> f33daf783 (chore(chat): update chat model)
   /** Synthetic system channel; it cannot accept chat or thread replies. */
   system?: boolean;
 }
