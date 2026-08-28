@@ -401,6 +401,13 @@
        a 14px label needs. This is still Discord's palette, which is the
        constraint that matters; it is only a different step of it. */
     --brand-discord-on-light: #4752c4;
+
+    /* Chargebee's orange, from their media kit's symbol mark. One value, not a
+       per-theme pair like the blurple above: as a graphic it measures 5.36:1 on
+       the dark canvas and 3.67:1 on the light one, both clear of the 3:1 a
+       non-text mark needs, so neither theme has to bend it. Their navy (#012A38)
+       and white variants each vanish into one of the two. */
+    --brand-chargebee: #ff3300;
 }
 
 .dark {
