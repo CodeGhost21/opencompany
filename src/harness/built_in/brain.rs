@@ -1565,12 +1565,12 @@ impl HarnessBrain {
         // It still carries the card's landing column, so the operator reads one
         // line and knows both what came back and where the card went. Steps are
         // deliberately empty: a dispatched card discards them into the note.
+        self.journal_task_outcome(&card, &responder, result_text, artifact_ids)
+            .await;
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
         let relay = lifecycle::relay_reply(&card, &responder, &self.orchestrator(), origin);
-        self.journal_task_outcome(&card, &responder, result_text, artifact_ids)
-            .await;
         Ok(Some(relay))
     }
 
