@@ -3362,10 +3362,13 @@ async fn list_approvals(
     }
     let runtime = lookup(&state, &id)?;
     // Membership got you the list; role decides whether you may read what is in
-    // it (issue #618).
+    // it (issue #618). Ownership is resolved before either (#1891): the queue
+    // is joined to cards by its consumers, and since the board card decides in
+    // place, handing out the raw park stamp would let an operator resolve
+    // another card's request from this one.
     Ok(Json(crate::server::approval_visibility::for_principal(
         &auth,
-        runtime.pending_approvals(),
+        runtime.pending_approvals_resolved().await,
     )))
 }
 
@@ -3380,12 +3383,13 @@ async fn list_approvals_single(
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
         return Err(resp.into());
     }
-    // Same contents rule as the `{id}` form (issue #618) — the two handlers are
-    // the same read behind two addressing forms, and a redaction applied to one
-    // of them would be a hole rather than a boundary.
+    // Same contents rule as the `{id}` form (issue #618) — and the same
+    // ownership resolution (#1891). The two handlers are the same read behind
+    // two addressing forms, and either applied to only one of them would be a
+    // hole rather than a boundary.
     Ok(Json(crate::server::approval_visibility::for_principal(
         &auth,
-        runtime.pending_approvals(),
+        runtime.pending_approvals_resolved().await,
     )))
 }
 

@@ -469,6 +469,13 @@ interface Props {
   companies: CompanyStatus[];
   onSwitchCompany: (id: string) => void;
   onBackToPicker?: () => void;
+  /** Start the New-company flow (issue #1807), owned by `ConnectionConsole`. */
+  onCreateCompany?: () => void;
+  /**
+   * Start the reset (archive + start clean) flow for the given company. Called
+   * from Settings → Lifecycle with the active company's id and name.
+   */
+  onResetCompany?: (id: string, name: string) => void;
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
@@ -479,6 +486,8 @@ export function AppShell({
   companies,
   onSwitchCompany,
   onBackToPicker,
+  onCreateCompany,
+  onResetCompany,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -2712,6 +2721,8 @@ export function AppShell({
             activeCompany={company}
             onSwitchCompany={onSwitchCompany}
             onBackToPicker={onBackToPicker}
+            onCreateCompany={onCreateCompany}
+            canCreateCompany={client.carriesPlatformBearer}
             view={view}
             onNavigate={setView}
           />
@@ -2745,7 +2756,6 @@ export function AppShell({
             <OperatorOverview
               client={client}
               company={company}
-              companyName={feed.status.name}
               feed={feed}
               scope={scope}
               // Issue #1015: re-read the run panels when a run parks or fails
@@ -2862,6 +2872,19 @@ export function AppShell({
               // than only counting it. The feed the sidebar badge already polls,
               // so the screen says what it is waiting on with no second request.
               parked={feed.approvals}
+              // Issue #1891: and decided here too, not only named. The same
+              // bundle the board and the run drawer get, so a verdict given on
+              // any of the three settles on the others with no reload. Named
+              // as this route's own props rather than the `…Approvals` suffix
+              // the section views take: it is a thin wrapper whose props mirror
+              // `TaskDetailView`'s, which has no other kind of decision to
+              // qualify these against.
+              deciding={decidingApprovals}
+              decided={decidedApprovals}
+              failed={failedApprovals}
+              onDecide={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -2934,11 +2957,25 @@ export function AppShell({
               // second request.
               approvals={feed.approvals}
               now={feed.now}
-              // Issue #883: "Review" on a blocked card opens the queue narrowed
-              // to that card. Through `navigate` rather than `setView` so the
-              // filter lands in the hash and survives a refresh and the Back
-              // button, like every other sub-page.
-              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // Issue #1891: a blocked card decides in place rather than only
+              // reporting that it is blocked. The same four maps the run drawer
+              // receives, owned here for the same reason — an operator who
+              // decides on the board, steps over to Approvals and comes back
+              // must not find a card that forgot what they did. `decided` is
+              // fed by the `approval_resolved` frame as well as by this
+              // console's own resolves, so a decision taken on the page settles
+              // on the board with no reload.
+              //
+              // This replaces `onReviewApprovals`: the card's own "View
+              // details" is an `href` built with `withHostParam`, which lands
+              // the same `#/approvals/<taskId>` in the hash — surviving a
+              // refresh and the Back button — without a callback to route it.
+              decidingApprovals={decidingApprovals}
+              decidedApprovals={decidedApprovals}
+              failedApprovals={failedApprovals}
+              onDecideApproval={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
               // Lists, which reads the same instance) with no reload.
@@ -3110,6 +3147,7 @@ export function AppShell({
               feed={feed}
               sub={sub}
               onFlag={() => setFeedbackOpen(true)}
+              onResetCompany={onResetCompany}
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
