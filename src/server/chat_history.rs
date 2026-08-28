@@ -2011,7 +2011,7 @@ mod test {
                     name: "Workflow".to_string(),
                     role: "Worker".to_string(),
                     description: None,
-                    tools: Vec::new(),
+                    tools: Some(Vec::new()),
                     model: None,
                     harness: None,
                 });
