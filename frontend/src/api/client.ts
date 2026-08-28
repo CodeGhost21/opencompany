@@ -570,6 +570,11 @@ export class OpenCompanyClient {
     return this.request<DeskDto[]>("GET", `${this.scope(company)}/desks`);
   }
 
+  /** The identity of the company's durable, read-only Operator feed. */
+  getOperatorChannel(company?: string | null): Promise<OperatorChannelDto> {
+    return this.request<OperatorChannelDto>("GET", `${this.scope(company)}/operator-channel`);
+  }
+
   /**
    * Add a teammate to a desk through the operator overlay (issue #72). The
    * teammate must be on the company roster; the desk must exist. Adding one
