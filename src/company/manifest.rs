@@ -184,6 +184,23 @@ impl CompanyManifest {
         Self::from_located(&discover(path.as_ref())?)
     }
 
+    /// [`from_path`](Self::from_path), but does not fail a
+    /// [`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)
+    /// agent-id collision — see [`validate_with`](Self::validate_with).
+    ///
+    /// `register_company`'s `serve` boot loop is this method's caller: every
+    /// hosted tenant's `company.toml` is the durable record of that company
+    /// (`companies/<name>`, loaded fresh on each container restart per
+    /// `CLAUDE.md`'s "Running under the platform harness"), not a one-time
+    /// authoring artifact. [`from_path`](Self::from_path) — used by
+    /// `opencompany check` and fresh provisioning — stays strict on purpose:
+    /// those *are* the authoring flow, and should refuse an id someone just
+    /// typed. This method is for the reload that must not refuse an id that
+    /// was fine when the company started (issue #1781 review, Codex P1).
+    pub fn from_path_for_reload(path: impl AsRef<Path>) -> Result<Self> {
+        Self::from_located_with(&discover(path.as_ref())?, false)
+    }
+
     /// Loads an already-[`discover`]ed manifest, folding in what the bundle
     /// around it declares: the roster from `agents/*.toml` when it has one, and
     /// the MCP servers from `mcp.json`.
@@ -199,13 +216,22 @@ impl CompanyManifest {
     /// reported every desk member as "not an agent in the roster", because it
     /// had validated a manifest whose roster it had never loaded.
     pub(crate) fn from_located(located: &Located) -> Result<Self> {
+        Self::from_located_with(located, true)
+    }
+
+    /// [`from_located`](Self::from_located), with
+    /// [`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)
+    /// enforcement toggled — see [`from_path_for_reload`](Self::from_path_for_reload).
+    fn from_located_with(located: &Located, enforce_reserved_agent_ids: bool) -> Result<Self> {
         // The bundle root is the located manifest's own parent, whether the
         // caller passed the directory or the file itself: `discover` accepts
         // both, and deriving the root from the located manifest is what keeps
         // the two call forms from resolving `agents/` differently.
         match located.path.parent() {
-            Some(bundle) => Self::from_file_in_bundle(&located.path, bundle),
-            None => Self::from_file(&located.path),
+            Some(bundle) => {
+                Self::from_file_in_bundle(&located.path, bundle, enforce_reserved_agent_ids)
+            }
+            None => Self::from_file_with(&located.path, enforce_reserved_agent_ids),
         }
     }
 
@@ -217,7 +243,11 @@ impl CompanyManifest {
     /// held to exactly the rules an inline `[[mcp_server]]` is — the HTTP-only
     /// transport boundary, the credential-free endpoint, the unique name —
     /// without a second copy of them living in the parser.
-    fn from_file_in_bundle(path: &Path, bundle: &Path) -> Result<Self> {
+    fn from_file_in_bundle(
+        path: &Path,
+        bundle: &Path,
+        enforce_reserved_agent_ids: bool,
+    ) -> Result<Self> {
         let mut manifest = Self::parse_file(path)?;
 
         if super::agent_file::has_agent_files(bundle) {
@@ -238,7 +268,7 @@ impl CompanyManifest {
         }
 
         let problems = manifest.merge_bundle_mcp_servers(bundle, path);
-        manifest.into_validated_with(path, problems)
+        manifest.into_validated_with(path, problems, enforce_reserved_agent_ids)
     }
 
     /// Folds `<bundle>/mcp.json` into `mcp_servers`, returning every problem the
@@ -276,7 +306,14 @@ impl CompanyManifest {
 
     /// Reads, parses, and validates a specific manifest file.
     pub fn from_file(path: &Path) -> Result<Self> {
-        Self::parse_file(path)?.into_validated(path)
+        Self::from_file_with(path, true)
+    }
+
+    /// [`from_file`](Self::from_file), with
+    /// [`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)
+    /// enforcement toggled — see [`from_path_for_reload`](Self::from_path_for_reload).
+    fn from_file_with(path: &Path, enforce_reserved_agent_ids: bool) -> Result<Self> {
+        Self::parse_file(path)?.into_validated(path, enforce_reserved_agent_ids)
     }
 
     /// Reads and deserializes a manifest file, without validating it.
@@ -351,8 +388,8 @@ impl CompanyManifest {
     /// already parsed and checked by [`crate::globals`], and running it through
     /// this validator would let one malformed global fail every company on the
     /// host rather than only itself.
-    fn into_validated(self, path: &Path) -> Result<Self> {
-        self.into_validated_with(path, Vec::new())
+    fn into_validated(self, path: &Path, enforce_reserved_agent_ids: bool) -> Result<Self> {
+        self.into_validated_with(path, Vec::new(), enforce_reserved_agent_ids)
     }
 
     /// [`into_validated`](Self::into_validated), carrying problems the caller
@@ -362,8 +399,13 @@ impl CompanyManifest {
     /// before validation runs, and what they found has to reach the same
     /// refusal. Reported first, because a file that would not parse is the
     /// thing to fix before anything the manifest says about it.
-    fn into_validated_with(mut self, path: &Path, mut problems: Vec<String>) -> Result<Self> {
-        problems.extend(self.validate());
+    fn into_validated_with(
+        mut self,
+        path: &Path,
+        mut problems: Vec<String>,
+        enforce_reserved_agent_ids: bool,
+    ) -> Result<Self> {
+        problems.extend(self.validate_with(enforce_reserved_agent_ids));
         if problems.is_empty() {
             self.apply_globals();
             Ok(self)
@@ -378,6 +420,24 @@ impl CompanyManifest {
     /// Returns every validation problem in prosumer language. An empty vector
     /// means the manifest is valid.
     pub fn validate(&self) -> Vec<String> {
+        self.validate_with(true)
+    }
+
+    /// [`validate`](Self::validate), with the [`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)
+    /// agent-id collision reported only when `enforce_reserved_agent_ids` is
+    /// set.
+    ///
+    /// [`from_path_for_reload`](Self::from_path_for_reload) calls this with
+    /// `false`: that rule shipped after companies already existed whose
+    /// roster declared an agent at one of those ids (`operator`, chiefly —
+    /// see the grandfather-support machinery in `channel.rs`, `operator.rs`,
+    /// `delivery.rs`, and `runtime.rs`, all built to run exactly this
+    /// manifest shape correctly), and this method's boot-time caller reloads
+    /// that same on-disk manifest on every restart, not just once at
+    /// authoring time. Every other problem below is still reported either
+    /// way — this grandfathers the one rule proven to predate existing
+    /// manifests, not validation as a whole.
+    fn validate_with(&self, enforce_reserved_agent_ids: bool) -> Vec<String> {
         let mut problems = Vec::new();
 
         if self.company.name.trim().is_empty() {
@@ -399,9 +459,10 @@ impl CompanyManifest {
                 problems.push(format!(
                     "{label} has an invalid `id` — use snake_case (lowercase letters, digits, and underscores, starting with a letter)."
                 ));
-            } else if crate::ports::types::RESERVED_AGENT_IDS
-                .iter()
-                .any(|reserved| agent.id.eq_ignore_ascii_case(reserved))
+            } else if enforce_reserved_agent_ids
+                && crate::ports::types::RESERVED_AGENT_IDS
+                    .iter()
+                    .any(|reserved| agent.id.eq_ignore_ascii_case(reserved))
             {
                 // Issue #1757 follow-up: `RESERVED_AGENT_IDS` already stops a
                 // console-minted teammate from taking one of these ids
@@ -1954,6 +2015,60 @@ mod tests {
                 "id {candidate:?} (reserved: {reserved:?}) should have been rejected: {problems:?}"
             );
         }
+    }
+
+    /// Issue #1781 review (Codex P1): `register_company`'s `serve` boot loop
+    /// reloads every company directory's `company.toml` on each restart, so
+    /// a company whose roster already grandfathers a teammate at a
+    /// [`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS) id —
+    /// `operator`, the case the rest of this codebase's grandfather-support
+    /// machinery (`channel.rs`, `operator.rs`, `delivery.rs`) exists to run
+    /// correctly — must still be able to boot. `from_path`, the strict
+    /// authoring-time loader, is proven first to still refuse it (unchanged
+    /// behavior, pinning the pre-fix failure this regresses against);
+    /// `from_path_for_reload` must accept the identical manifest.
+    #[test]
+    fn from_path_for_reload_grandfathers_a_manifest_agent_at_a_reserved_id() {
+        let dir = write_bundle(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n",
+            &[],
+        );
+
+        let strict = CompanyManifest::from_path(dir.path());
+        assert!(
+            strict.is_err(),
+            "sanity check: the strict authoring loader must still refuse this manifest, \
+             or this test is not exercising the rule it claims to"
+        );
+
+        let reloaded = CompanyManifest::from_path_for_reload(dir.path())
+            .expect("a company that already grandfathers an `operator` teammate must reboot");
+        assert!(
+            reloaded.agents.iter().any(|a| a.id == "operator"),
+            "the grandfathered agent itself must still be loaded, not merely tolerated: {:?}",
+            reloaded.agents
+        );
+    }
+
+    /// The reload loader still enforces every other manifest rule — it
+    /// grandfathers exactly the reserved-agent-id collision, not validation
+    /// as a whole, so a company directory hand-edited into a genuinely
+    /// invalid shape (here, a duplicate agent id) must still refuse to boot.
+    #[test]
+    fn from_path_for_reload_still_refuses_an_unrelated_validation_problem() {
+        let dir = write_bundle(
+            "[company]\nname = \"Acme\"\n\n\
+             [[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\n\
+             [[agent]]\nid = \"writer\"\nrole = \"Also Writer\"\n",
+            &[],
+        );
+
+        let err = CompanyManifest::from_path_for_reload(dir.path())
+            .expect_err("a duplicate agent id must still be refused on reload");
+        assert!(
+            format!("{err}").contains("more than once"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
