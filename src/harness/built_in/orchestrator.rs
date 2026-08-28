@@ -3870,9 +3870,17 @@ impl Tool for RunWorkflowTool {
                 // applies to its own settled runs — a stranded or blocked
                 // agent-started run is otherwise silent to every operator not
                 // watching this turn, especially a stranded run with no
-                // approval card to surface. Unconditional of `run.cancelled`
-                // below, matching `WorkflowSpawn`'s own ordering (it has no
-                // `cancelled` special-case of its own at this point either).
+                // approval card to surface.
+                //
+                // Issue #1865 (PR #1883 review comment 3878430677): gated on
+                // `!run.cancelled`, matching `WorkflowSpawn::spawn_admitted`'s
+                // own `Ok(run) if run.cancelled => {}` arm (added for the same
+                // comment). The clean node-boundary cancel arm in
+                // `run_workflow_inner` carries `blocked_nodes: blocks.take()`
+                // forward, so a cancelled run reaches here with a non-empty
+                // `blocked_nodes` exactly like a genuinely blocked one — this
+                // must not tell an operator "a step is waiting on a person to
+                // decide something" about a run somebody already stopped.
                 //
                 // Stranded checked before blocked, same as `WorkflowSpawn`:
                 // `HarnessAgentRunner` pushes a `WorkflowBlockedNode` whenever
@@ -3882,7 +3890,11 @@ impl Tool for RunWorkflowTool {
                 // full pending count, with no card still `Pending` delivery
                 // either, tells the two apart.
                 if let Some(notifications) = self.notifications.as_ref() {
-                    if !run.pending_approvals.is_empty()
+                    if run.cancelled {
+                        // Handled below by the `run.cancelled` arm, which
+                        // returns a `ToolResult::error` — no unhealthy
+                        // notification for a deliberate stop.
+                    } else if !run.pending_approvals.is_empty()
                         && crate::ports::workflow_runner::stranded_approvals(
                             &run.pending_approvals,
                             &run.approvals,
