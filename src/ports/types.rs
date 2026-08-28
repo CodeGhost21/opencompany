@@ -4474,15 +4474,14 @@ impl CompanyRecord {
         if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
             return Some(exact.id.clone());
         }
-        if !crate::server::chat_history::is_general_chat(Some(key)) {
-            if let Some(exact) = self
+        if !crate::server::chat_history::is_general_chat(Some(key))
+            && let Some(exact) = self
                 .overlay_desks
                 .iter()
                 .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
                 .find(|d| d.id == key)
-            {
-                return Some(exact.id.clone());
-            }
+        {
+            return Some(exact.id.clone());
         }
 
         self.manifest
