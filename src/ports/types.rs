@@ -4461,6 +4461,17 @@ impl CompanyRecord {
                 || self.overlay_agents.iter().any(|a| a.id == agent_id))
     }
 
+    /// Returns the durable system-feed address. A grandfathered roster agent
+    /// named `operator` owns the bare address for its DM, so reports use the
+    /// disjoint fallback address in that case.
+    pub fn operator_feed_channel(&self) -> &'static str {
+        if self.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL) {
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+        } else {
+            crate::runtime::channel::OPERATOR_CHANNEL
+        }
+    }
+
     /// Mints the roster id for a teammate about to be added under
     /// `display_name`: [`agent_slug`] of the name, suffixed `_2`, `_3`, … until
     /// it collides with nothing this record already routes on (issue #686).
