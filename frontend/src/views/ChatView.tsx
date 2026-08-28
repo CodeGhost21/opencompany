@@ -32,6 +32,7 @@ import {
   isDetachedChat,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   fromHistory,
@@ -1257,33 +1258,62 @@ export function ChatView({
     [client, company],
   );
 
+  /*
+    Chat is its own content (`components/page-header.tsx`'s `hidden` variant):
+    the channel it opens on already carries its own visible title
+    (`ChatHeader`'s own `h1`), so the page keeps only an accessible name and
+    paints nothing over it.
+
+    Read once into a const rather than duplicated into every early return —
+    `SearchView` and `FinancesView` take the same shape. Without it, the two
+    states below rendered nothing before `ChatHeader` mounts: a company still
+    loading its desks, or one with no channel to open at all, so a screen
+    reader got a page with no accessible name until a channel existed
+    (issue #1781 review, Codex P2; `page-header-precedes-every-return.test.ts`
+    covers every routed view, this one included).
+  */
+  const header = <PageHeader hidden title="Chat" />;
+
   // Three ways to have no channel on screen, which used to be one blank pane.
   // Which one it is, is the whole point: "still loading" and "this company has
   // nothing" are different facts and only one of them is worth acting on.
   if (desksError) {
     return (
-      <EmptyPane
-        title="Couldn't load this company's channels"
-        body={desksError}
-        action={{ label: "Retry", onClick: () => void loadDesks() }}
-      />
+      <>
+        {header}
+        <EmptyPane
+          title="Couldn't load this company's channels"
+          body={desksError}
+          action={{ label: "Retry", onClick: () => void loadDesks() }}
+        />
+      </>
     );
   }
-  if (!desks) return <LoadingPane />;
+  if (!desks) {
+    return (
+      <>
+        {header}
+        <LoadingPane />
+      </>
+    );
+  }
   if (!channel) {
     return (
-      <EmptyPane
-        title="No channels yet"
-        body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a teammate and their direct message shows up here."
-        action={{ label: "Add a teammate", onClick: () => setAddOpen(true) }}
-        after={
-          <AddMemberDialog
-            open={addOpen}
-            onOpenChange={setAddOpen}
-            onAdd={(fields) => void addMember(fields)}
-          />
-        }
-      />
+      <>
+        {header}
+        <EmptyPane
+          title="No channels yet"
+          body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a teammate and their direct message shows up here."
+          action={{ label: "Add a teammate", onClick: () => setAddOpen(true) }}
+          after={
+            <AddMemberDialog
+              open={addOpen}
+              onOpenChange={setAddOpen}
+              onAdd={(fields) => void addMember(fields)}
+            />
+          }
+        />
+      </>
     );
   }
   // A local the closures below can capture as non-null: TypeScript hoists
