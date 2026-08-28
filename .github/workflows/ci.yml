@@ -246,6 +246,9 @@ jobs:
               # `assert-single-tauri-app.sh` got in. `rust` already lists this
               # path; `frontend` is where the scripts actually execute.
               - 'scripts/ci/**'
+              # Same reasoning for the release-notes generator and its test,
+              # which also run in `Console`.
+              - 'scripts/release/**'
             desktop:
               - '.github/workflows/ci.yml'
               - 'src-tauri/**'
@@ -1584,6 +1587,19 @@ jobs:
       # rather than a build one. It rides the Console job because that job is
       # Node-only and cheap; the rule itself is repository-wide.
       - run: ./scripts/ci/assert-md-line-cap.sh
+
+      # The release-notes generator, which is otherwise only ever exercised by a
+      # `workflow_dispatch` release — the one moment nobody wants to discover a
+      # `TypeError` in it. `node --test` with no framework and no package.json:
+      # the script has no dependencies, and adding an npm project under
+      # `scripts/` to run a dozen assertions would put a second one in a
+      # repository that has exactly one (`frontend/`).
+      #
+      # Rides the Console job for the reason the checks above do: Node-only and
+      # cheap. The `frontend` path filter gains `scripts/release/**` alongside
+      # this step — without it a PR editing only the generator skips `Console`,
+      # and the test is the one thing its own diff cannot run.
+      - run: node --test scripts/release/generate-release-notes.test.mjs
 
       # Exactly one Tauri app, and no script that picks it by working directory
       # rather than by name.
