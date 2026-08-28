@@ -7961,9 +7961,36 @@ needs_reason = true
     /// must not leak that internal duplication to the console: it feeds
     /// `/workflows/wired-channels`, and `WorkflowCreateDialog` renders one
     /// `SelectItem` per id — a repeated `operator` collides as a React key.
+    ///
+    /// `861a8fbad` (landed after this test's fixture was first written) made
+    /// `build()` run the STRICT `validate()` whenever no persisted record
+    /// exists yet for the company (`existing.is_none()`), and only grandfather
+    /// a reserved id/name collision when `existing.is_some()` — i.e. on a real
+    /// reboot. A bare `RuntimeBuilder::new(..).build()` off a freshly parsed
+    /// manifest is a first boot by construction, so the reserved `operator`
+    /// group-chat id below now fails strict validation before the fixture
+    /// ever reaches the collision state this test means to exercise. Seed a
+    /// persisted record with a safe manifest first — the same two-step shape
+    /// as `a_reboot_still_grandfathers_an_already_registered_operator_agent_id`
+    /// above — so the second `build()` is the reboot the relaxed loader is
+    /// meant to excuse, not a fresh authoring mistake.
     #[tokio::test]
     async fn deliverable_channel_ids_dedupes_a_grandfathered_operator_desk() {
         let dir = tempfile::tempdir().unwrap();
+        let safe = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        RuntimeBuilder::new(dir.path(), safe)
+            .build()
+            .await
+            .expect("the first boot with a safe manifest must succeed and persist a record");
+
         let manifest = parse(
             r#"
             [company]
@@ -7980,7 +8007,10 @@ needs_reason = true
         let runtime = RuntimeBuilder::new(dir.path(), manifest)
             .build()
             .await
-            .unwrap();
+            .expect(
+                "a company this store already has a record for must still reboot, \
+                 even with a manifest that only the relaxed loader would accept",
+            );
 
         // Both adapters really are present internally — this asserts the
         // fixture reaches the collision state the fix has to survive, not just
