@@ -98,7 +98,7 @@ import {
   mergeHistoryInOrder,
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
-import { defaultDesks, type Desk } from "@/lib/desks";
+import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
@@ -115,6 +115,7 @@ import {
   channelIdForThread,
   deskFromDto,
   dmChannelId,
+  dmThreadId,
   HISTORY_UNSTARTED,
   isOperatorChannelDto,
   type DecidedApproval,
@@ -399,8 +400,29 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
-  if (desks[0]) map[MAIN_THREAD_ID] = desks[0].id;
-  for (const threadId of [...desks.map((d) => d.id), ...members.map((m) => m.id)]) {
+  // Every spelling the host folds the company-wide line under (issue #1743).
+  //
+  // The main line used to be seeded with the first desk's id instead: with no
+  // `#general` channel to land in, it was parked on whichever desk sorted
+  // first, so it would still be somewhere the operator could find it. That is
+  // now actively wrong — an unaddressed message and its reply were rendered in
+  // `#engineering`, complete with an unread badge, while the host's own
+  // history for that desk was empty.
+  //
+  // Resolved through `channelIdForThread` rather than answered here, so there
+  // is one rule and not two: a blueprint desk grandfathered under a General id
+  // owns the line in its own company, and `buildChannels` renders no built-in
+  // channel beside it — pointing these spellings at a `main` nothing renders
+  // parks live frames and their unread badges where they cannot be opened.
+  for (const spelling of ["", MAIN_THREAD_ID, "General", GENERAL_CHANNEL]) {
+    const channelId = channelIdForThread(spelling, desks, members);
+    if (channelId) map[spelling] = channelId;
+  }
+  // `dmThreadId`, not `m.id`: a teammate whose id is a General spelling is
+  // addressed on `dm:<id>`, and the host emits its live frames under that key.
+  // Seeded bare, `channelForThread` could place neither that DM's reply nor its
+  // working indicator anywhere at all (issue #1743).
+  for (const threadId of [...desks.map((d) => d.id), ...members.map(dmThreadId)]) {
     const channelId = channelIdForThread(threadId, desks, members);
     if (channelId) map[threadId] = channelId;
   }
@@ -1113,7 +1135,14 @@ export function AppShell({
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
-        setFirstDeskChannelId(chatDesks[0]?.id ?? null);
+        // The channel `ChatView` lands on when the hash names none, which since
+        // issue #1743 is the built-in `#general` rather than the first desk —
+        // the two must agree, or a line with nowhere else to go lands in a
+        // channel the operator is not looking at. Resolved rather than
+        // hard-coded, for the reason `generalChannelId` gives: a grandfathered
+        // blueprint desk owns the line in its own company, and `main` is then
+        // not a channel at all.
+        setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
         // Fold the Operator feed's id into the same rehydration pass, keyed on
         // its own id both as channel and thread (its channel id *is* its
         // thread id — `chat/history?desk=<id>` reads it through the ordinary
@@ -1126,8 +1155,36 @@ export function AppShell({
           ...(operatorChannel ? [operatorChannel.id] : []),
         ];
         const channels = [
+          // `#general` is not in the desk list (it is not a desk), so its
+          // history has to be named here or nothing would rehydrate it on
+          // reload — the one channel every company has would come back empty.
+          {
+            channelId: channelIdForThread(MAIN_THREAD_ID, chatDesks, roster) ?? MAIN_THREAD_ID,
+            threadId: MAIN_THREAD_ID,
+          },
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
-          ...roster.map((m) => ({ channelId: dmChannelId(m), threadId: m.id })),
+          // A DM's history is fetched under the teammate's **own id** — but
+          // that id is not always this DM's address. A manifest may declare a
+          // teammate whose id is a General spelling (`mint_agent_id` reserves
+          // `main` and `General`, but a blueprint is not something this console
+          // overrules), and `GET chat/history?desk=main` then returns the
+          // *folded General conversation*, not that teammate's transcript:
+          // `is_general_chat` has folded `""`, `main`, `General` and `general`
+          // into one conversation since issue #65. Naming `dm:<id>` as its
+          // channel therefore poured the company-wide line into that DM on
+          // every reload.
+          //
+          // Resolved through `channelIdForThread` so the one rule that decides
+          // where a thread renders decides it here too (issue #1743). For every
+          // ordinary teammate that is exactly `dm:<id>`, unchanged.
+          ...roster.map((m) => ({
+            channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
+            // The address the DM is actually written under. Bare, this fetched
+            // the folded General history for a teammate whose id is a General
+            // spelling, so its own transcript could never be recovered after a
+            // reload (issue #1743).
+            threadId: dmThreadId(m),
+          })),
           ...(operatorChannel
             ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
             : []),
