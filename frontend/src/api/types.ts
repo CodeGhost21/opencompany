@@ -215,6 +215,8 @@ export interface DeskDto {
    * for these. Omitted (undefined/false) for blueprint desks.
    */
   overlayCreated?: boolean;
+  /** Synthetic system channel; not a real desk or task assignee. */
+  system?: boolean;
 }
 
 /**
