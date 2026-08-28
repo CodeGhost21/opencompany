@@ -353,5 +353,10 @@ so it is named: `--brand-discord`, `--brand-discord-hover`,
 `--brand-discord-on-dark`. The token name is what stops a future cleanup
 "fixing" it into the palette.
 
+`--brand-chargebee` (`#ff3300`) joins it for the same reason — the provider
+mark on Finance → Invoicing. One token where Discord needs three: as a mark
+rather than a label it only has to clear 3:1, which it does on both grounds
+(5.36:1 dark, 3.67:1 light), so neither theme needs its own step.
+
 Anything drawn on top of a provider colour must not assume a light or dark
 ground — they span `#0F0F0F` to `#EA4335`.

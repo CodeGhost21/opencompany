@@ -5,6 +5,7 @@ import { getBilling, type BillingStatus } from "@/api/billing";
 import type { OpenCompanyClient } from "@/api/client";
 import { listInvoices, testChargebee, type Invoice } from "@/api/finance";
 import { ApiError } from "@/api/types";
+import { ChargebeeIcon } from "@/components/chargebee-icon";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -187,6 +188,7 @@ export function InvoicingView({ client, company }: Props) {
         <ConnectionPanel
           title="Chargebee"
           testId="chargebee"
+          logo={<ChargebeeIcon className="size-4 text-(--brand-chargebee)" />}
           health={health}
           expanded={expanded}
           onExpandedChange={setExpanded}
