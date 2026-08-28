@@ -487,6 +487,24 @@ impl CompanyManifest {
                 problems.push(format!(
                     "{label} uses the id `operator`, which is reserved for the built-in Operator channel — choose a different id."
                 ));
+            } else if chat
+                .name
+                .eq_ignore_ascii_case(crate::runtime::channel::OPERATOR_CHANNEL)
+            {
+                // Issue #1781 review (Codex P2): the id check above is not
+                // enough on its own — `server::operator::resolve_desk`
+                // matches a desk by id *or* case-insensitive name, so
+                // `{id: "ops", name: "Operator"}` shadows the system channel
+                // exactly as thoroughly as claiming the literal id would.
+                // `GET {scope}/chat/history?desk=operator`, the request the
+                // console's pinned read-only row makes, would resolve to this
+                // desk instead of the system feed, and the desk's own
+                // (writable, member) transcript would display through the
+                // identity the console assumes is the read-only Operator
+                // feed. Reserved for the same reason the id is.
+                problems.push(format!(
+                    "{label} is named \"Operator\", which is reserved for the built-in Operator channel — choose a different name."
+                ));
             } else if !chat_ids.insert(chat.id.as_str()) {
                 problems.push(format!(
                     "group chat `id` `{}` is used more than once — ids must be unique.",
@@ -1841,6 +1859,46 @@ mod tests {
             problems
                 .iter()
                 .any(|p| p.contains("reserved") && p.contains("operator")),
+            "{problems:?}"
+        );
+    }
+
+    /// Issue #1781 review (Codex P2): the id check alone is not enough —
+    /// `server::operator::resolve_desk` matches a desk by id *or*
+    /// case-insensitive name, so a desk at a harmless id but named "Operator"
+    /// shadows the system channel exactly as thoroughly as claiming the
+    /// literal id would: `GET {scope}/chat/history?desk=operator` (the
+    /// console's pinned read-only row) resolves to this desk instead of the
+    /// system feed, and its own writable transcript displays through the
+    /// identity the console assumes is read-only.
+    #[test]
+    fn rejects_a_group_chat_named_operator_even_with_a_harmless_id() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"Operator\"\nmembers = [\"ceo\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("reserved") && p.contains("Operator")),
+            "{problems:?}"
+        );
+    }
+
+    /// Case-insensitive, matching `resolve_desk`'s own fold — "operator" and
+    /// "OPERATOR" alias the same collision as "Operator" does.
+    #[test]
+    fn the_operator_name_reservation_folds_case() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"operator\"\nmembers = [\"ceo\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("reserved")),
             "{problems:?}"
         );
     }
