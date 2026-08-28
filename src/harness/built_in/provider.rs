@@ -2200,6 +2200,62 @@ mod tests {
         assert!(resp.message.tool_calls.is_empty());
     }
 
+    /// A non-null but empty visible content field is not the documented
+    /// reasoning-only shape. It must not cause internal reasoning to be
+    /// promoted as the assistant answer.
+    #[test]
+    fn empty_string_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("empty string content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
+    /// An absent visible content field is distinct from an explicit null and
+    /// must not activate the reasoning-only fallback.
+    #[test]
+    fn absent_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("absent content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
+    /// An unsupported content shape is not equivalent to null content.
+    #[test]
+    fn unsupported_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "image_url", "image_url": {} }],
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("unsupported content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
     /// A reasoning-only turn returns `content: null` with the visible text under
     /// a `reasoning` field and no tool calls. It must fall back to the reasoning
     /// text and parse rather than hard-erroring — the managed reasoning brain
