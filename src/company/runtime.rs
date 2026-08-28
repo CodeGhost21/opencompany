@@ -2002,6 +2002,7 @@ impl CompanyRuntime {
             self,
             &stashed.workflow_id,
             stashed.input,
+            stashed.started_by,
         )
         .await
         {

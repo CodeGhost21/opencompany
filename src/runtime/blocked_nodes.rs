@@ -43,7 +43,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-/// The two facts a blocked agent node's continuation needs, stashed at
+use crate::ports::types::StartedBy;
+
+/// The three facts a blocked agent node's continuation needs, stashed at
 /// block-settle and handed back on release.
 #[derive(Clone, Debug)]
 pub struct StashedBlock {
@@ -52,6 +54,10 @@ pub struct StashedBlock {
     /// The paused run's own trigger input, replayed unchanged — the minted grant
     /// is what lets the identical gated call pass on the re-run.
     pub input: Value,
+    /// The blocked run's own attribution (issue #1862 prerequisite), carried
+    /// into the continuation so approving the block does not silently reset it
+    /// to `Operator` — see `spawn_blocked_node_continuation`.
+    pub started_by: StartedBy,
 }
 
 /// Per-(run, node) continuation state for a blocked agent node: the workflow id
@@ -72,7 +78,7 @@ impl BlockedNodeQueue {
     /// **First write wins.** Every gated call one node parked shares one turn
     /// key and one trigger input, so a second arm for the same key would carry
     /// identical facts; keeping the first is simplest and cannot disagree.
-    pub fn arm(&self, turn: &str, workflow_id: &str, input: &Value) {
+    pub fn arm(&self, turn: &str, workflow_id: &str, input: &Value, started_by: &StartedBy) {
         self.inner
             .lock()
             .expect("blocked node queue poisoned")
@@ -80,6 +86,7 @@ impl BlockedNodeQueue {
             .or_insert_with(|| StashedBlock {
                 workflow_id: workflow_id.to_string(),
                 input: input.clone(),
+                started_by: started_by.clone(),
             });
     }
 
@@ -126,12 +133,18 @@ mod test {
             "workflow-node:run-1:draft",
             "digest",
             &json!({ "topic": "x" }),
+            &StartedBy::Agent("ceo".into()),
         );
         assert!(q.is_armed("workflow-node:run-1:draft"));
 
         let block = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(block.workflow_id, "digest");
         assert_eq!(block.input, json!({ "topic": "x" }));
+        assert_eq!(
+            block.started_by,
+            StartedBy::Agent("ceo".into()),
+            "the blocked run's own attribution must ride the stash, not reset on release"
+        );
         assert_eq!(q.waiting(), 0, "release drops the stash");
         assert!(!q.is_armed("workflow-node:run-1:draft"));
     }
@@ -149,14 +162,21 @@ mod test {
             "workflow-node:run-1:draft",
             "digest",
             &json!({ "topic": "first" }),
+            &StartedBy::Operator,
         );
         q.arm(
             "workflow-node:run-1:draft",
             "digest",
             &json!({ "topic": "second" }),
+            &StartedBy::Agent("ceo".into()),
         );
         let block = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(block.input, json!({ "topic": "first" }));
+        assert_eq!(
+            block.started_by,
+            StartedBy::Operator,
+            "first write wins for started_by too, same as workflow_id/input"
+        );
     }
 
     /// Two blocked nodes of two runs are independent stashes — a release of one
@@ -165,8 +185,18 @@ mod test {
     #[test]
     fn two_blocked_nodes_do_not_share_a_stash() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
-        q.arm("workflow-node:run-2:draft", "digest", &json!({ "n": 2 }));
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
+        q.arm(
+            "workflow-node:run-2:draft",
+            "digest",
+            &json!({ "n": 2 }),
+            &StartedBy::Operator,
+        );
 
         let first = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(first.input, json!({ "n": 1 }));

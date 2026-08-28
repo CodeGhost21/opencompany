@@ -870,6 +870,7 @@ async fn run_workflow_inner(
                 &run_id,
                 &trigger_input,
                 &blocked,
+                &ctx.started_by,
             );
             return Ok(blocked_run(BlockedRun {
                 nodes,
@@ -1119,6 +1120,7 @@ async fn run_workflow_inner(
             // Issue #617: the resolver's per-child gate record, so a namespaced
             // child gate's card can name the child's tool and reason.
             child_gates: &child_gates,
+            started_by: &ctx.started_by,
         },
     )
     .await;
@@ -1164,6 +1166,7 @@ async fn run_workflow_inner(
         &run_id,
         &trigger_input,
         &blocked_nodes,
+        &ctx.started_by,
     );
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
     // via a `notices` sentence, not only via the node's own status — the
@@ -1579,6 +1582,10 @@ struct PausedGates<'a> {
     /// gate (`sub::work`) is described from what the gate pass classified
     /// rather than falling back to an unclassified parent-graph lookup.
     child_gates: &'a super::caps::resolver::ChildGateRegistry,
+    /// Issue #1862 prerequisite: the paused run's own attribution, stamped on
+    /// every card this pass parks so `spawn_continuation` can carry it into the
+    /// continuation instead of resetting to `Operator`.
+    started_by: &'a crate::ports::types::StartedBy,
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -1637,6 +1644,7 @@ fn stash_blocked_agent_nodes(
     run_id: &str,
     trigger_input: &serde_json::Value,
     blocked: &[crate::ports::WorkflowBlockedNode],
+    started_by: &crate::ports::types::StartedBy,
 ) {
     let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
         return;
@@ -1646,7 +1654,9 @@ fn stash_blocked_agent_nodes(
             continue;
         }
         let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
-        parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+        parking
+            .blocked_nodes
+            .arm(&turn, workflow_id, trigger_input, started_by);
     }
 }
 
@@ -1671,6 +1681,7 @@ async fn park_pending_gates(
         // Issue #617: the resolver's per-child gate record, for a namespaced
         // child gate's card.
         child_gates,
+        started_by,
     } = paused;
     if pending.is_empty() {
         return;
@@ -1776,6 +1787,18 @@ async fn park_pending_gates(
             edges,
             node_id,
         );
+        // Issue #1862 prerequisite: stamp the paused run's own attribution on
+        // the card, so approving it can carry the same `StartedBy` into the
+        // continuation instead of resetting to `Operator` (see
+        // `started_by_of`/`spawn_continuation`). Outside `is_same_gate`'s
+        // dedupe identity, same as the ledgers below it — the decision is the
+        // same decision however it later gets re-parked.
+        if let Value::Object(ref mut payload) = effect.payload {
+            payload.insert(
+                crate::runtime::workflow_resume::PAYLOAD_STARTED_BY.to_string(),
+                serde_json::json!(started_by),
+            );
+        }
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
             tracing::debug!(
                 company = %record.id,
