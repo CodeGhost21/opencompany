@@ -369,3 +369,98 @@ describe("a slow-but-successful activation read is not starved by overlapping po
     expect(container.textContent).toBe('{"checked":true,"isActivated":true}');
   });
 });
+
+/**
+ * PR #1875 review finding (comment 3878631085, `app-shell.tsx:957`) — one of
+ * three "time out a hung read" threads that land on the same root cause
+ * (`lib/read-timeout.ts`'s own doc has the shared explanation).
+ *
+ * `isGateAdminStuck` (round 16, above) is driven entirely by `fetchMe`
+ * *settling* — the `catch` block below is what counts failures. `fetchMe`
+ * goes through `OpenCompanyClient`, whose request path had no timeout of its
+ * own, so a `fetchMe` that neither resolves nor rejects (a stalled proxy, a
+ * backend that accepts the connection and never answers) left `failures` at
+ * zero forever: no `catch` ever ran, `isGateAdminStuck` never flipped, no
+ * matter how long the hang ran. `hang()` — already used throughout this file
+ * for "this test does not care about this endpoint" — is exactly that shape
+ * once a real endpoint uses it on purpose.
+ *
+ * `withReadTimeout` closes it by turning "never settles" into "settles late,
+ * as a rejection" at `GATE_ADMIN_CHECK_TIMEOUT_MS` (20s, comfortably above
+ * any legitimate read) — round 16's *existing* failure counter, unchanged
+ * here, is what actually recovers.
+ */
+describe("a hung admin-role read does not strand the operator either", () => {
+  it("times out a hung admin-role read into the existing isGateAdminStuck escape", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const meCalls = { count: 0 };
+    // `/auth/me` hangs forever — never resolves, never rejects. `/activation`
+    // answers immediately with an incomplete status, so `activationGate.stuck`
+    // never flips: this isolates the admin-check hang from the activation
+    // read the same way `buildAdminCheckStuckClient` isolates a rejecting one.
+    const client = (() => {
+      const known = {
+        baseUrl: "",
+        scopeFor: (company: string | null) => `/api/v1/companies/${company ?? ""}`,
+        listTeam: vi.fn(async () => STAFFED),
+        subscribeToEvents: () => () => {},
+        get: (path: string) => {
+          if (path.includes("/auth/me")) {
+            meCalls.count += 1;
+            return hang();
+          }
+          if (path.includes("/activation")) {
+            return Promise.resolve(INCOMPLETE_ACTIVATION);
+          }
+          return hang();
+        },
+        status: hang,
+        approvals: hang,
+        listDesks: hang,
+      };
+      return new Proxy(known, {
+        get(target, prop, receiver) {
+          if (prop in target) return Reflect.get(target, prop, receiver);
+          return hang;
+        },
+      }) as unknown as OpenCompanyClient;
+    })();
+
+    await act(async () => {
+      root.render(
+        createElement(ConnectionScopeProvider, {
+          scope: SCOPE,
+          children: createElement(AppShell, {
+            client,
+            company: null,
+            initialStatus: STATUS,
+            companies: [STATUS],
+            onSwitchCompany: () => {},
+          }),
+        }),
+      );
+    });
+
+    expect(meCalls.count).toBe(1);
+    expect(container.textContent).toContain("Loading");
+    expect(container.textContent).not.toContain("Continue to the console");
+
+    // Each attempt needs GATE_ADMIN_CHECK_TIMEOUT_MS (20s) to time out, then
+    // GATE_ADMIN_CHECK_RETRY_MS (3s) before the next one starts.
+    // GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES (3) of those flips the escape —
+    // advance well past that, the same margin the slow-read test above uses
+    // relative to its own bound.
+    for (let i = 0; i < 12; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+    }
+
+    // Without the timeout, exactly one hung call would ever have gone out —
+    // the first `fetchMe` await would still be pending right now. Proving a
+    // second one started proves the first one settled (as a rejection) and
+    // the retry loop resumed, which only `withReadTimeout` makes possible.
+    expect(meCalls.count).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("Continue to the console");
+  });
+});

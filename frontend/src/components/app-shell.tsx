@@ -77,6 +77,7 @@ import {
   type TaskStatus,
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
+import { withReadTimeout } from "@/lib/read-timeout";
 import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
@@ -408,6 +409,28 @@ const TURN_POLL_MS = 4000;
  * gate open for an actual admin.
  */
 const GATE_ADMIN_CHECK_RETRY_MS = 3000;
+
+/**
+ * How long a single `fetchMe` call is allowed to sit with no response at all
+ * before it is treated as a failure (PR #1875 review finding).
+ *
+ * `resolveGateAdminCheckError`/`GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES` only
+ * ever run once the call's promise *settles* — one way or the other. `fetchMe`
+ * goes through `OpenCompanyClient`, and its request path has no timeout of
+ * its own (`api/transport/browser.ts` calls bare `fetch`, no `AbortSignal`),
+ * so a stalled proxy or a backend that accepts the connection and then never
+ * answers leaves that promise pending forever: no rejection ever reaches the
+ * `catch` below, `failures` never increments, and `isGateAdminStuck` never
+ * flips even though the admin is exactly as wedged as the retry-forever case
+ * three rounds of this file's history already closed. `withReadTimeout` turns
+ * that silence into an ordinary rejection at this bound, which
+ * `resolveGateAdminCheckError` already classifies as non-terminal — so the
+ * existing failure counter below is what actually recovers, this only makes
+ * sure it gets the chance to. Long enough that the legitimate "cold host"
+ * case (the same class of cost `useActivationGate`'s poll interval doc calls
+ * out) is never mistaken for a hang.
+ */
+const GATE_ADMIN_CHECK_TIMEOUT_MS = 20000;
 
 /**
  * How many consecutive non-settled `fetchMe` failures before the admin check
@@ -954,7 +977,9 @@ export function AppShell({
     const load = () => {
       void (async () => {
         try {
-          const admin = (await fetchMe(client, company)).role === "admin";
+          const admin =
+            (await withReadTimeout(fetchMe(client, company), GATE_ADMIN_CHECK_TIMEOUT_MS)).role ===
+            "admin";
           if (!live) return;
           setIsGateAdmin(admin);
           failures = 0;
