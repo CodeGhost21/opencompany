@@ -2901,7 +2901,16 @@ impl CompanyRuntime {
         live
     }
 
-    /// The approvals currently awaiting the operator.
+    /// Resolves the task id for an attempt, if the run record is available.
+    async fn task_id_for_run(&self, run_id: &str) -> Option<String> {
+        self.runs()
+            .get_run(&self.id, run_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|run| run.task_id)
+    }
+
     ///
     /// The single projection point for [`ApprovalSummary`], and therefore the
     /// single place issue #372's `agent` + `payload` are filled in. The payload
