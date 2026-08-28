@@ -726,44 +726,15 @@ export interface BudgetPauseMarker {
   atMillis: number;
 }
 
-
+export interface StandingGrant {
   id: string;
-  /** The teammate it was granted to. Empty on a workflow grant (issue #1098),
-   * which names its subject in `workflow` instead. */
   agent: string;
-  /** The authored workflow allowed to redeem it, when the grant is to a
-   * workflow rather than a teammate (issue #1098) — `agent` is empty then.
-   * Absent on every teammate grant. */
   workflow?: string;
-  /** The tool it admits, with any arguments. */
   tool: string;
   verdict: Verdict;
-  /** Who granted it: a signed-in user, or the platform credential. */
   granted_by: { kind: string; id: string };
   at_millis: number;
-  /** Epoch-millis it stops admitting calls. */
   expires_at_millis: number;
-  /**
-   * The slice of the tool it is confined to, when the tool's name is not the
-   * whole of what it can do (#457).
-   *
-   * **Two kinds of value, in one untyped string** — both minted by the host's
-   * `standing_scope_of`, and a reader that assumes either one is the bug #785
-   * was:
-   *
-   * * a **Composio toolkit** identifier like `github` — a slug, which has to be
-   *   spelled out before an operator can read it;
-   * * a **URL origin** like `https://docs.rs`, added for `web_fetch` by
-   *   #673/#739 — already exactly what the operator approved, and to be shown
-   *   untouched.
-   *
-   * Render it through `grantHeadline` in `lib/language`, which is the one place
-   * that tells them apart. Do not spell a scope out at a call site.
-   *
-   * Absent for every tool whose name already says everything, and absent from
-   * an older host that predates the field. Both mean "nothing to narrow", so
-   * the row simply says what it always said.
-   */
   scope?: string;
 }
 
