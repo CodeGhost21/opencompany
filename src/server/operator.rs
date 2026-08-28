@@ -3094,11 +3094,8 @@ async fn resolve_desk(
 /// never see more than a matching chat send could.
 async fn history_viewer(
     headers: &HeaderMap,
-    state: &AppState,
-    company: &CompanyId,
-    peer: Option<std::net::SocketAddr>,
-) -> Result<(Viewer, bool), crate::server::Rejection> {
-    let actor = chat_actor(headers, state, company, peer).await?;
+    runtime: &CompanyRuntime,
+    headers: &HeaderMap,
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => {
             let is_admin = runtime
