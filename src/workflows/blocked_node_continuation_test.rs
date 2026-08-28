@@ -2116,3 +2116,102 @@ async fn a_late_landing_approval_bank_write_retires_its_own_resurrection() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
+
+/// Issue #1825 (PR #1825 review) — a retried amend against an id **already**
+/// resolved must not durably bank the *turn* as approved.
+///
+/// `settle_approval_amended` hardcodes `Verdict::Approve` for its inline bank
+/// call, unlike the plain path (`settle_approval`), which passes the actual
+/// operator verdict through and additionally short-circuits on
+/// `ResolveOutcome::NotParked` before ever reaching the bank. Pre-fix, the
+/// amend path had neither guard: a second amend call against an id already
+/// resolved — here, resolved by a plain **deny** — reads
+/// `ResolveOutcome::NotParked` (nothing left parked to overlay onto) but still
+/// ran the bank unconditionally with the hardcoded `Approve`. `origins`
+/// intentionally outlives resolution (see
+/// `approval_origins_outlive_resolution_and_expiry_and_survive_reload` in
+/// `runtime/journal.rs`), so `bank_blocked_node_approval` still resolves the
+/// denied id back to its turn and durably marks that turn approved — even
+/// though nothing this call did actually approved anything, and the node's
+/// sibling card is still undecided. A restart before the sibling's own
+/// (denial) decision would then rehydrate the turn as approved from nothing
+/// but this spurious bank, and dispatch a continuation no real decision ever
+/// authorized.
+///
+/// Proven red by re-adding the old unconditional
+/// `self.rt.bank_blocked_node_approval(id, Verdict::Approve).await;` in place
+/// of the `if executed.is_some() { .. }` gate this fix adds.
+#[tokio::test]
+async fn a_retried_amend_on_an_already_denied_card_does_not_bank_the_turn() {
+    let home = seed_home();
+    let (rt, runner) = runtime(
+        home.path(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo one" }),
+            },
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "echo two" }),
+            },
+            Turn::Say("Both were refused, so I stopped."),
+        ],
+    )
+    .await;
+
+    let run_id = cold_run(&rt).await;
+    let cards = cards_for(&rt, &run_id);
+    assert_eq!(cards.len(), 2, "the node parked two cards under one batch");
+
+    let turn = workflow_node_turn_key(&run_id, NODE);
+
+    // A real decision on the first card: deny. `bank_blocked_node_approval`
+    // correctly no-ops on a non-`Approve` verdict, so this alone must not
+    // bank the turn.
+    resolve_and_settle(&rt, &cards[0], Verdict::Deny).await;
+    assert!(
+        !rt.blocked_nodes()
+            .peek(&turn)
+            .expect("the node's stash is still live — one card is still undecided")
+            .approved,
+        "precondition: a denied card must not bank the turn as approved"
+    );
+
+    // A retried amend against the SAME, already-resolved id. The parked
+    // effect is already gone (the deny above removed it), so this is the
+    // `ResolveOutcome::NotParked` branch on the amend path — nothing new is
+    // approved by this call.
+    rt.resolve_approval_amended(
+        &cards[0],
+        json!({ "command": "echo one amended" }),
+        operator(),
+    )
+    .await
+    .expect("a resolve against an already-resolved id still returns Ok, not an error");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    assert!(
+        !rt.blocked_nodes()
+            .peek(&turn)
+            .expect("the stash is still live — the sibling card is still undecided")
+            .approved,
+        "a retried amend on an already-denied id must not bank the turn as approved — \
+         nothing about this call actually approved anything"
+    );
+    assert!(
+        !rt.journal().blocked_node_approvals().contains(&turn),
+        "no BlockedNodeApproved record for this turn — the retried amend approved nothing, \
+         so nothing should have been durably banked"
+    );
+
+    // The node's actual last decision: the sibling card, also denied.
+    resolve_and_settle(&rt, &cards[1], Verdict::Deny).await;
+
+    assert_eq!(
+        runner.started(),
+        1,
+        "both of this node's calls were denied — no continuation is owed, even though a \
+         spurious retried amend once tried to bank the turn approved"
+    );
+}
