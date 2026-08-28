@@ -504,15 +504,6 @@ export interface ApprovalSummary {
   /** The host-resolved task owner, when an authoritative task-detail projection provides it. */
   ownerTaskId?: string;
   /**
-   * The host-resolved task owner for this parked approval, when available.
-   *
-   * Unlike `task`, which is the park's card-level link, this is computed with
-   * the attempt-level ownership rule. Decision surfaces must require it before
-   * exposing controls; an absent value means an older host cannot prove this
-   * queue row belongs to the card.
-   */
-  ownerTaskId?: string;
-  /**
    * The roster teammate whose blocked tool call this is (#372). Mirrors
    * `Effect::agent`: present exactly when the effect came from a harness tool
    * call, absent for a native effect the runtime performs itself.
