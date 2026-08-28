@@ -4463,19 +4463,28 @@ impl CompanyRecord {
 
     /// The chat id the durable Operator system feed journals under for this
     /// company (issue #1781 review — CodeRabbit Major + Codex P2; stability
-    /// after removal — Codex P2 follow-up).
+    /// after removal — Codex P2 follow-up; desk-collision divert — CodeRabbit
+    /// P2 follow-up).
     ///
     /// Ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL)
     /// itself. Diverted to
     /// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
-    /// whenever a grandfathered roster **teammate** has ever held the literal
-    /// id `operator` — `is_roster_agent` true (still on the roster) **or**
-    /// [`is_retired`](Self::is_retired) true (removed since) — and no desk of
-    /// the same id exists (`desk_exists` false). Using `OPERATOR_CHANNEL`
-    /// there would put that teammate's private DM and the public "what
-    /// happened" system feed on one address — a post to the visible
-    /// read-only feed could reach them, and a delivered report would be
-    /// indistinguishable from their own words.
+    /// whenever anything grandfathered already holds the literal id
+    /// `operator`: a roster **teammate** — `is_roster_agent` true (still on
+    /// the roster) **or** [`is_retired`](Self::is_retired) true (removed
+    /// since) — or a real **desk** (`desk_exists` true). Using
+    /// `OPERATOR_CHANNEL` for either would put that other surface's own
+    /// transcript and the public "what happened" system feed on one address:
+    /// for a teammate, a post to the visible read-only feed could reach
+    /// them, and a delivered report would be indistinguishable from their own
+    /// words; for a desk, `server::operator::operator_channel` hands this id
+    /// straight to the console as the pinned Operator row, appended
+    /// (`operatorSection`, `frontend/src/views/ChatView.tsx`) *after* the
+    /// desk's own section — so `findChannel`, which returns the first
+    /// section match, would always resolve the pinned row to the desk
+    /// instead, and `send_to_channel_adapter` would journal every workflow
+    /// report onto the desk's own `chat_id`, mixing "Workflow report — …"
+    /// rows into its ordinary conversation.
     ///
     /// The `is_retired` half matters because the divert has to **stay put**
     /// once it has ever applied: removing a manifest teammate always tombstones
@@ -4493,13 +4502,16 @@ impl CompanyRecord {
     /// stored is renamed, and where NEW system-feed content lands never moves
     /// back.
     ///
-    /// The `desk_exists` guard covers the **other** grandfather case — a real
-    /// **desk** already owning `operator` — so a company on that shape is not
-    /// also diverted onto the collision-fallback address it has no use for.
+    /// This method only decides where the *feed* journals — it never changes
+    /// what a client can address by typing `operator` itself. A desk that
+    /// owns the id stays reachable and writable through it exactly as before:
+    /// [`CompanyRuntime::ensure_desk_writable`](crate::company::runtime::CompanyRuntime::ensure_desk_writable)
+    /// resolves `OPERATOR_CHANNEL` against `desk_exists`/`is_roster_agent`
+    /// directly, independent of this divert.
     pub fn operator_feed_channel(&self) -> &'static str {
-        if !self.desk_exists(crate::runtime::OPERATOR_CHANNEL)
-            && (self.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL)
-                || self.is_retired(crate::runtime::channel::OPERATOR_CHANNEL))
+        if self.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+            || self.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL)
+            || self.is_retired(crate::runtime::channel::OPERATOR_CHANNEL)
         {
             crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
         } else {
@@ -8961,15 +8973,21 @@ mod test {
         );
     }
 
-    /// The companion grandfather case: a real **desk** already owning
-    /// `operator` must not also divert onto the collision-fallback address —
-    /// that address exists for the roster-teammate collision only, and a
-    /// desk at that id is handled on its own terms wherever a caller resolves
-    /// `operator` (`CompanyRuntime::ensure_desk_writable` checks `desk_exists`
-    /// directly). Without the `desk_exists` guard, a company grandfathered
-    /// onto *both* shapes at once would divert here regardless.
+    /// The third grandfather case (PR #1781 review, CodeRabbit): a real
+    /// **desk** already owning `operator` must divert the feed exactly like
+    /// the roster-teammate case above, not stay on the literal id. Left on
+    /// `OPERATOR_CHANNEL`, the feed's id equals the desk's own id, and two
+    /// surfaces collide on it: `server::operator::operator_channel` hands
+    /// that id to the console as the pinned Operator row, appended (`
+    /// operatorSection`, `frontend/src/views/ChatView.tsx`) *after* the desk
+    /// section `buildChannels` already put the same id in — so `findChannel`,
+    /// which returns the first section match, resolves the pinned row to the
+    /// desk every time. And `send_to_channel_adapter` journals each workflow
+    /// report under `operator_feed_channel()`'s result, so with no divert
+    /// those reports land in `chat_id == "operator"` too — the desk's own
+    /// ordinary transcript, not a distinguishable feed.
     #[test]
-    fn operator_feed_channel_is_not_diverted_by_a_desk_collision_alone() {
+    fn operator_feed_channel_diverts_off_a_grandfathered_desks_own_operator_line() {
         let manifest = "[company]\nname = \"Acme\"\n\
              [[group_chat]]\nid = \"operator\"\nname = \"Operator Desk\"\nmembers = []\n";
         let record = desk_record(manifest, Vec::new());
@@ -8977,9 +8995,11 @@ mod test {
         assert!(!record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL));
         assert_eq!(
             record.operator_feed_channel(),
-            crate::runtime::OPERATOR_CHANNEL,
-            "a desk-only collision must not divert onto the roster-teammate \
-             fallback address"
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "a desk already owning `operator` must divert the feed off that \
+             same address, the same way a roster teammate holding it does — \
+             otherwise the pinned Operator row and the desk share one id and \
+             `findChannel` always resolves it to the desk"
         );
     }
 }

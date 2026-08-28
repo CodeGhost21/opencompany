@@ -6553,6 +6553,50 @@ mode = "full"
         );
     }
 
+    /// PR #1781 review (CodeRabbit): the same divert as the test above, for
+    /// the *other* grandfather shape — a real **desk** already owning
+    /// `operator` (see `a_manifest_desk_predating_the_reserved_operator_id_stays_writable`
+    /// for the write side of this same fixture). Left undiverted, `GET
+    /// {scope}/operator-channel` and `GET {scope}/desks` would answer the
+    /// same id for two different things: the console appends the pinned
+    /// Operator row *after* the desk section (`operatorSection`,
+    /// `frontend/src/views/ChatView.tsx`), so `findChannel` — first-section-match
+    /// — would resolve the pinned row to the desk, and every workflow report
+    /// would journal onto the desk's own transcript instead of a
+    /// distinguishable feed.
+    #[tokio::test]
+    async fn the_operator_channel_diverts_off_a_grandfathered_desks_own_operator_line() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Ops Room\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let desks = desks.as_array().unwrap();
+        assert_eq!(desks.len(), 1);
+        assert_eq!(
+            desks[0]["id"], "operator",
+            "the desk itself must keep its own literal id: {desks:?}"
+        );
+
+        let channel = get_operator_channel(&app, &cookie).await;
+        assert_eq!(
+            channel["id"],
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the pinned Operator row must not claim the literal `operator` id \
+             once a desk already holds it — otherwise the console shows two \
+             rows sharing one id and `findChannel` always resolves the pinned \
+             row to the desk: {channel:?}"
+        );
+    }
+
     /// Issue #65: the console's default thread addresses sends with
     /// `chat: "main"`, but pre-threading history and the synthetic operator
     /// desk are keyed on `"General"`. A transcript spanning both ids — one
