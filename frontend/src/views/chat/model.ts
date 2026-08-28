@@ -242,8 +242,6 @@ export interface Channel {
   leadless?: boolean;
   /** Synthetic system channel; it cannot accept chat or thread replies. */
   system?: boolean;
-  /** Synthetic system channel; it cannot accept chat or thread replies. */
-  system?: boolean;
 }
 
 export interface ChannelSection {
