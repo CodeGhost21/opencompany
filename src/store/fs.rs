@@ -1062,7 +1062,65 @@ impl Drop for StagedGuard {
     }
 }
 
+/// Test-only: parks [`remove_staged`] so a test can abort the task *while*
+/// the error-path cleanup is awaiting, proving the guard stays armed across
+/// it (issue #1828 review, eighth round). Keyed by the temp file's parent
+/// directory, since the temp's own name is randomly generated — each test
+/// owns its own bundle directory, so tests stay independent under the
+/// default parallel harness.
+#[cfg(test)]
+pub(crate) mod cleanup_probe {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+    use tokio::sync::Notify;
+
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, ()>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static BLOCKED: LazyLock<Notify> = LazyLock::new(Notify::new);
+
+    fn key(dir: &Path) -> PathBuf {
+        std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+    }
+
+    /// Arms a one-shot stall for the next `remove_staged` of a temp file
+    /// living directly in `dir`.
+    pub(crate) fn arm(dir: &Path) {
+        GATES
+            .lock()
+            .expect("cleanup-probe poisoned")
+            .insert(key(dir), ());
+    }
+
+    /// No-op unless this temp's directory was armed. Notifies
+    /// [`wait_blocked`], then parks forever — the test aborts the task
+    /// rather than releasing it, which is the scenario under test.
+    pub(crate) async fn maybe_block(tmp: &Path) {
+        let armed = tmp
+            .parent()
+            .map(|dir| {
+                GATES
+                    .lock()
+                    .expect("cleanup-probe poisoned")
+                    .remove(&key(dir))
+                    .is_some()
+            })
+            .unwrap_or(false);
+        if armed {
+            BLOCKED.notify_one();
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Waits until an armed cleanup has reached its stall point.
+    pub(crate) async fn wait_blocked() {
+        BLOCKED.notified().await;
+    }
+}
+
 async fn remove_staged(tmp: &Path) {
+    #[cfg(test)]
+    cleanup_probe::maybe_block(tmp).await;
     match tokio::fs::remove_file(tmp).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1422,7 +1480,12 @@ impl CompanyStore for FsCompanyStore {
         let toml_tmp = match stage_atomic_bytes(&bundle.company_toml(), toml_src.as_bytes()).await {
             Ok(tmp) => tmp,
             Err(e) => {
-                guard.disarm();
+                // Deliberately NOT disarmed before this await: aborting the
+                // task *during* the cleanup would otherwise leave `meta_tmp`
+                // with nothing to reclaim it, which is the same hole this
+                // guard exists to close (issue #1828 review, eighth round).
+                // Once `remove_staged` has run, the guard's own `Drop` sweep
+                // of that path is a harmless no-op.
                 remove_staged(&meta_tmp).await;
                 return Err(e);
             }
@@ -3522,6 +3585,92 @@ mod test {
     /// first-time publish — the same fault as the very first round's test
     /// above, which already proves the *live* files stay safe — and, in
     /// addition to that, assert no `*.tmp-*` file is left anywhere under the
+    /// **Issue #1828 review, eighth round**: the guard closed the "dropped
+    /// mid-stage" hole, but its first version disarmed *before* awaiting the
+    /// error path's `remove_staged`. Aborting the task inside that await
+    /// therefore reopened the very hole the guard exists to close: the
+    /// cleanup never finished, and `Drop` no longer had `meta_tmp` to
+    /// reclaim.
+    ///
+    /// Fault plus cancellation, as the review asked for: fail the second
+    /// stage so the error path runs, park `remove_staged` with
+    /// `cleanup_probe`, then abort. Pre-fix the `meta.tmp-<id>` survives;
+    /// post-fix the still-armed guard reclaims it as the frame unwinds.
+    #[tokio::test]
+    async fn aborting_during_the_error_path_cleanup_still_reclaims_the_staged_temp_file() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: sample_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "provisioning".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        let bundle_dir = bundle.company_toml().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&bundle_dir).expect("bundle dir");
+
+        // Fail the *second* stage so `save` takes its error path, and park
+        // the cleanup that path awaits.
+        fault_probe::fail_next_write(&bundle.company_toml());
+        cleanup_probe::arm(&bundle_dir);
+
+        let handle = tokio::spawn(async move { store.save(&record).await });
+
+        cleanup_probe::wait_blocked().await;
+        handle.abort();
+        let joined = handle.await;
+        assert!(
+            joined.as_ref().is_err_and(|e| e.is_cancelled()),
+            "the save task must actually have been cancelled inside the \
+             cleanup await for this test to mean anything, got {joined:?}"
+        );
+
+        let cleaned_up = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let orphans = std::fs::read_dir(&bundle_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                    .count();
+                if orphans == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            cleaned_up.is_ok(),
+            "aborting inside the error path's remove_staged must still \
+             reclaim the staged temp — an orphan sat in {} for the whole \
+             timeout",
+            bundle_dir.display()
+        );
+    }
+
     /// **Issue #1828 review, seventh round**: the sibling test below covers a
     /// second-stage write that *fails*. This covers the second-stage write
     /// that never returns at all because the caller went away — an aborted
