@@ -1563,12 +1563,15 @@ impl HarnessBrain {
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
-        Ok(Some(lifecycle::relay_reply(
+        let relay = lifecycle::relay_reply(
             &card,
             &responder,
             &self.orchestrator(),
             origin,
-        )))
+        );
+        self.journal_task_outcome(&card, &responder, result_text, artifact_ids)
+            .await;
+        Ok(Some(relay))
     }
 
     /// Ends a dispatch that never ran because its `assignee` names nobody this
