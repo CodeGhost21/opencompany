@@ -19,6 +19,7 @@ import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
+import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import {
   ApiError,
   type ApprovalSummary,
@@ -774,19 +775,23 @@ export function ChatView({
    * swallowed rather than surfacing `desksError`: losing the pinned row is a
    * much smaller degradation than blocking the whole channel list on it, and
    * the fetch is retried on every company switch same as desks are.
+   *
+   * One bounded retry (issue #1781 review, Codex P2), the same
+   * `fetchWithOneRetry` wrapper `app-shell.tsx`'s independent hydration pass
+   * already uses for this identity: without it, a single dropped request
+   * here — while the shell's own, retried lookup succeeds — left `operator`
+   * `null` even though history kept hydrating, so the pinned row stayed
+   * absent until the client/company changed or the page reloaded. See
+   * `fetchWithOneRetry`'s doc for why the retry itself lives there rather
+   * than inline.
    */
   const operatorRun = useRef(0);
   useEffect(() => {
     const run = ++operatorRun.current;
     setOperator(null);
-    client
-      .getOperatorChannel(company)
-      .then((dto) => {
-        if (run === operatorRun.current && isOperatorChannelDto(dto)) setOperator(dto);
-      })
-      .catch(() => {
-        // Degrade silently — see the doc comment above.
-      });
+    void fetchWithOneRetry(() => client.getOperatorChannel(company)).then((dto) => {
+      if (run === operatorRun.current && isOperatorChannelDto(dto)) setOperator(dto);
+    });
   }, [client, company]);
 
   /**

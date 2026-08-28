@@ -11,6 +11,7 @@ import { fromHistory, mergeHistoryInOrder, type ChatMessage } from "@/lib/chat";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appShell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
 
 describe("chat channel history polling", () => {
   it("wires each resolved channel fan-out to a disposable 5s visible-tab poll", () => {
@@ -31,6 +32,20 @@ describe("chat channel history polling", () => {
       "fetchWithOneRetry(() => client.getOperatorChannel(company))",
     );
     expect(appShell).not.toContain("client.getOperatorChannel(company).catch(() => null)");
+  });
+
+  /**
+   * PR #1781 review (Codex P2, comment 3878524727): `ChatView`'s own
+   * render-side lookup of the same identity had the twin gap — a single
+   * dropped request there, while `app-shell.tsx`'s independent, now-retried
+   * lookup succeeded, left history hydrating with `operator` stuck `null`
+   * until the client/company changed or the page reloaded. Same wrapper,
+   * same fix, source-wiring-pinned the same way the shell's call site above
+   * is (no render harness for either component in this repo).
+   */
+  it("ChatView also retries the Operator channel fetch instead of giving up on the first miss", () => {
+    expect(chatView).toContain("fetchWithOneRetry(() => client.getOperatorChannel(company))");
+    expect(chatView).not.toContain("client.getOperatorChannel(company)\n      .then(");
   });
 
   // The polling merge is `mergeHistoryInOrder` — the same reconstruction rule
