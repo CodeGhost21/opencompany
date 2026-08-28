@@ -1041,10 +1041,16 @@ async fn commit_staged(path: &Path, tmp: PathBuf) -> std::result::Result<(), Com
     // One `spawn_blocking` for the rename-then-sync pair rather than two
     // `tokio::fs` calls, mirroring `stage_atomic_bytes` above.
     let joined = tokio::task::spawn_blocking(move || {
-        std::fs::rename(&tmp, &owned_path).map_err(|e| CommitFailure {
-            published: false,
-            error: io_err(&owned_path, e),
-        })?;
+        if let Err(e) = std::fs::rename(&tmp, &owned_path) {
+            // Ownership of `tmp` passed to this job, so nothing upstream is
+            // still guarding it — reclaim it here when the rename did not
+            // land (issue #1828 review, eleventh round).
+            let _ = std::fs::remove_file(&tmp);
+            return Err(CommitFailure {
+                published: false,
+                error: io_err(&owned_path, e),
+            });
+        }
         // Test-only: see `fault_probe::fail_next_dir_sync`. Reaches the state
         // the plain fault probe cannot — rename landed, durability step did
         // not.
@@ -1132,6 +1138,16 @@ impl StagedGuard {
     /// Start guarding `tmp` until this guard is dropped or disarmed.
     fn watch(&mut self, tmp: &Path) {
         self.tmps.push(tmp.to_path_buf());
+    }
+
+    /// Stop guarding one path without removing it. Used when ownership
+    /// passes to `commit_staged`: its `spawn_blocking` job renames the temp
+    /// and keeps running even if the caller's future is dropped, so a `Drop`
+    /// sweep here would delete the file out from under a rename that is
+    /// still going to happen — leaving the first file published against the
+    /// second's `NotFound` (issue #1828 review, eleventh round).
+    fn forget(&mut self, tmp: &Path) {
+        self.tmps.retain(|held| held != tmp);
     }
 
     /// Release every guarded path without removing it — the save reached a
@@ -1614,11 +1630,13 @@ impl CompanyStore for FsCompanyStore {
                     return Err(io_err(&bundle.company_toml(), e));
                 }
             };
+            guard.forget(&toml_tmp);
             if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
                 remove_staged(&toml_tmp).await;
                 remove_staged(&meta_tmp).await;
                 return Err(f.error);
             }
+            guard.forget(&meta_tmp);
             if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
                 remove_staged(&meta_tmp).await;
                 // Only roll the manifest back when `meta.json` genuinely did
@@ -1644,7 +1662,8 @@ impl CompanyStore for FsCompanyStore {
                     // that leaves the record genuinely mixed.
                     match stage_atomic_bytes(&bundle.company_toml(), &previous).await {
                         Ok(rollback_tmp) => {
-                            guard.watch(&rollback_tmp);
+                            // Ownership passes straight to the commit below;
+                            // never guarded, for the same reason as above.
                             if let Err(rollback_failure) =
                                 commit_staged(&bundle.company_toml(), rollback_tmp.clone()).await
                             {
@@ -1673,11 +1692,13 @@ impl CompanyStore for FsCompanyStore {
                 return Err(f.error);
             }
         } else {
+            guard.forget(&meta_tmp);
             if let Err(f) = commit_staged(&bundle.meta_json(), meta_tmp.clone()).await {
                 remove_staged(&meta_tmp).await;
                 remove_staged(&toml_tmp).await;
                 return Err(f.error);
             }
+            guard.forget(&toml_tmp);
             if let Err(f) = commit_staged(&bundle.company_toml(), toml_tmp.clone()).await {
                 remove_staged(&toml_tmp).await;
                 return Err(f.error);
@@ -3756,6 +3777,108 @@ mod test {
     /// first-time publish — the same fault as the very first round's test
     /// above, which already proves the *live* files stay safe — and, in
     /// addition to that, assert no `*.tmp-*` file is left anywhere under the
+    /// **Issue #1828 review, eleventh round**: `commit_staged`'s
+    /// `spawn_blocking` job keeps running after the caller's future is
+    /// dropped, exactly like `stage_atomic_bytes`. So a save cancelled while
+    /// the *second* commit was in flight had `StagedGuard::drop` delete
+    /// `meta_tmp` out from under a rename that was still going to happen:
+    /// the rename then failed `NotFound`, the manifest was already
+    /// published, and cancellation skipped the rollback branch — leaving a
+    /// new manifest paired with old metadata.
+    ///
+    /// Ownership of each temp now passes to `commit_staged` before the call,
+    /// so the guard no longer races it. Drives the case with `stall_probe`
+    /// on the metadata staging write and an abort while it is parked.
+    #[tokio::test]
+    async fn cancelling_a_save_does_not_delete_a_temp_a_commit_still_owns() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let record_named = |name: &str| CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: {
+                let mut m = sample_manifest();
+                m.company.name = name.to_string();
+                m
+            },
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        store
+            .save(&record_named("Before"))
+            .await
+            .expect("first publish");
+
+        // Park the metadata staging write, then abort the save while it is
+        // held there — the update path stages meta.json first.
+        let release = stall_probe::arm(&bundle.meta_json());
+        let after = record_named("After");
+        let reader = FsCompanyStore::new(&root);
+        let handle = tokio::spawn(async move { store.save(&after).await });
+        stall_probe::wait_blocked().await;
+        handle.abort();
+        let joined = handle.await;
+        assert!(
+            joined.as_ref().is_err_and(|e| e.is_cancelled()),
+            "the save task must actually have been cancelled for this test \
+             to mean anything, got {joined:?}"
+        );
+        release.send(()).expect("stall gate still open");
+
+        // Whatever the cancellation left behind, the bundle must never be a
+        // new manifest paired with stale metadata, and must not accumulate
+        // orphaned temps.
+        let bundle_dir = bundle.company_toml().parent().unwrap().to_path_buf();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let orphans = std::fs::read_dir(&bundle_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                    .count();
+                if orphans == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "a cancelled save must not strand a staged temp in {}",
+            bundle_dir.display()
+        );
+
+        // The record must still load — the whole hazard is a manifest whose
+        // paired metadata never landed.
+        let loaded = reader.load(&id).await.expect("load must not error");
+        assert!(
+            loaded.is_some(),
+            "the bundle must remain loadable after a cancelled update"
+        );
+    }
+
     /// **Issue #1828 review, tenth round**: `commit_staged` returned a plain
     /// `Err` for two very different states — the rename never happened, or
     /// the rename landed and only `sync_parent_dir` failed. The rollback
