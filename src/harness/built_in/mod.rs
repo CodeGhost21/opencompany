@@ -199,8 +199,8 @@ use crate::ports::types::{
     OverlayDesk, OverlayDeskMember, PolicyOverride, TurnStep,
 };
 use crate::ports::{
-    ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
-    UsageMeter,
+    ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, NotificationStore, SecretStore,
+    TaskStore, UsageMeter,
 };
 use crate::runtime::builder::agent_scoped_grants;
 
@@ -282,6 +282,18 @@ pub struct HarnessDeps {
     /// written either way, so an unwired artifact store loses nothing that
     /// existed previously.
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
+    /// The company's notification store, so the orchestrator's `run_workflow`
+    /// tool can file a `workflow_run_failed` notification on the same terms as
+    /// the console run route, the cron scheduler, and the approval-resume path
+    /// (issue #1865, PR #1883 review comment 3877185396) — that tool is the
+    /// one run-outcome chokepoint `WorkflowSpawn` does not cover, since an
+    /// agent-started run stays inside the calling turn rather than routing
+    /// through `WorkflowSpawn::spawn` (see that type's own `notifications`
+    /// doc comment). `None` — the default build, and most of this struct's
+    /// test constructions — simply skips the notification, exactly as `tasks`
+    /// and `artifacts` degrade above: the run itself still journals and
+    /// answers the tool call either way, only the company-wide alert is lost.
+    pub notifications: Option<Arc<dyn NotificationStore>>,
     /// The company's ledgers, so an agent can read what has already been
     /// decided, goaled or ruled out, record what it decides, and declare an axis
     /// nobody anticipated. `None` builds no ledger tools at all — which is right
@@ -4850,6 +4862,7 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(provider::MockProvider::default()),
@@ -5663,6 +5676,7 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                notifications: None,
                 ledgers: None,
                 ledger_registry: Default::default(),
                 provider: Arc::new(MockProvider::new("mock: ")),
@@ -5878,6 +5892,7 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -6777,6 +6792,7 @@ description = "Builds the product."
     fn scripted_agent(outcomes: Vec<Result<String, String>>) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(outcomes)),
@@ -7313,6 +7329,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Scripted 10 deep, not once: whether the vendored harness retries
@@ -7452,6 +7469,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -7584,6 +7602,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Always succeeds — the "operator manually added credits and
@@ -7726,6 +7745,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Succeeds against a request B's text — deliberately DIFFERENT
@@ -7839,6 +7859,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -7943,6 +7964,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -8083,6 +8105,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![Ok(
@@ -8207,6 +8230,7 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8703,6 +8727,7 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -9143,6 +9168,7 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -9305,6 +9331,7 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),

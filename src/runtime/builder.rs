@@ -3039,6 +3039,7 @@ impl RuntimeBuilder {
                                 }),
                             );
                             let mut deps = HarnessDeps {
+                                notifications: Some(ops.notifications.clone()),
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
                                 default_mcp_servers: self.default_mcp_servers.clone(),

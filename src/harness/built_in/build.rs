@@ -970,6 +970,11 @@ pub fn build_agent(
             manifest_agent.id.clone(),
             manifest_agent.tools.clone(),
             grants.to_vec(),
+            // Issue #1865: where `run_workflow` files a `workflow_run_failed`
+            // notification for a run the agent itself started, on the same
+            // terms as the console run route, the cron scheduler, and the
+            // approval-resume path.
+            deps.notifications.clone(),
         ));
     }
     // Recursive desk delegation (issue #176): a NON-orchestrator agent whose
@@ -1879,6 +1884,7 @@ mod tests {
         let mcp_home = Some(root.join("mcp"));
         let audit_root = root;
         HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),

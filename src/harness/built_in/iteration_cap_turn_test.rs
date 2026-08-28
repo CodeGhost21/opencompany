@@ -188,6 +188,7 @@ fn read_then_answer(n: usize, answer: &'static str) -> Vec<Turn> {
 /// control left standing, which is the condition #988 is about.
 fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
     HarnessDeps {
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {

@@ -4000,6 +4000,7 @@ description = "Runs Acme."
     /// (and its `[[harness]]` block) without restating the whole deps literal.
     fn brain_over_mock_with(dir: &std::path::Path, record: CompanyRecord) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -4399,6 +4400,7 @@ description = "Builds it."
     fn brain_with_tasks(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -4495,6 +4497,7 @@ description = "Builds it."
     ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(BudgetExhaustedProvider),
@@ -4662,6 +4665,7 @@ members = ["engineer"]
         with_workspace: bool,
     ) -> (HarnessBrain, Arc<FsOps>) {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -6589,6 +6593,7 @@ members = ["engineer"]
     fn brain_over(dir: &std::path::Path, record: CompanyRecord) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -7914,6 +7919,7 @@ members = ["eng1", "eng2"]
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8067,6 +8073,7 @@ members = ["eng1", "eng2"]
         let log = Arc::new(FailFirstLog::default());
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8163,6 +8170,7 @@ members = ["eng1", "eng2"]
         requests: crate::harness::policy::ApprovalRequestQueue,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8500,6 +8508,7 @@ members = ["eng1", "eng2"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8566,6 +8575,7 @@ members = ["eng1", "eng2"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(BudgetExhaustedProvider),
@@ -9021,6 +9031,7 @@ members = ["eng1", "eng2"]
         use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -9413,6 +9424,7 @@ members = ["eng1", "eng2"]
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),
@@ -9758,6 +9770,7 @@ members = ["eng1", "eng2"]
             selector_calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),
@@ -10150,6 +10163,7 @@ members = ["eng1", "eng2"]
             steer: steer.clone(),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),

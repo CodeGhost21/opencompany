@@ -4962,6 +4962,7 @@ mode = "full"
             .unwrap();
 
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
