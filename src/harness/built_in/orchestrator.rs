@@ -4781,6 +4781,10 @@ pub(crate) fn create_workflow_parameters_schema() -> Value {
                     "type": "string",
                     "description": "An optional one-line description of what the workflow does."
                 },
+                "ownerDesk": {
+                    "type": "string",
+                    "description": "Optional owning desk id or display name."
+                },
                 "nodes": {
                     "type": "array",
                     "description": "The graph's nodes. Exactly one must be a `trigger`.",
