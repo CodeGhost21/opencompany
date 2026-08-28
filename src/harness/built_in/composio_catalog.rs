@@ -758,6 +758,14 @@ pub fn composio_brief(toolkits: &[String]) -> String {
     // guards against — the live tools enforce the allowlist and would reject
     // the authorization/execution either way (PR #1780 review, rounds 6-7).
     let github_reachable = named.iter().any(|toolkit| toolkit == "github");
+    // The capability *claim* above must not name GitHub before discovery, but
+    // the "don't hand-roll a provider API" warning below is a guardrail, not a
+    // claim — a concrete `api.github.com` example is what makes it land, and
+    // withholding it in open mode weakened the warning for the case where the
+    // agent is most likely to try exactly that (issue #1780 review). Keep the
+    // example whenever GitHub is plausibly in play: named explicitly, or open
+    // mode, where the backend allowlist may well include it.
+    let github_example = github_reachable || named.is_empty();
 
     let mut brief = String::from(if github_reachable {
         "\n\n## Connected integrations (GitHub and other SaaS)\n\
@@ -790,7 +798,7 @@ pub fn composio_brief(toolkits: &[String]) -> String {
         ));
     }
 
-    brief.push_str(if github_reachable {
+    brief.push_str(if github_example {
         "Do NOT use `http_request`, `curl` or `web_fetch` against a connected provider's API (for \
          example `api.github.com`) — those tools call it with no credential and it answers 401 or \
          403; only the Composio tools carry the company's connection. And do not promise an action \
@@ -1578,12 +1586,21 @@ mod tests {
     fn the_composio_brief_open_mode_does_not_name_github_before_discovery() {
         let brief = composio_brief(&[]);
         assert!(
-            !brief.to_lowercase().contains("github"),
+            !brief.contains("Connected integrations (GitHub and other SaaS)")
+                && !brief.contains("You reach GitHub"),
             "open mode must not claim GitHub is reachable before discovery: {brief}"
         );
         // The routing rule and grounding still hold generically.
         assert!(brief.contains("composio_execute"), "{brief}");
         assert!(brief.contains("http_request"), "{brief}");
+        // ...and the guardrail keeps its concrete example. Naming
+        // `api.github.com` as something NOT to hand-roll is the opposite of
+        // claiming GitHub is reachable, and the turn test
+        // `the_composio_routing_brief_reaches_the_model_system_prompt`
+        // asserts the model actually sees it. An earlier revision of this
+        // test forbade the substring "github" outright, which took the
+        // example down with the claim and broke that guarantee.
+        assert!(brief.contains("api.github.com"), "{brief}");
     }
 
     // -----------------------------------------------------------------------
