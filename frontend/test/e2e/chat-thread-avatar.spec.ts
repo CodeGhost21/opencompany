@@ -112,7 +112,15 @@ test("your own line wears your own face in the thread panel too", async ({ page 
   // brain answers the reply below, so both voices end up in it.
   await thread.getByPlaceholder("Reply…").fill("and here is a reply");
   await thread.getByPlaceholder("Reply…").press("Enter");
-  await expect(thread.getByText("and here is a reply")).toBeVisible({ timeout: 30_000 });
+  // `exact` matters here for the same reason `hasNotText` does above: the echo
+  // brain quotes the reply back as `You said: and here is a reply`, so a
+  // substring match resolves to two lines the moment that answer lands, and the
+  // assertion dies of a strict-mode violation instead of waiting. Which of the
+  // two the console paints first is a race the runner's load decides, which is
+  // why the substring form passed here and failed on a busy CI runner.
+  await expect(thread.getByText("and here is a reply", { exact: true })).toBeVisible({
+    timeout: 30_000,
+  });
   await expect(otherThreadTile(page)).toBeVisible({ timeout: 30_000 });
 
   // The bug: your line's face was the mascot hashed from the literal string
