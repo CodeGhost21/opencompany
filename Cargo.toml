@@ -252,7 +252,7 @@ hmac = "0.12"
 # is not — shared-string tables and cell typing make hand-parsing it a
 # liability — so `calamine` reads that one.
 pdf-extract = { version = "0.12", optional = true }
-calamine = { version = "0.34", optional = true }
+calamine = { version = "0.36", optional = true }
 quick-xml = { version = "0.41", optional = true }
 zip = { version = "6", default-features = false, features = ["deflate"], optional = true }
 
