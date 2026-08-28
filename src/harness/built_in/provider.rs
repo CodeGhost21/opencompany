@@ -817,7 +817,9 @@ fn extract_array_refusal_text(value: Option<&serde_json::Value>) -> Option<Strin
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
     // Content may be a plain string OR an array of `{type:"text",text:…}`
     // parts; tolerate both.
-    let mut content = extract_content_text(payload.pointer("/choices/0/message/content"));
+    let raw_content = payload.pointer("/choices/0/message/content");
+    let content_is_null = raw_content.is_some_and(serde_json::Value::is_null);
+    let mut content = extract_content_text(raw_content);
     let tool_calls = parse_tool_calls(&payload);
     let finish_reason = payload
         .pointer("/choices/0/finish_reason")
@@ -940,13 +942,7 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             // comment 3875167298). It always wins over leaked text/reasoning,
             // independent of how the turn finished.
             content = refusal;
-        } else if genuinely_finished
-            && content.is_empty()
-            && matches!(
-                payload.pointer("/choices/0/message/content"),
-                None | Some(serde_json::Value::Null)
-            )
-        {
+        } else if genuinely_finished && content_is_null && content.is_empty() {
             // Reasoning-model fallback: a reasoning-only turn returns
             // `content: null` with the visible text under `reasoning` /
             // `reasoning_content` (string or array-of-parts). Only promote it
@@ -2214,6 +2210,62 @@ mod tests {
         assert!(resp.message.tool_calls.is_empty());
     }
 
+    /// A non-null but empty visible content field is not the documented
+    /// reasoning-only shape. It must not cause internal reasoning to be
+    /// promoted as the assistant answer.
+    #[test]
+    fn empty_string_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("empty string content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
+    /// An absent visible content field is distinct from an explicit null and
+    /// must not activate the reasoning-only fallback.
+    #[test]
+    fn absent_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("absent content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
+    /// An unsupported content shape is not equivalent to null content.
+    #[test]
+    fn unsupported_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "image_url", "image_url": {} }],
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("unsupported content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
     /// A reasoning-only turn returns `content: null` with the visible text under
     /// a `reasoning` field and no tool calls. It must fall back to the reasoning
     /// text and parse rather than hard-erroring — the managed reasoning brain
@@ -2392,6 +2444,7 @@ mod tests {
                 "message": {
                     "role": "assistant",
                     "content": null,
+                    "reasoning": "",
                     "reasoning_content": [
                         { "type": "text", "text": "The answer is " },
                         { "type": "text", "text": "42." }
