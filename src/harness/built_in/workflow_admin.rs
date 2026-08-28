@@ -622,7 +622,7 @@ impl Tool for UpdateWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Replace a saved workflow's whole graph — use this to FIX a workflow that is wrong rather than creating a second one beside it. You must call `read_workflow` first: this is a full replacement (anything you leave out is gone), and `expected_version` is REQUIRED and only comes from that read. Send the same `{id, name, description, ownerDesk, nodes, edges}` shape `create_workflow` takes, with `id` naming the workflow to replace. `ownerDesk`, when present, is preserved and validated as an owning desk. NOT for making a new workflow (use `create_workflow`), NOT for removing one (use `delete_workflow`), NOT for running one (use `run_workflow`). Workflows shipped in the company's source tree, workflows that run on a schedule, and workflows whose nodes carry run policy (`on_error`, `retry`, `requires_approval`, `repeatable`) are refused here — those are the operator's to change in the console. If the workflow changed since you read it the edit is refused; read it again and reapply."
+        "Replace a saved workflow's whole graph — use this to FIX a workflow that is wrong rather than creating a second one beside it. You must call `read_workflow` first: this is a full replacement (anything you leave out is gone), and `expected_version` is REQUIRED and only comes from that read. Send the same `{id, name, description, ownerDesk, nodes, edges}` shape `create_workflow` takes, with `id` naming the workflow to replace. Omit `ownerDesk` to leave the current owning desk untouched; send a desk id/name to assign or move it; send `null` or an empty string to explicitly unassign it. NOT for making a new workflow (use `create_workflow`), NOT for removing one (use `delete_workflow`), NOT for running one (use `run_workflow`). Workflows shipped in the company's source tree, workflows that run on a schedule, and workflows whose nodes carry run policy (`on_error`, `retry`, `requires_approval`, `repeatable`) are refused here — those are the operator's to change in the console. If the workflow changed since you read it the edit is refused; read it again and reapply."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -660,6 +660,15 @@ impl Tool for UpdateWorkflowTool {
                  graph, so editing one you haven't read would drop the rest of it."
             )));
         };
+        // PR #1882 review (bot finding on the `owner_desk.is_none()` fallback
+        // below): a caller who explicitly sends `"ownerDesk": null` or an
+        // all-whitespace string to unassign a workflow is indistinguishable,
+        // after parsing, from one who never mentioned the field at all — both
+        // normalize to `None` on `draft.owner_desk`. Recorded here, on the raw
+        // JSON, before `args` is consumed: presence of the key is the caller's
+        // signal that they thought about ownership at all, whatever value they
+        // sent it as.
+        let owner_desk_mentioned = args.get("ownerDesk").is_some();
         let parsed = match serde_json::from_value::<CreateWorkflowArgs>(args) {
             Ok(parsed) => parsed,
             Err(err) => {
@@ -709,7 +718,15 @@ impl Tool for UpdateWorkflowTool {
             // editing an unrelated node on an owner-assigned workflow, without
             // ever mentioning `ownerDesk`, must not clear the desk an operator
             // (or the workflow-proposal apply path) had already set.
-            if draft.owner_desk.is_none() {
+            //
+            // PR #1882 review (bot finding, second pass): `draft.owner_desk ==
+            // None` alone can't tell "never mentioned" apart from "explicitly
+            // sent null/blank to unassign" — both parse to `None`, so the
+            // fallback used to restore the stored desk in BOTH cases, leaving
+            // no payload shape that could ever clear it. `owner_desk_mentioned`
+            // (captured off the raw JSON above, before parsing) breaks the tie:
+            // only fall back when the key was truly absent.
+            if draft.owner_desk.is_none() && !owner_desk_mentioned {
                 draft.owner_desk = raw.owner_desk.clone();
             }
             let projection = project_workflow_spec(&raw);

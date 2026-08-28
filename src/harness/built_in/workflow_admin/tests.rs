@@ -855,6 +855,90 @@ async fn an_update_applies_a_newly_supplied_owner_desk() {
     );
 }
 
+/// **Regression, PR #1882 review (bot finding on `workflow_admin.rs:713`).**
+/// An explicit `"ownerDesk": null` must unassign the workflow, not restore the
+/// stored desk. `RawWorkflow::try_from(CreateWorkflowArgs)` parses `null` to
+/// `draft.owner_desk == None` — the exact same value an omitted key produces
+/// — so the `owner_desk.is_none()` fallback alone cannot tell "the caller
+/// never mentioned ownership" (must preserve, per
+/// `an_update_preserves_the_workflows_owner_desk` above) apart from "the
+/// caller explicitly cleared it" (must apply). Before the fix, `update_workflow`
+/// had no payload that could ever produce an unowned result: every value
+/// resolved to either "keep stored" or "move to a different desk". This pins
+/// the fix's `owner_desk_mentioned` presence check on the raw JSON.
+#[tokio::test]
+async fn an_update_can_explicitly_clear_owner_desk_with_null() {
+    let fx = Fixture::new();
+    fx.put_overlay("owned", OWNED_TOML).await;
+
+    let read = ReadWorkflowTool::new(fx.admin())
+        .execute(json!({ "id": "owned" }))
+        .await
+        .unwrap();
+    let version = data(&read)["version"]
+        .as_str()
+        .expect("a version token")
+        .to_string();
+
+    // A full-replacement edit that explicitly unassigns the desk.
+    let mut graph = graph_args("owned", "Owned flow", "Worker");
+    graph["ownerDesk"] = Value::Null;
+    graph["expected_version"] = json!(version);
+    let updated = UpdateWorkflowTool::new(fx.admin())
+        .execute(graph)
+        .await
+        .unwrap();
+    assert!(!updated.is_error, "{}", err_text(&updated));
+
+    let reloaded =
+        crate::company::load_workflow_union(Some(fx.source_dir()), &fx.overlays().await, "owned")
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        reloaded.owner_desk, None,
+        "an agent explicitly sending ownerDesk: null must clear the stored desk, not restore it"
+    );
+}
+
+/// Sibling of the null case above: an explicit all-whitespace `ownerDesk`
+/// carries the same "I thought about this and I want it unowned" signal as
+/// `null` — `normalize_owner_desk` already treats blank the same as absent
+/// for validation purposes, and this pins that the update tool's presence
+/// check (keyed on the JSON field existing, not on what it normalizes to)
+/// clears rather than preserves for this shape too.
+#[tokio::test]
+async fn an_update_can_explicitly_clear_owner_desk_with_blank_string() {
+    let fx = Fixture::new();
+    fx.put_overlay("owned", OWNED_TOML).await;
+
+    let read = ReadWorkflowTool::new(fx.admin())
+        .execute(json!({ "id": "owned" }))
+        .await
+        .unwrap();
+    let version = data(&read)["version"]
+        .as_str()
+        .expect("a version token")
+        .to_string();
+
+    let mut graph = graph_args("owned", "Owned flow", "Worker");
+    graph["ownerDesk"] = json!("   ");
+    graph["expected_version"] = json!(version);
+    let updated = UpdateWorkflowTool::new(fx.admin())
+        .execute(graph)
+        .await
+        .unwrap();
+    assert!(!updated.is_error, "{}", err_text(&updated));
+
+    let reloaded =
+        crate::company::load_workflow_union(Some(fx.source_dir()), &fx.overlays().await, "owned")
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        reloaded.owner_desk, None,
+        "an agent explicitly sending a blank ownerDesk must clear the stored desk, not restore it"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 5. delete
 // ---------------------------------------------------------------------------
