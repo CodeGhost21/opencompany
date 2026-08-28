@@ -942,7 +942,7 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             // comment 3875167298). It always wins over leaked text/reasoning,
             // independent of how the turn finished.
             content = refusal;
-        } else if genuinely_finished && content.is_empty() {
+        } else if genuinely_finished && content_is_null && content.is_empty() {
             // Reasoning-model fallback: a reasoning-only turn returns
             // `content: null` with the visible text under `reasoning` /
             // `reasoning_content` (string or array-of-parts). Only promote it
