@@ -3122,7 +3122,7 @@ async fn chat_history_response(
     peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
-    let viewer = history_viewer(headers, state, company, peer).await?;
+    let (viewer, is_admin) = history_viewer(headers, state, company, peer).await?;
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref()).await?;
     let limit = query
         .limit
