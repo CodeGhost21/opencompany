@@ -4784,8 +4784,8 @@ pub(crate) fn create_workflow_parameters_schema() -> Value {
                     "description": "An optional one-line description of what the workflow does."
                 },
                 "ownerDesk": {
-                    "type": "string",
-                    "description": "Optional owning desk id. Use the stable desk id, not its display name."
+                    "type": ["string", "null"],
+                    "description": "Optional owning desk id. Use the stable desk id, not its display name. On update_workflow, send `null` to explicitly unassign the desk; omit the key to leave the current desk untouched."
                 },
                 "nodes": {
                     "type": "array",
@@ -8812,6 +8812,32 @@ name = "Morning"
              persisted TOML, matching every other boundary that builds a \
              RawWorkflow: {}",
             record.overlay_workflows[0].toml
+        );
+    }
+
+    /// PR #1882 review (bot finding on `orchestrator.rs:4788`).
+    /// `UpdateWorkflowTool`'s description (built from this same schema via
+    /// `create_graph_schema`) tells the agent to send `"ownerDesk": null` to
+    /// unassign a desk, and `an_update_can_explicitly_clear_owner_desk_with_null`
+    /// proves `execute` honors that. But `execute` is called directly in that
+    /// test, bypassing the boundary a schema-constrained tool-calling client
+    /// actually enforces: before this fix `ownerDesk` was declared bare
+    /// `"type": "string"`, so such a client would reject the `null` argument
+    /// before the call ever reached `execute`'s presence check, leaving the
+    /// advertised clear operation reachable in tests but not in the field.
+    #[test]
+    fn owner_desk_schema_permits_null() {
+        let schema = create_workflow_parameters_schema();
+        let owner_desk_type = &schema["properties"]["ownerDesk"]["type"];
+        let permits_null = owner_desk_type
+            .as_array()
+            .map(|types| types.iter().any(|t| t == "null"))
+            .unwrap_or(false);
+        assert!(
+            permits_null,
+            "ownerDesk schema type must include \"null\" so a schema-constrained \
+             client can send the explicit-clear value the tool description \
+             promises; got {owner_desk_type:?}"
         );
     }
 
