@@ -435,6 +435,42 @@ pub(crate) mod append_probe {
             .copied()
             .unwrap_or(0)
     }
+
+    /// The order in which [`super::write_atomic_bytes`] publish renames have
+    /// landed, globally, since the process started.
+    ///
+    /// A multi-file save (`FsCompanyStore::save_gated` writes `company.toml`
+    /// then `meta.json`) has a crash-ordering property neither
+    /// [`counts`] nor [`atomic_syncs`] can answer: *which file's publish is
+    /// observable first* if the process dies between the two. Each is
+    /// individually atomic+durable (that is what those two probes prove), but
+    /// nothing about a single path's own counters says anything about a
+    /// **different** path's write landing before or after it. This log does:
+    /// it is one global, append-only sequence of every publish, in the order
+    /// `write_atomic_bytes` actually completed them.
+    static WRITE_ORDER: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+    pub(crate) fn record_write_order(path: &Path) {
+        WRITE_ORDER
+            .lock()
+            .expect("append-probe poisoned")
+            .push(key(path));
+    }
+
+    /// The subsequence of the global publish order restricted to `paths`,
+    /// in the order they actually landed. Tests use their own unique temp
+    /// paths, so restricting to the paths under test is enough to make this
+    /// deterministic even though the log itself is never cleared.
+    pub(crate) fn write_order_for(paths: &[&Path]) -> Vec<PathBuf> {
+        let keys: Vec<PathBuf> = paths.iter().map(|p| key(p)).collect();
+        WRITE_ORDER
+            .lock()
+            .expect("append-probe poisoned")
+            .iter()
+            .filter(|p| keys.contains(p))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Test-only fault injection for [`write_atomic_bytes`].
@@ -1203,6 +1239,13 @@ async fn commit_staged(path: &Path, tmp: PathBuf) -> std::result::Result<(), Com
             published: true,
             error,
         })?;
+        // Records the order this publish landed in, relative to any other
+        // `write_atomic` / `commit_staged` call — see
+        // `append_probe::write_order_for`'s doc comment for why a multi-file
+        // save (`FsCompanyStore::save_gated`) needs this and a per-path
+        // counter alone cannot answer it.
+        #[cfg(test)]
+        append_probe::record_write_order(&owned_path);
         Ok::<_, CommitFailure>(())
     })
     .await;
@@ -1609,6 +1652,22 @@ struct Meta {
     /// [`crate::ports::types::CompanyRecord::activation_completed_at`].
     #[serde(default)]
     activation_completed_at: Option<u64>,
+    /// Whether this bundle has ever been saved by activation-aware code — the
+    /// on-disk marker behind [`CompanyStore::activation_gate_seen`]
+    /// (PR #1875 review finding).
+    ///
+    /// `#[serde(default)]` reads a meta.json written before this field
+    /// existed as `false`: a genuinely pre-#1843 record. `save` below always
+    /// writes `true`, since every save from this build understands the
+    /// activation funnel — which is what makes a *second* save of the same
+    /// bundle (e.g. a restart before the operator finishes onboarding)
+    /// distinguishable from a bundle that predates activation tracking
+    /// entirely, even though both can otherwise have the identical
+    /// `lifecycle == "running"`, `activation_completed_at: None` shape.
+    ///
+    /// [`CompanyStore::activation_gate_seen`]: crate::ports::store::CompanyStore::activation_gate_seen
+    #[serde(default)]
+    activation_gate_seen: bool,
 }
 
 impl Default for Meta {
@@ -1635,6 +1694,7 @@ impl Default for Meta {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            activation_gate_seen: false,
         }
     }
 }
@@ -1659,124 +1719,61 @@ impl FsCompanyStore {
     fn bundle(&self, id: &CompanyId) -> Bundle {
         Bundle::new(self.root.clone(), id)
     }
-}
 
-#[async_trait]
-impl CompanyStore for FsCompanyStore {
-    async fn load(&self, id: &CompanyId) -> Result<Option<CompanyRecord>> {
-        let bundle = self.bundle(id);
-
-        // Issue #1828 review, finding on comment 3879048530: `commit_lock` in
-        // `save` (above) only serializes the *commit* phase across a
-        // cancelled caller's orphaned detached task — it says nothing about
-        // `load`, which used to read `company.toml`/`meta.json` straight off
-        // disk with no lock at all. A fresh caller's `company_write_lock` is
-        // freed the instant a cancelled caller's frame drops, so a fresh
-        // load-mutate-save cycle (every real call site — `policy.rs`,
-        // `team.rs`, …) could call `load` immediately, while the previous
-        // caller's orphaned commit was still parked mid-rename, and read the
-        // pre-commit record. That fresh caller's own `save` still blocks on
-        // `commit_lock` until the orphaned commit finishes, so the two
-        // commits never interleave on disk — but the fresh caller had
-        // already merged its change onto stale data, so its save durably
-        // *reverted* the orphaned commit's already-landed change the instant
-        // it finally landed. A lost update, not a file-corruption race:
-        // `commit_lock` alone cannot see it, because both commits still
-        // succeed, in the correct order, on well-formed files.
-        //
-        // Acquiring and releasing the same `path_lock(bundle.dir())` the
-        // commit phase holds, before reading either file, is a barrier:
-        // `load` cannot return until any commit already in flight for this
-        // bundle has fully finished renaming. It is safe to release
-        // immediately rather than hold it across both reads below — the
-        // per-company `company_write_lock` every load-mutate-save caller
-        // acquires before `load` and keeps through `save` rules out any
-        // *other* legitimate writer starting a new commit before this same
-        // caller's own `save` reaches `commit_lock`, so the only commit this
-        // barrier ever needs to wait out is the one already in flight when
-        // `load` was called.
-        {
-            let _commit_barrier = path_lock(bundle.dir()).lock_owned().await;
-        }
-
-        let toml_path = bundle.company_toml();
-        let toml_src = match tokio::fs::read_to_string(&toml_path).await {
-            Ok(src) => src,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(io_err(&toml_path, e)),
-        };
-        // `from_stored_toml`, not `toml::from_str`: a stored company is read far
-        // more often than it is provisioned, and the global baseline has to
-        // reach the companies that already exist — see
-        // `CompanyManifest::apply_globals`.
-        let manifest = crate::company::CompanyManifest::from_stored_toml(&toml_src)
-            .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
-
-        let meta_src = read_optional(&bundle.meta_json()).await?;
-        // A bundle with no meta file yet is a running company with no overlays —
-        // which is exactly `Meta::default()`. Carrying that through one value
-        // rather than a positional tuple keeps adding an overlay collection a
-        // one-line change here instead of a four-place one.
-        let meta: Meta = if meta_src.trim().is_empty() {
-            Meta::default()
-        } else {
-            serde_json::from_str(&meta_src)?
-        };
-
-        // The ledger is read leniently, and this is the only place in the fs
-        // backend that is (issue #387). Every other read here is either a
-        // rewriter — where skipping would delete the damaged line on write-back
-        // — or a request-time reader, where a failure costs one request. This
-        // one is neither: it is on the boot path, so a single malformed
-        // accounting line used to take the whole company down, and the repair
-        // console an operator would use sits behind the boot it killed.
-        //
-        // The skipped lines stay on disk untouched. Nothing in `load` writes,
-        // and `append_ledger` only appends, so the file after a tolerated boot
-        // is byte-identical to the file before it.
-        let ledger_path = bundle.ledger_jsonl();
-        let (ledger, skipped) = read_jsonl_lenient::<LedgerEntry>(&ledger_path).await?;
-        if let Some(first) = skipped.first() {
-            // `error!`, not `warn!`: the company is running on an incomplete
-            // ledger, so its reported spend is wrong until someone repairs the
-            // file. Loud once per load, naming the file and the first bad line —
-            // never the line's contents, which are operator/agent free text.
-            tracing::error!(
-                company = %id,
-                ledger = %ledger_path.display(),
-                skipped = skipped.len(),
-                first_line = first.line,
-                first_bytes = first.bytes,
-                error = %first.message,
-                "[store] ledger lines could not be parsed; they were skipped so the company can still boot, and left on disk for repair — reported spend is incomplete until they are fixed"
-            );
-        }
-
-        Ok(Some(CompanyRecord {
-            overlay_agent_edits: meta.overlay_agent_edits,
-            overlay_retired_agents: meta.overlay_retired_agents,
-            id: id.clone(),
-            manifest,
-            ledger,
-            lifecycle: meta.lifecycle,
-            overlay_agents: meta.overlay_agents,
-            overlay_desk_members: meta.overlay_desk_members,
-            overlay_desk_order: meta.overlay_desk_order,
-            overlay_desks: meta.overlay_desks,
-            overlay_workflows: meta.overlay_workflows,
-            overlay_budgets: meta.overlay_budgets,
-            overlay_policy: meta.overlay_policy,
-            overlay_tool_grants: meta.overlay_tool_grants,
-            overlay_desk_tools: meta.overlay_desk_tools,
-            disabled_workflows: meta.disabled_workflows,
-            template_provenance: meta.template_provenance,
-            setup: meta.setup,
-            name_confirmed: meta.name_confirmed,
-            activation_completed_at: meta.activation_completed_at,
-        }))
-    }
-
-    async fn save(&self, record: &CompanyRecord) -> Result<()> {
+    /// The shared body of `save` and `save_importing`: writes the meta file
+    /// and manifest, stamping `activation_gate_seen` with whatever the
+    /// caller passes rather than always `true`. See
+    /// `CompanyStore::save_importing`'s doc comment for why the two callers
+    /// need different values.
+    ///
+    /// ## Write order depends on whether the bundle already exists (PR #1875
+    /// review finding)
+    ///
+    /// `FsCompanyStore::load` decides whether a bundle exists **at all** by
+    /// whether `company.toml` is present — `meta.json` is read only once that
+    /// check has already passed. That makes `company.toml` the file whose
+    /// existence *publishes* the bundle. A crash between the two writes
+    /// always leaves one of them stale, and which file needs to be the
+    /// stale one flips depending on whether this call is a first-time
+    /// publish or an update to a bundle that is already live:
+    ///
+    /// - **First publish** (no `company.toml` yet): `meta.json` first. A
+    ///   crash after `company.toml`'s rename but before `meta.json`'s leaves
+    ///   a bundle `load` reports as existing, with `lifecycle == "running"`
+    ///   and — because `meta.json` is missing — `activation_gate_seen`
+    ///   defaulting to `false`. That is byte-for-byte the shape
+    ///   `RuntimeBuilder::build`'s grandfather migration matches on, so a
+    ///   fresh company's interrupted first boot gets silently auto-activated
+    ///   (issue #1843). Meta-first fails toward the *safe* state instead: a
+    ///   crash after `meta.json`'s rename but before `company.toml`'s leaves
+    ///   `company.toml` still absent, so `load` reports the bundle as not
+    ///   existing yet — worst case a retried save, never an unseen
+    ///   activation.
+    ///
+    /// - **Update to an existing bundle**: `company.toml` first — the
+    ///   opposite order, and load-bearing for `PATCH {scope}`'s name-confirm
+    ///   write (`company_profile::patch_company`, issue #1844), which flips
+    ///   `name_confirmed` and the manifest name in the same save. Meta-first
+    ///   here would durably land `name_confirmed: true` while `company.toml`
+    ///   still carried the pre-rename placeholder name if the process died
+    ///   between the two writes — and because `name_confirmed` is what hides
+    ///   the console's only rename control, that mismatch has no way back
+    ///   through the UI; the next rebuild would carry the *wrong* name
+    ///   forward forever, confirmed. Manifest-first fails toward the
+    ///   recoverable state instead: a crash after `company.toml`'s rename but
+    ///   before `meta.json`'s leaves `load` reading the OLD `meta.json` —
+    ///   `name_confirmed` still `false` — so the console simply re-shows the
+    ///   rename step, and resubmitting it is idempotent by design (see
+    ///   `patch_company`'s own doc comment).
+    ///
+    ///   This does not reopen the first-publish hazard above: that hazard
+    ///   needs a **missing** `meta.json` to make `load` default
+    ///   `activation_gate_seen` to `false` via `Meta::default()`, which can
+    ///   only happen on a bundle's very first save. An update's `meta.json`
+    ///   already exists from a prior save, so if this save's rewrite of it
+    ///   never lands, `load` falls back to that OLD `meta.json` — never a
+    ///   default — and its gate marker is untouched either way.
+    async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
         let bundle = self.bundle(&record.id);
         bundle.ensure_dirs().await?;
 
@@ -1801,6 +1798,7 @@ impl CompanyStore for FsCompanyStore {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            activation_gate_seen,
         };
         // Write order depends on whether the bundle already exists (issue
         // #1828 review, second round).
@@ -1982,6 +1980,162 @@ impl CompanyStore for FsCompanyStore {
         commit_rx
             .await
             .map_err(|_| OpenCompanyError::Store("commit task dropped before completing".into()))?
+    }
+}
+
+#[async_trait]
+impl CompanyStore for FsCompanyStore {
+    async fn load(&self, id: &CompanyId) -> Result<Option<CompanyRecord>> {
+        let bundle = self.bundle(id);
+
+        // Issue #1828 review, finding on comment 3879048530: `commit_lock` in
+        // `save` (above) only serializes the *commit* phase across a
+        // cancelled caller's orphaned detached task — it says nothing about
+        // `load`, which used to read `company.toml`/`meta.json` straight off
+        // disk with no lock at all. A fresh caller's `company_write_lock` is
+        // freed the instant a cancelled caller's frame drops, so a fresh
+        // load-mutate-save cycle (every real call site — `policy.rs`,
+        // `team.rs`, …) could call `load` immediately, while the previous
+        // caller's orphaned commit was still parked mid-rename, and read the
+        // pre-commit record. That fresh caller's own `save` still blocks on
+        // `commit_lock` until the orphaned commit finishes, so the two
+        // commits never interleave on disk — but the fresh caller had
+        // already merged its change onto stale data, so its save durably
+        // *reverted* the orphaned commit's already-landed change the instant
+        // it finally landed. A lost update, not a file-corruption race:
+        // `commit_lock` alone cannot see it, because both commits still
+        // succeed, in the correct order, on well-formed files.
+        //
+        // Acquiring and releasing the same `path_lock(bundle.dir())` the
+        // commit phase holds, before reading either file, is a barrier:
+        // `load` cannot return until any commit already in flight for this
+        // bundle has fully finished renaming. It is safe to release
+        // immediately rather than hold it across both reads below — the
+        // per-company `company_write_lock` every load-mutate-save caller
+        // acquires before `load` and keeps through `save` rules out any
+        // *other* legitimate writer starting a new commit before this same
+        // caller's own `save` reaches `commit_lock`, so the only commit this
+        // barrier ever needs to wait out is the one already in flight when
+        // `load` was called.
+        {
+            let _commit_barrier = path_lock(bundle.dir()).lock_owned().await;
+        }
+
+        let toml_path = bundle.company_toml();
+        let toml_src = match tokio::fs::read_to_string(&toml_path).await {
+            Ok(src) => src,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&toml_path, e)),
+        };
+        // `from_stored_toml`, not `toml::from_str`: a stored company is read far
+        // more often than it is provisioned, and the global baseline has to
+        // reach the companies that already exist — see
+        // `CompanyManifest::apply_globals`.
+        let manifest = crate::company::CompanyManifest::from_stored_toml(&toml_src)
+            .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
+
+        let meta_src = read_optional(&bundle.meta_json()).await?;
+        // A bundle with no meta file yet is a running company with no overlays —
+        // which is exactly `Meta::default()`. Carrying that through one value
+        // rather than a positional tuple keeps adding an overlay collection a
+        // one-line change here instead of a four-place one.
+        let meta: Meta = if meta_src.trim().is_empty() {
+            Meta::default()
+        } else {
+            serde_json::from_str(&meta_src)?
+        };
+
+        // The ledger is read leniently, and this is the only place in the fs
+        // backend that is (issue #387). Every other read here is either a
+        // rewriter — where skipping would delete the damaged line on write-back
+        // — or a request-time reader, where a failure costs one request. This
+        // one is neither: it is on the boot path, so a single malformed
+        // accounting line used to take the whole company down, and the repair
+        // console an operator would use sits behind the boot it killed.
+        //
+        // The skipped lines stay on disk untouched. Nothing in `load` writes,
+        // and `append_ledger` only appends, so the file after a tolerated boot
+        // is byte-identical to the file before it.
+        let ledger_path = bundle.ledger_jsonl();
+        let (ledger, skipped) = read_jsonl_lenient::<LedgerEntry>(&ledger_path).await?;
+        if let Some(first) = skipped.first() {
+            // `error!`, not `warn!`: the company is running on an incomplete
+            // ledger, so its reported spend is wrong until someone repairs the
+            // file. Loud once per load, naming the file and the first bad line —
+            // never the line's contents, which are operator/agent free text.
+            tracing::error!(
+                company = %id,
+                ledger = %ledger_path.display(),
+                skipped = skipped.len(),
+                first_line = first.line,
+                first_bytes = first.bytes,
+                error = %first.message,
+                "[store] ledger lines could not be parsed; they were skipped so the company can still boot, and left on disk for repair — reported spend is incomplete until they are fixed"
+            );
+        }
+
+        Ok(Some(CompanyRecord {
+            overlay_agent_edits: meta.overlay_agent_edits,
+            overlay_retired_agents: meta.overlay_retired_agents,
+            id: id.clone(),
+            manifest,
+            ledger,
+            lifecycle: meta.lifecycle,
+            overlay_agents: meta.overlay_agents,
+            overlay_desk_members: meta.overlay_desk_members,
+            overlay_desk_order: meta.overlay_desk_order,
+            overlay_desks: meta.overlay_desks,
+            overlay_workflows: meta.overlay_workflows,
+            overlay_budgets: meta.overlay_budgets,
+            overlay_policy: meta.overlay_policy,
+            overlay_tool_grants: meta.overlay_tool_grants,
+            overlay_desk_tools: meta.overlay_desk_tools,
+            disabled_workflows: meta.disabled_workflows,
+            template_provenance: meta.template_provenance,
+            setup: meta.setup,
+            name_confirmed: meta.name_confirmed,
+            activation_completed_at: meta.activation_completed_at,
+        }))
+    }
+
+    async fn save(&self, record: &CompanyRecord) -> Result<()> {
+        // Every ordinary `save` call against a `running` company is, by
+        // definition, made by code that understands the activation funnel —
+        // see `CompanyStore::activation_gate_seen`'s doc comment. That
+        // reasoning does NOT extend to a `paused`/`archived` record still
+        // waiting on its own first `running` boot to decide the marker (PR
+        // #1875 review finding, third round — mongodb.rs/sqlite.rs already
+        // carry this): `RuntimeBuilder::build`'s "existing but not running"
+        // arm carries the marker forward untouched for exactly this reason,
+        // but a write that reaches this method directly — bypassing `build`
+        // entirely, e.g. `company_logo::put_logo`'s plain load-modify-save,
+        // which never checks lifecycle — would stamp `true` regardless and
+        // poison the grandfather arm's `!gate_already_seen` guard before the
+        // record's own migration boot ever runs. So: stamp `true` only once
+        // the record itself says `running`; otherwise preserve whatever is
+        // already on file, same as `build`'s own "not running" arm does.
+        if record.lifecycle == "running" {
+            self.save_gated(record, true).await
+        } else {
+            let gate_seen = self.activation_gate_seen(&record.id).await?;
+            self.save_gated(record, gate_seen).await
+        }
+    }
+
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        self.save_gated(record, gate_seen).await
+    }
+
+    async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {
+        let bundle = self.bundle(id);
+        let meta_src = read_optional(&bundle.meta_json()).await?;
+        if meta_src.trim().is_empty() {
+            // No meta.json at all: this bundle has never been saved by any
+            // code, activation-aware or not.
+            return Ok(false);
+        }
+        let meta: Meta = serde_json::from_str(&meta_src)?;
+        Ok(meta.activation_gate_seen)
     }
 
     async fn list(&self) -> Result<Vec<CompanySummary>> {
@@ -3287,6 +3441,16 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_paused_ordinary_save_preserves_activation_gate() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_paused_ordinary_save_preserves_activation_gate(Arc::new(
+            FsCompanyStore::new(&root),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
     async fn conformance_append_only_event_and_ledger() {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
@@ -3744,21 +3908,119 @@ mod test {
         );
     }
 
-    /// **Issue #1828 review**: `provision.rs`'s durable collision check calls
-    /// `load` before every create/reset, and `load` reads a bundle that has
-    /// `company.toml` but no `meta.json` as an *existing* company
-    /// (`Meta::default()` — deliberate, load-bearing for real bundles that
-    /// predate `meta.json`, see that impl's doc comment). If `save` ever left
-    /// exactly that combination behind after a failed write, the pre-check
-    /// would return `company_exists` forever over a company that was never
-    /// actually provisioned, permanently blocking retry.
+    #[tokio::test]
+    async fn save_publishes_the_gate_marker_before_the_manifest() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: sample_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+
+        let order = append_probe::write_order_for(&[&bundle.meta_json(), &bundle.company_toml()]);
+        assert_eq!(
+            order,
+            vec![bundle.meta_json(), bundle.company_toml()],
+            "meta.json (the gate marker) must land before company.toml (what \
+             `load` treats as the bundle's existence) — reversed, an \
+             interrupted save can auto-activate a fresh company as a legacy \
+             one on its next boot"
+        );
+    }
+
+    /// **PR #1875 review finding**: the opposite ordering rule from the test
+    /// above, for the opposite case — updating a bundle that is already live
+    /// must publish `company.toml` before `meta.json`.
     ///
-    /// `save` writes `meta.json` before `company.toml` for exactly this
-    /// reason: a failure between the two writes then always leaves
-    /// `company.toml` absent, which `load` already reads as "no such
-    /// company." This proves it by injecting a failure on the first write a
-    /// fresh `save` performs and asserting the id still reads back as
-    /// absent — never as an existing company — and that a retry succeeds.
+    /// Reversed (the first-publish order applied to an update too), a crash
+    /// between the two writes during `PATCH {scope}`'s name-confirm save
+    /// (`company_profile::patch_company`) can durably land `name_confirmed:
+    /// true` while `company.toml` still carries the pre-rename placeholder
+    /// name — and since `name_confirmed` is what hides the console's only
+    /// rename control, that mismatched pair has no way back through the UI.
+    /// Same reasoning as the sibling test: only the *order* the publishes
+    /// land in distinguishes the two outcomes, which is what
+    /// `append_probe::write_order_for` records.
+    #[tokio::test]
+    async fn updating_an_existing_bundle_publishes_the_manifest_before_the_gate_marker() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        let bundle = Bundle::new(root.clone(), &id);
+
+        let first_save = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: sample_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+        // Publish the bundle for the first time — the create-path branch,
+        // unaffected by this test's assertion.
+        store.save(&first_save).await.unwrap();
+
+        // The exact write `patch_company` performs: an existing bundle,
+        // `name_confirmed` flips to `true` alongside the manifest name.
+        let mut second_save = first_save;
+        second_save.manifest.company.name = "Operator Chosen Name".to_string();
+        second_save.name_confirmed = true;
+        store.save(&second_save).await.unwrap();
+
+        let order = append_probe::write_order_for(&[&bundle.meta_json(), &bundle.company_toml()]);
+        // The log is global across both saves; the update's pair is the last
+        // two entries.
+        let update_order = &order[order.len() - 2..];
+        assert_eq!(
+            update_order,
+            vec![bundle.company_toml(), bundle.meta_json()],
+            "an update to an existing bundle must publish company.toml (the \
+             name) before meta.json (name_confirmed) — reversed, an \
+             interrupted rename save can durably confirm the wrong name with \
+             no way back through the console"
+        );
+    }
+
     #[tokio::test]
     async fn a_save_interrupted_after_the_first_write_still_reads_back_as_absent() {
         let root_dir = tmp_root();

@@ -789,6 +789,35 @@ impl MongoStore {
         }
         Ok(out)
     }
+
+    /// The shared body of `save` and `save_importing`: upserts the company
+    /// document, stamping `overlay_json`'s `activation_gate_seen` with
+    /// whatever the caller passes rather than always `true`. See
+    /// `CompanyStore::save_importing`'s doc comment for why the two callers
+    /// need different values.
+    async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
+        let manifest_toml = toml::to_string(&record.manifest)
+            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
+        let overlay_json = serde_json::to_string(&OverlayBlob::from_record_gated(
+            record,
+            activation_gate_seen,
+        ))?;
+        // Append-only: `save` upserts the company document, never the ledger.
+        self.collection("companies")
+            .update_one(
+                doc! {"company_id": record.id.as_ref()},
+                doc! {"$set": {
+                    "manifest_toml": manifest_toml,
+                    "lifecycle": &record.lifecycle,
+                    "overlay_json": overlay_json,
+                    "updated_ms": now_millis() as i64,
+                }},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -854,24 +883,56 @@ impl CompanyStore for MongoStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        let manifest_toml = toml::to_string(&record.manifest)
-            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        let overlay_json = serde_json::to_string(&OverlayBlob::from_record(record))?;
-        // Append-only: `save` upserts the company document, never the ledger.
-        self.collection("companies")
-            .update_one(
-                doc! {"company_id": record.id.as_ref()},
-                doc! {"$set": {
-                    "manifest_toml": manifest_toml,
-                    "lifecycle": &record.lifecycle,
-                    "overlay_json": overlay_json,
-                    "updated_ms": now_millis() as i64,
-                }},
-            )
-            .with_options(UpdateOptions::builder().upsert(true).build())
+        // Every ordinary `save` call against a `running` company is, by
+        // definition, made by code that understands the activation funnel —
+        // see `CompanyStore::activation_gate_seen`'s doc comment. That
+        // reasoning does NOT extend to a `paused`/`archived` record still
+        // waiting on its own first `running` boot to decide the marker (PR
+        // #1875 review finding, second round): `RuntimeBuilder::build`'s
+        // "existing but not running" arm carries the marker forward
+        // untouched for exactly this reason, but a write that reaches this
+        // method directly — bypassing `build` entirely, e.g.
+        // `company_logo::put_logo`'s plain load-modify-save, which never
+        // checks lifecycle — would stamp `true` regardless and poison the
+        // grandfather arm's `!gate_already_seen` guard before the record's
+        // own migration boot ever runs. So: stamp `true` only once the
+        // record itself says `running`; otherwise preserve whatever is
+        // already on file, same as `build`'s own "not running" arm does.
+        if record.lifecycle == "running" {
+            self.save_gated(record, true).await
+        } else {
+            let gate_seen = self.activation_gate_seen(&record.id).await?;
+            self.save_gated(record, gate_seen).await
+        }
+    }
+
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        self.save_gated(record, gate_seen).await
+    }
+
+    /// PR #1875 review finding: the hosted platform selects this backend for
+    /// tenant storage (`OPENCOMPANY_STORAGE=mongodb`), so inheriting the
+    /// trait's always-`false` default here — rather than reading the same
+    /// `overlay_json` field `save` above always stamps `activation_gate_seen:
+    /// true` into (via `OverlayBlob::from_record`) — would let a genuinely
+    /// new tenant's *second* boot go unnoticed as a legacy pre-#1843 record
+    /// and get silently auto-activated, defeating the fix `save` above
+    /// exists to carry. A company with no document at all reads `false`,
+    /// matching `FsCompanyStore::activation_gate_seen`'s own "no bundle
+    /// written yet" case.
+    async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {
+        let Some(company) = self
+            .collection("companies")
+            .find_one(doc! {"company_id": id.as_ref()})
             .await
-            .map_err(mongo_err)?;
-        Ok(())
+            .map_err(mongo_err)?
+        else {
+            return Ok(false);
+        };
+        match company.get_str("overlay_json") {
+            Ok(json) => Ok(OverlayBlob::parse(json)?.activation_gate_seen),
+            Err(_) => Ok(false),
+        }
     }
 
     async fn list(&self) -> Result<Vec<CompanySummary>> {
@@ -5555,6 +5616,13 @@ mod test {
     async fn conformance_isolation_by_company() {
         let Some(s) = store().await else { return };
         conformance::assert_isolation_by_company(s.clone(), s.clone(), s.clone(), s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_paused_ordinary_save_preserves_activation_gate() {
+        let Some(s) = store().await else { return };
+        conformance::assert_paused_ordinary_save_preserves_activation_gate(s.clone()).await;
         drop_db(&s).await;
     }
 

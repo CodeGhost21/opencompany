@@ -724,6 +724,40 @@ impl SqliteStore {
             .or_insert_with(|| broadcast::channel(256).0)
             .clone()
     }
+
+    /// The shared body of `save` and `save_importing`: upserts the company
+    /// row, stamping `overlay_json`'s `activation_gate_seen` with whatever
+    /// the caller passes rather than always `true`. See
+    /// `CompanyStore::save_importing`'s doc comment for why the two callers
+    /// need different values.
+    async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
+        let manifest_toml = toml::to_string(&record.manifest)
+            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
+        let overlay_json = serde_json::to_string(&OverlayBlob::from_record_gated(
+            record,
+            activation_gate_seen,
+        ))?;
+        let conn = self.conn();
+        // Append-only: `save` upserts the company row and never touches ledger.
+        conn.execute(
+            "INSERT INTO company (company_id, manifest_toml, lifecycle, overlay_json, updated_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(company_id) DO UPDATE SET \
+               manifest_toml = excluded.manifest_toml, \
+               lifecycle = excluded.lifecycle, \
+               overlay_json = excluded.overlay_json, \
+               updated_ms = excluded.updated_ms",
+            params![
+                record.id.as_ref(),
+                manifest_toml,
+                record.lifecycle,
+                overlay_json,
+                now_millis() as i64
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -788,29 +822,55 @@ impl CompanyStore for SqliteStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        let manifest_toml = toml::to_string(&record.manifest)
-            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        let overlay_json = serde_json::to_string(&OverlayBlob::from_record(record))?;
+        // Every ordinary `save` call against a `running` company is, by
+        // definition, made by code that understands the activation funnel —
+        // see `CompanyStore::activation_gate_seen`'s doc comment. That
+        // reasoning does NOT extend to a `paused`/`archived` record still
+        // waiting on its own first `running` boot to decide the marker (PR
+        // #1875 review finding, second round): `RuntimeBuilder::build`'s
+        // "existing but not running" arm carries the marker forward
+        // untouched for exactly this reason, but a write that reaches this
+        // method directly — bypassing `build` entirely, e.g.
+        // `company_logo::put_logo`'s plain load-modify-save, which never
+        // checks lifecycle — would stamp `true` regardless and poison the
+        // grandfather arm's `!gate_already_seen` guard before the record's
+        // own migration boot ever runs. So: stamp `true` only once the
+        // record itself says `running`; otherwise preserve whatever is
+        // already on file, same as `build`'s own "not running" arm does.
+        if record.lifecycle == "running" {
+            self.save_gated(record, true).await
+        } else {
+            let gate_seen = self.activation_gate_seen(&record.id).await?;
+            self.save_gated(record, gate_seen).await
+        }
+    }
+
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        self.save_gated(record, gate_seen).await
+    }
+
+    /// PR #1875 review finding: `overlay_json` is the same blob `save` above
+    /// always stamps `activation_gate_seen: true` into (via
+    /// `OverlayBlob::from_record`), so reading it back here — rather than
+    /// inheriting the trait's always-`false` default — is what lets a
+    /// sqlite-backed company's second boot tell itself apart from a genuine
+    /// pre-#1843 legacy record. A row that has never been saved at all reads
+    /// `false`, matching `FsCompanyStore::activation_gate_seen`'s own "no
+    /// bundle written yet" case.
+    async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {
         let conn = self.conn();
-        // Append-only: `save` upserts the company row and never touches ledger.
-        conn.execute(
-            "INSERT INTO company (company_id, manifest_toml, lifecycle, overlay_json, updated_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
-             ON CONFLICT(company_id) DO UPDATE SET \
-               manifest_toml = excluded.manifest_toml, \
-               lifecycle = excluded.lifecycle, \
-               overlay_json = excluded.overlay_json, \
-               updated_ms = excluded.updated_ms",
-            params![
-                record.id.as_ref(),
-                manifest_toml,
-                record.lifecycle,
-                overlay_json,
-                now_millis() as i64
-            ],
-        )
-        .map_err(sql_err)?;
-        Ok(())
+        let overlay_json: Option<String> = conn
+            .query_row(
+                "SELECT overlay_json FROM company WHERE company_id = ?1",
+                params![id.as_ref()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(overlay_json) = overlay_json else {
+            return Ok(false);
+        };
+        Ok(OverlayBlob::parse(&overlay_json)?.activation_gate_seen)
     }
 
     async fn list(&self) -> Result<Vec<CompanySummary>> {
@@ -4076,6 +4136,12 @@ mod test {
     async fn conformance_isolation_by_company() {
         let s = store();
         conformance::assert_isolation_by_company(s.clone(), s.clone(), s.clone(), s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_paused_ordinary_save_preserves_activation_gate() {
+        let s = store();
+        conformance::assert_paused_ordinary_save_preserves_activation_gate(s).await;
     }
 
     #[tokio::test]

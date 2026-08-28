@@ -440,6 +440,28 @@ pub async fn assert_isolation_by_company(
         context.list(&beta, "").await.unwrap().is_empty(),
         "beta context leaked"
     );
+    // `beta` was never saved: the activation gate reads "never seen", exactly
+    // like a company with no bundle/document/row at all.
+    assert!(
+        !store.activation_gate_seen(&beta).await.unwrap(),
+        "a company that was never saved must report the activation gate as \
+         never seen"
+    );
+    // PR #1875 review finding: `alpha` WAS just saved, by this same
+    // activation-aware build, so the gate must already read "seen" —
+    // immediately, with no second save. A backend that leaves this at the
+    // `CompanyStore` trait's always-`false` default cannot tell a fresh
+    // company's second boot apart from a genuine pre-#1843 legacy record, and
+    // `RuntimeBuilder::build`'s grandfather back-fill would silently
+    // auto-activate every such company on that backend the moment it
+    // restarts before onboarding finishes — the exact bug #1843 fixed,
+    // reopened for whichever backend forgets this.
+    assert!(
+        store.activation_gate_seen(&alpha).await.unwrap(),
+        "a company just saved by activation-aware code must have the \
+         activation gate marked as seen — a backend inheriting the trait's \
+         always-false default would re-open the #1843 auto-activation bug"
+    );
 
     // `alpha` still sees its own data.
     let loaded = store.load(&alpha).await.unwrap().expect("alpha record");
@@ -610,6 +632,63 @@ pub async fn assert_isolation_by_company(
         1
     );
     assert_eq!(context.list(&alpha, "").await.unwrap().len(), 1);
+}
+
+/// PR #1875 review finding: `CompanyStore::save` stamps `activation_gate_seen:
+/// true` unconditionally, on the reasoning (its own doc comment) that "every
+/// OTHER call site really is activation-aware code doing a normal write" —
+/// true for a `running` company, but not for one still `paused` on its first
+/// post-upgrade boot. `RuntimeBuilder::build`'s own "existing but not
+/// running" arm already knows this and deliberately leaves the marker exactly
+/// as recorded rather than migrating a paused legacy record — but that
+/// protection only covers saves `build` itself makes. Any OTHER ordinary
+/// write against the same still-paused, not-yet-migrated record — e.g.
+/// `company_logo::put_logo`'s plain load-modify-save cycle, which does not
+/// check lifecycle at all — used to stamp the marker `true` regardless,
+/// poisoning it before the company's own first `running` boot ever gets to
+/// decide. Once poisoned, the grandfather arm's `!gate_already_seen` guard
+/// can never fire again, and a genuinely legacy operator who resumes their
+/// paused company is shown the fresh-company onboarding funnel instead of
+/// being grandfathered in.
+pub async fn assert_paused_ordinary_save_preserves_activation_gate(store: Arc<dyn CompanyStore>) {
+    let id = CompanyId::new("paused-legacy");
+    let mut paused = record(&id);
+    paused.lifecycle = "paused".to_string();
+
+    // Simulate a legacy pre-#1843 bundle that is still unmigrated:
+    // `activation_gate_seen` explicitly `false`, exactly like a record no
+    // activation-aware `build` has ever decided.
+    store.save_importing(&paused, false).await.unwrap();
+    assert!(
+        !store.activation_gate_seen(&id).await.unwrap(),
+        "setup: the fixture must start gate-unseen"
+    );
+
+    // An ordinary write against the still-paused record — a console route
+    // like `company_logo::put_logo` that loads, mutates one field, and calls
+    // plain `save`, with no lifecycle check of its own.
+    paused.manifest.company.logo_url = Some("data:image/png;base64,AA==".to_string());
+    store.save(&paused).await.unwrap();
+
+    assert!(
+        !store.activation_gate_seen(&id).await.unwrap(),
+        "an ordinary write against a still-paused, not-yet-migrated legacy \
+         record must not stamp the activation gate marker `true` — only a \
+         `running` boot's own migration decision may, or a resumed legacy \
+         company is shown onboarding it should have been grandfathered past"
+    );
+
+    // Once the company is actually running, an ordinary save is still free to
+    // stamp the marker — the common case `save`'s `true` exists for, which
+    // the fix above must not break.
+    let mut running = paused.clone();
+    running.lifecycle = "running".to_string();
+    store.save(&running).await.unwrap();
+    assert!(
+        store.activation_gate_seen(&id).await.unwrap(),
+        "an ordinary write against a running company must still mark the \
+         activation gate as seen"
+    );
 }
 
 /// Event and ledger logs are append-only: prior entries never move or mutate
