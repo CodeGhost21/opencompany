@@ -789,20 +789,25 @@ fn extract_content_text(value: Option<&serde_json::Value>) -> String {
 /// refusal part in the same array is silently dropped and never reaches
 /// visible `content` — it must be recovered separately so the
 /// reasoning-fallback guard can still detect it and refuse to promote
-/// leaked reasoning over it. Returns the first nonempty refusal found, or
-/// `None` when the value isn't an array or carries no refusal part.
+/// leaked reasoning over it. Concatenates every nonempty refusal part in
+/// order — mirroring how `extract_content_text` concatenates every
+/// `"text"`-typed part rather than stopping at the first, since a provider
+/// splitting a refusal across multiple parts is otherwise silently
+/// truncated to just the first fragment. Returns `None` when the value
+/// isn't an array or carries no refusal part.
 fn extract_array_refusal_text(value: Option<&serde_json::Value>) -> Option<String> {
     let parts = value?.as_array()?;
-    parts.iter().find_map(|part| {
+    let mut out = String::new();
+    for part in parts {
         let is_refusal = part.get("type").and_then(|t| t.as_str()) == Some("refusal");
         if !is_refusal {
-            return None;
+            continue;
         }
-        part.get("refusal")
-            .and_then(|r| r.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    })
+        if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str()) {
+            out.push_str(refusal);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Parse an OpenAI-compatible chat-completion payload into a tinyagents
@@ -2401,6 +2406,32 @@ mod tests {
         });
         let resp = model_response_from_payload(payload).expect("refusal turn parses");
         assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// Multiple `{"type":"refusal",…}` parts in the same array-shaped
+    /// `content`. `extract_array_refusal_text`'s `find_map` stops at the
+    /// first match, so only the first part's text is recovered — the
+    /// analogous `extract_content_text` concatenates every `"text"`-typed
+    /// part instead of stopping at the first, so the refusal path must do
+    /// the same or it silently truncates the provider's own visible safety
+    /// response (CodeRabbit review on #1779, comment 3878506287).
+    #[test]
+    fn a_refusal_wins_and_is_not_truncated_when_content_array_has_multiple_refusal_parts() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "refusal", "refusal": "I can't help with that. " },
+                        { "type": "refusal", "refusal": "Here's why." }
+                    ]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that. Here's why.");
         assert!(resp.message.tool_calls.is_empty());
     }
 
