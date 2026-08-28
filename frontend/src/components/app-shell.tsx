@@ -1158,7 +1158,21 @@ export function AppShell({
           desks === null ? defaultDesks() : desks.length ? desks.map(deskFromDto) : defaultDesks();
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
-        setChatChannelByThread(channelMap(chatDesks, roster));
+        //
+        // The Operator feed's id is folded in here too (issue #1781 review,
+        // Codex P2): `channelMap` only knows desks and roster teammates, so
+        // without this the map a **live** SSE frame is resolved through
+        // (`channelForThread(chatChannelByThread, event.chatId)`, a few
+        // hundred lines below) missed the Operator channel entirely and
+        // dropped the frame — `renderAgentReply` returns on the very next
+        // line when the lookup misses. The five-second history poll still
+        // recovered it eventually, because the `channels` rehydration-target
+        // list a little further down already carries this same id→id pair;
+        // this closes the live-event gap the poll was quietly papering over.
+        setChatChannelByThread({
+          ...channelMap(chatDesks, roster),
+          ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
+        });
         // The channel `ChatView` lands on when the hash names none, which since
         // issue #1743 is the built-in `#general` rather than the first desk —
         // the two must agree, or a line with nowhere else to go lands in a

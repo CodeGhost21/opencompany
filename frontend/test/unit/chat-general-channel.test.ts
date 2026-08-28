@@ -664,4 +664,24 @@ describe("the shell resolves every thread-to-channel lookup through channelForTh
     expect(matches?.length ?? 0).toBe(2);
     expect(shell).not.toContain("chatChannelByThreadRef.current[threadId]");
   });
+
+  /**
+   * PR #1781 review (Codex P2, comment 3878664647): `channelMap` only knows
+   * desks and roster teammates, so `setChatChannelByThread(channelMap(...))`
+   * alone never taught `chatChannelByThread` the Operator channel's own
+   * id → id pair. `channelForThread(chatChannelByThread, event.chatId)`
+   * (pinned above) then missed on `event.chatId === operatorChannel.id` and
+   * `renderAgentReply` returned without rendering the live SSE frame — the
+   * Operator transcript and its unread state only caught up on the
+   * five-second history poll, whose own `channels` rehydration-target list
+   * (a few lines further down) already carried this id and was masking the
+   * gap. Folding the id into the state map itself, not just the poll
+   * targets, is what closes it for the live path too.
+   */
+  it("folds the Operator channel's id into chatChannelByThread, not just the poll targets", () => {
+    expect(shell).toContain(
+      "...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {})",
+    );
+    expect(shell).not.toContain("setChatChannelByThread(channelMap(chatDesks, roster));");
+  });
 });
