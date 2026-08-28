@@ -67,7 +67,7 @@ import {
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { listTasks, listTaskApprovals, patchTask, type Task } from "@/api/tasks";
+import { listTasks, patchTask, type Task } from "@/api/tasks";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
 import { LedgerBoard } from "@/views/LedgerBoard";
@@ -215,7 +215,6 @@ interface Props {
   decidedApprovals?: Readonly<Record<string, DecidedApproval>>;
   failedApprovals?: Record<string, string>;
   /** Whether a detached approval continuation is still running for a card. */
-  continuationTaskIds?: ReadonlySet<string>;
   onDecideApproval?: (
     approval: ApprovalSummary,
     verdict: Verdict,
@@ -307,7 +306,6 @@ export function LedgersView({
   decidingApprovals = EMPTY_DECIDING,
   decidedApprovals = EMPTY_DECIDED,
   failedApprovals = EMPTY_FAILED,
-  continuationTaskIds,
   onDecideApproval,
   onListsChanged,
 }: Props) {
@@ -352,7 +350,6 @@ export function LedgersView({
    * Empty for every other ledger, whose rows have no `Task` behind them at all.
    */
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [authoritativeApprovals, setAuthoritativeApprovals] = useState<ApprovalSummary[]>([]);
 
   const ledger = useMemo(
     () => (sub ? (ledgers.find((held) => held.slug === sub) ?? null) : null),
@@ -482,13 +479,6 @@ export function LedgersView({
     }
     try {
       setTasks(await listTasks(client, company));
-      if (isBoard) {
-        setAuthoritativeApprovals(
-          Object.values(await listTaskApprovals(client, company)).flat(),
-        );
-      } else {
-        setAuthoritativeApprovals([]);
-      }
     } catch {
       // Leave whatever is already held: a stale decoration beats none.
     }
@@ -1061,7 +1051,7 @@ export function LedgersView({
                   taskFor={
                     isBoard ? (entry) => taskById.get(entry.id) : undefined
                   }
-                  approvals={authoritativeApprovals}
+                  approvals={approvals}
                   now={clock}
                   // #1891: a blocked card decides in place, through the shell's
                   // one resolve. The same four the run drawer already receives.
@@ -1335,7 +1325,6 @@ function BoardMode({
               askerNames={askerNames}
               deciding={deciding}
               failed={failed}
-              continuationInFlight={continuationTaskIds?.has(task.id)}
               onDecide={onDecide}
               onOpen={() => onOpen(entry)}
               onResume={() => onResume?.(entry)}

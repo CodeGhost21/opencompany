@@ -6340,6 +6340,134 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
     );
 }
 
+/// The **queue** answers ownership the same way the card does (#1891).
+///
+/// [`the_attempt_id_outranks_the_card_link_when_both_are_present`] pins the task
+/// detail read. `GET …/approvals` projected the raw park stamp instead, so the
+/// two surfaces disagreed about the same approval: the card refused to show
+/// `appr-elsewhere` and the queue handed it out labelled `t-1`. Every console
+/// join on that link — the board's blocked row, the Approvals page's per-card
+/// filter — inherited the disagreement.
+///
+/// Read-only that was a wrong label. Once the board card grew Approve and
+/// Decline it became an operator resolving another card's request, so the two
+/// reads are pinned against each other here rather than left to agree by
+/// convention.
+#[tokio::test]
+async fn the_queue_resolves_ownership_the_same_way_the_card_does() {
+    use crate::ports::runs::NewRun;
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    for (id, task) in [("run-b", "t-1"), ("run-c", "t-other")] {
+        runtime
+            .runs()
+            .create_run(&company, NewRun::for_task(id, task, "ceo"))
+            .await
+            .unwrap();
+    }
+
+    let under_run = |run: &str| {
+        let mut effect = parked_effect();
+        effect.run_id = Some(run.to_string());
+        effect
+    };
+
+    // Stamped with this card, parked under another card's attempt. The card
+    // read refuses it; the queue must not label it `t-1` either.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-elsewhere"),
+            &under_run("run-c"),
+            dispatched_at + 5,
+            TaskLink::Task { id: "t-1".into() },
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    // Stamped Unlinked, parked under this card's own attempt. The card read
+    // claims it, so the queue must too — the correction runs both ways.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-attempt-2"),
+            &under_run("run-b"),
+            dispatched_at + 6,
+            TaskLink::Unlinked,
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    // No attempt at all: the stamp is the whole answer, unchanged.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-stamped"),
+            &parked_effect(),
+            dispatched_at + 7,
+            TaskLink::Task { id: "t-1".into() },
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/approvals", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let queue = body.as_array().unwrap();
+    let owner_of = |id: &str| {
+        queue
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing from the queue: {queue:?}"))["task"]
+            .clone()
+    };
+
+    assert_eq!(
+        owner_of("appr-elsewhere"),
+        json!({ "link": "task", "id": "t-other" }),
+        "the attempt outranks the stamp on the queue, exactly as on the card",
+    );
+    assert_eq!(
+        owner_of("appr-attempt-2"),
+        json!({ "link": "task", "id": "t-1" }),
+        "and claims a park the cycle stamped Unlinked",
+    );
+    assert_eq!(
+        owner_of("appr-stamped"),
+        json!({ "link": "task", "id": "t-1" }),
+        "a park with no attempt keeps the link it was stamped with",
+    );
+
+    // The pinning half: what the card shows is what the queue says is its own.
+    let (_, card) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let mut on_card: Vec<&str> = card["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    on_card.sort_unstable();
+    let mut from_queue: Vec<&str> = queue
+        .iter()
+        .filter(|row| row["task"] == json!({ "link": "task", "id": "t-1" }))
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    from_queue.sort_unstable();
+    assert_eq!(
+        on_card, from_queue,
+        "the two reads must not disagree about which approvals belong to t-1",
+    );
+}
+
 /// An approval parked by a build older than #333 carries no link at all. It
 /// keeps the pre-#333 run-window correlation rather than vanishing, so existing
 /// history still renders.

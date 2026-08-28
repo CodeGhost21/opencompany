@@ -912,15 +912,6 @@ export function taskStatusesById(
   return statuses;
 }
 
-export function listTaskApprovals(
-  client: OpenCompanyClient,
-  company: string | null,
-): Promise<Record<string, import("@/api/types").ApprovalSummary[]>> {
-  return client.get<Record<string, import("@/api/types").ApprovalSummary[]>>(
-    `${client.scopeFor(company)}/tasks/approvals`,
-  );
-}
-
 export interface SteerInput {
   action: SteerAction;
   instruction?: string;

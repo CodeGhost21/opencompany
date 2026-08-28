@@ -2901,12 +2901,77 @@ impl CompanyRuntime {
         live
     }
 
+    /// The parked queue, with each approval's **owning card** resolved (#1891).
+    ///
+    /// What every HTTP reader of the queue should call. [`Self::pending_approvals`]
+    /// projects `task` as the raw link the park stamped, and that link is only
+    /// the *fallback* half of the ownership rule the task detail read applies:
+    /// the attempt (`Effect::run_id`) outranks it wherever there is one, which
+    /// `the_attempt_id_outranks_the_card_link_when_both_are_present` pins. So an
+    /// approval parked under one card's attempt while stamped with another
+    /// card's link was handed out under the stamp, and a console joining on it
+    /// put the row on the wrong card. Read-only that was a wrong label; once the
+    /// board card grew Approve and Decline (#1891) it became an operator
+    /// resolving somebody else's request, which is why the resolution belongs
+    /// here rather than in a console that cannot see an attempt id at all.
+    ///
+    /// **Costs one store read per distinct attempt behind the queue**, not per
+    /// approval and not per card — the ids are deduplicated first, and a queue
+    /// whose parks name no attempt (a chat turn, a scheduler tick) does none.
+    /// That is what keeps it affordable on a route the console polls: the
+    /// alternative the board rejected in #883 was re-reading task detail per
+    /// card per poll.
+    pub async fn pending_approvals_resolved(&self) -> Vec<ApprovalSummary> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut summaries = self.pending_approvals();
+        // Approval id → the attempt that parked it, for the parks naming one.
+        // Read from the journal rather than the summaries because `run_id` is
+        // deliberately not on the wire: `workflow_run_id` carries only the
+        // workflow half, precisely so a task attempt is never read as a run.
+        let attempts: HashMap<String, String> = self
+            .journal
+            .pending()
+            .into_iter()
+            .filter_map(|p| {
+                p.effect
+                    .run_id
+                    .clone()
+                    .map(|run_id| (p.id.as_ref().to_string(), run_id))
+            })
+            .collect();
+        if attempts.is_empty() {
+            return summaries;
+        }
+        let distinct: HashSet<&str> = attempts.values().map(String::as_str).collect();
+        let mut owners: HashMap<String, Option<String>> = HashMap::with_capacity(distinct.len());
+        for run_id in distinct {
+            // A read that fails is not a card: `resolve_owners` treats "no
+            // owner" and "cannot say" alike, because both mean no card claims
+            // this attempt and neither may be answered with the stale stamp.
+            let owner = self
+                .runs()
+                .get_run(self.id(), run_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|run| run.task_id);
+            owners.insert(run_id.to_string(), owner);
+        }
+        crate::runtime::approval_ownership::resolve_owners(&mut summaries, &attempts, &owners);
+        summaries
+    }
+
     /// The approvals currently awaiting the operator.
     ///
     /// The single projection point for [`ApprovalSummary`], and therefore the
     /// single place issue #372's `agent` + `payload` are filled in. The payload
     /// is redacted and bounded **here**, before it is a summary at all, so no
     /// caller can accidentally serialize the raw effect.
+    ///
+    /// **`task` is the raw park link here.** Every reader that shows an
+    /// approval *against a card* wants [`Self::pending_approvals_resolved`]
+    /// instead — see there for why the stamp alone is not the ownership answer.
     pub fn pending_approvals(&self) -> Vec<ApprovalSummary> {
         self.journal
             .pending()
@@ -2922,7 +2987,6 @@ impl CompanyRuntime {
                 // stalled workflow up.
                 workflow_id: crate::runtime::workflow_resume::gate_workflow_id(&p.effect)
                     .map(str::to_owned),
-                owner_task_id: None,
                 id: p.id,
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,

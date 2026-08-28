@@ -69,16 +69,26 @@ export function pendingApprovalWait(
  * pending by construction — unlike {@link pendingApprovalWait}, which filters a
  * task-detail projection that includes resolutions.
  *
- * **Only `{link: "task"}` matches, and that is the whole ownership rule here.**
- * `CycleHostImpl::park` stamps the link on every park path, so a card-dispatched
- * approval always carries it. The host's own `approval_owner` has a first rule
- * this cannot reach — the attempt-level `run_id`, which separates two *runs of
- * the same card* — but that distinction does not change the answer to "is this
- * card blocked", which is the only question asked here. `{link: "unlinked"}`
- * (a workflow delivery, an operator-chat turn, a scheduler tick) and an absent
- * link (a park predating #333) both belong to no card and are skipped rather
- * than guessed at: the host keeps a run-window heuristic for the ambiguous case
- * and the board has no window to apply it against.
+ * **Only `{link: "task"}` matches, and since #1891 that is the host's own
+ * ownership answer rather than an approximation of it.** The field used to
+ * carry the raw link `CycleHostImpl::park` stamped, which is only the fallback
+ * half of `approval_owner`: the attempt behind a park outranks the card it was
+ * stamped with wherever there is one. This join could not reach that rule — no
+ * attempt id is on the wire, and it would need every card's attempt ids anyway
+ * — so an approval parked under one card's attempt and stamped with another's
+ * landed on the wrong card here.
+ *
+ * That was a wrong label while the row was read-only. It stopped being
+ * survivable when the card grew Approve and Decline, because the operator would
+ * have been resolving another card's request, so the resolution moved to the
+ * host: `pending_approvals_resolved` applies the rule before serialising and
+ * this reads the answer. See `ApprovalSummary.task`.
+ *
+ * `{link: "unlinked"}` (a workflow delivery, an operator-chat turn, a scheduler
+ * tick, or an attempt no card claims) and an absent link (a park predating
+ * #333) both belong to no card and are skipped rather than guessed at: the host
+ * keeps a run-window heuristic for the ambiguous case and the board has no
+ * window to apply it against.
  */
 export function approvalsForTask(
   approvals: readonly ApprovalSummary[],

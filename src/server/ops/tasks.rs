@@ -51,10 +51,6 @@ pub fn router() -> Router<AppState> {
         // the operator strip into a 404.
         .merge(scoped("/tasks/inflight", get(list_inflight)))
         .merge(scoped(
-            "/tasks/approvals",
-            get(task_approvals),
-        ))
-        .merge(scoped(
             "/tasks/{task_id}",
             get(task_detail).patch(patch_task).delete(delete_task),
         ))
@@ -1337,31 +1333,6 @@ pub(crate) struct TaskDetail {
     /// only from approvals parked at or after the window opened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) waiting_since: Option<u64>,
-}
-
-/// `GET …/tasks/approvals` — authoritative pending approvals grouped by task.
-async fn task_approvals(
-    company: ScopedCompany,
-) -> Result<Json<std::collections::HashMap<String, Vec<crate::runtime::types::ApprovalSummary>>>, ApiError> {
-    let tasks = company.runtime.tasks().list(company.id()).await?;
-    let mut out = std::collections::HashMap::new();
-    for task in tasks.into_iter().filter(|task| task.stage == Some("paused".to_string())) {
-        let detail = assemble_detail(&company, &task.id).await?;
-        let pending_ids: std::collections::HashSet<_> = detail
-            .approvals
-            .iter()
-            .filter(|approval| approval.status == "pending")
-            .map(|approval| approval.id.as_str())
-            .collect();
-        let approvals = company
-            .runtime
-            .pending_approvals()
-            .into_iter()
-            .filter(|approval| pending_ids.contains(approval.id.as_ref()))
-            .collect();
-        out.insert(task.id, approvals);
-    }
-    Ok(Json(out))
 }
 
 ///

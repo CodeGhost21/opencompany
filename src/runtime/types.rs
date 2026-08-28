@@ -174,14 +174,6 @@ pub struct ApprovalSummary {
     /// pre-#333 approval serializes as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<TaskLink>,
-    /// The task resolved by the host's attempt-aware approval ownership rule.
-    ///
-    /// This is separate from [`task`](Self::task), whose link is only a
-    /// card-level hint. Decision surfaces use this field to avoid exposing a
-    /// parked approval from a different attempt under the same card link.
-    /// Omitted when the host cannot establish an owner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_task_id: Option<String>,
     /// The roster teammate whose blocked tool call this approval was parked for
     /// (issue #372), mirroring [`Effect::agent`](crate::ports::types::Effect::agent).
     ///

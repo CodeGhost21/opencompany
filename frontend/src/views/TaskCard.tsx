@@ -144,7 +144,6 @@ export function TaskItem({
   onDecide,
   onOpen,
   onResume,
-  continuationInFlight,
 }: {
   task: Task;
   dragging: boolean;
@@ -164,7 +163,6 @@ export function TaskItem({
   /** Decisions that did not land, keyed by approval id. */
   failed: Record<string, string>;
   /** Whether a detached approval continuation is still running for this card. */
-  continuationInFlight?: boolean;
   /**
    * The shell's one resolve, per approval id (#1891).
    *
@@ -325,13 +323,20 @@ export function TaskItem({
             // decision had already set going. The queue still holds the row
             // until the host drops it, so this stays down across that window
             // and lifts on its own.
-            disabled={rows.length > 0 || continuationInFlight}
+            //
+            // A `continuationInFlight` flag was tried here and removed: the
+            // shell set it before the resolve and cleared it in the `finally`,
+            // so it was true only while the POST was in flight — exactly the
+            // window `rows` already covers, since the queue still holds the row
+            // then. It read as closing the gap after the feed refreshes and did
+            // not, which is worse than the gap being documented: that one needs
+            // a host-side "continuation running" signal the board projection
+            // does not carry, and it is tracked on #1891.
+            disabled={rows.length > 0}
             title={
               rows.length > 0
                 ? "Blocked — decide its approvals first; resuming re-runs the work from the start."
-                : continuationInFlight
-                  ? "The approval continuation is still running."
-                  : undefined
+                : undefined
             }
             onClick={(e) => {
               // Don't let the click bubble to the card's open handler.

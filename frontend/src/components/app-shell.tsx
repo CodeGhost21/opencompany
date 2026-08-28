@@ -897,10 +897,6 @@ export function AppShell({
    * state rather than showing the previous attempt's error under a live one.
    */
   const [failedApprovals, setFailedApprovals] = useState<Record<string, string>>({});
-  /** Cards whose detached approval continuation has not settled yet. */
-  const [continuationTaskIds, setContinuationTaskIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
 
   // The sidebar badge, and the rising edge behind the "needs a sign-off" push.
   //
@@ -1022,7 +1018,6 @@ export function AppShell({
     setDecidedApprovals({});
     setDecidingApprovals(new Map());
     setFailedApprovals({});
-    setContinuationTaskIds(new Set());
 
     // How far each channel's cold hydration has got, and which thread's
     // request is still in flight, so the 5-second poll below (`rehydrateAll`
@@ -2438,11 +2433,6 @@ export function AppShell({
     if (decidingApprovals.has(approval.id)) return;
     ownApprovalDecisionsRef.current.add(approval.id);
     markDeciding(approval.id, verdict);
-    setContinuationTaskIds((prev) => {
-      const next = new Set(prev);
-      if (approval.task?.link === "task") next.add(approval.task.id);
-      return next;
-    });
     // A retry starts clean: the previous attempt's error must not sit under a
     // live one, or the operator cannot tell which attempt it belongs to.
     clearFailure(approval.id);
@@ -2502,11 +2492,6 @@ export function AppShell({
       setFailedApprovals((prev) => ({ ...prev, [approval.id]: msg }));
     } finally {
       markDeciding(approval.id, null);
-      setContinuationTaskIds((prev) => {
-        const next = new Set(prev);
-        if (approval.task?.id) next.delete(approval.task.id);
-        return next;
-      });
       void feed.refresh();
     }
   };
@@ -2977,7 +2962,6 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
-              continuationTaskIds={continuationTaskIds}
               onDecideApproval={(approval, verdict, scope) =>
                 void decideApproval(approval, verdict, scope)
               }
