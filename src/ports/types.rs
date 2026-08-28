@@ -4461,11 +4461,46 @@ impl CompanyRecord {
                 || self.overlay_agents.iter().any(|a| a.id == agent_id))
     }
 
-    /// Returns the durable system-feed address. A grandfathered roster agent
-    /// named `operator` owns the bare address for its DM, so reports use the
-    /// disjoint fallback address in that case.
+    /// The chat id the durable Operator system feed journals under for this
+    /// company (issue #1781 review — CodeRabbit Major + Codex P2; stability
+    /// after removal — Codex P2 follow-up).
+    ///
+    /// Ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL)
+    /// itself. Diverted to
+    /// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+    /// whenever a grandfathered roster **teammate** has ever held the literal
+    /// id `operator` — `is_roster_agent` true (still on the roster) **or**
+    /// [`is_retired`](Self::is_retired) true (removed since) — and no desk of
+    /// the same id exists (`desk_exists` false). Using `OPERATOR_CHANNEL`
+    /// there would put that teammate's private DM and the public "what
+    /// happened" system feed on one address — a post to the visible
+    /// read-only feed could reach them, and a delivered report would be
+    /// indistinguishable from their own words.
+    ///
+    /// The `is_retired` half matters because the divert has to **stay put**
+    /// once it has ever applied: removing a manifest teammate always tombstones
+    /// its id in [`overlay_retired_agents`](Self::overlay_retired_agents)
+    /// (`server::ops::team::remove_member`) rather than rewriting
+    /// `company.toml`, and that tombstone never clears. Checking
+    /// `is_roster_agent` alone flips the address back to `OPERATOR_CHANNEL`
+    /// the moment the teammate is retired — orphaning every report already
+    /// journaled under the fallback from `/desks`, and letting the retired
+    /// teammate's own historical DM rows (stored under `chat_id ==
+    /// "operator"`) surface as if they belonged to the "new" system feed.
+    /// Diverting is collision-impossible by construction (see the fallback
+    /// constant's doc for why nothing can ever mint that id) and, with the
+    /// tombstone check, permanent by construction too — nothing already
+    /// stored is renamed, and where NEW system-feed content lands never moves
+    /// back.
+    ///
+    /// The `desk_exists` guard covers the **other** grandfather case — a real
+    /// **desk** already owning `operator` — so a company on that shape is not
+    /// also diverted onto the collision-fallback address it has no use for.
     pub fn operator_feed_channel(&self) -> &'static str {
-        if self.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL) {
+        if !self.desk_exists(crate::runtime::OPERATOR_CHANNEL)
+            && (self.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL)
+                || self.is_retired(crate::runtime::channel::OPERATOR_CHANNEL))
+        {
             crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
         } else {
             crate::runtime::channel::OPERATOR_CHANNEL
@@ -8891,5 +8926,60 @@ mod test {
         let round_one = r#"{"nodeId":"node-3","name":"old.png","mime":"image/png","size":10}"#;
         let loaded: Attachment = serde_json::from_str(round_one).unwrap();
         assert_eq!(loaded.extracted_text, None);
+    }
+
+    /// Issue #1781 review (Codex P2): a grandfathered manifest teammate at the
+    /// literal id `operator` diverts the durable system feed to
+    /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` (see `operator_feed_channel`
+    /// above). Retiring that teammate must not flip the feed back onto
+    /// `OPERATOR_CHANNEL` — the tombstone in `overlay_retired_agents` is
+    /// permanent (manifest removal always goes through `retire_agent`, never a
+    /// TOML rewrite), so the reports already journaled under the fallback
+    /// address would be orphaned from `/desks` and the retired teammate's own
+    /// historical DM rows (`chat_id == "operator"`) would start bleeding into
+    /// the "new" system feed the moment the id looked free again.
+    #[test]
+    fn operator_feed_channel_stays_diverted_after_the_collision_is_retired() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"operator\"\nrole = \"Chief of Staff\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "fixture must start in the collision state this test exercises"
+        );
+
+        record.retire_agent(crate::runtime::OPERATOR_CHANNEL);
+        assert!(!record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL));
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the feed address must stay stable once anything has ever held the \
+             `operator` id — flipping back to OPERATOR_CHANNEL would orphan the \
+             fallback's existing reports and resurface the retired teammate's \
+             own DM history in the system feed"
+        );
+    }
+
+    /// The companion grandfather case: a real **desk** already owning
+    /// `operator` must not also divert onto the collision-fallback address —
+    /// that address exists for the roster-teammate collision only, and a
+    /// desk at that id is handled on its own terms wherever a caller resolves
+    /// `operator` (`CompanyRuntime::ensure_desk_writable` checks `desk_exists`
+    /// directly). Without the `desk_exists` guard, a company grandfathered
+    /// onto *both* shapes at once would divert here regardless.
+    #[test]
+    fn operator_feed_channel_is_not_diverted_by_a_desk_collision_alone() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Operator Desk\"\nmembers = []\n";
+        let record = desk_record(manifest, Vec::new());
+        assert!(record.desk_exists(crate::runtime::OPERATOR_CHANNEL));
+        assert!(!record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL));
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL,
+            "a desk-only collision must not divert onto the roster-teammate \
+             fallback address"
+        );
     }
 }
