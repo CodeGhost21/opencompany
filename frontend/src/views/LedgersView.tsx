@@ -349,6 +349,7 @@ export function LedgersView({
    * Empty for every other ledger, whose rows have no `Task` behind them at all.
    */
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [authoritativeApprovals, setAuthoritativeApprovals] = useState<ApprovalSummary[]>([]);
 
   const ledger = useMemo(
     () => (sub ? (ledgers.find((held) => held.slug === sub) ?? null) : null),
