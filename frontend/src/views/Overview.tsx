@@ -8,6 +8,7 @@ import { listTasks, type Task } from "@/api/tasks";
 import type { DeskDto } from "@/api/types";
 import { getWorkflow, listWorkflows, type WorkflowGraph } from "@/api/workflows";
 import { fromDto, type TeamMember } from "@/lib/team";
+import { PageHeader } from "@/components/page-header";
 import { adapt, buildMemoryGraph } from "./overview/kg/adapter";
 import { buildKnowledgeGraph } from "./overview/kg/model";
 import { ownedBy } from "./overview/pulse";
@@ -391,7 +392,7 @@ export function Overview({ client, company, companyName }: Props) {
       {/* The graph is the page and draws no visible title of its own (issue
           #1221) — this names it for a screen reader the same way every other
           view's title does. */}
-      <h1 className="sr-only">Company overview</h1>
+      <PageHeader hidden title="Company overview" />
       {/* A complete read failure is the page's state, not a detail in the
           snapshot chrome. The opaque canvas keeps an unreachable host from
           looking like a genuinely empty company, and puts the retry beside the

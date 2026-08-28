@@ -35,7 +35,7 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +64,23 @@ pub fn router() -> Router<AppState> {
         .merge(scoped(
             "/team/{agent_id}",
             super::team_agent::method_router().delete(remove_member),
+        ))
+        // Issue #1776: the same drafting for a teammate that does not exist
+        // yet — the Add-teammate form, which has no id to address. A static
+        // segment, so it shadows nothing: no `POST` is served on
+        // `/team/{agent_id}`, and a teammate whose id really is `draft` drafts
+        // at `/team/draft/draft`.
+        .merge(scoped(
+            "/team/draft",
+            post(super::team_agent::draft_new_profile),
+        ))
+        // Issue #1776: drafting a mandate or persona for one teammate. Its own
+        // path rather than another method on `/team/{agent_id}`, because it is
+        // not a write to that teammate — it reads the record and returns text,
+        // and a `POST` on the teammate's own path would read as one.
+        .merge(scoped(
+            "/team/{agent_id}/draft",
+            post(super::team_agent::draft_profile),
         ))
         .merge(scoped("/team/{agent_id}/inbox", put(toggle_inbox)))
         .merge(scoped(
@@ -120,9 +137,10 @@ struct TeamMemberDto {
     ///
     /// `companyAllow` repeats on every row, which is the payload cost of
     /// mirroring the detail shape exactly rather than inventing a leaner
-    /// parallel one. It is worth paying: an **empty `requested` means the
-    /// company's standard grant**, not "no tools", and a row that dropped the
-    /// ceiling would leave a client no way to say which it was looking at.
+    /// parallel one. It is worth paying: `requested` is three-state since issue
+    /// #1804 (`null` = the company's standard grant, `[]` = an explicit no-tools
+    /// grant, `[globs]` = narrow), and a row that dropped the ceiling would leave
+    /// a client no way to say which of the three it was looking at.
     tools: super::team_agent::AgentToolsDto,
     /// The desks this teammate sits on, resolved through the same helper the
     /// detail read uses (issue #601). Desks are the company's real grouping —
@@ -597,8 +615,13 @@ async fn add_member(
         role: body.role,
         description: body.description,
         // Issue #661 / L5: the teammate's own grant, intersected with the
-        // company allow-list by the shared reads/roster build. Empty = standard.
-        tools,
+        // company allow-list by the shared reads/roster build. A teammate created
+        // with no stated (and no billing-narrowed) grant is stored as `None` —
+        // inherit the company's standard grant — not `Some(vec![])`, which since
+        // issue #1804 is an explicit deny-all. This create path expresses only
+        // "inherit" and "narrow"; the deny-all state is reachable by editing the
+        // teammate afterwards (`PATCH …/team/{id}` with `tools: []`).
+        tools: if tools.is_empty() { None } else { Some(tools) },
         model: None,
         harness: None,
     };
@@ -1059,10 +1082,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

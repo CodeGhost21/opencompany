@@ -851,7 +851,7 @@ async fn gather_evidence(
             id: a.id.clone(),
             role: a.role.clone(),
             description: a.description.clone(),
-            grants: crate::runtime::builder::agent_effective_grants(&allow, &a.tools),
+            grants: crate::runtime::builder::agent_effective_grants(&allow, a.tools.as_deref()),
             global: a.global,
         })
         .collect();
@@ -865,7 +865,10 @@ async fn gather_evidence(
                 id: overlay.id.clone(),
                 role: overlay.role.clone(),
                 description: overlay.description.clone(),
-                grants: crate::runtime::builder::agent_effective_grants(&allow, &overlay.tools),
+                grants: crate::runtime::builder::agent_effective_grants(
+                    &allow,
+                    overlay.tools.as_deref(),
+                ),
                 global: false,
             }),
     );

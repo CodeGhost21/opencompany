@@ -878,6 +878,11 @@ pub fn mention_responder(record: &CompanyRecord, mentions: &[Mention]) -> Option
 /// desk's effective membership, so `@everyone` in `#engineering` names the
 /// engineering desk rather than the whole company.
 ///
+/// The one channel where it *does* name the whole company is the built-in
+/// `#general` (issue #1743), which is not a desk and has no membership of its
+/// own: there, `@everyone` expands to the roster, derived at read time, so a
+/// teammate added a minute ago is named without anything having been written.
+///
 /// # This is a list, not a fan-out
 ///
 /// One operator message spawns exactly one turn — the invariant the chat POST
@@ -911,13 +916,41 @@ pub fn mentioned_agents(
                     }
                 }
             }
-            MentionTarget::Everyone => {
-                if let Some(desk_id) = record.resolve_desk_id(desk) {
+            // An **overlay** desk cannot stand in for the built-in `#general`
+            // channel here, and does not need filtering out: `resolve_desk_id`
+            // declines to match one against a General spelling at all (issue
+            // #1743), so a desk that took `general`/`main`/`General` before
+            // those were reserved cannot narrow a company-wide broadcast to its
+            // own membership. A desk the *blueprint* declares still wins, which
+            // is the grandfathering this host has always honoured.
+            MentionTarget::Everyone => match record.resolve_desk_id(desk) {
+                Some(desk_id) => {
                     for member in record.effective_desk_members(&desk_id) {
                         push(&mut out, record, responder, member);
                     }
                 }
-            }
+                // The built-in `#general` channel is not a desk (issue #1743),
+                // so it has no membership to expand against — it *is* the whole
+                // roster, derived here on every read. Before this, `@everyone`
+                // on the company-wide line resolved to nobody: the arm above
+                // found no desk and the broadcast named no one, which is the
+                // one channel where it should name everyone.
+                //
+                // Still a **list, not a fan-out** — see this function's note.
+                // One operator message spawns one turn whatever it names, so a
+                // broadcast here costs the same as any other message; it only
+                // tells the answering teammate who else was addressed.
+                //
+                // Ordered by the same manifest-then-overlay walk `desk_ids`
+                // uses, so "who is in #general" reads the same as every other
+                // roster surface.
+                None if crate::server::chat_history::is_general_chat(Some(desk)) => {
+                    for id in crate::runtime::delegation_tools::roster_agent_ids(record) {
+                        push(&mut out, record, responder, id);
+                    }
+                }
+                None => {}
+            },
             MentionTarget::User { .. } => {}
         }
     }
@@ -959,7 +992,7 @@ pub fn mentioned_users(users: &[UserRecord], mentions: &[Mention]) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::types::{AgentOverride, CompanyId, CompanyRecord};
+    use crate::ports::types::{AgentOverride, CompanyId, CompanyRecord, OverlayAgent};
     use crate::ports::users::{UserRole, UserStatus};
 
     const MANIFEST: &str = r#"
@@ -995,10 +1028,13 @@ members = ["engineer", "ceo"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -1603,6 +1639,144 @@ members = ["engineer", "ceo"]
             mentioned_users(&people(), &found),
             vec!["u1".to_string(), "u2".to_string()],
             "a broadcast addresses the company's people, not a desk's teammates"
+        );
+    }
+
+    /// `@everyone` on the built-in `#general` channel names the whole roster,
+    /// under every spelling the host folds into it (issue #1743).
+    ///
+    /// Before this it named **nobody**: `#general` is not a desk, so
+    /// `resolve_desk_id` found nothing and the broadcast arm expanded against
+    /// an empty membership. The one channel where "everyone" literally means
+    /// everyone was the one channel where `@everyone` reached no one.
+    #[test]
+    fn everyone_on_the_general_channel_names_the_whole_roster() {
+        let found = resolve_text("@everyone standup in five");
+        for spelling in ["general", "General", "main", "Main", ""] {
+            assert_eq!(
+                mentioned_agents(&acme(), spelling, &found, None),
+                vec!["engineer".to_string(), "ceo".to_string()],
+                "@everyone addressed as {spelling:?} must name the whole roster"
+            );
+        }
+    }
+
+    /// An **overlay** desk that took a General spelling before those were
+    /// reserved must not narrow the company-wide broadcast (issue #1743).
+    ///
+    /// `resolve_desk_id` matches a desk by id *or* by case-insensitive name, so
+    /// a persisted `{id: "ops", name: "General"}` is selected when
+    /// `HarnessBrain::everyone_desk` folds the built-in `main` thread to
+    /// `General` — and `@everyone` on the one channel where everyone means
+    /// everyone would reach only that desk's members. A desk the *blueprint*
+    /// declares is the company's own General desk and still wins; this is only
+    /// about state `create_desk` used to accept and now refuses.
+    #[test]
+    fn an_overlay_desk_squatting_a_general_spelling_does_not_narrow_the_broadcast() {
+        let mut record = acme();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "ops".to_string(),
+            name: "General".to_string(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["ceo".to_string()],
+        });
+        let found = resolve_text("@everyone standup in five");
+        for spelling in ["general", "General", "main", ""] {
+            assert_eq!(
+                mentioned_agents(&record, spelling, &found, None),
+                vec!["engineer".to_string(), "ceo".to_string()],
+                "@everyone addressed as {spelling:?} must still name the whole roster"
+            );
+        }
+        // And the squatting desk keeps working as the desk it is, addressed by
+        // its own id — this narrows the broadcast, nothing else.
+        assert_eq!(
+            mentioned_agents(&record, "ops", &found, None),
+            vec!["ceo".to_string()],
+            "the desk itself is unchanged"
+        );
+    }
+
+    /// A named desk keeps expanding against **its own** membership, not the
+    /// roster — the reservation above must not leak into every channel.
+    #[test]
+    fn everyone_on_a_named_desk_still_names_only_that_desk() {
+        let mut record = acme();
+        // A teammate on nobody's desk: on the roster, off `#engineering`.
+        record.overlay_agents.push(OverlayAgent {
+            id: "designer".to_string(),
+            name: "Dana".to_string(),
+            role: "Designer".to_string(),
+            description: None,
+            tools: None,
+            model: None,
+            harness: None,
+        });
+        let found = resolve_text("@everyone standup in five");
+        assert_eq!(
+            mentioned_agents(&record, "engineering", &found, None),
+            vec!["engineer".to_string(), "ceo".to_string()],
+            "a desk broadcast is bounded by the desk"
+        );
+    }
+
+    /// Membership of `#general` is **derived, never stored**: a teammate added
+    /// to the roster a moment ago is in it, with no membership write anywhere
+    /// (issue #1743).
+    ///
+    /// The proof is the mutation, not the assertion: the only thing this test
+    /// changes is `overlay_agents` — the roster. `overlay_desk_members`,
+    /// `overlay_desks` and `overlay_desk_order` are asserted still empty, so
+    /// there is no second copy of "who is in #general" that could drift from
+    /// the roster. That is the whole reason the channel is not a desk.
+    #[test]
+    fn a_teammate_added_to_the_roster_is_in_general_with_no_membership_write() {
+        let mut record = acme();
+        let found = resolve_text("@everyone standup in five");
+        assert_eq!(
+            mentioned_agents(&record, "general", &found, None),
+            vec!["engineer".to_string(), "ceo".to_string()]
+        );
+
+        record.overlay_agents.push(OverlayAgent {
+            id: "designer".to_string(),
+            name: "Dana".to_string(),
+            role: "Designer".to_string(),
+            description: None,
+            tools: None,
+            model: None,
+            harness: None,
+        });
+
+        assert_eq!(
+            mentioned_agents(&record, "general", &found, None),
+            vec![
+                "engineer".to_string(),
+                "ceo".to_string(),
+                "designer".to_string()
+            ],
+            "the new teammate is in #general the moment it joins the roster"
+        );
+        assert!(
+            record.overlay_desk_members.is_empty()
+                && record.overlay_desks.is_empty()
+                && record.overlay_desk_order.is_empty(),
+            "nothing was written to any desk overlay to make that true"
+        );
+    }
+
+    /// A retired teammate drops out of `#general` on the same read, for the
+    /// same reason: `push` re-checks `is_roster_agent`, which is what a derived
+    /// membership buys — there is no stale seat to clean up.
+    #[test]
+    fn a_retired_teammate_leaves_general_on_the_next_read() {
+        let mut record = acme();
+        record.overlay_retired_agents.push("engineer".to_string());
+        let found = resolve_text("@everyone standup in five");
+        assert_eq!(
+            mentioned_agents(&record, "general", &found, None),
+            vec!["ceo".to_string()]
         );
     }
 

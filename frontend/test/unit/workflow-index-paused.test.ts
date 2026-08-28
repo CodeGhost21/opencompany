@@ -146,7 +146,10 @@ function type(selector: string, value: string) {
 
 /** Opens the New-workflow dialog, fills the smallest draft `validate()` accepts
  * (the starter trigger node already carries an id and a name), and submits. The
- * stub client answers the POST with whatever `makeClient` was given. */
+ * stub client answers the POST with whatever `makeClient` was given.
+ *
+ * Create confirms the permanent id first (#1808): the form's Create opens a
+ * confirm, and the confirm's own action runs the write — so this clicks both. */
 async function createThroughDialog() {
   await act(async () => {
     container.querySelector<HTMLButtonElement>('[data-testid="workflow-create"]')?.click();
@@ -160,6 +163,11 @@ async function createThroughDialog() {
   await act(async () => {
     document
       .querySelector<HTMLButtonElement>('[data-testid="workflow-dialog-submit"]')
+      ?.click();
+  });
+  await act(async () => {
+    document
+      .querySelector<HTMLButtonElement>('[data-testid="workflow-id-confirm-create"]')
       ?.click();
   });
 }

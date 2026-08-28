@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } from "@/api/types";
+import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -59,6 +60,8 @@ interface Props {
    * client the blob route needs. Absent where nothing renders attachments.
    */
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
+  /** Board task id -> live state for card-linked background turns (#1758). */
+  taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
   /**
    * Places a first brief into the composer on an empty channel.
    * Optional so the thread panel — which renders no intro — need not pass it.
@@ -88,6 +91,25 @@ interface Props {
    * and why it carries the cause rather than a boolean.
    */
   cognition?: CognitionState | null;
+  /**
+   * The Add-Credits CTA (issue #1846). Passed straight through to
+   * `MessageRow`, which is why the signature carries the clicked notice's
+   * own `message.id` alongside the agent id (issue #1846 review, Codex
+   * #3868962374) — see `MessageRow`'s doc.
+   */
+  onRedeemBudgetPause?: (agentId: string, noticeMessageId: string) => void;
+  redeemingBudgetPauseAgent?: string | null;
+  /**
+   * The message id of the MOST RECENT budget-pause notice per agent,
+   * COMPANY-WIDE (issue #1846 review, Codex #3865395879).
+   *
+   * Computed by the caller from every channel's transcript, not just this
+   * one — the backend parks at most one marker per agent regardless of which
+   * channel the pause happened in, so this has to match that scope. Passed
+   * straight through to `MessageRow`, the same way `redeemingBudgetPauseAgent`
+   * is.
+   */
+  latestBudgetPauseMessageIdByAgent?: Map<string, string>;
 }
 
 /**
@@ -131,6 +153,7 @@ export function MessageTimeline({
   onDismissCard,
   dismissingCardId,
   resolveAttachmentUrl,
+  taskStatusByTaskId,
   onStartBrief,
   onAddPeople,
   now,
@@ -140,6 +163,9 @@ export function MessageTimeline({
   failedApprovals,
   onDecideApproval,
   cognition,
+  onRedeemBudgetPause,
+  redeemingBudgetPauseAgent,
+  latestBudgetPauseMessageIdByAgent,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
@@ -305,7 +331,12 @@ export function MessageTimeline({
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
                 resolveAttachmentUrl={resolveAttachmentUrl}
+                taskStatusByTaskId={taskStatusByTaskId}
+                now={now ?? Date.now()}
                 cognition={cognition}
+                onRedeemBudgetPause={onRedeemBudgetPause}
+                redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+                latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
               />
             </div>
           ) : (

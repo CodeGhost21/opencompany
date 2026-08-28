@@ -156,7 +156,7 @@ pub(crate) struct RunSummary {
     /// Which attempt at the card this is, 1-based.
     attempt: u32,
     /// Where it stands: `pending` · `running` · `waiting_approval` · `paused` ·
-    /// `succeeded` · `failed` · `cancelled`.
+    /// `succeeded` · `failed` · `cancelled` · `declined`.
     status: RunStatus,
     /// The coarse phase of `status`: `active`, `parked`, or `terminal`.
     ///
@@ -357,7 +357,7 @@ impl RunsQuery {
             let status = RunStatus::from_wire(word).ok_or_else(|| {
                 ApiError(OpenCompanyError::InvalidRequest(format!(
                     "unknown run status '{word}': expected one of pending, running, \
-                     waiting_approval, paused, succeeded, failed, cancelled"
+                     waiting_approval, paused, succeeded, failed, cancelled, declined"
                 )))
             })?;
             statuses.push(status);
@@ -504,11 +504,14 @@ mod tests {
                 overlay_desks: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 overlay_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

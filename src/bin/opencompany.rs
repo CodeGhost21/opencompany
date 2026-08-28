@@ -546,6 +546,10 @@ fn company_builder(
     // (`OPENCOMPANY_AUTH_MODE` / `config.toml`). `None` leaves each manifest's
     // `[users].mode` to answer, which is the normal case.
     .with_auth_mode_override(state.auth_mode_override())
+    // Issue #1739. Process-wide and inherited from the state, so boot, the
+    // in-place rebuilder and provisioning all get the same one — a
+    // `NullTracker` in every build but a hosted tenant's.
+    .with_analytics(state.analytics())
     .with_skills_registry(state.shared_skill_registry()?)
     // The setup cards a real operator should find waiting on a real board. Turned
     // on here rather than inferred from the seed directory, so a test or a
@@ -2211,6 +2215,13 @@ async fn async_main() -> Result<()> {
             // companies register, so the very first `PUT …/inference` on a
             // freshly booted tenant already has a rebuilder to reach for.
             state = state.with_rebuilder(Arc::new(BootRebuilder));
+            // Issue #1739. The handle goes on the state now, before any company
+            // is built, because a company's usage meter is wrapped at build
+            // time; the tracker behind it is chosen further down, once a
+            // runtime exists to read cognition off. See
+            // `analytics::DeferredTracker`.
+            let analytics = Arc::new(opencompany::analytics::DeferredTracker::new());
+            state = state.with_analytics(analytics.clone());
             // Schedulers stop cleanly when this is notified (Ctrl-C below).
             let shutdown = Arc::new(Notify::new());
             let mut scheduler_handles = Vec::new();
@@ -2269,6 +2280,39 @@ async fn async_main() -> Result<()> {
                 }
             }
 
+            // Take the port BEFORE anything is reported. `instance_started`
+            // means an instance that started, and a host whose address is
+            // occupied or malformed never listened and never answered
+            // `/healthz` — but the shutdown flush below still runs on the way
+            // out, so an event queued above the bind would be sent for a
+            // process that served nothing, and hosted install counts would
+            // include every crash-looping container.
+            //
+            // Binding here rather than inside `server::serve` also fails fast:
+            // a refused address now aborts before four background tasks are
+            // spawned, instead of after. Nothing between this and
+            // `serving.run()` can return early, so the port is never taken and
+            // then abandoned. The state is cloned rather than moved because
+            // `install_analytics` below needs it — `AppState` is `Clone` by
+            // design, and its registry is `Arc`-shared, so both handles see the
+            // same companies.
+            let (_bound, serving) =
+                opencompany::server::bind(&state.config().bind, state.clone()).await?;
+
+            // Issue #1739: with the companies registered and the port taken,
+            // this host knows who it is, which brain it is on and how much it is
+            // serving — so the tracker can be chosen and `instance_started`
+            // reported. On every build but a hosted tenant's this installs a
+            // no-op and the line below says so.
+            println!(
+                "{}",
+                opencompany::analytics::boot::describe(&opencompany::analytics::install_analytics(
+                    &state,
+                    analytics.as_ref(),
+                    &opencompany::app::config::ProcessEnv,
+                ))
+            );
+
             // One workflow scheduler for the whole process, started even with no
             // companies loaded: it re-reads the registry each minute, so a
             // company registered later is picked up without a restart.
@@ -2304,7 +2348,28 @@ async fn async_main() -> Result<()> {
             // refused connection. `println!` for the same reason as the lines
             // above — the default `EnvFilter` would swallow an `info!`.
             println!("listening on {} (from {bind_source})", state.config().bind);
-            opencompany::server::serve(state).await
+            let served = serving.run().await;
+            // Issue #1739: after the server has drained, so anything a
+            // last-moment turn reported still leaves — and bounded, because the
+            // drain budget is the whole point. The client's own 5s timeout is
+            // not a bound on *this*: added to the 25s drain and the 2s
+            // connection grace it takes the worst case to 32s, past the 30s
+            // those two were sized to fit inside, so a slow collector during a
+            // rollout would have bought a `SIGKILL` mid-shutdown. Giving up the
+            // batch is the right trade — a dropped batch costs a line in a
+            // dashboard, an overrun costs a half-finished turn.
+            if tokio::time::timeout(
+                opencompany::server::shutdown::flush_budget(
+                    opencompany::server::shutdown::grace_from_env(),
+                ),
+                opencompany::analytics::Tracker::flush(analytics.as_ref()),
+            )
+            .await
+            .is_err()
+            {
+                tracing::debug!("analytics: flush did not finish inside the shutdown budget");
+            }
+            served
         }
         Some(Command::Spec { openhuman_root }) => {
             let state = AppState::new(AppConfig {

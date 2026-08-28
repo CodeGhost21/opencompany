@@ -7,6 +7,7 @@ import type { LocalScope } from "@/connections/types";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { commitOverviewVisit, openOverviewVisit } from "@/lib/overview-visit";
 import { chatHref } from "@/lib/run-source";
+import { PageHeader } from "@/components/page-header";
 
 interface Props {
   client: OpenCompanyClient;
@@ -237,17 +238,20 @@ export function OperatorOverview({
   const failedReadCapped = failedRuns.length >= FAILED_READ_LIMIT;
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto p-5 sm:p-8" data-testid="operator-overview" data-tour="operator-overview">
-      <header className="flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-sm text-muted-foreground">{companyName}</p>
-          <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Start with the work that needs your judgment.</p>
-        </div>
-        <a href="#/chat" className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
-          <MessageSquare className="size-4" aria-hidden /> Start a conversation
-        </a>
-      </header>
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="operator-overview" data-tour="operator-overview">
+      <PageHeader
+        gutter="px-5 sm:px-8"
+        title="Overview"
+        width="5xl"
+        eyebrow={companyName}
+        description="Start with the work that needs your judgment."
+        actions={
+          <a href="#/chat" className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+            <MessageSquare className="size-4" aria-hidden /> Start a conversation
+          </a>
+        }
+      />
+      <div className="mx-auto flex w-full min-h-0 max-w-5xl flex-1 flex-col gap-6 overflow-auto p-5 sm:p-8">
 
       <section aria-labelledby="overview-attention" className="rounded-xl border bg-card p-5 shadow-sm">
         <div className="flex items-start justify-between gap-4">
@@ -304,6 +308,7 @@ export function OperatorOverview({
       <p className="text-xs text-muted-foreground">
         Looking for the company&apos;s structure? <a className="underline-offset-2 hover:underline" href="#/company/graph">Open the knowledge graph</a>.
       </p>
+      </div>
     </div>
   );
 }

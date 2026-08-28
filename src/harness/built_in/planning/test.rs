@@ -172,10 +172,13 @@ fn record() -> CompanyRecord {
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     }
 }
 
@@ -192,7 +195,7 @@ fn evidence() -> Evidence {
             id: a.id.clone(),
             role: a.role.clone(),
             description: a.description.clone(),
-            grants: crate::runtime::builder::agent_effective_grants(&allow, &a.tools),
+            grants: crate::runtime::builder::agent_effective_grants(&allow, a.tools.as_deref()),
             global: a.global,
         })
         .collect();
@@ -1626,7 +1629,7 @@ async fn add_overlay_agent(runtime: &Arc<CompanyRuntime>, id: &str, role: &str, 
             name: id.to_string(),
             role: role.to_string(),
             description: Some(description.to_string()),
-            tools: Vec::new(),
+            tools: None,
             model: None,
             harness: None,
         });
@@ -1659,6 +1662,7 @@ async fn the_prompt_carries_runtime_teammates_and_desks_not_just_manifest_ones()
         name: "Growth".to_string(),
         description: None,
         members: vec!["social_manager".to_string()],
+        responder: crate::ports::types::ResponderMode::default(),
     });
     runtime.store().save(&record).await.unwrap();
 

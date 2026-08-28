@@ -843,10 +843,13 @@ impl CompanyStore for MongoStore {
             overlay_agent_edits: overlay.agent_edits,
             overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
+            overlay_tool_grants: overlay.tool_grants,
             overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
             setup: overlay.setup,
+            name_confirmed: overlay.name_confirmed,
+            activation_completed_at: overlay.activation_completed_at,
         }))
     }
 
@@ -5427,10 +5430,13 @@ mod test {
                 overlay_budgets: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             };
             s.save(&record).await.expect("save company");
         }
@@ -5504,10 +5510,13 @@ mod test {
                 overlay_budgets: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             };
             // Same template name under two tenants: distinct namespaced ids, no
             // `companies` unique-index conflict.

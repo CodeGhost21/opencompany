@@ -72,6 +72,8 @@
 //! only under the `openhuman` feature). The shared half therefore cannot live
 //! in the harness, or the default build could not reach it.
 
+use sha2::{Digest, Sha256};
+
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord, ArtifactStore};
@@ -114,6 +116,26 @@ pub struct PublishTarget<'a> {
     /// The node the previous version of this artifact was mirrored into, when
     /// there was one. Reused if it still resolves; see [`materialize`].
     pub existing_node_id: Option<&'a str>,
+}
+
+/// One card-less workflow-run artifact.
+///
+/// Runs cannot use [`PublishTarget`] directly because its second path segment
+/// is a task id and a workflow agent node has no card. This target preserves
+/// the same author/source/payload contract while giving the mirror the two ids
+/// that make the destination unique within a run.
+#[derive(Debug, Clone, Copy)]
+pub struct RunTarget<'a> {
+    /// The roster agent whose sandbox produced the file.
+    pub agent_id: &'a str,
+    /// The workflow run that owns the capture.
+    pub run_id: &'a str,
+    /// The graph node whose turn wrote it.
+    pub node_id: &'a str,
+    /// The normalized path relative to that agent's workspace.
+    pub source: &'a str,
+    /// The captured file body.
+    pub payload: MirrorPayload<'a>,
 }
 
 /// What [`materialize`] is being asked to put in the tree.
@@ -332,6 +354,56 @@ async fn materialize_fresh(
         // edits the tree by hand.
         None => create_first(workspace, company, &parent, filename, target).await,
     }
+}
+
+/// A workflow node id's path segment within a run's artifact folder.
+///
+/// `kebab_name_or` is not injective — `write_up` and `write-up` both normalize
+/// to `write-up` — but workflow validation only requires raw node ids to be
+/// unique, not their kebab form. Two nodes that collide there would otherwise
+/// resolve to the same `materialize_run` destination, and the later capture
+/// would silently overwrite the earlier node's output. Appending a short
+/// stable hash of the RAW id (computed before normalization) makes the
+/// segment collision-resistant while keeping the kebab prefix for
+/// readability in the workspace tree.
+fn run_node_segment(node_id: &str) -> String {
+    let kebab = kebab_name_or(node_id, node_id);
+    let digest = Sha256::digest(node_id.as_bytes());
+    let mut suffix = String::with_capacity(8);
+    for byte in digest.iter().take(4) {
+        use std::fmt::Write as _;
+        let _ = write!(suffix, "{byte:02x}");
+    }
+    format!("{kebab}-{suffix}")
+}
+
+/// Files a card-less workflow-node output into the shared workspace tree.
+///
+/// The layout is `artifacts/<agent>/runs/<run>/<node>-<hash>/<source…>`.
+/// Reusing [`materialize`] keeps the same path validation, conflict handling,
+/// binary storage, and atomic create semantics as task artifacts while the
+/// `runs` segment prevents a run id from being mistaken for a task id.
+pub async fn materialize_run(
+    workspace: &dyn WorkspaceStore,
+    company: &CompanyId,
+    target: RunTarget<'_>,
+) -> Result<Mirrored> {
+    let run = kebab_name_or(target.run_id, target.run_id);
+    let node = run_node_segment(target.node_id);
+    let source = format!("{run}/{node}/{}", target.source);
+    materialize(
+        workspace,
+        company,
+        PublishTarget {
+            agent_id: target.agent_id,
+            task_id: "runs",
+            task_title: None,
+            source: &source,
+            payload: target.payload,
+            existing_node_id: None,
+        },
+    )
+    .await
 }
 
 /// Publishes a deliverable to a path that nothing occupies yet, and loses
@@ -3028,6 +3100,63 @@ mod test {
                 .iter()
                 .all(|n| n.kind != NodeKind::Folder || n.name == ARTIFACTS_ROOT),
             "no folder beneath the root should survive a fully-refused publish: {nodes:?}"
+        );
+    }
+
+    /// Two workflow nodes whose raw ids differ only by underscore vs dash
+    /// still capture to distinct folders.
+    ///
+    /// `write_up` and `write-up` both kebab-normalize to `write-up`. Workflow
+    /// validation only requires the RAW ids to be unique, so both are legal
+    /// node ids in one graph. Without a raw-id-derived suffix on the path
+    /// segment, the second node's capture would resolve to the same
+    /// destination as the first and silently overwrite its output.
+    #[tokio::test]
+    async fn run_nodes_with_colliding_kebab_ids_capture_to_distinct_folders() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize_run(
+            ws,
+            &co,
+            RunTarget {
+                agent_id: "cmo",
+                run_id: "run-1",
+                node_id: "write_up",
+                source: "notes.md",
+                payload: MirrorPayload::Text("first node's body"),
+            },
+        )
+        .await
+        .expect("first node capture");
+
+        let second = materialize_run(
+            ws,
+            &co,
+            RunTarget {
+                agent_id: "cmo",
+                run_id: "run-1",
+                node_id: "write-up",
+                source: "notes.md",
+                payload: MirrorPayload::Text("second node's body"),
+            },
+        )
+        .await
+        .expect("second node capture");
+
+        assert_ne!(
+            first.node_id, second.node_id,
+            "colliding kebab node ids must not resolve to the same workspace node"
+        );
+
+        let (_, first_body) = ws
+            .read(&co, &first.node_id)
+            .await
+            .expect("read")
+            .expect("first node still present");
+        assert_eq!(
+            first_body, "first node's body",
+            "the second node's capture must not overwrite the first node's output"
         );
     }
 }
