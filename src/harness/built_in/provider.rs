@@ -1789,10 +1789,21 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
     // a broken endpoint as reachable, passing the setup wizard or console
     // Test action for a provider that cannot complete the bare chat turn it
     // exists to verify (CodeRabbit review on #1779, comment 3877827976).
-    if response.message.content.is_empty() {
+    //
+    // Checking `content.is_empty()` alone only catches a tool-call-*only*
+    // reply. An endpoint can also emit a text preamble alongside a genuinely
+    // parsed tool call (`content` nonempty AND `tool_calls` nonempty) —
+    // `model_response_from_payload` accepts that combination for a real turn
+    // too, so it clears this guard with content to spare even though a tool
+    // call the probe never offered was still requested. Require the tool-call
+    // list to be empty as well so any tool call at all — bare or alongside
+    // text — fails the probe (CodeRabbit review on #1779, comment
+    // 3878355375).
+    if response.message.content.is_empty() || !response.message.tool_calls.is_empty() {
         return Err(anyhow::anyhow!(
-            "probe response carried no visible text — endpoint returned a \
-             tool call instead of answering a turn that offered no tools"
+            "probe response carried a tool call — endpoint requested an \
+             action instead of (or alongside) answering a turn that offered \
+             no tools"
         ));
     }
     Ok(())
@@ -4258,6 +4269,48 @@ mod tests {
         let err = probe(&decl, None)
             .await
             .expect_err("a tool-call-only reply to a no-tools probe must not pass");
+        assert!(
+            err.to_string().contains("tool call"),
+            "error should name why the probe failed: {err}"
+        );
+    }
+
+    /// CodeRabbit review on #1779 (comment 3878355375): the tool-call guard
+    /// above only checked `content.is_empty()`, which catches a tool-call-
+    /// *only* reply but not a mixed one — a text preamble alongside a
+    /// genuinely parsed tool call. `model_response_from_payload` accepts that
+    /// combination for a real turn (the finish-reason-declares-an-action
+    /// guard only fires when `tool_calls` fails to parse), so `content` comes
+    /// back nonempty and the pre-fix check let it through even though the
+    /// probe offered no tools and the endpoint still requested one. Must
+    /// still fail the probe.
+    #[tokio::test]
+    async fn probe_rejects_tool_call_alongside_text_preamble() {
+        let url = spawn_stub_message(serde_json::json!({
+            "role": "assistant",
+            "content": "Let me check that for you.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "lookup_weather", "arguments": "{}" }
+                }
+            ]
+        }))
+        .await;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url);
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = probe(&decl, None)
+            .await
+            .expect_err("a tool call alongside text in a no-tools probe must not pass");
         assert!(
             err.to_string().contains("tool call"),
             "error should name why the probe failed: {err}"
