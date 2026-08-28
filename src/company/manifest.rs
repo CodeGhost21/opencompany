@@ -424,19 +424,24 @@ impl CompanyManifest {
     }
 
     /// [`validate`](Self::validate), with the [`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)
-    /// agent-id collision reported only when `enforce_reserved_agent_ids` is
-    /// set.
+    /// agent-id collision, and the matching `operator` group-chat id/name
+    /// reservation, reported only when `enforce_reserved_agent_ids` is set.
     ///
     /// [`from_path_for_reload`](Self::from_path_for_reload) calls this with
     /// `false`: that rule shipped after companies already existed whose
-    /// roster declared an agent at one of those ids (`operator`, chiefly —
-    /// see the grandfather-support machinery in `channel.rs`, `operator.rs`,
-    /// `delivery.rs`, and `runtime.rs`, all built to run exactly this
-    /// manifest shape correctly), and this method's boot-time caller reloads
-    /// that same on-disk manifest on every restart, not just once at
-    /// authoring time. Every other problem below is still reported either
-    /// way — this grandfathers the one rule proven to predate existing
-    /// manifests, not validation as a whole.
+    /// roster declared an agent at one of those ids — or whose desk list
+    /// declared a group chat at the `operator` id or name (`operator`,
+    /// chiefly — see the grandfather-support machinery in `channel.rs`,
+    /// `operator.rs`, `delivery.rs`, and `runtime.rs`, all built to run
+    /// exactly this manifest shape correctly), and this method's boot-time
+    /// caller reloads that same on-disk manifest on every restart, not just
+    /// once at authoring time. Every other problem below is still reported
+    /// either way — this grandfathers the reserved-`operator`-identity rules
+    /// proven to predate existing manifests (agent id, plus group-chat id and
+    /// name), not validation as a whole (issue #1781 review, Codex P1: the
+    /// group-chat arm was still unconditional after the agent-id arm was
+    /// gated, so a company whose desk list predates the reservation could
+    /// still fail to reboot).
     fn validate_with(&self, enforce_reserved_agent_ids: bool) -> Vec<String> {
         let mut problems = Vec::new();
 
@@ -536,7 +541,9 @@ impl CompanyManifest {
                 problems.push(format!(
                     "{label} has an invalid `id` — use snake_case (lowercase letters, digits, and underscores, starting with a letter)."
                 ));
-            } else if chat.id == crate::runtime::channel::OPERATOR_CHANNEL {
+            } else if enforce_reserved_agent_ids
+                && chat.id == crate::runtime::channel::OPERATOR_CHANNEL
+            {
                 // Issue #1757: `operator` is the reserved id of the built-in,
                 // read-only Operator system channel — every company gets one,
                 // listed and durable. A manifest desk claiming that id would be
@@ -545,12 +552,20 @@ impl CompanyManifest {
                 // `chat_and_emit` (`src/server/operator.rs`), which treats any
                 // `chat_id == OPERATOR_CHANNEL` as the system feed regardless of
                 // where it came from.
+                //
+                // Gated on `enforce_reserved_agent_ids` for the same reason the
+                // agent-id reservation above is (issue #1781 review, Codex P1):
+                // `operator` becoming reserved postdates real companies, and a
+                // desk that already claimed the id — or the name, below — must
+                // still reboot through `from_path_for_reload`, not just an
+                // agent at the id. Authoring (`from_path`) stays strict.
                 problems.push(format!(
                     "{label} uses the id `operator`, which is reserved for the built-in Operator channel — choose a different id."
                 ));
-            } else if chat
-                .name
-                .eq_ignore_ascii_case(crate::runtime::channel::OPERATOR_CHANNEL)
+            } else if enforce_reserved_agent_ids
+                && chat
+                    .name
+                    .eq_ignore_ascii_case(crate::runtime::channel::OPERATOR_CHANNEL)
             {
                 // Issue #1781 review (Codex P2): the id check above is not
                 // enough on its own — `server::operator::resolve_desk`
@@ -562,7 +577,8 @@ impl CompanyManifest {
                 // desk instead of the system feed, and the desk's own
                 // (writable, member) transcript would display through the
                 // identity the console assumes is the read-only Operator
-                // feed. Reserved for the same reason the id is.
+                // feed. Reserved for the same reason the id is — and gated
+                // the same way (issue #1781 review, Codex P1 follow-up).
                 problems.push(format!(
                     "{label} is named \"Operator\", which is reserved for the built-in Operator channel — choose a different name."
                 ));
@@ -2068,6 +2084,75 @@ mod tests {
         assert!(
             format!("{err}").contains("more than once"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// Issue #1781 review (Codex P1): the `operator` group-chat id/name
+    /// reservation (`rejects_a_group_chat_claiming_the_reserved_operator_id`
+    /// above) is the desk-side twin of the agent-id reservation
+    /// `from_path_for_reload_grandfathers_a_manifest_agent_at_a_reserved_id`
+    /// covers — both postdate real companies, since `operator` only became a
+    /// reserved system channel with issue #1757. The agent-id arm was gated
+    /// on `enforce_reserved_agent_ids`; this arm was not, so a company whose
+    /// desk list already declared `id = "operator"` before the reservation
+    /// shipped could reboot as an agent-only grandfather case but never as a
+    /// desk one — `register_company`'s `serve` boot loop would refuse it on
+    /// every restart. `from_path` is proven first to still refuse it
+    /// (pinning the pre-fix failure this regresses against);
+    /// `from_path_for_reload` must accept the identical manifest and keep
+    /// the desk itself loaded.
+    #[test]
+    fn from_path_for_reload_grandfathers_a_group_chat_at_the_reserved_operator_id() {
+        let dir = write_bundle(
+            "[company]\nname = \"Acme\"\n\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\n\
+             [[group_chat]]\nid = \"operator\"\nname = \"Legacy Ops\"\nmembers = [\"ceo\"]\n",
+            &[],
+        );
+
+        let strict = CompanyManifest::from_path(dir.path());
+        assert!(
+            strict.is_err(),
+            "sanity check: the strict authoring loader must still refuse this manifest, \
+             or this test is not exercising the rule it claims to"
+        );
+
+        let reloaded = CompanyManifest::from_path_for_reload(dir.path())
+            .expect("a company that already has a desk at the `operator` id must reboot");
+        assert!(
+            reloaded.group_chats.iter().any(|c| c.id == "operator"),
+            "the grandfathered desk itself must still be loaded, not merely tolerated: {:?}",
+            reloaded.group_chats
+        );
+    }
+
+    /// The name-collision twin of the test above: a desk at a harmless id but
+    /// named "Operator" shadows the system channel exactly as thoroughly
+    /// (`server::operator::resolve_desk` matches by id *or* case-insensitive
+    /// name — see `rejects_a_group_chat_named_operator_even_with_a_harmless_id`),
+    /// and was equally unconditional before this fix.
+    #[test]
+    fn from_path_for_reload_grandfathers_a_group_chat_named_operator() {
+        let dir = write_bundle(
+            "[company]\nname = \"Acme\"\n\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\n\
+             [[group_chat]]\nid = \"legacy_ops\"\nname = \"Operator\"\nmembers = [\"ceo\"]\n",
+            &[],
+        );
+
+        let strict = CompanyManifest::from_path(dir.path());
+        assert!(
+            strict.is_err(),
+            "sanity check: the strict authoring loader must still refuse this manifest, \
+             or this test is not exercising the rule it claims to"
+        );
+
+        let reloaded = CompanyManifest::from_path_for_reload(dir.path())
+            .expect("a company that already has a desk named \"Operator\" must reboot");
+        assert!(
+            reloaded.group_chats.iter().any(|c| c.id == "legacy_ops"),
+            "the grandfathered desk itself must still be loaded, not merely tolerated: {:?}",
+            reloaded.group_chats
         );
     }
 
