@@ -464,3 +464,94 @@ describe("a hung admin-role read does not strand the operator either", () => {
     expect(container.textContent).toContain("Continue to the console");
   });
 });
+
+/**
+ * PR #1875 review finding (comment 3878631082, `useActivationGate.ts:155`) —
+ * one of three "time out a hung read" threads that land on the same root
+ * cause (`lib/read-timeout.ts`'s own doc has the shared explanation).
+ *
+ * `inFlight` (the in-flight guard fixed just above, round 17) only clears
+ * once the call it is guarding *settles* — resolve or reject, either flips
+ * it back to `false` in `finally`. A `getActivation` that neither resolves
+ * nor rejects left `inFlight` stuck `true` forever: every later poll tick
+ * kept getting skipped by the very guard meant to stop them racing ahead of
+ * a live read, and `failures`/`stuck` never fired either, since nothing was
+ * ever a caught error for them to count.
+ *
+ * `withReadTimeout` closes it the same way as the admin-check thread:
+ * `ACTIVATION_READ_TIMEOUT_MS` (20s — comfortably above `SLOW_READ_MS`
+ * above, so a merely slow-but-successful read is never mistaken for a hang)
+ * turns the silence into an ordinary rejection, which flows straight into
+ * the *existing* `failures` counter and eventually `stuck`, and `inFlight`
+ * clears in the same `finally` as any other rejection.
+ */
+describe("a hung activation read does not strand the operator either", () => {
+  it("times out a hung activation read into the existing failures/stuck counter", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const activationCalls = { count: 0 };
+    // `/activation` hangs forever. Exercised directly against the hook, the
+    // same way the overlapping-polls test above is: the race (and now the
+    // timeout that closes its hung-read gap) lives entirely inside
+    // `useActivationGate`, not in anything `AppShell` adds on top.
+    const client = (() => {
+      const known = {
+        baseUrl: "",
+        scopeFor: (company: string | null) => `/api/v1/companies/${company ?? ""}`,
+        listTeam: vi.fn(async () => STAFFED),
+        subscribeToEvents: () => () => {},
+        get: (path: string) => {
+          if (path.includes("/activation")) {
+            activationCalls.count += 1;
+            return hang();
+          }
+          return hang();
+        },
+        status: hang,
+        approvals: hang,
+        listDesks: hang,
+      };
+      return new Proxy(known, {
+        get(target, prop, receiver) {
+          if (prop in target) return Reflect.get(target, prop, receiver);
+          return hang;
+        },
+      }) as unknown as OpenCompanyClient;
+    })();
+
+    function StuckProbe({
+      client: c,
+      company,
+    }: {
+      client: OpenCompanyClient;
+      company: string | null;
+    }): ReturnType<typeof createElement> {
+      const gate = useActivationGate(c, company, true);
+      return createElement(
+        "div",
+        { "data-testid": "probe" },
+        JSON.stringify({ checked: gate.checked, retrying: gate.retrying, stuck: gate.stuck }),
+      );
+    }
+
+    await act(async () => {
+      root.render(createElement(StuckProbe, { client, company: null }));
+    });
+
+    expect(activationCalls.count).toBe(1);
+    expect(container.textContent).toBe('{"checked":false,"retrying":false,"stuck":false}');
+
+    // Same shape as the admin-check case: ACTIVATION_READ_TIMEOUT_MS (20s) to
+    // time out, ACTIVATION_READ_RETRY_MS (3s) before the next attempt,
+    // STUCK_AFTER_FAILURES (3) of those flips `stuck`.
+    for (let i = 0; i < 12; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+    }
+
+    // More than one call proves the first hung read settled (late, as a
+    // rejection) and freed `inFlight` rather than wedging it forever.
+    expect(activationCalls.count).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toBe('{"checked":false,"retrying":true,"stuck":true}');
+  });
+});

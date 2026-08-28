@@ -4,6 +4,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { type ActivationStatus, getActivation } from "@/api/activation";
 import { resolveActivationReadError } from "@/onboarding/gate-logic";
 import { startVisiblePolling } from "@/lib/visible-poll";
+import { withReadTimeout } from "@/lib/read-timeout";
 
 /**
  * How often the gate re-reads the funnel while it is on screen.
@@ -31,6 +32,30 @@ const POLL_MS = 5000;
  * that window small instead of leaving it as wide as a full poll interval.
  */
 const ACTIVATION_READ_RETRY_MS = 3000;
+
+/**
+ * How long a single `getActivation` call is allowed to sit with no response
+ * at all before it is treated as a failure (PR #1875 review finding).
+ *
+ * The `inFlight` guard just below only clears once the call it is guarding
+ * *settles* — resolve or reject, either flips it back to `false` in `finally`.
+ * `getActivation` goes through `OpenCompanyClient`, whose request path has no
+ * timeout of its own (`api/transport/browser.ts` calls bare `fetch`, no
+ * `AbortSignal`), so a stalled proxy or backend that accepts the connection
+ * and never answers leaves that promise pending forever: `inFlight` never
+ * clears, every later poll tick keeps getting skipped by the very guard that
+ * exists to stop them racing ahead of a live read, and `failures`/`stuck`
+ * never fire either, because nothing here is a caught error. The escape this
+ * hook already offers for a durable failure never has a failure to catch.
+ * `withReadTimeout` turns that silence into an ordinary rejection at this
+ * bound — `resolveActivationReadError` already classifies a non-`404` error
+ * as non-terminal, so it flows straight into the existing `failures` counter
+ * and eventually `stuck`, and `inFlight` clears in the same `finally` as any
+ * other rejection. Comfortably above `SLOW_READ_MS` (`onboarding-gate-stuck-
+ * escape.test.ts`) so a merely slow-but-successful read is never mistaken for
+ * a hang.
+ */
+const ACTIVATION_READ_TIMEOUT_MS = 20000;
 
 /**
  * How many consecutive non-terminal `getActivation` failures before the hook
@@ -152,7 +177,7 @@ export function useActivationGate(
     inFlight.current = true;
     const gen = ++generation.current;
     try {
-      const next = await getActivation(client, company);
+      const next = await withReadTimeout(getActivation(client, company), ACTIVATION_READ_TIMEOUT_MS);
       if (gen !== generation.current) return;
       setStatus(next);
       setChecked(true);
