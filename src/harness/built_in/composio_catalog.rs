@@ -929,12 +929,22 @@ pub fn composio_brief(toolkits: &[String]) -> String {
 /// not a deeper path under it. Calendar's prefix set only had `/calendar/`,
 /// so a batch request bypassed deflection the same way Drive's did before
 /// round 8.
+///
+/// Gmail has the same batch-endpoint gap as Drive and Calendar (PR #1780
+/// review, round 10): `www.googleapis.com/batch/gmail/v1` is a sibling of
+/// `/gmail/`, not a deeper path under it — the same shape as the
+/// `/upload/gmail/` sibling above. Gmail's prefix set only had `/gmail/` and
+/// `/upload/gmail/`, so a batched Gmail request bypassed deflection the same
+/// way Drive's and Calendar's batch requests did before rounds 8 and 9.
 fn toolkit_api_hosts(toolkit: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match toolkit {
         "github" => &[("api.github.com", &[]), ("uploads.github.com", &[])],
         "gmail" => &[
             ("gmail.googleapis.com", &[]),
-            ("www.googleapis.com", &["/gmail/", "/upload/gmail/"]),
+            (
+                "www.googleapis.com",
+                &["/gmail/", "/upload/gmail/", "/batch/gmail/"],
+            ),
         ],
         "googlecalendar" => &[
             ("calendar.googleapis.com", &[]),
@@ -1873,6 +1883,13 @@ mod tests {
     /// `/gmail/`. Before the fix `gmail`'s prefix set only had `/gmail/`, so
     /// this raw unauthenticated request passed straight through instead of
     /// being deflected to Composio.
+    ///
+    /// PR #1780 review (round 10): like Drive's and Calendar's `/batch/`
+    /// sibling prefixes (rounds 8 and 9), batching several Gmail calls into
+    /// one request goes to `www.googleapis.com/batch/gmail/v1` — another
+    /// sibling of `/gmail/`, not a deeper path under it. Before this fix
+    /// Gmail's prefix set had no `/batch/gmail/` entry, so a batch request
+    /// passed straight through instead of being deflected.
     #[test]
     fn gmail_deflection_on_the_legacy_host_is_scoped_to_gmail_paths() {
         let connected = vec!["gmail".to_string()];
@@ -1904,6 +1921,11 @@ mod tests {
             .is_some(),
             "the legacy media/resumable upload route on the shared gateway host must also be \
              deflected, the same as Drive's sibling /upload/drive/ prefix"
+        );
+        assert!(
+            web_call_deflection(&connected, "https://www.googleapis.com/batch/gmail/v1").is_some(),
+            "the batch endpoint on the legacy gateway host must also be deflected, the same as \
+             Drive's sibling /batch/drive/ and Calendar's sibling /batch/calendar/ prefixes"
         );
     }
 
