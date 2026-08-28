@@ -1613,12 +1613,15 @@ impl HarnessBrain {
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
-        Ok(Some(lifecycle::relay_reply(
+        let relay = lifecycle::relay_reply(
             &card,
             &orchestrator,
             &orchestrator,
             origin,
-        )))
+        );
+        self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
+            .await;
+        Ok(Some(relay))
     }
 
     /// Opens the trace sink for this dispatch's attempt row (issue #242), or
