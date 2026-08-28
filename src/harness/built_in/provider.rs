@@ -872,16 +872,34 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         || payload
             .pointer("/choices/0/message/function_call")
             .is_some_and(|v| !v.is_null());
+    // How many entries the *raw* array actually carried, when it is an
+    // array at all (legacy `function_call` and non-array shapes have no
+    // raw count to compare against, and are already fully covered by the
+    // `tool_calls.is_empty()` arm below since `parse_tool_calls` only reads
+    // the array shape). Used to catch a *partial* parse: `parse_tool_calls`
+    // silently drops any entry missing `function.name` (it is a
+    // `filter_map`), so a raw array of one valid call and one malformed one
+    // survives parsing as a single-element `tool_calls` — nonempty, so the
+    // `tool_calls.is_empty()` check alone does not fire, and the malformed
+    // entry (a genuinely requested action) is discarded without a trace
+    // (CodeRabbit review on #1779, comment 3877118065).
+    let raw_tool_call_count = payload
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(|v| v.as_array())
+        .map(std::vec::Vec::len);
     // A tool call was genuinely requested (the raw payload carries one,
-    // whether or not `parse_tool_calls` accepted it) but none survived
-    // parsing. This must error even when `content` is nonempty: array-shaped
-    // content can carry a text preamble alongside the malformed call, which
-    // would otherwise pass the empty-turn check below and let the harness
-    // silently return the preamble as if it were the whole answer — the same
-    // class of substitution the reasoning-fallback guard above exists to
-    // prevent, just via the *content* channel instead of `reasoning`
-    // (CodeRabbit review on #1779, comment 3872084060).
-    if raw_tool_call_requested && tool_calls.is_empty() {
+    // whether or not `parse_tool_calls` accepted it) but not every entry
+    // survived parsing — either none did, or some did and some were
+    // silently dropped. This must error even when `content` is nonempty:
+    // array-shaped content can carry a text preamble alongside the
+    // malformed call, which would otherwise pass the empty-turn check below
+    // and let the harness silently return the preamble as if it were the
+    // whole answer — the same class of substitution the reasoning-fallback
+    // guard above exists to prevent, just via the *content* channel instead
+    // of `reasoning` (CodeRabbit review on #1779, comment 3872084060).
+    if raw_tool_call_requested
+        && (tool_calls.is_empty() || raw_tool_call_count.is_some_and(|n| n != tool_calls.len()))
+    {
         let detail = finish_reason
             .as_deref()
             .map(|r| format!(" (finish_reason: {r})"))
@@ -2499,6 +2517,40 @@ mod tests {
         assert!(
             msg.contains("function_call"),
             "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A raw `tool_calls` array can be *partially* malformed: one entry
+    /// parses (has `function.name`), one does not. `parse_tool_calls`'s
+    /// `filter_map` drops the malformed entry and returns the single valid
+    /// one — a nonempty `Vec`, so `tool_calls.is_empty()` alone never
+    /// catches it. Pre-fix, the response is returned successfully with only
+    /// the surviving call, silently discarding a genuinely requested action
+    /// (CodeRabbit review on #1779, comment 3877118065). The guard must
+    /// compare the raw array length against the parsed count, not just
+    /// check for emptiness.
+    #[test]
+    fn partially_malformed_tool_calls_array_errors_instead_of_dropping_one_call() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        { "id": "call_1", "type": "function", "function": { "name": "get_weather", "arguments": "{}" } },
+                        { "id": "call_2", "type": "function", "function": { "arguments": "{}" } }
+                    ]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a partially malformed tool_calls array must not silently drop the malformed entry",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool call"),
+            "error must name the dropped tool call for diagnosis, got: {msg}"
         );
     }
 
