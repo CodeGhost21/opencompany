@@ -116,6 +116,58 @@ impl BlockerKind {
         }
     }
 
+    /// Which gap class a missing [`PrereqKind`] is (issue #1861).
+    ///
+    /// The planning pass already names *what* is missing; this says who can
+    /// supply it, which is the axis that decides how the question is asked.
+    ///
+    /// A connection, a Composio account, an MCP server, a credential or a
+    /// missing grant are all [`Infrastructure`](Self::Infrastructure): nobody
+    /// on the roster knows the state of the operator's integrations, so #1866's
+    /// bounded ask-around rung would spend turns discovering that. A missing
+    /// file, an unresolved assignee, or a prerequisite this host cannot even
+    /// classify are [`Information`](Self::Information) — a person knows, and so
+    /// might a teammate.
+    ///
+    /// Never [`Transient`](Self::Transient): a prerequisite the pass could not
+    /// satisfy does not satisfy itself by being retried.
+    ///
+    /// [`PrereqKind`]: crate::ports::tasks::PrereqKind
+    pub fn for_prereq(kind: crate::ports::tasks::PrereqKind) -> Self {
+        use crate::ports::tasks::PrereqKind;
+        match kind {
+            PrereqKind::Connection
+            | PrereqKind::Composio
+            | PrereqKind::Mcp
+            | PrereqKind::Credential
+            | PrereqKind::Permission => Self::Infrastructure,
+            PrereqKind::File | PrereqKind::Assignee | PrereqKind::Other => Self::Information,
+        }
+    }
+
+    /// The class for a *set* of missing prerequisites.
+    ///
+    /// [`Infrastructure`](Self::Infrastructure) wins whenever any member is:
+    /// a plan blocked on both a missing credential and a missing brief still
+    /// cannot start until the operator reconnects something, and routing the
+    /// pair through the roster first would ask teammates about an integration
+    /// none of them can see. The information half rides along in the reason.
+    ///
+    /// An empty set is [`Information`](Self::Information) — vacuous, and the
+    /// caller has nothing to ask about anyway.
+    pub fn for_prereqs(kinds: impl IntoIterator<Item = crate::ports::tasks::PrereqKind>) -> Self {
+        kinds
+            .into_iter()
+            .map(Self::for_prereq)
+            .fold(Self::Information, |acc, kind| {
+                if acc == Self::Infrastructure || kind == Self::Infrastructure {
+                    Self::Infrastructure
+                } else {
+                    kind
+                }
+            })
+    }
+
     /// The dotted effect kind a park of this class carries, e.g.
     /// `blocker.information`.
     pub fn effect_kind(self) -> String {
@@ -290,6 +342,63 @@ mod test {
         assert!(
             !BlockerKind::Transient.parks(),
             "a transient failure is not answerable by a person and must retry, not ask"
+        );
+    }
+
+    /// Only the operator can reconnect an integration, so those prerequisites
+    /// must not be routed through the roster first.
+    #[test]
+    fn integration_prereqs_are_infrastructure_and_the_rest_are_information() {
+        use crate::ports::tasks::PrereqKind;
+        for kind in [
+            PrereqKind::Connection,
+            PrereqKind::Composio,
+            PrereqKind::Mcp,
+            PrereqKind::Credential,
+            PrereqKind::Permission,
+        ] {
+            assert_eq!(BlockerKind::for_prereq(kind), BlockerKind::Infrastructure);
+        }
+        for kind in [PrereqKind::File, PrereqKind::Assignee, PrereqKind::Other] {
+            assert_eq!(BlockerKind::for_prereq(kind), BlockerKind::Information);
+        }
+    }
+
+    /// A prerequisite never resolves itself, so no prereq class may park as
+    /// transient — that would settle the card and ask nobody.
+    #[test]
+    fn no_prereq_is_transient() {
+        use crate::ports::tasks::PrereqKind;
+        for kind in [
+            PrereqKind::Connection,
+            PrereqKind::Composio,
+            PrereqKind::Mcp,
+            PrereqKind::Credential,
+            PrereqKind::File,
+            PrereqKind::Permission,
+            PrereqKind::Assignee,
+            PrereqKind::Other,
+        ] {
+            assert!(BlockerKind::for_prereq(kind).parks());
+        }
+    }
+
+    #[test]
+    fn a_mixed_set_of_prereqs_takes_the_operator_route() {
+        use crate::ports::tasks::PrereqKind;
+        assert_eq!(
+            BlockerKind::for_prereqs([PrereqKind::File, PrereqKind::Credential]),
+            BlockerKind::Infrastructure,
+            "a plan blocked on a credential cannot start however well the brief is answered"
+        );
+        assert_eq!(
+            BlockerKind::for_prereqs([PrereqKind::File, PrereqKind::Assignee]),
+            BlockerKind::Information
+        );
+        assert_eq!(
+            BlockerKind::for_prereqs([]),
+            BlockerKind::Information,
+            "vacuous, and there is nothing to ask about"
         );
     }
 

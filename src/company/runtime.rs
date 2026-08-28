@@ -1249,6 +1249,89 @@ impl CompanyRuntime {
     /// Whole-company audience: a bounced card has no single decider the way a
     /// mention does, and its assignee is exactly who the card's own `assignee`
     /// field already names for anyone who opens it.
+    /// Parks a blocker on the approval gate from **outside a cycle** (issue
+    /// #1861).
+    ///
+    /// The planning pass runs in a detached `tokio::spawn` with no cycle around
+    /// it and no attempt row of its own, so it cannot reach
+    /// `CycleRunner::park` and must not stage onto the harness's
+    /// approval-request queue: nothing would drain that until some later,
+    /// unrelated chat cycle happened to run, and the park would then be
+    /// attributed to that turn's thread rather than to this card.
+    ///
+    /// So this is `CycleRunner::park`'s journal-and-announce half, minus the
+    /// two things only a cycle can honestly supply:
+    ///
+    /// * **No continuation is armed.** There is no turn suspended on this
+    ///   answer — the pass has already finished. Arming one would leave a
+    ///   counter against a cycle that will never run again. Resuming a planning
+    ///   blocker means re-dispatching the card, which is #1863's work.
+    /// * **No grant is marked pending.** `mark_pending` protects a live
+    ///   checkout from another turn's orphan sweep; a finished pass holds none.
+    ///
+    /// Ordering matches the cycle's exactly: gate, then the journal write that
+    /// binds it, then the advisory event. A crash between the journal and the
+    /// event replays as "still parked" and the console picks it up on its next
+    /// feed refresh, which is the same trade `CycleRunner::park` documents.
+    pub(crate) async fn park_blocker(
+        &self,
+        payload: &crate::ports::blockers::BlockerPayload,
+        task_id: &str,
+    ) -> Result<ApprovalId> {
+        use crate::ports::types::{Effect, EffectGroup};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let effect = Effect {
+            kind: payload.effect_kind(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+            // Not an agent's blocked tool call — see `Effect::agent`. Approving
+            // one is inert until #1863 carries the answer back.
+            agent: None,
+            // A pass mints no attempt row, so there is no run waiting on this.
+            run_id: None,
+        };
+        let approval_id = self.approvals.park(&self.id, effect.clone()).await?;
+        self.journal
+            .record_parked(
+                &approval_id,
+                &effect,
+                now_millis(),
+                TaskLink::from_task_id(Some(task_id)),
+                // No conversation: a planning pass is not anybody's turn, so
+                // there is no thread to thread the answer back into.
+                ApprovalConversation {
+                    thread: None,
+                    parent: None,
+                },
+                None,
+            )
+            .await?;
+        if let Err(err) = self
+            .events
+            .append(
+                &self.id,
+                CompanyEvent::ApprovalParked {
+                    approval_id: approval_id.clone(),
+                    effect_kind: effect.kind.clone(),
+                    thread: None,
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                company = %self.id,
+                approval_id = %approval_id,
+                error = %err,
+                "blocker parked and journaled, but its event-log entry failed",
+            );
+        }
+        Ok(approval_id)
+    }
+
     pub(crate) async fn notify_dispatch_failed(&self, task_id: &str, reason: &str) {
         let note = crate::ports::notifications::Notification {
             id: crate::ports::generate_id(),
