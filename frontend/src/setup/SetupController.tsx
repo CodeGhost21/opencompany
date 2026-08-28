@@ -5,6 +5,7 @@ import type { TeamMemberDto } from "@/api/types";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import type { LocalScope } from "@/connections/types";
 import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
+import { withReadTimeout } from "@/lib/read-timeout";
 import { SetupDialog } from "./SetupDialog";
 import {
   clearSetupRedesign,
@@ -21,6 +22,28 @@ import {
 
 /** Where "Set up a model" sends the operator. */
 const MODEL_SETTINGS = "#/settings/connections";
+
+/**
+ * How long the gate's roster read (`client.listTeam`, just below) is allowed
+ * to sit with no response at all before it is treated as unreachable (PR
+ * #1875 review finding).
+ *
+ * The `catch` around that call already treats any rejection as "cannot tell
+ * a fresh company from a staffed one, offer nothing" and settles `checked`
+ * regardless — the one thing it cannot handle is a promise that never
+ * settles at all. `client.listTeam` goes through `OpenCompanyClient`, whose
+ * request path has no timeout of its own (`api/transport/browser.ts` calls
+ * bare `fetch`, no `AbortSignal`), so a stalled proxy or a backend that
+ * accepts the connection and never answers leaves `roster = await
+ * client.listTeam(company)` pending forever: `checked` never becomes `true`
+ * here, `onOpenChange` never fires, `AppShell`'s `setupChecked` never flips,
+ * and `shouldHoldShellPending`'s `!input.setupChecked` branch holds the shell
+ * with no way out — there is no stuck counter on this axis at all, only the
+ * one settlement this read never reaches. `withReadTimeout` turns that
+ * silence into an ordinary rejection at this bound, which the existing
+ * `catch` below already handles exactly like any other unreachable host.
+ */
+const SETUP_ROSTER_TIMEOUT_MS = 20000;
 
 /** Whether the operator is still on the page they left setup for. */
 function onModelSettings(): boolean {
@@ -197,7 +220,7 @@ export function SetupController({
     (async () => {
       let roster: TeamMemberDto[] = [];
       try {
-        roster = await client.listTeam(company);
+        roster = await withReadTimeout(client.listTeam(company), SETUP_ROSTER_TIMEOUT_MS);
       } catch {
         // A host with no roster surface, or one we cannot reach. Offer nothing:
         // a setup flow that cannot read the team cannot tell a fresh company

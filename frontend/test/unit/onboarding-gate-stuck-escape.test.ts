@@ -555,3 +555,121 @@ describe("a hung activation read does not strand the operator either", () => {
     expect(container.textContent).toBe('{"checked":false,"retrying":true,"stuck":true}');
   });
 });
+
+/**
+ * PR #1875 review finding (comment 3878631089, `gate-logic.ts:191`) — one of
+ * three "time out a hung read" threads that land on the same root cause
+ * (`lib/read-timeout.ts`'s own doc has the shared explanation).
+ *
+ * Unlike the two threads above, `shouldHoldShellPending`'s `!input.setupChecked`
+ * branch has no stuck counter on this axis at all — `SetupController`'s own
+ * `catch` around `client.listTeam` already treats any rejection as "cannot
+ * tell a fresh company from a staffed one, offer nothing" and settles
+ * `checked` regardless, so ordinarily there is nothing left to fix here. The
+ * one thing that `catch` cannot handle is a promise that never settles at
+ * all: a `listTeam` that neither resolves nor rejects left `checked` `false`
+ * inside `SetupController` forever, so its `onOpenChange` never fired,
+ * `AppShell`'s `setupChecked` never flipped, and the `!input.setupChecked`
+ * hold above had nothing else — no escape — to release it.
+ *
+ * `withReadTimeout` closes it the same way as the other two: `SETUP_ROSTER_
+ * TIMEOUT_MS` (20s) turns the silence into an ordinary rejection, which the
+ * *existing* `catch` already handles exactly like any other unreachable host.
+ */
+describe("a hung setup-roster read does not strand the operator either", () => {
+  it("times out a hung setup-roster read into the existing setupChecked gate, unblocking the shell", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const rosterCalls = { count: 0 };
+    // Setup's own roster read (`SetupController`, not the chat-thread
+    // `listTeam` call in `app-shell.tsx`) hangs forever. `/auth/me` and
+    // `/activation` both answer immediately — an admin, incomplete funnel —
+    // so nothing here comes from either of the other two reads: the only
+    // thing holding the shell is the roster read that never settles. Activation
+    // is left incomplete (not the already-activated fixture the admin-check
+    // and activation tests above use) so the release lands on `OnboardingGate`
+    // rather than the full authenticated shell — `HostSwitcher`, mounted deep
+    // in that shell's sidebar, needs a `HostsProvider` this suite's minimal
+    // client double does not provide, the same reason the overlapping-polls
+    // test above exercises `useActivationGate` directly rather than through
+    // `AppShell`. `OnboardingGate` carries no such dependency, and reaching it
+    // is just as much proof the hold released as reaching the ordinary shell
+    // would be.
+    const client = (() => {
+      const known = {
+        baseUrl: "",
+        scopeFor: (company: string | null) => `/api/v1/companies/${company ?? ""}`,
+        listTeam: vi.fn(async () => {
+          rosterCalls.count += 1;
+          return hang();
+        }),
+        subscribeToEvents: () => () => {},
+        get: (path: string) => {
+          if (path.includes("/auth/me")) {
+            return Promise.resolve({
+              id: "op",
+              email: "op@example.com",
+              role: "admin",
+              company: "co",
+            });
+          }
+          if (path.includes("/activation")) {
+            return Promise.resolve(INCOMPLETE_ACTIVATION);
+          }
+          return hang();
+        },
+        status: hang,
+        approvals: hang,
+        listDesks: hang,
+      };
+      return new Proxy(known, {
+        get(target, prop, receiver) {
+          if (prop in target) return Reflect.get(target, prop, receiver);
+          return hang;
+        },
+      }) as unknown as OpenCompanyClient;
+    })();
+
+    await act(async () => {
+      root.render(
+        createElement(ConnectionScopeProvider, {
+          scope: SCOPE,
+          children: createElement(AppShell, {
+            client,
+            company: null,
+            initialStatus: STATUS,
+            companies: [STATUS],
+            onSwitchCompany: () => {},
+          }),
+        }),
+      );
+    });
+
+    expect(rosterCalls.count).toBe(1);
+    // `shouldHoldShellPending`'s `!input.setupChecked` branch holds
+    // unconditionally — there is no stuck flag on this axis at all, only
+    // `RouteLoading`, forever, without the timeout.
+    expect(container.textContent).toContain("Loading");
+    expect(container.textContent).not.toContain("Continue to the console");
+    expect(container.textContent).not.toContain("Skip for now");
+
+    // SETUP_ROSTER_TIMEOUT_MS (20s) to time out. Setup's own read has no
+    // retry loop — it settles `checked` once and is done (see
+    // `SetupController`'s `catch`) — so one timeout is all this needs.
+    for (let i = 0; i < 3; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+    }
+
+    // The read is still only called once — SetupController does not retry —
+    // but it settled (late, as a rejection the existing `catch` already
+    // handles as "cannot tell a fresh company from a staffed one, offer
+    // nothing"), which is enough to flip `setupChecked` and release the hold.
+    // With admin true and the funnel still incomplete, `shouldShowOnboardingGate`
+    // now has everything it needs and renders the gate — including its own
+    // always-available "Skip for now" escape — instead of a loader that never
+    // resolves.
+    expect(rosterCalls.count).toBe(1);
+    expect(container.textContent).toContain("Skip for now");
+  });
+});
