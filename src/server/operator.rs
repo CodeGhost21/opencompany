@@ -3205,7 +3205,7 @@ async fn attribution_audit_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
-    let _viewer = history_viewer(headers, state, company, &runtime, peer).await?;
+    let _viewer = history_viewer(headers, state, company, runtime.as_ref(), peer).await?;
     let record = runtime
         .store()
         .load(runtime.id())
