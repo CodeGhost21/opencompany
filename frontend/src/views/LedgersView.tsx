@@ -1335,6 +1335,7 @@ function BoardMode({
               askerNames={askerNames}
               deciding={deciding}
               failed={failed}
+              continuationInFlight={continuationTaskIds?.has(task.id)}
               onDecide={onDecide}
               onOpen={() => onOpen(entry)}
               onResume={() => onResume?.(entry)}
