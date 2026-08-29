@@ -12,6 +12,7 @@ import {
   BookText,
   Wallet,
   Workflow,
+  Bell,
 } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
