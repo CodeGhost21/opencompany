@@ -395,13 +395,14 @@ pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> Str
 /// render a timeline on, so its steps go into the note (and, once #190 lands,
 /// onto the task's own `task_id`-correlated timeline).
 ///
-/// `task_id` carries the card's own id (issue #1852): once the runtime
-/// journals this bubble, that is the value that lands on
-/// [`AgentReply::task_id`](crate::ports::types::CompanyEvent::AgentReply), the
-/// same "card this reply is about" widening `journal_chat_replies`
-/// (`server::operator`) already relies on for its own card-opened chip — so
-/// the origin thread's bubble carries a working link back to the card that
-/// answered it, and that link survives a transcript reload.
+/// `task_id` carries the card's own id, for field-contract consistency with
+/// every other `OutboundMessage` producer — but `CompanyRuntime::
+/// journal_dispatch_replies` intentionally strips it back to `None` before
+/// journaling this bubble: the settle that already ran left a
+/// `DeskTaskCompleted` event pointed at this same thread, and carrying
+/// `task_id` here too would render a second "card opened" chip for a card
+/// that is not open by the time this bubble lands. It does not reach
+/// `AgentReply::task_id` and does not survive a transcript reload.
 pub fn relay_reply(
     card: &TaskRecord,
     responder: &str,
