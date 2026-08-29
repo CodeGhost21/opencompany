@@ -733,8 +733,8 @@ async fn the_composio_routing_brief_reaches_the_model_system_prompt() {
         &deps,
         crate::runtime::delegation::ChatTarget::default(),
     )
-        .await
-        .expect("turn runs");
+    .await
+    .expect("turn runs");
 
     let system = system_prompts(&script).join("\n");
     // The routing rule reached the model.
