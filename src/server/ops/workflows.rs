@@ -3119,6 +3119,7 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                     relabel_blocked(&mut entry.nodes, &blocked_nodes);
                     entry.blocked_nodes = blocked_nodes;
                     entry.approvals = approvals;
+                    entry.degraded = false;
                     continue;
                 }
                 // …else stand alone. Two ways to get here, both legitimate: a
