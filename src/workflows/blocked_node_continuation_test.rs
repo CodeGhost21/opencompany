@@ -134,6 +134,7 @@ fn operator() -> Actor {
 struct StartedRun {
     #[allow(dead_code)]
     input: Value,
+    started_by: StartedBy,
 }
 
 /// The real runner, wrapped so the test can count dispatches — the reported
@@ -147,6 +148,10 @@ struct RecordingRunner {
 impl RecordingRunner {
     fn started(&self) -> usize {
         self.started.lock().expect("recording runner").len()
+    }
+
+    fn started_runs(&self) -> Vec<StartedRun> {
+        self.started.lock().expect("recording runner").clone()
     }
 }
 
@@ -164,6 +169,7 @@ impl WorkflowRunner for RecordingRunner {
             .expect("recording runner")
             .push(StartedRun {
                 input: input.clone(),
+                started_by: ctx.started_by.clone(),
             });
         self.inner.run(company, workflow, input, ctx).await
     }
@@ -833,6 +839,11 @@ async fn a_restart_between_park_and_approve_preserves_agent_attribution() {
         runner.started(),
         2,
         "an approval after a restart re-dispatches the run from the durable stash"
+    );
+    assert_eq!(
+        runner.started_runs()[1].started_by,
+        StartedBy::Agent("ceo".to_string()),
+        "the continuation must receive the attribution rehydrated from the durable stash"
     );
 }
 
