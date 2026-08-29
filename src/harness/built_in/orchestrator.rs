@@ -3854,6 +3854,62 @@ impl Tool for RunWorkflowTool {
                          you're asked to — someone chose to stop it."
                     )));
                 }
+                // Issue #1861: notify for unhealthy runs (blocked or stranded),
+                // matching the notification logic in WorkflowSpawn. Agent-initiated
+                // runs should badge the operator just like console/scheduler runs.
+                if let Some(notifications) = &self.notifications {
+                    if !run.blocked_nodes.is_empty()
+                        && run.blocked_nodes.iter().any(|n| !n.approval_ids.is_empty())
+                    {
+                        let note = crate::ports::notifications::Notification {
+                            id: crate::ports::generate_id(),
+                            kind: "workflow_run_blocked".to_string(),
+                            subject: crate::ports::notifications::Subject {
+                                kind: crate::ports::notifications::SubjectKind::Run,
+                                id: ctx.run_id.to_string(),
+                            },
+                            created_at: crate::ports::now_millis(),
+                            title: format!(
+                                "Workflow `{wid}` blocked: This run stopped because a step is waiting on a person to decide something."
+                            ),
+                            audience: None,
+                            context: None,
+                        };
+                        if let Err(err) = notifications.append(&self.company, &note).await {
+                            tracing::warn!(
+                                company = %self.company,
+                                workflow = %wid,
+                                run_id = %ctx.run_id,
+                                error = %err,
+                                "run_workflow: could not notify for blocked run"
+                            );
+                        }
+                    } else if run.approvals.iter().any(|a| a.outcome.unparkable()) {
+                        let note = crate::ports::notifications::Notification {
+                            id: crate::ports::generate_id(),
+                            kind: "workflow_run_stranded".to_string(),
+                            subject: crate::ports::notifications::Subject {
+                                kind: crate::ports::notifications::SubjectKind::Run,
+                                id: ctx.run_id.to_string(),
+                            },
+                            created_at: crate::ports::now_millis(),
+                            title: format!(
+                                "Workflow `{wid}` stranded: This run tried to park an approval and could not — nothing is waiting on it any more, and nobody was asked."
+                            ),
+                            audience: None,
+                            context: None,
+                        };
+                        if let Err(err) = notifications.append(&self.company, &note).await {
+                            tracing::warn!(
+                                company = %self.company,
+                                workflow = %wid,
+                                run_id = %ctx.run_id,
+                                error = %err,
+                                "run_workflow: could not notify for stranded run"
+                            );
+                        }
+                    }
+                }
                 // Issue #339: this run is something the turn produced, so a
                 // dispatched card that reached here can link to it. Staged
                 // here — *after* the cancelled arm above — because a run an
