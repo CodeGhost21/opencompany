@@ -5168,6 +5168,40 @@ to = "done"
         .expect("a wired target passes the same pass");
     }
 
+    /// **Regression, issue #1882 review (PR #1882 bot finding, comment
+    /// 3879878907).** The courtesy pre-flight now takes the caller's stored
+    /// owning desk, so a caller that holds the saved body — the fix-from-run
+    /// copilot — gets the SAME grandfathering `update_company_workflow` applies:
+    /// a desk that went stale under an untouched field is carried, not refused.
+    ///
+    /// RED-FIRST: pre-fix this function took no such argument and always
+    /// validated as a create, so the unchanged arm below was a `400`.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn courtesy_validation_grandfathers_an_unchanged_stale_owner_desk() {
+        let company = CompanyId::new("acme");
+        let record = record(&company, manifest_with_assistant());
+        let mut draft = valid_draft("wf", "WF");
+        draft.owner_desk = Some("ghost-desk".to_string());
+
+        courtesy_validate_draft(&draft, &record, None, None, Some("ghost-desk"))
+            .expect("an unchanged owning desk is carried, not refused");
+
+        // The create-shaped caller keeps the old, stricter verdict: with no
+        // stored body to grandfather against, a desk naming nothing is a refusal.
+        let err = courtesy_validate_draft(&draft, &record, None, None, None)
+            .expect_err("a create-shaped pre-flight still refuses an unknown desk");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].field.as_deref(), Some("owner_desk"));
+
+        // And grandfathering is scoped to the value that was already on file: a
+        // DIFFERENT bad desk on the same edit is still refused.
+        let err = courtesy_validate_draft(&draft, &record, None, None, Some("some-other-desk"))
+            .expect_err("a newly named bad desk is not grandfathered by an edit");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].field.as_deref(), Some("owner_desk"));
+    }
+
     /// Issue #1191: a `channel` destination with no `target` is refused with a
     /// LOCATED problem — the node id and the config field — not a bare sentence.
     ///
