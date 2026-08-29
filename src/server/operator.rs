@@ -1382,11 +1382,18 @@ fn project_event_for_viewer(
             workflow_id,
             run_id,
             scheduled,
+            started_by,
         } => {
             let mut o = envelope("workflow_run_started");
             o["workflowId"] = json!(workflow_id);
             o["runId"] = json!(run_id);
             o["scheduled"] = json!(scheduled);
+            // Issue #1862 prerequisite: forwarded only when present, so a run
+            // journaled before this field existed (or one that genuinely has
+            // no sender) projects exactly as it did before.
+            if let Some(started_by) = started_by {
+                o["startedBy"] = json!(started_by);
+            }
             o
         }
         // Issue #382: the live per-node START bracket, the counterpart of the
@@ -10040,12 +10047,31 @@ mode = "full"
             workflow_id: "digest".into(),
             run_id: "run-1".into(),
             scheduled: true,
+            started_by: None,
         }))
         .expect("workflow_run_started reaches the console");
         assert_eq!(started["type"], "workflow_run_started");
         assert_eq!(started["workflowId"], "digest");
         assert_eq!(started["runId"], "run-1");
         assert_eq!(started["scheduled"], true);
+        assert!(
+            started.get("startedBy").is_none(),
+            "no sender projects no key: {started}"
+        );
+
+        // Issue #1862 prerequisite: when the journal carries a sender, the SSE
+        // frame forwards it under `startedBy`.
+        let started_with_sender = super::project_event(&stored(CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            scheduled: false,
+            started_by: Some(crate::ports::types::StartedBy::Agent("ceo".into())),
+        }))
+        .expect("workflow_run_started reaches the console");
+        assert_eq!(
+            started_with_sender["startedBy"],
+            serde_json::json!({"agent": "ceo"})
+        );
 
         let node = super::project_event(&stored(CompanyEvent::WorkflowNodeFinished {
             workflow_id: "digest".into(),

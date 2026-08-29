@@ -67,12 +67,35 @@ pub(super) struct CopilotContext {
     pub(super) fixing: Option<FixTarget>,
 }
 
+impl CopilotContext {
+    /// The owning desk the correction's saved counterpart already carries, for
+    /// [`courtesy_validate_draft`]'s update semantics (issue #1882 review).
+    /// `None` on the create-from-description path, which has no saved body — a
+    /// desk named there is a genuinely new assignment and is validated as one.
+    pub(super) fn previous_owner_desk(&self) -> Option<&str> {
+        self.fixing
+            .as_ref()
+            .and_then(|fix| fix.owner_desk.as_deref())
+    }
+}
+
 /// The saved identity a fix-from-run correction must preserve (issue #840, PR-3):
 /// the exact `wid` the edit route writes under, and the display name the operator
 /// recognises. The model corrects the GRAPH; the host keeps the identity.
 pub(super) struct FixTarget {
     pub(super) id: String,
     pub(super) name: String,
+    /// The owning desk the failing workflow is saved with (issue #1882 review,
+    /// PR #1882 bot finding, comment 3879878907). Like `id` and `name` this is
+    /// host-owned across a correction — `ownerDesk` is not on either tool's
+    /// parameter schema, so the model has no sanctioned way to change it, and a
+    /// value it echoed from the evidence prompt (or dropped entirely) must not
+    /// decide ownership. Pinned back onto the corrected spec, and passed to
+    /// `courtesy_validate_draft` as the previous owner so an unchanged desk that
+    /// has since gone stale is grandfathered exactly as the real update path
+    /// grandfathers it, instead of blocking the correction of an unrelated run
+    /// failure.
+    pub(super) owner_desk: Option<String>,
 }
 
 /// A graph the propose tool accepted under full host authority — the value the
@@ -293,6 +316,7 @@ impl Tool for CheckWorkflowTool {
             Some(fix) => {
                 spec.id = fix.id.clone();
                 spec.name = fix.name.clone();
+                spec.owner_desk = fix.owner_desk.clone();
             }
             None => {
                 spec.id = safe_workflow_id(
@@ -314,6 +338,7 @@ impl Tool for CheckWorkflowTool {
                     &self.ctx.company.record,
                     self.ctx.company.source_dir.as_deref(),
                     Some(&self.ctx.company.wired_channels),
+                    self.ctx.previous_owner_desk(),
                 ) {
                     problems.push(err.to_string());
                 }
@@ -444,6 +469,11 @@ impl Tool for ProposeWorkflowTool {
             Some(fix) => {
                 spec.id = fix.id.clone();
                 spec.name = fix.name.clone();
+                // The saved owner is host-owned across a correction, the same
+                // footing as the id and the name (issue #1882 review): neither
+                // tool advertises `ownerDesk`, so a model echo of it is noise
+                // and an omission of it would silently unassign the workflow.
+                spec.owner_desk = fix.owner_desk.clone();
             }
             None => {
                 spec.id = safe_workflow_id(
@@ -487,6 +517,7 @@ impl Tool for ProposeWorkflowTool {
                             &self.ctx.company.record,
                             self.ctx.company.source_dir.as_deref(),
                             Some(&self.ctx.company.wired_channels),
+                            self.ctx.previous_owner_desk(),
                         ) {
                             errors.push(err.to_string());
                         }

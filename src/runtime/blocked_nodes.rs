@@ -68,6 +68,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use crate::ports::types::StartedBy;
+
 /// The facts a blocked agent node's continuation needs, stashed at
 /// block-settle and handed back on release.
 #[derive(Clone, Debug)]
@@ -77,6 +79,10 @@ pub struct StashedBlock {
     /// The paused run's own trigger input, replayed unchanged — the minted grant
     /// is what lets the identical gated call pass on the re-run.
     pub input: Value,
+    /// The blocked run's own attribution (issue #1862 prerequisite), carried
+    /// into the continuation so approving the block does not silently reset it
+    /// to `Operator` — see `spawn_blocked_node_continuation`.
+    pub started_by: StartedBy,
     /// Whether any of this node's parked calls has been approved, banked the
     /// moment that decision lands rather than read off the release batch
     /// (issue #1816).
@@ -111,7 +117,7 @@ impl BlockedNodeQueue {
     /// **First write wins.** Every gated call one node parked shares one turn
     /// key and one trigger input, so a second arm for the same key would carry
     /// identical facts; keeping the first is simplest and cannot disagree.
-    pub fn arm(&self, turn: &str, workflow_id: &str, input: &Value) {
+    pub fn arm(&self, turn: &str, workflow_id: &str, input: &Value, started_by: &StartedBy) {
         self.inner
             .lock()
             .expect("blocked node queue poisoned")
@@ -119,6 +125,7 @@ impl BlockedNodeQueue {
             .or_insert_with(|| StashedBlock {
                 workflow_id: workflow_id.to_string(),
                 input: input.clone(),
+                started_by: started_by.clone(),
                 approved: false,
             });
     }
@@ -186,15 +193,23 @@ impl BlockedNodeQueue {
     /// the builder folds the durable
     /// [`blocked_stashes`](crate::runtime::journal::RuntimeJournal::blocked_stashes)
     /// left by a park that outlived its process and re-arms one stash per still-
-    /// undelivered `(turn, workflow_id, input)`. **First write wins**, on
-    /// [`arm`](Self::arm)'s terms, so a live stash inherited on a rebuild is never
-    /// clobbered by a journal replay of the same turn.
-    pub fn rearm(&self, stashes: impl IntoIterator<Item = (String, String, Value)>) {
+    /// undelivered `(turn, workflow_id, input, started_by)`. **First write
+    /// wins**, on [`arm`](Self::arm)'s terms, so a live stash inherited on a
+    /// rebuild is never clobbered by a journal replay of the same turn.
+    ///
+    /// `started_by` comes straight from the durable
+    /// [`BlockedNodeStashed`](crate::runtime::journal::JournalRecord::BlockedNodeStashed)
+    /// record now (issue #1862 prerequisite) — the journal itself is what
+    /// degrades a stash written before that record carried the field to
+    /// `Operator` (its `#[serde(default)]`), so this call site just passes the
+    /// fact through rather than re-deciding the fallback.
+    pub fn rearm(&self, stashes: impl IntoIterator<Item = (String, String, Value, StartedBy)>) {
         let mut inner = self.inner.lock().expect("blocked node queue poisoned");
-        for (turn, workflow_id, input) in stashes {
+        for (turn, workflow_id, input, started_by) in stashes {
             inner.entry(turn).or_insert(StashedBlock {
                 workflow_id,
                 input,
+                started_by,
                 approved: false,
             });
         }
@@ -280,12 +295,18 @@ mod test {
             "workflow-node:run-1:draft",
             "digest",
             &json!({ "topic": "x" }),
+            &StartedBy::Agent("ceo".into()),
         );
         assert!(q.is_armed("workflow-node:run-1:draft"));
 
         let block = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(block.workflow_id, "digest");
         assert_eq!(block.input, json!({ "topic": "x" }));
+        assert_eq!(
+            block.started_by,
+            StartedBy::Agent("ceo".into()),
+            "the blocked run's own attribution must ride the stash, not reset on release"
+        );
         assert_eq!(q.waiting(), 0, "release drops the stash");
         assert!(!q.is_armed("workflow-node:run-1:draft"));
     }
@@ -303,14 +324,21 @@ mod test {
             "workflow-node:run-1:draft",
             "digest",
             &json!({ "topic": "first" }),
+            &StartedBy::Operator,
         );
         q.arm(
             "workflow-node:run-1:draft",
             "digest",
             &json!({ "topic": "second" }),
+            &StartedBy::Agent("ceo".into()),
         );
         let block = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(block.input, json!({ "topic": "first" }));
+        assert_eq!(
+            block.started_by,
+            StartedBy::Operator,
+            "first write wins for started_by too, same as workflow_id/input"
+        );
     }
 
     /// Issue #1816: rehydrating from the journal's still-live stashes re-arms the
@@ -324,17 +352,25 @@ mod test {
                 "workflow-node:run-1:draft".to_string(),
                 "digest".to_string(),
                 json!({ "topic": "x" }),
+                StartedBy::Agent("ceo".into()),
             ),
             (
                 "workflow-node:run-2:draft".to_string(),
                 "digest".to_string(),
                 json!({ "topic": "y" }),
+                StartedBy::Operator,
             ),
         ]);
         assert_eq!(q.waiting(), 2, "both durable stashes came back");
         let block = q.release("workflow-node:run-1:draft").expect("rehydrated");
         assert_eq!(block.workflow_id, "digest");
         assert_eq!(block.input, json!({ "topic": "x" }));
+        assert_eq!(
+            block.started_by,
+            StartedBy::Agent("ceo".into()),
+            "rearm must carry the real attribution through, not degrade every \
+             rehydrated stash to Operator"
+        );
     }
 
     /// A live stash (inherited on a rebuild) is never clobbered by a journal
@@ -346,14 +382,21 @@ mod test {
             "workflow-node:run-1:draft",
             "digest",
             &json!({ "n": "live" }),
+            &StartedBy::Operator,
         );
         q.rearm(vec![(
             "workflow-node:run-1:draft".to_string(),
             "digest".to_string(),
             json!({ "n": "replayed" }),
+            StartedBy::Agent("ceo".into()),
         )]);
         let block = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(block.input, json!({ "n": "live" }), "live wins over replay");
+        assert_eq!(
+            block.started_by,
+            StartedBy::Operator,
+            "live wins over replay for started_by too"
+        );
     }
 
     /// A fresh stash starts unapproved, and `mark_approved` flips it — the
@@ -361,7 +404,12 @@ mod test {
     #[test]
     fn mark_approved_flips_the_stashed_flag() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
 
         q.mark_approved("workflow-node:run-1:draft");
 
@@ -391,7 +439,12 @@ mod test {
     #[test]
     fn rearm_alone_does_not_recover_a_pre_restart_approval() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
         q.mark_approved("workflow-node:run-1:draft");
 
         // Simulate the restart: the in-memory queue is gone, and boot rehydrates
@@ -402,6 +455,7 @@ mod test {
             "workflow-node:run-1:draft".to_string(),
             "digest".to_string(),
             json!({ "n": 1 }),
+            StartedBy::Operator,
         )]);
 
         let block = rehydrated
@@ -421,8 +475,18 @@ mod test {
     #[test]
     fn two_blocked_nodes_do_not_share_a_stash() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
-        q.arm("workflow-node:run-2:draft", "digest", &json!({ "n": 2 }));
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
+        q.arm(
+            "workflow-node:run-2:draft",
+            "digest",
+            &json!({ "n": 2 }),
+            &StartedBy::Operator,
+        );
 
         let first = q.release("workflow-node:run-1:draft").expect("armed");
         assert_eq!(first.input, json!({ "n": 1 }));
@@ -442,7 +506,12 @@ mod test {
     #[test]
     fn peek_reads_the_stash_without_taking_it() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
 
         let seen = q.peek("workflow-node:run-1:draft").expect("armed");
         assert_eq!(seen.input, json!({ "n": 1 }));
@@ -477,8 +546,18 @@ mod test {
     #[test]
     fn approved_turns_lists_only_the_marked_ones() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
-        q.arm("workflow-node:run-2:draft", "digest", &json!({ "n": 2 }));
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
+        q.arm(
+            "workflow-node:run-2:draft",
+            "digest",
+            &json!({ "n": 2 }),
+            &StartedBy::Operator,
+        );
         q.mark_approved("workflow-node:run-1:draft");
 
         assert_eq!(
@@ -494,7 +573,12 @@ mod test {
     #[test]
     fn approved_turns_is_empty_with_nothing_marked() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
         assert!(q.approved_turns().is_empty());
     }
 
@@ -505,8 +589,18 @@ mod test {
     #[test]
     fn stashed_turns_lists_approved_and_unapproved_alike() {
         let q = BlockedNodeQueue::default();
-        q.arm("workflow-node:run-1:draft", "digest", &json!({ "n": 1 }));
-        q.arm("workflow-node:run-2:draft", "digest", &json!({ "n": 2 }));
+        q.arm(
+            "workflow-node:run-1:draft",
+            "digest",
+            &json!({ "n": 1 }),
+            &StartedBy::Operator,
+        );
+        q.arm(
+            "workflow-node:run-2:draft",
+            "digest",
+            &json!({ "n": 2 }),
+            &StartedBy::Operator,
+        );
         q.mark_approved("workflow-node:run-1:draft");
 
         let mut turns = q.stashed_turns();

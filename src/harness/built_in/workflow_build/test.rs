@@ -2640,6 +2640,103 @@ async fn a_failure_fix_corrects_the_graph_and_preserves_identity() {
     }
 }
 
+/// **Regression, issue #1882 review (PR #1882 bot finding, comment 3879878907).**
+/// A workflow whose owning desk has since been deleted is still correctable: the
+/// stale desk rides through the correction as an UNCHANGED value, so the
+/// courtesy pre-flight grandfathers it exactly as the edit route would, instead
+/// of refusing the whole correction over a field the operator never touched.
+///
+/// RED-FIRST: pre-fix `courtesy_validate_draft` always validated the corrected
+/// graph as a fresh create, so the echoed `ghost-desk` was a hard refusal and
+/// the fixer folded to not-automatable — an unrelated stale owner blocked the
+/// repair of the actual run failure.
+#[tokio::test]
+async fn a_failure_fix_survives_an_owning_desk_that_no_longer_exists() {
+    // The model does what the prompt asks and echoes back the fields it did not
+    // change — including the `ownerDesk` it saw on the failing graph.
+    let corrected = json!({
+        "name": "Weekly digest",
+        "ownerDesk": "ghost-desk",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Every Monday", "schedule": "0 9 * * 1" },
+            { "id": "draft", "kind": "agent", "name": "Draft", "agent": "maya" }
+        ],
+        "edges": [{ "from": "t", "to": "draft" }]
+    });
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("dropped the unwired search step", corrected),
+        NativeStep::done("Corrected the workflow."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model, None).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    let mut failing = failing_spec();
+    // No such desk on this company — the owning desk was deleted after the
+    // workflow was saved.
+    failing.owner_desk = Some("ghost-desk".to_string());
+
+    let outcome = fix_workflow_from_failure(&runtime, &failing, &failure_ctx())
+        .await
+        .expect("the fixer runs");
+    match outcome {
+        DescriptionDraftOutcome::Graph { spec, .. } => {
+            assert_eq!(
+                spec.owner_desk.as_deref(),
+                Some("ghost-desk"),
+                "the stale owner is carried through the correction, not silently rewritten"
+            );
+            assert!(
+                spec.nodes.iter().all(|n| n.kind != "tool_call"),
+                "and the actual run failure is still corrected"
+            );
+        }
+        DescriptionDraftOutcome::NotAutomatable(reason) => {
+            panic!("a stale owning desk must not block the correction: {reason}")
+        }
+    }
+}
+
+/// The other half of host authority over `ownerDesk` on the fix path (issue
+/// #1882 review): neither copilot tool advertises the field, so a model that
+/// simply omits it from its correction — the common case — must not silently
+/// UNASSIGN the workflow. The host pins the saved desk back on, the same way it
+/// pins the saved id and name.
+///
+/// RED-FIRST: pre-fix `FixTarget` carried no desk and nothing re-applied it, so
+/// the corrected spec came back with `owner_desk: None`.
+#[tokio::test]
+async fn a_failure_fix_keeps_the_saved_owner_desk_when_the_model_drops_it() {
+    let corrected = json!({
+        "name": "Weekly digest",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Every Monday", "schedule": "0 9 * * 1" },
+            { "id": "draft", "kind": "agent", "name": "Draft", "agent": "maya" }
+        ],
+        "edges": [{ "from": "t", "to": "draft" }]
+    });
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("dropped the unwired search step", corrected),
+        NativeStep::done("Corrected the workflow."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model, None).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    let mut failing = failing_spec();
+    failing.owner_desk = Some("ghost-desk".to_string());
+
+    let outcome = fix_workflow_from_failure(&runtime, &failing, &failure_ctx())
+        .await
+        .expect("the fixer runs");
+    match outcome {
+        DescriptionDraftOutcome::Graph { spec, .. } => assert_eq!(
+            spec.owner_desk.as_deref(),
+            Some("ghost-desk"),
+            "an omitted ownerDesk restores the saved one rather than unassigning it"
+        ),
+        DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
+    }
+}
+
 /// A correction that keeps failing a host gate — an `agent` node naming a teammate
 /// not on the roster — is never accepted, so the fixer folds to not-automatable
 /// naming the gate. The SAME gate pipeline the create path runs, not a bypass.

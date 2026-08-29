@@ -281,6 +281,13 @@ export type CompanyStreamEvent =
       workflowId: string;
       runId: string;
       scheduled: boolean;
+      // Optional, not just possibly-absent-looking: the server only sets
+      // this key `if let Some(started_by)` (`project_event_for_viewer` in
+      // `src/server/operator.rs`). A run journaled before issue #1862's
+      // prerequisite landed, or any producer with genuinely no sender,
+      // projects with the key absent — never `null` — so a consumer must
+      // handle `undefined` rather than trust it as always present.
+      startedBy?: "operator" | "schedule" | { agent: string };
     }
   // Issue #382: a non-trigger node began executing. Structural ids only — the
   // node has not run, so there is no status or duration, and never any input.
