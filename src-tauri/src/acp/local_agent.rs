@@ -700,9 +700,24 @@ impl LocalAcpAgent {
         // apply here. Preserve that fact so a later restart can detect that a
         // removed harness model must not be restored by `session/load`.
         // Never record a desired value that was unavailable to ACP, however.
-        let mut applied_model = (!was_resumed && !self.env.is_empty())
-            .then(|| self.model.as_deref())
-            .flatten();
+        //
+        // A resumed session starts from what its own record already says,
+        // not `None`: `session/load` restores that session-scoped config
+        // regardless of what `to_apply` ends up being below, so a resume
+        // that sends nothing (no matching config option for `desired`) is
+        // still on its recorded model, not the adapter default. Seeding
+        // `None` here would overwrite a true record with a false one and
+        // defeat the very guard at `resume_session`'s `desired_model.is_none()
+        // && record.model.is_some()` check on the next restart (CodeRabbit,
+        // PR #1904 review).
+        let mut applied_model = if was_resumed {
+            self.read_session_record(company, agent_id)
+                .and_then(|record| record.model)
+        } else {
+            (!self.env.is_empty())
+                .then(|| self.model.map(str::to_string))
+                .flatten()
+        };
         if let Some(model) = to_apply.as_deref()
             && let Some(config_id) = model_config_id(&raw, model)
         {
