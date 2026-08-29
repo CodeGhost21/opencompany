@@ -694,11 +694,15 @@ impl LocalAcpAgent {
         } else {
             self.agent_models.get(agent_id).cloned()
         };
-        // Track whether the model was actually applied: only record the
-        // applied model, not a desired-but-unavailable one, so the session
-        // record does not falsely claim a model was set when the session
-        // stayed on its default/previous model.
-        let mut applied_model = None;
+        // Track the model that is actually in effect. On a fresh session,
+        // `self.model` was delivered through the harness startup environment
+        // when it is non-empty, even though there is no ACP config option to
+        // apply here. Preserve that fact so a later restart can detect that a
+        // removed harness model must not be restored by `session/load`.
+        // Never record a desired value that was unavailable to ACP, however.
+        let mut applied_model = (!was_resumed && !self.env.is_empty())
+            .then(|| self.model.as_deref())
+            .flatten();
         if let Some(model) = to_apply.as_deref()
             && let Some(config_id) = model_config_id(&raw, model)
         {
