@@ -7122,6 +7122,71 @@ to = "done"
         assert_eq!(problems[0].field.as_deref(), Some("owner_desk"));
     }
 
+    /// **Regression, issue #1882 review ("preserve padded stale owners"),
+    /// RED-FIRST.** The grandfathering above compares the draft's
+    /// `owner_desk` against the STORED body's. The draft side is trimmed on
+    /// the way in (`normalize_owner_desk` at the top of
+    /// `update_company_workflow`); the stored side used to be whatever the
+    /// saved TOML literally held. A stored value with surrounding whitespace
+    /// therefore never compared equal to the same value round-tripped through
+    /// a GET/PUT, so the grandfathering did not apply and an unrelated edit
+    /// was refused once the padded desk went stale. `parse_workflow` now
+    /// normalizes the stored side too, so both are trimmed by construction.
+    #[tokio::test]
+    async fn an_unrelated_update_survives_a_padded_stored_desk_that_went_stale() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant_and_desk(),
+        )));
+        let mut created = valid_draft("wf", "WF");
+        created.owner_desk = Some("ops".to_string());
+        create_company_workflow(&company, None, &store, None, created, None, None)
+            .await
+            .expect("creates with a real desk");
+
+        // Pad the STORED value. Every write boundary trims, so this stands in
+        // for a body that reached the record by any other route — a
+        // hand-authored graph, an import, a body written before the trim.
+        let mut padded_record = store.load(&company).await.unwrap().unwrap();
+        padded_record.overlay_workflows[0].toml = padded_record.overlay_workflows[0]
+            .toml
+            .replace("owner_desk = \"ops\"", "owner_desk = \"  ops  \"");
+        assert!(
+            padded_record.overlay_workflows[0]
+                .toml
+                .contains("owner_desk = \"  ops  \""),
+            "the padded stored body must actually be in place for this test to mean anything"
+        );
+        // The desk goes stale underneath the workflow at the same time.
+        padded_record.manifest = manifest_with_assistant();
+        store.save(&padded_record).await.unwrap();
+        let version = workflow_version(&padded_record.overlay_workflows[0].toml);
+
+        // What a console round-trip sends back: the desk exactly as the read
+        // route hands it out (trimmed), with an unrelated field edited.
+        let mut edit = valid_draft("wf", "WF");
+        edit.owner_desk = Some("ops".to_string());
+        edit.description = Some("Renamed the description only.".to_string());
+        let file = update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            edit,
+            Some(&version),
+            None,
+        )
+        .await
+        .expect("a padded stored desk must grandfather the same as an unpadded one");
+        assert_eq!(
+            file.owner_desk.as_deref(),
+            Some("ops"),
+            "the stale desk is carried forward, not cleared"
+        );
+    }
+
     /// **Regression, issue #1882 review (PR #1882 bot finding, comment
     /// 3878829353), RED-FIRST.** The grandfathering above (previous test)
     /// only covers a stored `owner_desk` that stays UNRESOLVABLE. This
