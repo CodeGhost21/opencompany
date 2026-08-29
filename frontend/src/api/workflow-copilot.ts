@@ -461,7 +461,10 @@ function describeRun(run: WorkflowRunOutcome): string {
           ? `BLOCKED at ${blocked.map((b) => b.nodeId).join(", ")} — produced no deliverable and the steps after did not run; parked ${parked} approval(s), which does NOT continue this run`
           : undelivered.length
             ? `finished, but ${undelivered.length} report(s) were not delivered`
-            : "finished";
+            : run.verdict === "degraded" ||
+                nodes.some((node) => node.status === "error")
+              ? "finished with degraded steps"
+              : "finished";
   const approvals = run.pendingApprovals.length
     ? ` awaiting approval: ${run.pendingApprovals.join(", ")};`
     : "";
