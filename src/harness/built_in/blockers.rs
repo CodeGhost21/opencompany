@@ -105,7 +105,8 @@ const SHAPES: &[Shape] = &[
             "incorrect api key",
             "authentication failed",
             "unauthorized",
-            "401",
+            "401 ",
+            " 401",
             "invalid_api_key",
         ],
         class: BlockerClass {
