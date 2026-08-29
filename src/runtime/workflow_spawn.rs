@@ -479,29 +479,51 @@ impl WorkflowSpawn {
         kind: &str,
         detail: &str,
     ) {
-        let note = crate::ports::notifications::Notification {
-            id: crate::ports::generate_id(),
-            kind: format!("workflow_run_{kind}"),
-            subject: crate::ports::notifications::Subject {
-                kind: crate::ports::notifications::SubjectKind::Run,
-                id: run_id.to_string(),
-            },
-            created_at: crate::ports::now_millis(),
-            title: format!("Workflow `{workflow_id}` {kind}: {detail}"),
-            audience: None,
-            context: None,
-        };
-        if let Err(err) = self.notifications.append(&self.company, &note).await {
-            tracing::warn!(
-                company = %self.company,
-                workflow = %workflow_id,
-                run = %run_id,
-                error = %err,
-                "a workflow-run-unhealthy notification could not be recorded; the run's own \
-                 outcome is unaffected, but nobody is badged for it"
-            );
-        }
+        file_run_unhealthy_notification(
+            self.notifications.as_ref(),
+            &self.company,
+            workflow_id,
+            run_id,
+            kind,
+            detail,
+        )
+        .await;
     }
+}
+
+/// Append a company-wide workflow-run notification without exposing engine
+/// details. Shared by supervised and agent-started workflow entry points.
+pub(crate) async fn file_run_unhealthy_notification(
+    notifications: &dyn crate::ports::notifications::NotificationStore,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+    kind: &str,
+    detail: &str,
+) {
+    let note = crate::ports::notifications::Notification {
+        id: crate::ports::generate_id(),
+        kind: format!("workflow_run_{kind}"),
+        subject: crate::ports::notifications::Subject {
+            kind: crate::ports::notifications::SubjectKind::Run,
+            id: run_id.to_string(),
+        },
+        created_at: crate::ports::now_millis(),
+        title: format!("Workflow `{workflow_id}` {kind}: {detail}"),
+        audience: None,
+        context: None,
+    };
+    if let Err(err) = notifications.append(company, &note).await {
+        tracing::warn!(
+            company = %company,
+            workflow = %workflow_id,
+            run = %run_id,
+            error = %err,
+            "a workflow-run-unhealthy notification could not be recorded; the run's own \
+             outcome is unaffected, but nobody is badged for it"
+        );
+    }
+}
 }
 
 async fn settle_cancelled_workflow_attempts(
