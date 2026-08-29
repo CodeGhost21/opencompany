@@ -24,7 +24,7 @@ Each node's `WorkflowNodeStarted` and `WorkflowNodeFinished` ride the **same**
 unbounded observer channel, so the collector drains them in order and a node's
 start is always journaled ahead of its finish.
 
-### Run-start sender
+## Run-start sender
 
 `WorkflowRunStarted` also carries `startedBy`, identifying the source of the
 run: `"operator"`, `"schedule"`, or `{ "agent": "<teammate-id>" }`. The field
