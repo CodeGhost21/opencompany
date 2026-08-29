@@ -3711,15 +3711,19 @@ impl HarnessBrain {
                         mentions: Vec::new(),
                     }];
                     responses.extend(turn.bubbles);
-                    // Issue #926/#1032, scheduled edition: a turn that paused at
-                    // its step cap or halted for spend says so in its own
-                    // sibling bubble, exactly as the operator path does. Here
-                    // the journal is the turn's only durable record — the
-                    // operator channel is in-memory for a cron tick — so
-                    // omitting them would present interrupted scheduled work as
-                    // a completed answer. Unauthored on the operator path; here
-                    // they must carry an author to be journaled at all, so they
-                    // take the same system author `system_notice` uses.
+                    // Issue #926/#1032/#1846, scheduled edition: a turn that
+                    // paused at its step cap, halted for spend, or paused for
+                    // lack of budget says so in its own sibling bubble, exactly
+                    // as the operator path does. Here the journal is the turn's
+                    // only durable record — the operator channel is in-memory
+                    // for a cron tick — so omitting them would present
+                    // interrupted scheduled work as a completed answer.
+                    // Unauthored on the operator path; here they must carry an
+                    // author to be journaled at all, so they take the same
+                    // system author `system_notice` uses. Separate `if`s, not
+                    // `else`s, mirroring the operator path: the flags are
+                    // sticky across the turns one tick runs, and each notice is
+                    // owed even when another fires.
                     if turn.hit_iteration_cap {
                         responses.push(OutboundMessage {
                             message_id: None,
@@ -3727,6 +3731,18 @@ impl HarnessBrain {
                             channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    if let Some(halt) = &turn.halted_for_spend {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: spend_halt_notice(halt),
                             steps: Vec::new(),
                             reply_to: None,
                             mentions: Vec::new(),
@@ -3744,9 +3760,9 @@ impl HarnessBrain {
                             mentions: Vec::new(),
                         });
                     }
-                    // A scheduled turn has no interactive caller to replace a
-                    // paused reply, so keep the pause placeholder and notice in
-                    // its durable journal alongside any completed bubbles.
+                    // The pause placeholder and notices are journaled here — a
+                    // scheduled turn's journal is its only durable record, and
+                    // no live operator is reading the in-memory channel.
                     // Drain what the scheduled turn published (#445) and file it
                     // onto the card the turn opened — or a freshly minted one —
                     // exactly as an operator turn's publish is filed.
