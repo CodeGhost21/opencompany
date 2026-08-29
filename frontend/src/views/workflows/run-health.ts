@@ -367,6 +367,9 @@ export function verdictOf(run: WorkflowRunOutcome): WorkflowRunVerdict {
   if (isBlocked(run)) return "blocked";
   if (undeliveredCount(run.deliveries) > 0) return "undelivered";
   if (awaitingCount(run) > 0) return "awaiting-approval";
+  // Legacy hosts may omit the verdict while still sending node statuses. An
+  // error node under continue/route is degraded, not a clean run.
+  if (run.nodes?.some((node) => node.status === "error")) return "degraded";
   return "ok";
 }
 
