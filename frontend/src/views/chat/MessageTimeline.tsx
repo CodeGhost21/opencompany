@@ -346,7 +346,7 @@ export function MessageTimeline({
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
               chatChannelByThread={chatChannelByThread}
-              compact
+              variant="compact"
               thread={
                 item.approvals[0]?.thread
                   ? { channelId: channel.id, label: channelTitle(channel) }

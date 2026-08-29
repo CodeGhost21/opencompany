@@ -13,6 +13,7 @@ import { signInWithHubToken, verifyCode } from "@/api/auth";
 import { isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
 import {
   createLocalInstance,
+  renameLocalInstance,
   deleteLocalInstance,
   embeddedHost,
   localInstances,
@@ -601,6 +602,24 @@ function Console() {
           await refreshLocal();
         }
       : undefined,
+    // Setup, finishing, names the host after the company it just built. Matched
+    // by instance identity rather than by address, for the reason the registry
+    // gives everywhere else: the address is this launch's and the identity is
+    // the machine's.
+    onNameLocalHost: isDesktopRuntime()
+      ? async (label) => {
+          const instanceId = active?.identity?.instanceId;
+          if (!instanceId) return;
+          const local = embedded.instances.find(
+            (instance) => instance.instanceId === instanceId,
+          );
+          // A remote host, or one this shell does not own. Nothing to rename,
+          // and nothing wrong: the caller does not know which kind it is on.
+          if (!local) return;
+          await renameLocalInstance(local.id, label);
+          await refreshLocal();
+        }
+      : undefined,
     onEditHost: (id, change) => editConnection(id, change),
     // Selection has to move *with* the removal, in one step. `active` falls
     // through to the first connection when nothing is selected, so a console
@@ -662,6 +681,7 @@ function Console() {
             defaultCompany={active.defaultCompany}
             notice={active.id === bootstrapId ? auth.notice : undefined}
             forceLogin={active.id === bootstrapId && auth.failed === true}
+            isBootstrap={active.id === bootstrapId}
           />
         ) : (
           // The switcher rides along, because an operator whose local host is

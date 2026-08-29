@@ -652,6 +652,22 @@ pub struct RuntimeBuilder {
     /// provision. On a rebuild the record's own provenance is carried forward,
     /// so this only applies when no record exists yet.
     template_provenance: Option<TemplateProvenance>,
+    /// Issue #1844: treat a genuinely first-ever boot as already having
+    /// cleared the account-activation funnel, the same grace the migration a
+    /// few lines below already gives an *existing* `running` company. Off by
+    /// default — a real first boot is exactly the moment the gate exists to
+    /// catch — and never read from the environment inside this module (see
+    /// `src/bin/opencompany.rs`, which is the one place `RuntimeBuilder` is
+    /// handed process configuration); this only exists so a caller who has
+    /// already decided the answer can say so explicitly. Its one caller today
+    /// is the e2e host script (`frontend/test/e2e/host.sh`, via
+    /// `OPENCOMPANY_SKIP_ACTIVATION_GATE`): `companies/e2e_harness` boots from
+    /// a wiped data root on every suite run, so without this every one of the
+    /// suite's ~100 unrelated specs would hit the new blocking gate on their
+    /// very first navigation — a regression this field exists to prevent
+    /// without weakening the gate for an actual first-run tenant, which never
+    /// sets it.
+    skip_activation_gate: bool,
     feedback: Option<Arc<FeedbackStore>>,
     github: Option<Arc<dyn GitHubClient>>,
     tinyhumans_feedback: Option<Arc<dyn TinyHumansClient>>,
@@ -766,6 +782,7 @@ impl RuntimeBuilder {
             seed_tasks: false,
             skills_registry: Arc::from([]),
             template_provenance: None,
+            skip_activation_gate: false,
             feedback: None,
             github: None,
             tinyhumans_feedback: None,
@@ -787,6 +804,14 @@ impl RuntimeBuilder {
     /// Overrides the derived company id.
     pub fn with_id(mut self, id: CompanyId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Issue #1844: skip the account-activation funnel's first-boot gate for
+    /// this company — see the field's own doc comment for who this is for and
+    /// why it defaults to off.
+    pub fn skip_activation_gate(mut self, skip: bool) -> Self {
+        self.skip_activation_gate = skip;
         self
     }
 
@@ -2429,18 +2454,33 @@ impl RuntimeBuilder {
             }
         };
 
-        // Issue #899 (Stage 1): the blocked-agent-node stash, shared between the
-        // workflow runner (which arms it at block-settle through `DeliveryParking`)
-        // and the runtime (whose `continue_turn` releases it). Inherited live on a
-        // rebuild, and a plain `default()` on a boot — unlike its two neighbours
-        // it is NOT rehydrated from the journal, because the parked tool-call
-        // effect carries no workflow id or trigger input to rebuild a stash from.
-        // A boot mid-block therefore re-arms the `continuations` counter but not
-        // this, and the released batch reports "re-run the workflow" instead of
-        // spawning. See `BlockedNodeQueue`.
+        // Issue #899 (Stage 1) / #1816 (Stage 2): the blocked-agent-node stash,
+        // shared between the workflow runner (which arms it at block-settle
+        // through `DeliveryParking`) and the runtime (whose `continue_turn`
+        // releases it). Inherited live on a rebuild. On a boot it is now
+        // rehydrated from the journal's still-live stash records — the durable
+        // half #1816 added beneath Stage 1's in-memory queue — exactly as
+        // `workflow_gates` above re-arms from its still-parked gates. A boot
+        // mid-block therefore re-arms both the `continuations` counter (from
+        // `parked_turns`) and this stash (from `blocked_stashes`), so an approval
+        // landing after the restart re-dispatches the run instead of reporting
+        // "re-run the workflow". See `BlockedNodeQueue`.
         let blocked_nodes = match handover.as_ref() {
             Some(h) => h.blocked_nodes.clone(),
-            None => crate::runtime::blocked_nodes::BlockedNodeQueue::default(),
+            None => {
+                let blocked_nodes = crate::runtime::blocked_nodes::BlockedNodeQueue::default();
+                blocked_nodes.rearm(journal.blocked_stashes());
+                // Issue #1816: fold in whichever of those rehydrated stashes
+                // already had an approve banked before the restart — the fact
+                // `ContinuationQueue`'s own rearm cannot carry (see its docs),
+                // and the one a blocked node has no re-park to fall back on if
+                // lost. Always after `rearm` above: the stash it names must
+                // already exist for this to land anywhere.
+                for turn in journal.blocked_node_approvals() {
+                    blocked_nodes.mark_approved(&turn);
+                }
+                blocked_nodes
+            }
         };
 
         // Brain selection, in precedence order:
@@ -2749,24 +2789,106 @@ impl RuntimeBuilder {
         // reason: a company already running plainly named itself at
         // provisioning time, whether or not the console ever asked it to
         // *confirm* that name through the later dedicated route.
-        let (name_confirmed, activation_completed_at) = match existing.as_ref() {
-            // Already latched — carry it forward untouched. Matches every
-            // other overlay above: a rebuild never re-derives a fact this
-            // field already answers.
-            Some(r) if r.activation_completed_at.is_some() => {
-                (r.name_confirmed, r.activation_completed_at)
-            }
-            // Running and unlatched: the grandfather case this migration
-            // exists for.
-            Some(r) if r.lifecycle == "running" => (true, Some(crate::ports::now_millis())),
-            // Existing but not running (paused/archived): left exactly as
-            // recorded rather than migrated, so pausing a company before this
-            // field existed cannot retroactively "activate" it via this path —
-            // its own next `running` boot does that instead.
-            Some(r) => (r.name_confirmed, r.activation_completed_at),
-            // A genuinely new company: the real funnel applies from boot one.
-            None => (false, None),
-        };
+        // PR #1875 review finding: a genuinely new company's *second* boot —
+        // `existing.lifecycle == "running"`, `existing.activation_completed_at:
+        // None` — has the exact same shape as a legacy pre-#1843 record, so
+        // the grandfather arm below cannot tell them apart from `existing`
+        // alone. `activation_gate_seen` is the store-level tiebreaker
+        // (`CompanyStore::activation_gate_seen`'s own doc comment has the
+        // full reasoning): `true` once this id has been saved by any build
+        // that already understands the activation funnel, which every save
+        // below now is.
+        let gate_already_seen = store.activation_gate_seen(&id).await?;
+        // The third element is the gate-seen marker THIS save must persist
+        // (PR #1875 review finding). It used to be implicit — every save
+        // went through `CompanyStore::save`, which always stamps `true` — so
+        // the "existing but not running" arm's promise that "its own next
+        // `running` boot" performs the migration was false: that later save
+        // (from this same `build`, or from a bare `CompanyRuntime::set_lifecycle`
+        // resume — see its own comment) had already poisoned the marker to
+        // `true` while the record was still paused/archived and unmigrated,
+        // so the grandfather arm's `!gate_already_seen` guard could never
+        // fire again. Every arm that actually decides the migration (or
+        // creates a fresh company) still persists `true`; only the "left
+        // exactly as recorded" arm now forwards whatever the marker already
+        // was, so an unmigrated legacy record stays eligible until a
+        // `running` boot finally grandfathers it in.
+        let (name_confirmed, activation_completed_at, gate_seen_to_persist) =
+            match existing.as_ref() {
+                // Already latched — carry it forward untouched. Matches every
+                // other overlay above: a rebuild never re-derives a fact this
+                // field already answers.
+                Some(r) if r.activation_completed_at.is_some() => {
+                    (r.name_confirmed, r.activation_completed_at, true)
+                }
+                // Running, unlatched, AND never seen by activation-aware code:
+                // the grandfather case this migration exists for — a record that
+                // predates the activation funnel entirely. Gated on
+                // `!gate_already_seen` so this does NOT also match a genuinely
+                // new company's second boot: a fresh company's first save
+                // already stamps the gate-seen marker, so a restart before it
+                // finishes onboarding falls through to the next arm and stays
+                // ungated instead of being silently activated.
+                Some(r) if r.lifecycle == "running" && !gate_already_seen => {
+                    (true, Some(crate::ports::now_millis()), true)
+                }
+                // Existing but not running (paused/archived): left exactly as
+                // recorded rather than migrated, so pausing a company before this
+                // field existed cannot retroactively "activate" it via this path —
+                // its own next `running` boot does that instead. The gate marker
+                // is left exactly as recorded too, or that promise breaks (see
+                // this `match`'s own doc comment above).
+                Some(r) => (
+                    r.name_confirmed,
+                    r.activation_completed_at,
+                    gate_already_seen,
+                ),
+                // A genuinely new company: the real funnel applies from boot one —
+                // unless the caller explicitly said not to gate it (issue #1844's
+                // `skip_activation_gate`, see its own doc comment).
+                None if self.skip_activation_gate => (true, Some(crate::ports::now_millis()), true),
+                None => (false, None, true),
+            };
+        // Issue #1844: an operator-confirmed display name is the one other
+        // manifest field a rebuild carries forward, alongside
+        // `[workflows].enabled` above. `record.manifest` is otherwise
+        // seed-authoritative — re-parsed from `company.toml` on every rebuild —
+        // and the console's `PATCH {scope}` name-confirm route writes straight
+        // into `manifest.company.name` rather than a separate overlay field
+        // (there is no `CompanyRecord::overlay_company_name`; the name IS the
+        // manifest field, the same way `[workflows].enabled` IS). Without this
+        // carry, a redeploy would silently revert an operator's chosen name
+        // back to whatever `company.toml` still says — the exact "runtime
+        // write wiped by the next rebuild" trap `merge_enabled_workflows`
+        // exists to avoid, just for a different field.
+        //
+        // Gated on the *existing record's own* `name_confirmed` — read before
+        // this build's migration above ever runs — not the freshly-computed
+        // `name_confirmed` a few lines up. Those two differ on exactly one
+        // path: the "running and unlatched" grandfather arm stamps `true` on
+        // *every* rebuild of a running, not-yet-latched company, including one
+        // whose record was created moments ago in this same process and never
+        // went near a name-confirm write. Carrying on that computed value would
+        // let a company adopt a manifest edit make it look console-confirmed
+        // (regression caught by `rebuild_keeps_every_other_manifest_field_seed_authoritative`,
+        // which mutates a record's name directly without ever setting the
+        // flag and expects the seed to keep winning). The record's own stored
+        // flag has no such false positive: it is `true` only where a `PATCH
+        // {scope}` write — or a genuine pre-#1843 grandfather record that
+        // already carried it — actually set it.
+        //
+        // Before confirmation the seed's name is a provisional default and
+        // staying seed-authoritative is correct — an operator editing
+        // `company.toml` pre-launch expects the edit to show up. A blank
+        // carried name is refused rather than trusted, since the validator
+        // that keeps `[company].name` non-empty for a fresh seed
+        // (`CompanyManifest::validate`) never ran against a hand-carried value.
+        if let Some(r) = existing.as_ref()
+            && r.name_confirmed
+            && !r.manifest.company.name.trim().is_empty()
+        {
+            self.manifest.company.name = r.manifest.company.name.clone();
+        }
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
         let brain: Arc<dyn Brain> = match self.brain {
@@ -3566,29 +3688,40 @@ impl RuntimeBuilder {
         // the whole overlay the moment version control edits `[tools]`, and
         // `seed_allow` is how the *next* rebuild still sees the seed's own list
         // through this fold.
+        // `save_importing`, not `save`: the ordinary `save` unconditionally
+        // stamps the gate-seen marker `true`, which is exactly the bug this
+        // `match` above exists to avoid for the "left exactly as recorded"
+        // arm (PR #1875 review finding). `save_importing`'s caller-supplied
+        // `gate_seen` is the general hook that already exists for "persist a
+        // record without forcing the marker" — bundle import is its other,
+        // original caller — so this reuses it rather than adding a second
+        // near-identical trait method.
         store
-            .save(&CompanyRecord {
-                overlay_retired_agents,
-                overlay_agent_edits,
-                id: id.clone(),
-                manifest: self.manifest.clone(),
-                ledger,
-                lifecycle,
-                overlay_agents,
-                overlay_desk_members,
-                overlay_desk_order,
-                overlay_desks,
-                overlay_workflows,
-                overlay_budgets,
-                overlay_policy,
-                overlay_tool_grants,
-                overlay_desk_tools,
-                disabled_workflows,
-                template_provenance,
-                setup,
-                name_confirmed,
-                activation_completed_at,
-            })
+            .save_importing(
+                &CompanyRecord {
+                    overlay_retired_agents,
+                    overlay_agent_edits,
+                    id: id.clone(),
+                    manifest: self.manifest.clone(),
+                    ledger,
+                    lifecycle,
+                    overlay_agents,
+                    overlay_desk_members,
+                    overlay_desk_order,
+                    overlay_desks,
+                    overlay_workflows,
+                    overlay_budgets,
+                    overlay_policy,
+                    overlay_tool_grants,
+                    overlay_desk_tools,
+                    disabled_workflows,
+                    template_provenance,
+                    setup,
+                    name_confirmed,
+                    activation_completed_at,
+                },
+                gate_seen_to_persist,
+            )
             .await?;
 
         // The gate above was built from the seed's `[policy]` alone, before the
@@ -3830,6 +3963,21 @@ impl RuntimeBuilder {
             runtime.hydrate_emergency(engaged);
         }
 
+        // Issue #1816 (Stage 3): a blocked-node stash the journal durably
+        // marks approved, with nothing left parked for its turn, is a run a
+        // restart stranded between its last approval banking and the release
+        // that should have followed. A rebuild skips this for the same reason
+        // it skips the rearms above: the live queues it inherits already
+        // reflect every decision taken since the last replay, so there is
+        // nothing here a fresh boot's journal-only view would find that the
+        // live one has not already acted on. Placed last, after every queue
+        // above (and the workflow runner, wired earlier in this function
+        // under the `openhuman` harness arm) is in place, so a stash this
+        // finds ready has somewhere real to resume to.
+        if handover.is_none() {
+            runtime.reconcile_stranded_blocked_nodes().await;
+        }
+
         Ok(runtime)
     }
 }
@@ -3879,6 +4027,7 @@ async fn seed_workspace(
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);
@@ -7559,6 +7708,363 @@ needs_reason = true
             crate::company::grants_search_explicit(&effective_grants(&rebuilt.manifest)),
             "the provider's grant list must carry the console grant: {:?}",
             effective_grants(&rebuilt.manifest)
+        );
+    }
+
+    /// Issue #1844: once `name_confirmed` is set, the *record's* name — not
+    /// the seed's — survives a rebuild. The mirror image of the test just
+    /// above: before confirmation the seed wins (asserted there), and after
+    /// confirmation the record does, which is the whole point of gating the
+    /// carry on the flag rather than always preferring one side.
+    #[tokio::test]
+    async fn rebuild_carries_forward_a_confirmed_company_name() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-namecarry-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.manifest.company.name = "Operator Chosen Name".to_string();
+        record.name_confirmed = true;
+        store.save(&record).await.unwrap();
+        drop(runtime);
+
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            rebuilt.manifest.company.name, "Operator Chosen Name",
+            "a confirmed name must survive a redeploy, not revert to company.toml's seed value"
+        );
+        assert!(rebuilt.name_confirmed);
+    }
+
+    /// Issue #1843/#1844: a company that predates activation tracking and was
+    /// already `running` at its next boot is back-filled as activated —
+    /// `name_confirmed` included — rather than gated behind an onboarding
+    /// screen it has no memory of starting. See `RuntimeBuilder::build`'s own
+    /// migration comment for why `running` (not `existing.is_some()` alone) is
+    /// the condition: a paused/archived company is left exactly as recorded.
+    #[tokio::test]
+    async fn rebuild_backfills_activation_for_a_pre_existing_running_company() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-backfill-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        // Simulate a bundle written before activation tracking existed:
+        // company.toml + a meta.json that has never gone near the
+        // `activation_gate_seen` marker (`#[serde(default)]` reads its
+        // absence as `false`), with the company already `running`. Written
+        // as raw files rather than through `FsCompanyStore::save` —
+        // `save` always stamps `activation_gate_seen: true` now (every save
+        // in this build is activation-aware by definition), which would
+        // defeat the one thing this fixture needs to be true: a bundle NO
+        // save from this build has ever touched.
+        let bundle = crate::store::Bundle::new(home.clone(), &id);
+        tokio::fs::create_dir_all(bundle.dir()).await.unwrap();
+        let toml_src = toml::to_string(&manifest).unwrap();
+        tokio::fs::write(bundle.company_toml(), toml_src)
+            .await
+            .unwrap();
+        tokio::fs::write(bundle.meta_json(), r#"{"lifecycle":"running"}"#)
+            .await
+            .unwrap();
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            rebuilt.name_confirmed,
+            "a pre-existing running company must be back-filled as named"
+        );
+        assert!(
+            rebuilt.activation_completed_at.is_some(),
+            "and as activated — it has been operating all along"
+        );
+    }
+
+    /// PR #1875 review finding, two rounds on the same scenario: a legacy
+    /// pre-#1843 record that is `paused` (or `archived`) at its first
+    /// post-upgrade boot is deliberately left un-migrated by the "existing
+    /// but not running" arm above.
+    ///
+    /// Round one's bug was premature: an unconditional `save` used to stamp
+    /// `activation_gate_seen: true` regardless, both at the end of `build`
+    /// and from a bare lifecycle transition (`CompanyRuntime::set_lifecycle`,
+    /// the console's pause/resume control) — poisoning the tiebreaker before
+    /// any migration had actually run, which permanently blocked the
+    /// grandfather arm's `!gate_already_seen` guard from ever firing again.
+    /// The fix at the time made `set_lifecycle` a pure passthrough for the
+    /// marker: never touch it, so a later `build()` could still decide.
+    ///
+    /// Round two's bug was the opposite failure mode of that same fix: a
+    /// company already registered in `state.registry()` never goes through
+    /// another `build()` across pause/resume — `server/provision.rs`'s
+    /// `transition` calls straight into the live runtime's `set_lifecycle`.
+    /// On a long-lived hosted tenant process, "its own next running boot"
+    /// might be days away, so a passthrough-only fix left an established
+    /// operator staring at the onboarding gate for the rest of that
+    /// process's uptime. The real fix is for `set_lifecycle` itself to make
+    /// the same decision the grandfather arm makes — gated on the identical
+    /// `!gate_already_seen` (and unset-latch) condition, so it still cannot
+    /// fire on a genuinely new company mid-onboarding — the moment a resume
+    /// puts an unmigrated record back to `running`, rather than only ever
+    /// forwarding the marker untouched.
+    #[tokio::test]
+    async fn a_paused_legacy_company_is_grandfathered_the_moment_it_resumes() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-paused-backfill-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        // Same legacy-fixture shape as
+        // `rebuild_backfills_activation_for_a_pre_existing_running_company`
+        // (raw files, not `FsCompanyStore::save`, for the same reason given
+        // there), except `paused` rather than `running`.
+        let bundle = crate::store::Bundle::new(home.clone(), &id);
+        tokio::fs::create_dir_all(bundle.dir()).await.unwrap();
+        let toml_src = toml::to_string(&manifest).unwrap();
+        tokio::fs::write(bundle.company_toml(), toml_src)
+            .await
+            .unwrap();
+        tokio::fs::write(bundle.meta_json(), r#"{"lifecycle":"paused"}"#)
+            .await
+            .unwrap();
+
+        // Boot 1: `paused`, so the "existing but not running" arm leaves the
+        // record un-migrated — and must leave the gate marker unseen too.
+        // Unaffected by round two's fix: `set_lifecycle` is never called
+        // here, only `build`.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        assert!(
+            !store.activation_gate_seen(&id).await.unwrap(),
+            "an unmigrated paused legacy record must not be marked gate-seen \
+             by an ordinary rebuild"
+        );
+
+        // Resume: the console's pause/resume control, on the same
+        // already-registered runtime — no rebuild in between, exactly the
+        // in-place-resume shape round two's finding describes.
+        use crate::ports::types::{Actor, ActorKind};
+        runtime
+            .set_lifecycle(
+                "running",
+                Actor {
+                    kind: ActorKind::Operator,
+                    id: "test-op".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Round two's fix: the resume itself must grandfather the record
+        // immediately — an established operator must not see the onboarding
+        // gate reappear for however long this process happens to stay up.
+        assert!(
+            store.activation_gate_seen(&id).await.unwrap(),
+            "a resume that puts an unmigrated legacy record back to `running` \
+             must grandfather it in place, not leave it waiting for a restart \
+             that may not come for a long time on a long-lived process"
+        );
+        let resumed = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            resumed.name_confirmed,
+            "the grandfathered record must read as name-confirmed immediately \
+             after resume"
+        );
+        assert!(
+            resumed.activation_completed_at.is_some(),
+            "the grandfathered record must read as activated immediately \
+             after resume, not only after the next full boot"
+        );
+        drop(runtime);
+
+        // Boot 2: already grandfathered by the resume above, so a rebuild
+        // must simply carry that forward — the "already latched" arm, not
+        // the grandfather arm, now applies.
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let rebuilt = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(rebuilt.name_confirmed);
+        assert!(rebuilt.activation_completed_at.is_some());
+        assert_eq!(
+            rebuilt.activation_completed_at, resumed.activation_completed_at,
+            "a rebuild after the resume must carry the latch forward untouched, \
+             not recompute a fresh timestamp"
+        );
+        assert!(runtime.store().activation_gate_seen(&id).await.unwrap());
+    }
+
+    /// The narrower guarantee round one's fix protects, isolated from round
+    /// two's live-grandfather behavior above: a resume that does NOT clear
+    /// the grandfather condition (record already latched, or gate already
+    /// seen) must still forward the marker exactly as recorded rather than
+    /// touching it. `set_lifecycle`'s own guard
+    /// (`to == "running" && !gate_seen && activation_completed_at.is_none()`)
+    /// is what keeps a genuinely-new, still-onboarding company's `pause` /
+    /// `resume` cycle from being mistaken for the legacy grandfather case —
+    /// its first save already stamped the marker `true`, so the guard never
+    /// fires for it.
+    #[tokio::test]
+    async fn a_resume_mid_onboarding_does_not_falsely_grandfather_a_new_company() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-resume-no-false-grandfather-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        // A brand-new company: first boot stamps `gate_seen: true` and
+        // leaves `name_confirmed`/`activation_completed_at` unset — the
+        // real funnel applies, matching
+        // `a_brand_new_company_is_not_backfilled_as_activated`.
+        let runtime = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let store = runtime.store().clone();
+        assert!(store.activation_gate_seen(&id).await.unwrap());
+
+        use crate::ports::types::{Actor, ActorKind};
+        runtime
+            .set_lifecycle(
+                "paused",
+                Actor {
+                    kind: ActorKind::Operator,
+                    id: "test-op".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        runtime
+            .set_lifecycle(
+                "running",
+                Actor {
+                    kind: ActorKind::Operator,
+                    id: "test-op".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let record = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            !record.name_confirmed,
+            "a pause/resume cycle mid-onboarding must not silently confirm the \
+             name for a company that never went near the name-confirm route"
+        );
+        assert!(
+            record.activation_completed_at.is_none(),
+            "a pause/resume cycle mid-onboarding must not activate a company \
+             that has not actually cleared the funnel"
+        );
+    }
+
+    /// The other half of the migration: a genuinely new company (no `existing`
+    /// record at all) gets no grace — the real funnel applies from boot one.
+    #[tokio::test]
+    async fn a_brand_new_company_is_not_backfilled_as_activated() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-nobackfill-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let record = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(!record.name_confirmed);
+        assert!(record.activation_completed_at.is_none());
+    }
+
+    /// PR #1875 review finding: a genuinely new company's *second* boot must
+    /// not be mistaken for the pre-#1843 grandfather case. The first boot
+    /// (`existing` is `None`) persists a record with `lifecycle == "running"`
+    /// and `activation_completed_at: None` — exactly the shape the grandfather
+    /// arm in `RuntimeBuilder::build` matches on. A restart before the operator
+    /// finishes onboarding (e.g. the app container bouncing mid-checklist) must
+    /// not let that second `build()` call activate the company via the
+    /// grandfather arm; only a company that predates activation tracking
+    /// entirely gets that grace.
+    #[tokio::test]
+    async fn a_restart_before_onboarding_completes_does_not_grandfather_activation() {
+        let home_dir = tempfile::Builder::new()
+            .prefix("oc-wf-no-grandfather-on-restart-")
+            .tempdir()
+            .expect("tempdir");
+        let home = home_dir.path().to_path_buf();
+        let manifest = wf_manifest("");
+        let id = CompanyId::new("acme");
+
+        // First boot: a brand-new company. Not activated — matches
+        // `a_brand_new_company_is_not_backfilled_as_activated` above — but its
+        // persisted record now has `lifecycle == "running"`.
+        RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Second boot: the same company restarting before the operator ever
+        // opened the activation funnel. `existing` now loads the record the
+        // first boot just wrote — `lifecycle == "running"`,
+        // `activation_completed_at: None` — the same shape a genuine
+        // pre-#1843 legacy record has.
+        RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let store = crate::store::FsCompanyStore::new(home_dir.path().to_path_buf());
+        let record = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            !record.name_confirmed,
+            "a container restart must not silently confirm the name for a company \
+             that never went near the name-confirm route"
+        );
+        assert!(
+            record.activation_completed_at.is_none(),
+            "a container restart before onboarding completes must not activate \
+             the company — that is the exact funnel the activation gate exists \
+             to enforce"
         );
     }
 
