@@ -357,7 +357,7 @@ function BouncedBadgeRow({ reason }: { reason: string }) {
   return (
     <div className="mt-2 flex items-start gap-1.5 text-2xs font-medium text-destructive">
       <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-      <span className="line-clamp-2">bounced: {reason}</span>
+      <span className="line-clamp-2">{'bounced: '}{reason}</span>
     </div>
   );
 }
