@@ -724,6 +724,40 @@ impl SqliteStore {
             .or_insert_with(|| broadcast::channel(256).0)
             .clone()
     }
+
+    /// The shared body of `save` and `save_importing`: upserts the company
+    /// row, stamping `overlay_json`'s `activation_gate_seen` with whatever
+    /// the caller passes rather than always `true`. See
+    /// `CompanyStore::save_importing`'s doc comment for why the two callers
+    /// need different values.
+    async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
+        let manifest_toml = toml::to_string(&record.manifest)
+            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
+        let overlay_json = serde_json::to_string(&OverlayBlob::from_record_gated(
+            record,
+            activation_gate_seen,
+        ))?;
+        let conn = self.conn();
+        // Append-only: `save` upserts the company row and never touches ledger.
+        conn.execute(
+            "INSERT INTO company (company_id, manifest_toml, lifecycle, overlay_json, updated_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(company_id) DO UPDATE SET \
+               manifest_toml = excluded.manifest_toml, \
+               lifecycle = excluded.lifecycle, \
+               overlay_json = excluded.overlay_json, \
+               updated_ms = excluded.updated_ms",
+            params![
+                record.id.as_ref(),
+                manifest_toml,
+                record.lifecycle,
+                overlay_json,
+                now_millis() as i64
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -788,29 +822,55 @@ impl CompanyStore for SqliteStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        let manifest_toml = toml::to_string(&record.manifest)
-            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        let overlay_json = serde_json::to_string(&OverlayBlob::from_record(record))?;
+        // Every ordinary `save` call against a `running` company is, by
+        // definition, made by code that understands the activation funnel —
+        // see `CompanyStore::activation_gate_seen`'s doc comment. That
+        // reasoning does NOT extend to a `paused`/`archived` record still
+        // waiting on its own first `running` boot to decide the marker (PR
+        // #1875 review finding, second round): `RuntimeBuilder::build`'s
+        // "existing but not running" arm carries the marker forward
+        // untouched for exactly this reason, but a write that reaches this
+        // method directly — bypassing `build` entirely, e.g.
+        // `company_logo::put_logo`'s plain load-modify-save, which never
+        // checks lifecycle — would stamp `true` regardless and poison the
+        // grandfather arm's `!gate_already_seen` guard before the record's
+        // own migration boot ever runs. So: stamp `true` only once the
+        // record itself says `running`; otherwise preserve whatever is
+        // already on file, same as `build`'s own "not running" arm does.
+        if record.lifecycle == "running" {
+            self.save_gated(record, true).await
+        } else {
+            let gate_seen = self.activation_gate_seen(&record.id).await?;
+            self.save_gated(record, gate_seen).await
+        }
+    }
+
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        self.save_gated(record, gate_seen).await
+    }
+
+    /// PR #1875 review finding: `overlay_json` is the same blob `save` above
+    /// always stamps `activation_gate_seen: true` into (via
+    /// `OverlayBlob::from_record`), so reading it back here — rather than
+    /// inheriting the trait's always-`false` default — is what lets a
+    /// sqlite-backed company's second boot tell itself apart from a genuine
+    /// pre-#1843 legacy record. A row that has never been saved at all reads
+    /// `false`, matching `FsCompanyStore::activation_gate_seen`'s own "no
+    /// bundle written yet" case.
+    async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {
         let conn = self.conn();
-        // Append-only: `save` upserts the company row and never touches ledger.
-        conn.execute(
-            "INSERT INTO company (company_id, manifest_toml, lifecycle, overlay_json, updated_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
-             ON CONFLICT(company_id) DO UPDATE SET \
-               manifest_toml = excluded.manifest_toml, \
-               lifecycle = excluded.lifecycle, \
-               overlay_json = excluded.overlay_json, \
-               updated_ms = excluded.updated_ms",
-            params![
-                record.id.as_ref(),
-                manifest_toml,
-                record.lifecycle,
-                overlay_json,
-                now_millis() as i64
-            ],
-        )
-        .map_err(sql_err)?;
-        Ok(())
+        let overlay_json: Option<String> = conn
+            .query_row(
+                "SELECT overlay_json FROM company WHERE company_id = ?1",
+                params![id.as_ref()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(overlay_json) = overlay_json else {
+            return Ok(false);
+        };
+        Ok(OverlayBlob::parse(&overlay_json)?.activation_gate_seen)
     }
 
     async fn list(&self) -> Result<Vec<CompanySummary>> {
@@ -3640,9 +3700,26 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
                 }
             }
         }
-        // Adoption commits nothing: the transaction is dropped, which rolls back
-        // a reservation that never wrote.
-        if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+        // Adoption stamps the lease flag (issue #1839) and commits it. The write
+        // rides `node_json` via serde, inside the immediate transaction this
+        // method already holds, so the flag lands atomically against a
+        // concurrent `delete_if_empty` and Race 1 is closed on this backend.
+        // Authorship is untouched — only `adopted` changes.
+        if let Some(mut existing) = existing_folder_claim(nodes.values(), parent, name)? {
+            if !existing.adopted {
+                existing.adopted = true;
+                tx.execute(
+                    "UPDATE workspace_nodes SET node_json = ?3 \
+                     WHERE company_id = ?1 AND id = ?2",
+                    params![
+                        company.as_ref(),
+                        existing.id,
+                        serde_json::to_string(&existing)?
+                    ],
+                )
+                .map_err(sql_err)?;
+                tx.commit().map_err(sql_err)?;
+            }
             return Ok(FolderClaim::Adopted(existing));
         }
         let node = new_folder(name, parent, origin);
@@ -3964,33 +4041,34 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_err)?;
-        let exists: Option<i64> = tx
-            .query_row(
-                "SELECT 1 FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
-                params![company.as_ref(), id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_err)?;
-        if exists.is_none() {
+        // `parent_id` and `adopted` live inside `node_json`, not as their own
+        // columns (see the `workspace_nodes` table def), so both the existence
+        // check and the has-child check go through the same deserializing
+        // helper the rest of this backend's workspace methods use — a raw SQL
+        // `WHERE parent_id = ?` against this table is a "no such column" error,
+        // not a narrowing filter.
+        let nodes = self.workspace_nodes(&tx, company)?;
+        let Some(node) = nodes.get(id) else {
+            return Ok(false);
+        };
+        // An adopted folder has a second writer whose create has not landed yet
+        // (issue #1839). The flag-read here and the flag-write in
+        // `adopt_or_create_folder` both happen under an IMMEDIATE transaction on
+        // this same table, so they serialize: once an adoption has stamped
+        // `adopted`, this refuses — closing the race on this backend rather than
+        // narrowing it, matching `FsOps`'s guard.
+        if node.adopted {
             return Ok(false);
         }
-        let has_child: Option<i64> = tx
-            .query_row(
-                "SELECT 1 FROM workspace_nodes WHERE company_id = ?1 AND parent_id = ?2 LIMIT 1",
-                params![company.as_ref(), id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_err)?;
-        if has_child.is_some() {
+        if nodes.values().any(|n| n.parent_id.as_deref() == Some(id)) {
             return Ok(false);
         }
+        // Single document, non-recursive — the reads above, taken under this
+        // same IMMEDIATE transaction, already proved `id` exists, is unadopted
+        // and is childless, so a plain delete-by-key is enough.
         let removed = tx
             .execute(
-                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2 AND NOT EXISTS (\
-                     SELECT 1 FROM workspace_nodes AS child \
-                     WHERE child.company_id = ?1 AND child.parent_id = ?2)",
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
                 params![company.as_ref(), id],
             )
             .map_err(sql_err)?;
@@ -4076,6 +4154,12 @@ mod test {
     async fn conformance_isolation_by_company() {
         let s = store();
         conformance::assert_isolation_by_company(s.clone(), s.clone(), s.clone(), s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_paused_ordinary_save_preserves_activation_gate() {
+        let s = store();
+        conformance::assert_paused_ordinary_save_preserves_activation_gate(s).await;
     }
 
     #[tokio::test]
@@ -4684,6 +4768,16 @@ mod test {
         conformance::assert_workspace_sibling_names(store()).await;
     }
 
+    /// Issue #1839: the adoption lease — a second claim marks the folder, and
+    /// `delete_if_empty` refuses it while a minted-unadopted twin still deletes.
+    /// SQLite inherits the trait-default `delete_if_empty`, so this pins that the
+    /// flag it persists in `node_json` under the adopt transaction is the flag
+    /// the default reads back.
+    #[tokio::test]
+    async fn conformance_workspace_adoption_lease() {
+        conformance::assert_workspace_adoption_lease(store()).await;
+    }
+
     /// **The race issue #894 is actually about**, and the reason the guard is an
     /// `IMMEDIATE` transaction rather than a check in `create`'s caller.
     ///
@@ -4724,6 +4818,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         let gate = Arc::new(tokio::sync::Barrier::new(2));
@@ -4818,6 +4913,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         WorkspaceStore::create(

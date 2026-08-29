@@ -303,6 +303,18 @@ async function mockApi(page: Page) {
       return json({ items: [], totalContext: 0, contextTruncated: false });
     if (path.endsWith("/me"))
       return json({ id: "op", email: "op@example.com", role: "admin" });
+    // Issue #1844: without this the fallback below answers `GET …/activation`
+    // with `[]` — truthy, so `shouldShowOnboardingGate` reads `isActivated` as
+    // `undefined` and, since `/me` above already resolves this operator as
+    // admin, opens the blocking gate over every one of this file's tests
+    // instead of the shell they actually exercise.
+    if (path.endsWith("/activation"))
+      return json({
+        nameConfirmed: true,
+        integrationConnected: true,
+        workflowRunSucceeded: true,
+        isActivated: true,
+      });
     return json([]);
   });
 }

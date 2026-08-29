@@ -789,6 +789,35 @@ impl MongoStore {
         }
         Ok(out)
     }
+
+    /// The shared body of `save` and `save_importing`: upserts the company
+    /// document, stamping `overlay_json`'s `activation_gate_seen` with
+    /// whatever the caller passes rather than always `true`. See
+    /// `CompanyStore::save_importing`'s doc comment for why the two callers
+    /// need different values.
+    async fn save_gated(&self, record: &CompanyRecord, activation_gate_seen: bool) -> Result<()> {
+        let manifest_toml = toml::to_string(&record.manifest)
+            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
+        let overlay_json = serde_json::to_string(&OverlayBlob::from_record_gated(
+            record,
+            activation_gate_seen,
+        ))?;
+        // Append-only: `save` upserts the company document, never the ledger.
+        self.collection("companies")
+            .update_one(
+                doc! {"company_id": record.id.as_ref()},
+                doc! {"$set": {
+                    "manifest_toml": manifest_toml,
+                    "lifecycle": &record.lifecycle,
+                    "overlay_json": overlay_json,
+                    "updated_ms": now_millis() as i64,
+                }},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -854,24 +883,56 @@ impl CompanyStore for MongoStore {
     }
 
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
-        let manifest_toml = toml::to_string(&record.manifest)
-            .map_err(|e| OpenCompanyError::Store(format!("cannot serialize manifest: {e}")))?;
-        let overlay_json = serde_json::to_string(&OverlayBlob::from_record(record))?;
-        // Append-only: `save` upserts the company document, never the ledger.
-        self.collection("companies")
-            .update_one(
-                doc! {"company_id": record.id.as_ref()},
-                doc! {"$set": {
-                    "manifest_toml": manifest_toml,
-                    "lifecycle": &record.lifecycle,
-                    "overlay_json": overlay_json,
-                    "updated_ms": now_millis() as i64,
-                }},
-            )
-            .with_options(UpdateOptions::builder().upsert(true).build())
+        // Every ordinary `save` call against a `running` company is, by
+        // definition, made by code that understands the activation funnel —
+        // see `CompanyStore::activation_gate_seen`'s doc comment. That
+        // reasoning does NOT extend to a `paused`/`archived` record still
+        // waiting on its own first `running` boot to decide the marker (PR
+        // #1875 review finding, second round): `RuntimeBuilder::build`'s
+        // "existing but not running" arm carries the marker forward
+        // untouched for exactly this reason, but a write that reaches this
+        // method directly — bypassing `build` entirely, e.g.
+        // `company_logo::put_logo`'s plain load-modify-save, which never
+        // checks lifecycle — would stamp `true` regardless and poison the
+        // grandfather arm's `!gate_already_seen` guard before the record's
+        // own migration boot ever runs. So: stamp `true` only once the
+        // record itself says `running`; otherwise preserve whatever is
+        // already on file, same as `build`'s own "not running" arm does.
+        if record.lifecycle == "running" {
+            self.save_gated(record, true).await
+        } else {
+            let gate_seen = self.activation_gate_seen(&record.id).await?;
+            self.save_gated(record, gate_seen).await
+        }
+    }
+
+    async fn save_importing(&self, record: &CompanyRecord, gate_seen: bool) -> Result<()> {
+        self.save_gated(record, gate_seen).await
+    }
+
+    /// PR #1875 review finding: the hosted platform selects this backend for
+    /// tenant storage (`OPENCOMPANY_STORAGE=mongodb`), so inheriting the
+    /// trait's always-`false` default here — rather than reading the same
+    /// `overlay_json` field `save` above always stamps `activation_gate_seen:
+    /// true` into (via `OverlayBlob::from_record`) — would let a genuinely
+    /// new tenant's *second* boot go unnoticed as a legacy pre-#1843 record
+    /// and get silently auto-activated, defeating the fix `save` above
+    /// exists to carry. A company with no document at all reads `false`,
+    /// matching `FsCompanyStore::activation_gate_seen`'s own "no bundle
+    /// written yet" case.
+    async fn activation_gate_seen(&self, id: &CompanyId) -> Result<bool> {
+        let Some(company) = self
+            .collection("companies")
+            .find_one(doc! {"company_id": id.as_ref()})
             .await
-            .map_err(mongo_err)?;
-        Ok(())
+            .map_err(mongo_err)?
+        else {
+            return Ok(false);
+        };
+        match company.get_str("overlay_json") {
+            Ok(json) => Ok(OverlayBlob::parse(json)?.activation_gate_seen),
+            Err(_) => Ok(false),
+        }
     }
 
     async fn list(&self) -> Result<Vec<CompanySummary>> {
@@ -3866,7 +3927,23 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                     }
                 }
             }
-            if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+            if let Some(mut existing) = existing_folder_claim(nodes.values(), parent, name)? {
+                // Stamp the adoption lease (issue #1839) via a `$set` on the
+                // node document. This backend has no per-company lock, so the
+                // flag narrows Race 1 to #1801's documented residual window
+                // rather than closing it — a `delete_if_empty` racing this
+                // `$set` can still miss it, and the loser's bounded retry above
+                // re-mints if it does. Authorship is untouched.
+                if !existing.adopted {
+                    existing.adopted = true;
+                    self.collection("workspace_nodes")
+                        .update_one(
+                            doc! {"company_id": company.as_ref(), "node_id": &existing.id},
+                            doc! {"$set": {"node_json": serde_json::to_string(&existing)?}},
+                        )
+                        .await
+                        .map_err(mongo_err)?;
+                }
                 return Ok(FolderClaim::Adopted(existing));
             }
             let node = new_folder(name, parent, origin.clone());
@@ -4398,7 +4475,16 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
     /// `delete_one`, instead of the whole of a caller's request.
     async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let nodes = self.workspace_nodes(company).await?;
-        if !nodes.contains_key(id) {
+        let Some(node) = nodes.get(id) else {
+            return Ok(false);
+        };
+        // An adopted folder has a second writer (issue #1839). This backend has
+        // no per-company lock, so the flag only narrows Race 1 to #1801's
+        // documented residual window rather than closing it: an adoption that
+        // has not yet committed its `$set` is invisible here, and the loser's
+        // bounded retry re-mints if it still loses. What the flag does close is
+        // the common case where the adoption *has* landed.
+        if node.adopted {
             return Ok(false);
         }
         if nodes
@@ -5055,6 +5141,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         };
         crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &node, b"live-bytes")
             .await
@@ -5177,6 +5264,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         };
         rebooted
             .collection("workspace_nodes")
@@ -5237,6 +5325,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         };
         crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &first, b"first")
             .await
@@ -5321,6 +5410,7 @@ mod test {
             mime: Some("image/png".to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         let racer_a = {
@@ -5555,6 +5645,13 @@ mod test {
     async fn conformance_isolation_by_company() {
         let Some(s) = store().await else { return };
         conformance::assert_isolation_by_company(s.clone(), s.clone(), s.clone(), s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_paused_ordinary_save_preserves_activation_gate() {
+        let Some(s) = store().await else { return };
+        conformance::assert_paused_ordinary_save_preserves_activation_gate(s.clone()).await;
         drop_db(&s).await;
     }
 
@@ -6112,6 +6209,17 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// Issue #1839: the adoption lease, on the backend that can only *narrow*
+    /// Race 1 — the `$set` an adoption writes is what a later `delete_if_empty`
+    /// reads, so the sequential contract (mark, then refuse) still holds even
+    /// though a truly concurrent delete can still miss an in-flight `$set`.
+    #[tokio::test]
+    async fn conformance_workspace_adoption_lease() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_adoption_lease(s.clone()).await;
+        drop_db(&s).await;
+    }
+
     /// Issue #887's no-torn-read contract, on the other backend hosted tenants
     /// run. A document replace is atomic, so this passed before the `fs` fix
     /// and passes after — the contract is the port's, not one backend's.
@@ -6149,6 +6257,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
 
         for (id, name, kind, parent, body) in [

@@ -544,6 +544,14 @@ pub const MIN_AGENTS: usize = 4;
 
 /// The most agents a setup pass may land. Beyond this a new operator is being
 /// handed clutter to tidy rather than a team to work with.
+/// The longest company name this flow accepts, in characters.
+///
+/// Shared by the derivation and by an operator's own name, because the reason
+/// for the bound is the same either way: `company_id_from_name` keeps every
+/// alphanumeric character, and the id becomes a directory component under the
+/// store.
+pub const MAX_COMPANY_NAME: usize = 60;
+
 pub const MAX_AGENTS: usize = 6;
 
 /// The longest mandate a card should carry. A model asked for a one-line
@@ -1231,6 +1239,18 @@ pub enum RosterSource {
     /// was too thin to be a company. Never blended with a model's answer —
     /// see [`validate_roster`].
     Fallback,
+    /// The roster of the bundled template the operator **picked**, shipped
+    /// whole.
+    ///
+    /// Distinct from [`Fallback`](Self::Fallback), which is the curated team
+    /// this module matches from the *answers*. The two are different rosters
+    /// and only one of them was chosen by anybody: an operator who selects
+    /// "Agentic Marketing Agency" and then skips the model step was handed the
+    /// five-person curated marketing team rather than that template's eight,
+    /// under a heading naming the template. This says what it is, so the
+    /// review screen can too — and so the apply can seed the template itself
+    /// rather than rebuild an approximation of it.
+    Preset,
 }
 
 /// Why a roster fell back to the curated team.
@@ -1280,6 +1300,7 @@ impl RosterSource {
         match self {
             Self::Model => "model",
             Self::Fallback => "fallback",
+            Self::Preset => "preset",
         }
     }
 }
@@ -1290,6 +1311,38 @@ impl RosterSource {
 /// This is both the fast path (no inference credential wired) and the floor
 /// every other path falls back to, which is why it lives here rather than
 /// beside the pass that polishes it.
+/// The proposal for a template the operator **picked**: that template's own
+/// roster, verbatim.
+///
+/// The counterpart to [`template_proposal`], and the difference is who chose.
+/// `template_proposal` matches a curated team from what the operator *wrote*;
+/// this one reports the team of the bundled company they *selected* from a
+/// list. Reaching for the curated team when a template is on screen produces
+/// the one outcome the review step must never produce — a roster that is not
+/// what the heading above it names.
+///
+/// `uncovered` stays empty for the same reason it does on the curated path: a
+/// shipped roster makes no claim about the job list, and inventing one either
+/// way would be a claim nobody checked.
+pub fn preset_proposal(
+    answers: &SetupAnswers,
+    template_key: &'static str,
+    agents: Vec<ProposedAgent>,
+    reason: FallbackReason,
+) -> RosterProposal {
+    RosterProposal {
+        // Bounded by the template rather than by [`MAX_AGENTS`]: this roster is
+        // shipped, not invented, and the review screen must show the team the
+        // template card said it would.
+        agents: validate_roster_bounded(agents, usize::MAX),
+        template_key,
+        source: RosterSource::Preset,
+        reason: Some(reason),
+        jobs: job_items(&answers.automate),
+        uncovered: Vec::new(),
+    }
+}
+
 pub fn template_proposal(answers: &SetupAnswers, reason: FallbackReason) -> RosterProposal {
     let template = match_template(answers);
     RosterProposal {
@@ -1431,7 +1484,7 @@ fn company_name(answers: &SetupAnswers) -> String {
         .unwrap_or(raw)
         .to_string();
     let head = head.as_str();
-    let trimmed: String = head.chars().take(60).collect();
+    let trimmed: String = head.chars().take(MAX_COMPANY_NAME).collect();
     if trimmed.trim().is_empty() {
         "My Company".to_string()
     } else {
@@ -1556,12 +1609,23 @@ pub(crate) fn clamp_description(description: &str) -> String {
 /// operator is always looking at one authored team or the other, never a blend
 /// of both. See [`crate::harness::roster_build`].
 pub fn validate_roster(proposed: Vec<ProposedAgent>) -> Vec<ProposedAgent> {
+    validate_roster_bounded(proposed, MAX_AGENTS)
+}
+
+/// [`validate_roster`], with the size bound named by the caller.
+///
+/// [`MAX_AGENTS`] bounds what a *model* may invent, and a bundled template is
+/// not a model: several ship eight or nine teammates deliberately, and running
+/// one through the six-agent cap would show an operator six of the eight their
+/// template card advertised and then build all eight. The cap stays exactly
+/// where it was for every designed roster; a shipped one is displayed whole.
+pub fn validate_roster_bounded(proposed: Vec<ProposedAgent>, max: usize) -> Vec<ProposedAgent> {
     let mut seen: Vec<String> = Vec::new();
     let mut roster: Vec<ProposedAgent> = Vec::new();
 
     let push = |agent: ProposedAgent, roster: &mut Vec<ProposedAgent>, seen: &mut Vec<String>| {
         let role = agent.role.trim();
-        if role.is_empty() || roster.len() >= MAX_AGENTS {
+        if role.is_empty() || roster.len() >= max {
             return;
         }
         let slug = role_slug(role);

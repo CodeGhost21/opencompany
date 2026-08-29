@@ -175,6 +175,7 @@ async fn upload(
         // would be an unverified claim about the payload.
         size: None,
         sha256: None,
+        adopted: false,
     };
     let stored = company
         .runtime
