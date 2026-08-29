@@ -195,12 +195,12 @@ use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{
-    Actor, ActorKind, AgentOverride, BudgetOverride, CompanyId, CompanyRecord, OverlayAgent,
-    OverlayDesk, OverlayDeskMember, PolicyOverride, TurnStep,
+    Actor, ActorKind, AgentOverride, BudgetOverride, CompanyId, CompanyRecord, EventSeq,
+    OverlayAgent, OverlayDesk, OverlayDeskMember, PolicyOverride, TurnStep,
 };
 use crate::ports::{
-    ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
-    UsageMeter,
+    ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, NotificationStore, SecretStore,
+    TaskStore, UsageMeter,
 };
 use crate::runtime::builder::agent_scoped_grants;
 
@@ -285,6 +285,18 @@ pub struct HarnessDeps {
     /// written either way, so an unwired artifact store loses nothing that
     /// existed previously.
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
+    /// The company's notification store, so the orchestrator's `run_workflow`
+    /// tool can file a `workflow_run_failed` notification on the same terms as
+    /// the console run route, the cron scheduler, and the approval-resume path
+    /// (issue #1865, PR #1883 review comment 3877185396) — that tool is the
+    /// one run-outcome chokepoint `WorkflowSpawn` does not cover, since an
+    /// agent-started run stays inside the calling turn rather than routing
+    /// through `WorkflowSpawn::spawn` (see that type's own `notifications`
+    /// doc comment). `None` — the default build, and most of this struct's
+    /// test constructions — simply skips the notification, exactly as `tasks`
+    /// and `artifacts` degrade above: the run itself still journals and
+    /// answers the tool call either way, only the company-wide alert is lost.
+    pub notifications: Option<Arc<dyn NotificationStore>>,
     /// The company's ledgers, so an agent can read what has already been
     /// decided, goaled or ruled out, record what it decides, and declare an axis
     /// nobody anticipated. `None` builds no ledger tools at all — which is right
@@ -630,7 +642,16 @@ pub struct CompanyAgent {
     /// transcript, so a thread only ever sees its own conversation. Guarded by
     /// the same `agent` critical section (turns are already serialised), so the
     /// pair cannot be read torn. `None` until the first bound turn.
-    bound_chat: Mutex<Option<String>>,
+    ///
+    /// **The channel is not the finest conversation there is** (#1890). The
+    /// binding is `(chat id, thread root)`, because two threads of one channel
+    /// are two conversations: keyed on the channel alone, moving between them
+    /// was not a switch, so the clear-and-re-seed never ran and one thread
+    /// answered with the other's turns still loaded. A `None` root is the
+    /// channel-level conversation and needs no special case — it is simply the
+    /// thread every unparented line hangs in, which is every line in a company
+    /// that has never threaded.
+    bound_chat: Mutex<Option<(String, Option<EventSeq>)>>,
 }
 
 /// The graceful reply returned when a turn yields the transient empty-response
@@ -933,7 +954,8 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None, None, None, None).await
+        self.run_with_steer(message, None, None, None, None, None)
+            .await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -966,6 +988,15 @@ impl CompanyAgent {
         stream: Option<crate::turn_stream::TurnStreamCtx>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
         chat_seed: Option<chat_seed::ChatSeedRequest>,
+        // The thread this turn belongs to (#1890), carried in its own right
+        // rather than read off `chat_seed`. The binding must not depend on an
+        // optional dependency: `chat_seed` is `None` whenever no `EventLog` is
+        // wired, so reading the root from it made two different threads of one
+        // channel compare equal on such a host — no clear, no re-seed, and the
+        // leak this whole change exists to close, reopened in exactly the
+        // configuration that cannot re-seed its way out of it (coderabbit
+        // review finding).
+        thread_root: Option<EventSeq>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
@@ -1063,12 +1094,16 @@ impl CompanyAgent {
         // own durable transcript. Runs inside the `agent` critical section,
         // which already serialises this agent's turns.
         if let Some(incoming) = turn_chat_id.as_deref() {
+            let incoming_root = thread_root;
             let mut bound = self.bound_chat.lock().await;
-            let switched = bound.as_deref() != Some(incoming);
+            let switched = bound.as_ref().map(|(chat, root)| (chat.as_str(), *root))
+                != Some((incoming, incoming_root));
             if switched {
                 tracing::debug!(
-                    from = bound.as_deref().unwrap_or("<none>"),
+                    from = bound.as_ref().map(|(chat, _)| chat.as_str()).unwrap_or("<none>"),
+                    from_thread = ?bound.as_ref().and_then(|(_, root)| *root),
                     to = incoming,
+                    to_thread = ?incoming_root,
                     "[harness] chat switched — resetting agent history and re-binding to the incoming thread"
                 );
                 agent.clear_history();
@@ -1131,7 +1166,7 @@ impl CompanyAgent {
                     seeded,
                     "[harness] thread-transcript re-seed result"
                 );
-                *bound = Some(incoming.to_string());
+                *bound = Some((incoming.to_string(), incoming_root));
             }
         } else {
             // Unthreaded turn (a dispatched background task or a workflow
@@ -2029,6 +2064,15 @@ enum LiveStream<'a> {
     Off,
     On {
         chat_id: Option<&'a str>,
+        /// The thread within `chat_id` this turn belongs to (#1890), `None`
+        /// for the channel itself.
+        ///
+        /// Rides here rather than as a seventh positional argument because
+        /// this variant is already the turn's *chat identity* and not only its
+        /// stream key — `chat_id` is what the history seed is scoped by, and
+        /// the thread is the other half of that scope. Nothing about live
+        /// streaming reads it.
+        thread_root: Option<EventSeq>,
     },
     /// A workflow agent node (issue #1702): it streams live like `On`, but its
     /// frames route by the workflow run + node rather than a chat thread — the
@@ -3115,17 +3159,19 @@ impl HarnessPool {
     /// Desk routing (which agent answers a group chat) is the caller's job — v1
     /// is single-responder and the WS3 chat handler picks the addressed member.
     ///
-    /// `chat_id` is the chat/desk **thread** this turn answers (the id journaled
-    /// as `AgentReply.chat_id`). It rides each live turn-stream frame so the
-    /// console routes the in-flight tool timeline to the right thread; `None`
-    /// falls back to the default desk, matching the durable reply.
+    /// `chat` names the conversation this turn answers: the chat/desk id
+    /// journaled as `AgentReply.chat_id`, and the thread within it (#1890). The
+    /// id rides each live turn-stream frame so the console routes the in-flight
+    /// tool timeline to the right thread; `None` falls back to the default
+    /// desk, matching the durable reply. The root scopes the history seed and
+    /// is never streamed.
     pub async fn run(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
         deps: &HarnessDeps,
-        chat_id: Option<&str>,
+        chat: crate::runtime::delegation::ChatTarget<'_>,
     ) -> crate::Result<TurnOutcome> {
         self.run_inner(
             company,
@@ -3133,7 +3179,10 @@ impl HarnessPool {
             message,
             deps,
             None,
-            LiveStream::On { chat_id },
+            LiveStream::On {
+                chat_id: chat.chat_id,
+                thread_root: chat.thread_root,
+            },
             None,
         )
         .await
@@ -3223,7 +3272,7 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         control: &SteerControl,
-        chat_id: Option<&str>,
+        chat: crate::runtime::delegation::ChatTarget<'_>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
         self.run_inner(
@@ -3232,7 +3281,10 @@ impl HarnessPool {
             message,
             deps,
             Some(control),
-            LiveStream::On { chat_id },
+            LiveStream::On {
+                chat_id: chat.chat_id,
+                thread_root: chat.thread_root,
+            },
             run_sink,
         )
         .await
@@ -3463,7 +3515,7 @@ impl HarnessPool {
         // reason (issue #1840): a confined turn is intentionally context-free, so
         // it carries none of the desk's recent history.
         let (outcome, turn_costs) = agent
-            .run_with_steer(message, None, stream_ctx, None, None)
+            .run_with_steer(message, None, stream_ctx, None, None, None)
             .await?;
 
         let provider_slug = deps.provider.telemetry_provider_id();
@@ -3725,11 +3777,11 @@ impl HarnessPool {
         // recent history; a background task or workflow node carries no chat
         // thread to bind history to (issue #1840).
         let seed_chat: Option<Option<&str>> = match &live {
-            LiveStream::On { chat_id } => Some(*chat_id),
+            LiveStream::On { chat_id, .. } => Some(*chat_id),
             _ => None,
         };
         let stream_ctx = match live {
-            LiveStream::On { chat_id } => Some(crate::turn_stream::TurnStreamCtx {
+            LiveStream::On { chat_id, .. } => Some(crate::turn_stream::TurnStreamCtx {
                 company: company.clone(),
                 agent_id: agent_id.to_string(),
                 // The chat/desk thread this turn answers — the same id journaled
@@ -3778,6 +3830,10 @@ impl HarnessPool {
                 raw_message: message.to_string(),
                 events: events.clone(),
                 store: deps.store.clone(),
+                thread_root: match &live {
+                    LiveStream::On { thread_root, .. } => *thread_root,
+                    _ => None,
+                },
             }),
             _ => None,
         };
@@ -3788,6 +3844,12 @@ impl HarnessPool {
                 stream_ctx,
                 run_sink.clone(),
                 chat_seed_request,
+                // From `live`, not from the seed request: the binding must hold
+                // on a host with no event log wired too (#1890).
+                match &live {
+                    LiveStream::On { thread_root, .. } => *thread_root,
+                    LiveStream::Workflow { .. } | LiveStream::Off => None,
+                },
             )
             .await?;
         // Issue #1846: park a durable re-issue marker the moment a pause is
@@ -3799,7 +3861,7 @@ impl HarnessPool {
         // redeem time rather than replaying a stale injection.
         if let Some(pause) = &outcome.budget_paused {
             let chat_id = match live {
-                LiveStream::On { chat_id } => chat_id.map(str::to_string),
+                LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
                 LiveStream::Workflow { .. } | LiveStream::Off => None,
             };
             // Issue #1846 review (Codex #3869193112): whether an operator
@@ -3870,7 +3932,7 @@ impl HarnessPool {
             // resend, by construction, runs with the SAME context the
             // marker parked; an unrelated success does not.
             let candidate_chat_id = match live {
-                LiveStream::On { chat_id } => chat_id.map(str::to_string),
+                LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
                 LiveStream::Workflow { .. } | LiveStream::Off => None,
             };
             let candidate_redeem = crate::runtime::grants::current_redeem_context();
@@ -4673,6 +4735,28 @@ pub(crate) fn build_roster(
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
         let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
+        // Issue #1759 (S2): when this agent has Composio wired (an explicit
+        // company/agent grant AND a resolved credential with a non-empty toolkit
+        // allowlist), install those connected toolkits on its policy so a raw
+        // `http_request`/`curl`/`web_fetch` aimed at one of their API hosts is
+        // deflected to the Composio route — the same condition S1's
+        // `composio_brief` is wired under, one door down (enforcement, not just
+        // instruction).
+        //
+        // `toolbelt::composio_capability_admits` (PR #1780 review) keeps this
+        // in lockstep with `build_agent`'s brief gate: `deps.capabilities` is
+        // the per-turn tier, and when it has denied `composio` (budget
+        // exhausted, or a fail-closed metering error) `filter_by_capabilities`
+        // strips every `composio_*` tool from this agent's belt. Installing the
+        // deflection anyway would deny the raw web call AND point the agent at
+        // a tool it no longer has — a dead end, not defense-in-depth.
+        #[cfg(feature = "composio")]
+        if crate::company::grants_composio_explicit(&grants)
+            && let Some(config) = deps.composio.as_ref()
+            && toolbelt::composio_capability_admits(!config.toolkits.is_empty(), &deps.capabilities)
+        {
+            agent_policy = agent_policy.with_connected_composio_toolkits(config.toolkits.clone());
+        }
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -4745,6 +4829,17 @@ pub(crate) fn build_roster(
         let desk_tools = company.agent_desk_tools(&manifest_agent.id);
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
         let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
+        // Issue #1759 (S2): same Composio deflection wiring as the manifest loop
+        // — an overlay teammate that holds the Composio grant is guarded on the
+        // same terms, including the `composio_capability_admits` check (PR
+        // #1780 review; see the manifest loop above for why).
+        #[cfg(feature = "composio")]
+        if crate::company::grants_composio_explicit(&grants)
+            && let Some(config) = deps.composio.as_ref()
+            && toolbelt::composio_capability_admits(!config.toolkits.is_empty(), &deps.capabilities)
+        {
+            agent_policy = agent_policy.with_connected_composio_toolkits(config.toolkits.clone());
+        }
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -4853,6 +4948,7 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(provider::MockProvider::default()),
@@ -5667,6 +5763,7 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                notifications: None,
                 ledgers: None,
                 ledger_registry: Default::default(),
                 provider: Arc::new(MockProvider::new("mock: ")),
@@ -5882,6 +5979,7 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -6198,7 +6296,13 @@ description = "Builds the product."
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
         let reply = pool
-            .run(&rec.id, "ceo", "hello-marker", &fx.deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("turn runs")
             .reply;
@@ -6218,7 +6322,13 @@ description = "Builds the product."
 
         // Cold store: nothing to inject on the first turn.
         let first = pool
-            .run(&rec.id, "ceo", "alpha task", &fx.deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "alpha task",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("first turn")
             .reply;
@@ -6239,7 +6349,13 @@ description = "Builds the product."
         // Second turn: the prior outcome (its body contains "alpha") is
         // retrieved and injected, so the agent sees the preamble.
         let second = pool
-            .run(&rec.id, "ceo", "alpha", &fx.deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "alpha",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("second turn")
             .reply;
@@ -6374,7 +6490,13 @@ description = "Builds the product."
             .await
             .expect("ensure after swap");
         let reply = pool
-            .run(&rec.id, "ceo", query, &swapped.deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                query,
+                &swapped.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("turn after swap")
             .reply;
@@ -6404,7 +6526,13 @@ description = "Builds the product."
             .await
             .expect("ensure after reverse swap");
         let reply = pool
-            .run(&rec.id, "ceo", query, &fx.deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                query,
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("turn after reverse swap")
             .reply;
@@ -6427,11 +6555,23 @@ description = "Builds the product."
         let rec = record();
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
-        pool.run(&rec.id, "ceo", "first", &fx.deps, None)
-            .await
-            .expect("first turn");
+        pool.run(
+            &rec.id,
+            "ceo",
+            "first",
+            &fx.deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
+        .await
+        .expect("first turn");
         let second = pool
-            .run(&rec.id, "ceo", "second", &fx.deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "second",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("second turn")
             .reply;
@@ -6475,7 +6615,13 @@ description = "Builds the product."
 
         // Control: the ordinary path injects the hit and writes the turn back.
         let ordinary = pool
-            .run(&rec.id, "ceo", question, &fx.deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                question,
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("the ordinary turn runs")
             .reply;
@@ -6528,7 +6674,13 @@ description = "Builds the product."
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
         let err = pool
-            .run(&rec.id, confine::CONFINED_AGENT_ID, "hi", &fx.deps, None)
+            .run(
+                &rec.id,
+                confine::CONFINED_AGENT_ID,
+                "hi",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect_err("the confined agent is not a roster agent");
         assert!(
@@ -6545,7 +6697,13 @@ description = "Builds the product."
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
         let err = pool
-            .run(&rec.id, "nobody", "hi", &fx.deps, None)
+            .run(
+                &rec.id,
+                "nobody",
+                "hi",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect_err("unknown agent rejected");
         assert!(
@@ -6559,7 +6717,13 @@ description = "Builds the product."
         let fx = fixture();
         let pool = HarnessPool::new();
         let err = pool
-            .run(&CompanyId::new("ghost"), "ceo", "hi", &fx.deps, None)
+            .run(
+                &CompanyId::new("ghost"),
+                "ceo",
+                "hi",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect_err("unknown company rejected");
         assert!(
@@ -6688,9 +6852,15 @@ description = "Builds the product."
         );
 
         for turn in 0..3 {
-            pool.run(&rec.id, "ceo", "hi", &fx.deps, None)
-                .await
-                .unwrap_or_else(|e| panic!("turn {turn} still runs without a workspace: {e:?}"));
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hi",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("turn {turn} still runs without a workspace: {e:?}"));
         }
 
         // The turns ran — a missing workspace is not fatal, which #449 does not
@@ -6725,9 +6895,15 @@ description = "Builds the product."
         let pool = HarnessPool::new();
         let rec = record();
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
-        pool.run(&rec.id, "ceo", "hi", &fx.deps, None)
-            .await
-            .expect("turn");
+        pool.run(
+            &rec.id,
+            "ceo",
+            "hi",
+            &fx.deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
+        .await
+        .expect("turn");
 
         assert!(fx.store.ledger.lock().unwrap().is_empty());
         assert!(fx.meter.samples.lock().unwrap().is_empty());
@@ -6781,6 +6957,7 @@ description = "Builds the product."
     fn scripted_agent(outcomes: Vec<Result<String, String>>) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(outcomes)),
@@ -6866,7 +7043,7 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control), None, None, None)
+            .run_with_steer("hi", Some(&control), None, None, None, None)
             .await
             .expect("runs");
         assert_eq!(
@@ -7317,6 +7494,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Scripted 10 deep, not once: whether the vendored harness retries
@@ -7397,7 +7575,7 @@ description = "Builds the product."
                 "ceo",
                 "Please summarize today's standup notes.",
                 &deps,
-                None,
+                crate::runtime::delegation::ChatTarget::default(),
             )
             .await
             .expect(
@@ -7456,6 +7634,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -7526,7 +7705,7 @@ description = "Builds the product."
                 "ceo",
                 "Please summarize today's standup notes.",
                 &deps,
-                None,
+                crate::runtime::delegation::ChatTarget::default(),
             )
             .await
             .expect("a budget pause is a graceful stop, not an error");
@@ -7588,6 +7767,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Always succeeds — the "operator manually added credits and
@@ -7686,7 +7866,7 @@ description = "Builds the product."
                 "ceo",
                 "Please summarize today's standup notes.",
                 &deps,
-                Some("general"),
+                crate::runtime::delegation::ChatTarget::channel(Some("general")),
             )
             .await
             .expect("this run succeeds against the scripted reply");
@@ -7730,6 +7910,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             // Succeeds against a request B's text — deliberately DIFFERENT
@@ -7808,7 +7989,13 @@ description = "Builds the product."
         // succeeds — an automatic background task landing before the
         // operator ever gets to A's CTA, per the finding's own example.
         let outcome = pool
-            .run(&company, "ceo", "File this under Q3 planning.", &deps, None)
+            .run(
+                &company,
+                "ceo",
+                "File this under Q3 planning.",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("request B succeeds against the scripted reply");
         assert!(outcome.budget_paused.is_none(), "request B must not pause");
@@ -7843,6 +8030,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -7915,7 +8103,13 @@ description = "Builds the product."
         // Request B: the EXACT same text, but in "sales" — a different
         // conversation entirely — which succeeds.
         let outcome = pool
-            .run(&company, "ceo", "review this", &deps, Some("sales"))
+            .run(
+                &company,
+                "ceo",
+                "review this",
+                &deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("sales")),
+            )
             .await
             .expect("request B succeeds against the scripted reply");
         assert!(outcome.budget_paused.is_none(), "request B must not pause");
@@ -7947,6 +8141,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![
@@ -8042,7 +8237,7 @@ description = "Builds the product."
                 "ceo",
                 "@researcher please summarize today's standup notes.",
                 &deps,
-                None,
+                crate::runtime::delegation::ChatTarget::default(),
             )
             .await
             .expect("a budget pause is a graceful stop, not an error")
@@ -8087,6 +8282,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(vec![Ok(
@@ -8146,7 +8342,13 @@ description = "Builds the product."
         pool.ensure(&rec, &deps).await.expect("pool ensures");
 
         let outcome = pool
-            .run(&company, "ceo", "How did standup go?", &deps, None)
+            .run(
+                &company,
+                "ceo",
+                "How did standup go?",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("a normal turn returns Ok");
 
@@ -8211,6 +8413,7 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8707,6 +8910,7 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8769,9 +8973,15 @@ description = "Builds the product."
         assert_eq!(pool.resident_companies().await, 1);
         // The roster is not addressable under "growth" yet.
         assert!(
-            pool.run(&rec.id, "growth", "hi", &deps, None)
-                .await
-                .is_err(),
+            pool.run(
+                &rec.id,
+                "growth",
+                "hi",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default()
+            )
+            .await
+            .is_err(),
             "the overlay teammate must not exist before it is added"
         );
 
@@ -8807,7 +9017,13 @@ description = "Builds the product."
         );
 
         let reply = pool
-            .run(&rec.id, "growth", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "growth",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("the new teammate is addressable on the very next turn")
             .reply;
@@ -9147,6 +9363,7 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -9309,6 +9526,7 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -9390,7 +9608,13 @@ description = "Sets direction."
 
         // Under the ceiling (0 spend < 100): the turn runs and echoes the prompt.
         let ok = pool
-            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("under-ceiling turn runs")
             .reply;
@@ -9427,7 +9651,13 @@ description = "Sets direction."
 
         // Over the ceiling: dispatch is refused with a benign notice — NOT an Err.
         let refused = pool
-            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("a refusal is a benign outcome, not a hard error")
             .reply;
@@ -9553,7 +9783,13 @@ description = "Sets direction."
         pool.ensure(&rec, &deps).await.expect("ensure");
 
         let reply = pool
-            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("no meter must not brick the turn")
             .reply;
@@ -9656,7 +9892,13 @@ description = "Builds the product."
             .len();
 
         let refused = pool
-            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("a refusal is a benign outcome, not a hard error")
             .reply;
@@ -9687,7 +9929,13 @@ description = "Builds the product."
         // The cap is per-teammate: the uncapped engineer is untouched, and the
         // CEO's spend does not count against it.
         let ok = pool
-            .run(&rec.id, "engineer", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "engineer",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("an uncapped teammate keeps working")
             .reply;
@@ -9878,7 +10126,13 @@ description = "Builds the product."
             .await
             .expect("fingerprinted");
         let refused = pool
-            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("a refusal is a benign outcome")
             .reply;
@@ -9909,7 +10163,13 @@ description = "Builds the product."
             "phase B: the same company, rebuilt in place — not a new process"
         );
         let unblocked = pool
-            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("the raised cap unblocks the teammate")
             .reply;
@@ -9931,7 +10191,13 @@ description = "Builds the product."
             .expect("fingerprinted");
         assert_ne!(fp_raised, fp_zero, "phase C: lowering a cap is a change");
         let zeroed = pool
-            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("a refusal is a benign outcome")
             .reply;
@@ -9954,7 +10220,13 @@ description = "Builds the product."
              did, clearing a cap would silently leave the teammate at zero"
         );
         let cleared = pool
-            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("an explicitly-uncapped teammate runs")
             .reply;
@@ -10222,7 +10494,13 @@ description = "Builds the product."
         // Uncapped to begin with: it answers.
         pool.ensure(&rec, &deps).await.expect("ensure");
         let reply = pool
-            .run(&rec.id, "growth", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "growth",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("an uncapped overlay teammate answers")
             .reply;
@@ -10250,7 +10528,13 @@ description = "Builds the product."
 
         pool.ensure(&rec, &deps).await.expect("ensure again");
         let refused = pool
-            .run(&rec.id, "growth", "should-not-echo", &deps, None)
+            .run(
+                &rec.id,
+                "growth",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("a refusal is a benign outcome")
             .reply;
@@ -10304,7 +10588,13 @@ budget_usd_daily = 0.0
         pool.ensure(&rec, &deps).await.expect("ensure");
 
         let reply = pool
-            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("an unreadable budget must not brick the teammate")
             .reply;
@@ -10318,7 +10608,13 @@ budget_usd_daily = 0.0
         let pool = HarnessPool::new();
         pool.ensure(&rec, &no_meter).await.expect("ensure");
         let reply = pool
-            .run(&rec.id, "ceo", "hello-marker", &no_meter, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &no_meter,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("no meter must not brick the teammate")
             .reply;
@@ -10351,7 +10647,13 @@ budget_usd_daily = 0.0
         pool.ensure(&rec, &deps).await.expect("ensure");
 
         let reply = pool
-            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("a new day admits the turn")
             .reply;
@@ -10879,6 +11181,18 @@ budget_usd_daily = 0.0
                     attachments: Vec::new(),
                 });
             }
+            /// An operator message posted inside the thread rooted at `parent`.
+            fn operator_in(&self, chat: &str, text: &str, parent: u64) {
+                self.push(CompanyEvent::OperatorMessage {
+                    text: text.to_string(),
+                    by: None,
+                    chat: Some(chat.to_string()),
+                    parent: Some(EventSeq::new(parent)),
+                    deliverable: None,
+                    mentions: Vec::new(),
+                    attachments: Vec::new(),
+                });
+            }
             fn reply(&self, chat_id: &str, text: &str) {
                 self.push(CompanyEvent::AgentReply {
                     chat_id: chat_id.to_string(),
@@ -11002,9 +11316,15 @@ budget_usd_daily = 0.0
 
             let pool = HarnessPool::new();
             pool.ensure(&rec, &fx.deps).await.expect("ensure");
-            pool.run(&rec.id, "ceo", "CURRENT_MARKER", &fx.deps, Some("general"))
-                .await
-                .expect("chat turn runs");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "CURRENT_MARKER",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("general")),
+            )
+            .await
+            .expect("chat turn runs");
 
             let all = seen.lock().unwrap().join("\n===\n");
             assert!(
@@ -11034,9 +11354,15 @@ budget_usd_daily = 0.0
             pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
             // First chat turn binds to general.
-            pool.run(&rec.id, "ceo", "first", &fx.deps, Some("general"))
-                .await
-                .expect("first chat turn");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "first",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("general")),
+            )
+            .await
+            .expect("first chat turn");
             // A background/unthreaded turn: resets bound_chat to None.
             pool.run_background(&rec.id, "ceo", "background", &fx.deps, None)
                 .await
@@ -11045,9 +11371,15 @@ budget_usd_daily = 0.0
             let before = seen.lock().unwrap().len();
             // Second chat turn on general — a switch again, because the background
             // turn invalidated the binding.
-            pool.run(&rec.id, "ceo", "second", &fx.deps, Some("general"))
-                .await
-                .expect("second chat turn");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "second",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("general")),
+            )
+            .await
+            .expect("second chat turn");
 
             let after: Vec<String> = seen.lock().unwrap()[before..].to_vec();
             let last = after
@@ -11072,9 +11404,15 @@ budget_usd_daily = 0.0
 
             let pool = HarnessPool::new();
             pool.ensure(&rec, &fx.deps).await.expect("ensure");
-            pool.run(&rec.id, "ceo", "hello beta", &fx.deps, Some("beta"))
-                .await
-                .expect("beta chat turn");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hello beta",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("beta")),
+            )
+            .await
+            .expect("beta chat turn");
 
             let all = seen.lock().unwrap().join("\n===\n");
             assert!(
@@ -11097,9 +11435,15 @@ budget_usd_daily = 0.0
 
             let pool = HarnessPool::new();
             pool.ensure(&rec, &fx.deps).await.expect("ensure");
-            pool.run(&rec.id, "ceo", "hey there", &fx.deps, Some("dm:teammate"))
-                .await
-                .expect("dm chat turn");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hey there",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("dm:teammate")),
+            )
+            .await
+            .expect("dm chat turn");
 
             let all = seen.lock().unwrap().join("\n===\n");
             assert!(
@@ -11130,9 +11474,15 @@ budget_usd_daily = 0.0
 
             // Turn 1 on "general": a switch (bound_chat starts None) — must
             // read the journal to build the seed.
-            pool.run(&rec.id, "ceo", "first", &fx.deps, Some("general"))
-                .await
-                .expect("first chat turn");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "first",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("general")),
+            )
+            .await
+            .expect("first chat turn");
             let reads_after_first = log.reads();
             assert!(
                 reads_after_first > 0,
@@ -11145,14 +11495,218 @@ budget_usd_daily = 0.0
 
             // Turn 2 on "general" — NOT a switch. Must not touch the journal
             // again to build a seed nothing downstream will use.
-            pool.run(&rec.id, "ceo", "second", &fx.deps, Some("general"))
-                .await
-                .expect("second chat turn");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "second",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("general")),
+            )
+            .await
+            .expect("second chat turn");
             assert_eq!(
                 log.reads(),
                 reads_after_first,
                 "a same-desk, non-switch chat turn must not re-read the \
                  journal to build a seed the switch check will discard"
+            );
+        }
+
+        /// Two threads of ONE channel are two conversations (#1890). Moving
+        /// between them was not a switch while the binding was keyed on the
+        /// chat id alone, so the clear-and-re-seed never ran and the second
+        /// thread answered with the first one's turns still in `history`.
+        #[tokio::test]
+        async fn a_thread_switch_within_one_channel_re_seeds() {
+            let (fx, log, _seen) = recording_fixture();
+            let rec = record();
+            log.operator("general", "root A"); // seq 0
+            log.operator("general", "root B"); // seq 1
+            log.operator_in("general", "first", 0); // seq 2 — turn 1, thread A
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            pool.run(
+                &rec.id,
+                "ceo",
+                "first",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::in_thread(
+                    Some("general"),
+                    Some(EventSeq::new(0)),
+                ),
+            )
+            .await
+            .expect("first chat turn");
+            let reads_after_first = log.reads();
+            assert!(reads_after_first > 0, "the first turn binds and seeds");
+
+            log.operator_in("general", "second", 1); // seq 3 — turn 2, thread B
+
+            pool.run(
+                &rec.id,
+                "ceo",
+                "second",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::in_thread(
+                    Some("general"),
+                    Some(EventSeq::new(1)),
+                ),
+            )
+            .await
+            .expect("second chat turn");
+            assert!(
+                log.reads() > reads_after_first,
+                "a different thread of the same channel is a switch: it must \
+                 clear the previous thread's history and re-seed from its own"
+            );
+        }
+
+        /// An UNADDRESSED threaded message still binds to its thread.
+        ///
+        /// A codex review on #1896 read `run_with_steer`'s `if let Some(incoming)
+        /// = turn_chat_id` guard and concluded that a client sending `parent`
+        /// without `chat` loses its root, so sibling threads on the default desk
+        /// keep sharing one history. That is not what happens: `turn_chat_id`
+        /// comes from the turn-stream route, which already falls back to
+        /// `DEFAULT_DESK` when no desk was addressed.
+        ///
+        /// This test exists because the obvious "fix" — normalizing the id where
+        /// the target is built — is actively harmful: the same `chat_id` reaches
+        /// card creation and a card's `origin_chat_id`, where `None` means "no
+        /// conversation raised this card" and `chat_history::owns` deliberately
+        /// routes it to no desk. Pinning the real behaviour here is what stops
+        /// that being re-applied.
+        #[tokio::test]
+        async fn an_unaddressed_message_still_binds_to_its_thread() {
+            let fx = fixture();
+            let rec = record();
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            // `chat_id: None` — the operator addressed no desk — with a root.
+            pool.run(
+                &rec.id,
+                "ceo",
+                "first",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::in_thread(None, Some(EventSeq::new(1))),
+            )
+            .await
+            .expect("unaddressed threaded turn");
+
+            let agent = {
+                let guard = pool.agents.read().await;
+                guard
+                    .get(&rec.id)
+                    .and_then(|roster| roster.iter().find(|a| a.agent_id == "ceo"))
+                    .cloned()
+                    .expect("the agent stays resident")
+            };
+            assert_eq!(
+                *agent.bound_chat.lock().await,
+                Some((
+                    crate::server::ops::language::DEFAULT_DESK.to_string(),
+                    Some(EventSeq::new(1))
+                )),
+                "an unaddressed turn binds to the General desk AND keeps its \
+                 thread root — the stream route already supplies the fallback"
+            );
+        }
+
+        /// The binding must not depend on the event log being wired
+        /// (coderabbit review finding).
+        ///
+        /// `incoming_root` used to be read off `chat_seed`, which is `None`
+        /// whenever `deps.events` is — so on such a host two different threads
+        /// of one channel compared equal, the clear-and-re-seed never ran, and
+        /// the leak this change exists to close was reopened in exactly the
+        /// configuration that cannot re-seed its way out of it.
+        ///
+        /// Asserted through `bound_chat` rather than through a seed, because a
+        /// host with no journal has no seed to inspect: the binding is the only
+        /// observable, and it is the thing that was wrong.
+        #[tokio::test]
+        async fn the_thread_binding_holds_with_no_event_log_wired() {
+            let mut fx = fixture();
+            fx.deps.events = None;
+            let rec = record();
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+            let thread_a = crate::runtime::delegation::ChatTarget::in_thread(
+                Some("general"),
+                Some(EventSeq::new(1)),
+            );
+            let thread_b = crate::runtime::delegation::ChatTarget::in_thread(
+                Some("general"),
+                Some(EventSeq::new(2)),
+            );
+
+            pool.run(&rec.id, "ceo", "first", &fx.deps, thread_a)
+                .await
+                .expect("thread A turn");
+            // The pool keeps one `CompanyAgent` per (company, agent) and
+            // reuses it across turns — which is exactly why the binding exists.
+            let agent = {
+                let guard = pool.agents.read().await;
+                guard
+                    .get(&rec.id)
+                    .and_then(|roster| roster.iter().find(|a| a.agent_id == "ceo"))
+                    .cloned()
+                    .expect("the agent stays resident between turns")
+            };
+            assert_eq!(
+                *agent.bound_chat.lock().await,
+                Some(("general".to_string(), Some(EventSeq::new(1)))),
+                "the first turn binds to its own thread, journal or no journal"
+            );
+
+            pool.run(&rec.id, "ceo", "second", &fx.deps, thread_b)
+                .await
+                .expect("thread B turn");
+            assert_eq!(
+                *agent.bound_chat.lock().await,
+                Some(("general".to_string(), Some(EventSeq::new(2)))),
+                "a different thread of the same channel must rebind — with no \
+                 event log the re-seed is empty, but the history clear is not \
+                 optional"
+            );
+        }
+
+        /// ...and the cost guard survives the finer key: consecutive turns in
+        /// the SAME thread are still not a switch, so they still pay for no
+        /// journal walk. Keyed only on the channel this held by accident; it
+        /// has to hold on purpose now.
+        #[tokio::test]
+        async fn a_second_turn_in_the_same_thread_does_not_re_read_the_journal() {
+            let (fx, log, _seen) = recording_fixture();
+            let rec = record();
+            log.operator("general", "root"); // seq 0
+            log.operator_in("general", "first", 0); // seq 1
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            let thread = crate::runtime::delegation::ChatTarget::in_thread(
+                Some("general"),
+                Some(EventSeq::new(0)),
+            );
+
+            pool.run(&rec.id, "ceo", "first", &fx.deps, thread)
+                .await
+                .expect("first chat turn");
+            let reads_after_first = log.reads();
+
+            log.operator_in("general", "second", 0); // seq 2, same thread
+            pool.run(&rec.id, "ceo", "second", &fx.deps, thread)
+                .await
+                .expect("second chat turn");
+            assert_eq!(
+                log.reads(),
+                reads_after_first,
+                "a second turn in the same thread is not a switch"
             );
         }
     }

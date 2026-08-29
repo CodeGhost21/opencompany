@@ -699,6 +699,44 @@ pub trait WorkspaceStore: Send + Sync {
     /// The conformance suite checks this by asking [`read_bytes`](Self::read_bytes)
     /// afterwards rather than by trusting the delete's return value.
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
+    /// Deletes `id` only if it is currently childless, checked and removed as
+    /// close to one operation as the backend can manage — never a caller's
+    /// earlier [`tree`](Self::tree) snapshot handed back to [`delete`](Self::delete).
+    ///
+    /// Exists for callers like [`rollback_empty_minted_folders`
+    /// (`workspace_scaffold`)](crate::company::workspace_scaffold::rollback_empty_minted_folders)
+    /// that decide a folder is safe to remove from a tree read taken earlier
+    /// in the same request. [`delete`](Self::delete) recurses unconditionally,
+    /// so re-using it against that stale read races a concurrent adopter: a
+    /// child can land in the window between the read and the call, and
+    /// `delete` sweeps it away with the folder it was supposed to save (found
+    /// in review on issue #1801's PR).
+    ///
+    /// Returns `Ok(false)`, and deletes nothing, when `id` does not exist or
+    /// currently has a child — a caller must not read a `false` as "gone".
+    ///
+    /// The default re-derives this from [`tree`](Self::tree) and
+    /// [`delete`](Self::delete), which only narrows the window a caller
+    /// already has rather than closing it — adequate for a decorator that has
+    /// no tighter primitive of its own, but a decorator MUST still forward to
+    /// its inner store's override rather than rely on this default, or an
+    /// inner backend's real fix never gets called. [`FsOps`](crate::store::FsOps)
+    /// overrides this under the same per-company index lock every other
+    /// writer takes, closing the window entirely; MongoDB has no equivalent
+    /// lock, so its override only re-checks immediately before deleting.
+    async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        let nodes = self.tree(company).await?;
+        if !nodes.iter().any(|node| node.id == id) {
+            return Ok(false);
+        }
+        if nodes
+            .iter()
+            .any(|node| node.parent_id.as_deref() == Some(id))
+        {
+            return Ok(false);
+        }
+        self.delete(company, id).await
+    }
     /// Whether the workspace has no nodes — the gate the seeder checks so a
     /// seeded-then-emptied workspace is never re-seeded.
     async fn is_empty(&self, company: &CompanyId) -> Result<bool>;

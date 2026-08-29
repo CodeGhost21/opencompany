@@ -48,11 +48,17 @@ async function render(task: Task) {
       createElement(TaskItem, {
         task,
         dragging: false,
-        block: null,
+        // Since #1891 the card takes its approval state as `rows` rather than
+        // a single `block` — this suite is not exercising any of that, so an
+        // empty/no-op set of them leaves the card unblocked and the bounce
+        // chip the only thing under test.
+        rows: [],
         now: T0,
+        askerNames: new Map(),
+        deciding: new Map(),
+        failed: {},
         onOpen: () => {},
         onResume: () => {},
-        onReview: () => {},
       }),
     );
   });

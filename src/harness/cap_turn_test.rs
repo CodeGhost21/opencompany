@@ -298,6 +298,7 @@ fn record() -> CompanyRecord {
 fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -423,7 +424,13 @@ async fn a_turn_that_exhausts_its_iteration_budget_reports_the_pause() {
     pool.ensure(&rec, &deps).await.expect("pool ensures");
 
     let outcome = pool
-        .run(&rec.id, AGENT, "Write a short feature spec.", &deps, None)
+        .run(
+            &rec.id,
+            AGENT,
+            "Write a short feature spec.",
+            &deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
         .await
         .expect("a cap is a pause, not an error — the turn must return Ok");
 
@@ -474,7 +481,13 @@ async fn a_turn_that_finishes_on_its_own_reports_no_pause() {
     pool.ensure(&rec, &deps).await.expect("pool ensures");
 
     let outcome = pool
-        .run(&rec.id, AGENT, "Write a short feature spec.", &deps, None)
+        .run(
+            &rec.id,
+            AGENT,
+            "Write a short feature spec.",
+            &deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
         .await
         .expect("turn runs");
 

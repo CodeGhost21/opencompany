@@ -3819,6 +3819,24 @@ impl Tool for RunWorkflowTool {
                         );
                     }
                 }
+                // Issue #1865 (PR #1883 review comment 3877518535): a panic is
+                // unambiguously the worst reading a run can settle with —
+                // notify without needing a verdict computation, mirroring
+                // `WorkflowSpawn::spawn_admitted`'s own panic arm. Fired
+                // unconditionally like the journal write above, not gated on
+                // it landing — the two are independent stores, and a journal
+                // miss must not also cost the alert.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    crate::runtime::file_run_unhealthy_notification(
+                        notifications,
+                        &self.company,
+                        &wid,
+                        &ctx.run_id,
+                        "failed",
+                        crate::runtime::PANICKED_BEFORE_FINISH,
+                    )
+                    .await;
+                }
                 // No re-raise: unlike `WorkflowSpawn`'s catch, there is no
                 // `JoinHandle` here to preserve a `JoinError` on — this call is
                 // itself the tool's execution, so the honest answer is an
@@ -3846,6 +3864,68 @@ impl Tool for RunWorkflowTool {
                         Ok(&run),
                     )
                     .await;
+                }
+                // Issue #1865 (PR #1883 review comment 3877518530): the same
+                // unhealthy-run classification `WorkflowSpawn::spawn_admitted`
+                // applies to its own settled runs — a stranded or blocked
+                // agent-started run is otherwise silent to every operator not
+                // watching this turn, especially a stranded run with no
+                // approval card to surface.
+                //
+                // Issue #1865 (PR #1883 review comment 3878430677): gated on
+                // `!run.cancelled`, matching `WorkflowSpawn::spawn_admitted`'s
+                // own `Ok(run) if run.cancelled => {}` arm (added for the same
+                // comment). The clean node-boundary cancel arm in
+                // `run_workflow_inner` carries `blocked_nodes: blocks.take()`
+                // forward, so a cancelled run reaches here with a non-empty
+                // `blocked_nodes` exactly like a genuinely blocked one — this
+                // must not tell an operator "a step is waiting on a person to
+                // decide something" about a run somebody already stopped.
+                //
+                // Stranded checked before blocked, same as `WorkflowSpawn`:
+                // `HarnessAgentRunner` pushes a `WorkflowBlockedNode` whenever
+                // a turn gated anything at all, parked or not, so a fully
+                // unparkable node lands in `blocked_nodes` exactly like one
+                // with a live card — only `stranded_approvals` equalling the
+                // full pending count, with no card still `Pending` delivery
+                // either, tells the two apart.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    if run.cancelled {
+                        // Handled below by the `run.cancelled` arm, which
+                        // returns a `ToolResult::error` — no unhealthy
+                        // notification for a deliberate stop.
+                    } else if !run.pending_approvals.is_empty()
+                        && crate::ports::workflow_runner::stranded_approvals(
+                            &run.pending_approvals,
+                            &run.approvals,
+                        ) == run.pending_approvals.len()
+                        && !run
+                            .deliveries
+                            .iter()
+                            .any(|d| matches!(d.status, crate::ports::DeliveryStatus::Pending))
+                    {
+                        crate::runtime::file_run_unhealthy_notification(
+                            notifications,
+                            &self.company,
+                            &wid,
+                            &ctx.run_id,
+                            "stranded",
+                            "This run tried to park an approval and could not — nothing is \
+                             waiting on it any more, and nobody was asked.",
+                        )
+                        .await;
+                    } else if !run.blocked_nodes.is_empty() {
+                        crate::runtime::file_run_unhealthy_notification(
+                            notifications,
+                            &self.company,
+                            &wid,
+                            &ctx.run_id,
+                            "blocked",
+                            "This run stopped because a step is waiting on a person to decide \
+                             something.",
+                        )
+                        .await;
+                    }
                 }
                 // Issue #383: a cancelled run is `Ok`, so without this arm the
                 // agent would read the empty node summary as "the workflow did

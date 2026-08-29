@@ -3959,6 +3959,38 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         Ok(true)
     }
 
+    // PR #1883 merge audit: `workspace_nodes` carries no `parent_id` SQL
+    // column — a node's parent lives inside `node_json` — so both the
+    // emptiness check and the guarded DELETE below read through
+    // `Self::workspace_nodes`, exactly as every other method in this impl
+    // does, rather than querying `parent_id` as a column. The prior version
+    // did that and failed every call with `no such column: parent_id`; see
+    // `delete_if_empty_removes_a_childless_folder`.
+    async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
+        if !nodes.contains_key(id) {
+            return Ok(false);
+        }
+        if nodes
+            .values()
+            .any(|node| node.parent_id.as_deref() == Some(id))
+        {
+            return Ok(false);
+        }
+        let removed = tx
+            .execute(
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+            )
+            .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(removed > 0)
+    }
+
     async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
         let conn = self.conn();
         let count: i64 = conn
@@ -3998,6 +4030,111 @@ mod test {
 
     fn store() -> Arc<SqliteStore> {
         Arc::new(SqliteStore::open_in_memory().expect("open in-memory sqlite"))
+    }
+
+    /// PR #1883 merge audit: `workspace_nodes` has no `parent_id` SQL
+    /// column — every other reader of a node's parent goes through
+    /// [`SqliteStore::workspace_nodes`], which deserializes `node_json` —
+    /// but `delete_if_empty`'s own emptiness check queried
+    /// `WHERE parent_id = ?2` directly against the table. This childless
+    /// folder proves the happy path still errors instead of returning
+    /// `Ok(true)`.
+    #[tokio::test]
+    async fn delete_if_empty_removes_a_childless_folder() {
+        use crate::ports::workspace::{NodeKind, WorkspaceOrigin, WorkspaceStore};
+
+        let s = store();
+        let company = CompanyId::new("acme");
+        let origin = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        let folder = crate::ports::workspace::WorkspaceNode {
+            id: "folder-1".to_string(),
+            name: "empty-folder".to_string(),
+            kind: NodeKind::Folder,
+            parent_id: None,
+            created_by: origin.clone(),
+            updated_by: origin,
+            updated_at_millis: crate::ports::now_millis(),
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+        s.create(&company, &folder, None)
+            .await
+            .expect("create folder");
+
+        let removed = s
+            .delete_if_empty(&company, "folder-1")
+            .await
+            .expect("delete_if_empty must not error on a childless folder");
+        assert!(removed, "a childless folder must be removed");
+        assert!(
+            !s.tree(&company)
+                .await
+                .expect("tree")
+                .iter()
+                .any(|n| n.id == "folder-1"),
+            "the folder must be gone"
+        );
+    }
+
+    /// The negative that makes the test above mean anything: a folder that
+    /// still has a child must be refused, not swept away with it — `delete`
+    /// (unconditional recursion) is the method for that, not this one.
+    #[tokio::test]
+    async fn delete_if_empty_refuses_a_folder_with_a_child() {
+        use crate::ports::workspace::{NodeKind, WorkspaceOrigin, WorkspaceStore};
+
+        let s = store();
+        let company = CompanyId::new("acme");
+        let origin = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        let folder = crate::ports::workspace::WorkspaceNode {
+            id: "folder-1".to_string(),
+            name: "parent-folder".to_string(),
+            kind: NodeKind::Folder,
+            parent_id: None,
+            created_by: origin.clone(),
+            updated_by: origin.clone(),
+            updated_at_millis: crate::ports::now_millis(),
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+        s.create(&company, &folder, None)
+            .await
+            .expect("create folder");
+        let child = crate::ports::workspace::WorkspaceNode {
+            id: "note-1".to_string(),
+            name: "note.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: Some("folder-1".to_string()),
+            created_by: origin.clone(),
+            updated_by: origin,
+            updated_at_millis: crate::ports::now_millis(),
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+        s.create(&company, &child, Some("body"))
+            .await
+            .expect("create child note");
+
+        let removed = s
+            .delete_if_empty(&company, "folder-1")
+            .await
+            .expect("delete_if_empty must not error");
+        assert!(!removed, "a folder with a child must not be removed");
+        assert!(
+            s.tree(&company)
+                .await
+                .expect("tree")
+                .iter()
+                .any(|n| n.id == "folder-1"),
+            "the folder must still be there"
+        );
     }
 
     /// [`SqliteStore::apply_pragmas`] settles for the connection the ports use.

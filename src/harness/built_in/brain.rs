@@ -156,6 +156,40 @@ pub(crate) fn budget_pause_notice(pause: &crate::harness::BudgetPause) -> String
     format!("{BUDGET_PAUSE_NOTICE_PREFIX} {}", pause.summary)
 }
 
+/// The non-redeemable sibling of [`BUDGET_PAUSE_NOTICE_PREFIX`] (issue #1846
+/// review, Codex #3870562586 / #3870562590).
+///
+/// The console renders its "Add credits & resend" CTA off
+/// [`BUDGET_PAUSE_NOTICE_PREFIX`] alone — there is no structured wire field to
+/// key on yet, as that constant's own doc says. Two paths pause WITHOUT a
+/// marker the generic chat redeem can honour:
+///
+/// * the **confined workflow copilot** — `run_confined` bypasses `run_inner`,
+///   the only place that parks a marker, and `CONFINED_AGENT_ID` names no
+///   addressable teammate, so there is nothing to redeem and nothing safe to
+///   replay; and
+/// * an **approval continuation** — it runs through `run_steered_background`,
+///   so `run_inner` parks its marker with `background: true`, a shape
+///   `redeem_budget_pause` refuses outright
+///   (`src/server/ops/budget_pause.rs`).
+///
+/// Emitting the redeemable prefix on either put a button on screen that could
+/// only ever fail — a 404 for the first (no marker exists), a 400 for the
+/// second (the marker exists and is refused). This prefix carries the SAME
+/// information and deliberately does not match the console's
+/// `isBudgetPauseNotice`, so the notice renders as an ordinary system bubble
+/// with no unusable action on it. Pinned by
+/// `a_confined_copilot_pause_offers_no_redeem_cta` and
+/// `an_approval_continuation_pause_offers_no_redeem_cta`.
+pub(crate) const BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX: &str =
+    "⏸ Paused — out of credits (add credits, then start this again):";
+
+/// The unauthored bubble for a budget pause that carries no redeemable marker.
+/// See [`BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX`].
+pub(crate) fn budget_pause_notice_no_resend(pause: &crate::harness::BudgetPause) -> String {
+    format!("{BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX} {}", pause.summary)
+}
+
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
@@ -324,13 +358,20 @@ fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
 /// it to the copilot as an ordinary answer — exactly the #966 misattribution
 /// class `system_notice` exists to prevent, just one call site short of it.
 ///
-/// Emits the SAME unauthored notice copy the interactive path shows, with no
-/// CTA (nothing was parked to redeem) — the honest middle ground the review
-/// asked for, between a fabricated copilot reply and a redemption this agent
-/// id can never honour.
+/// Emits the unauthored notice through
+/// [`budget_pause_notice_no_resend`] — the honest middle ground between a
+/// fabricated copilot reply and a redemption this agent id can never honour.
+///
+/// Issue #1846 review (Codex #3870562586): this used to emit
+/// [`budget_pause_notice`], whose prefix is exactly what the console keys its
+/// "Add credits & resend" button off. The doc above already claimed "with no
+/// CTA" — but nothing enforced it, so the button rendered anyway and, with no
+/// marker ever parked for `CONFINED_AGENT_ID`, every click did a GET that
+/// returned `null` followed by a POST that 404'd. The no-resend prefix makes
+/// the claim true.
 fn confined_turn_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
     match &outcome.budget_paused {
-        Some(pause) => system_notice(budget_pause_notice(pause)),
+        Some(pause) => system_notice(budget_pause_notice_no_resend(pause)),
         None => confined_bubble(outcome),
     }
 }
@@ -572,6 +613,11 @@ impl HarnessBrain {
             tool: String,
             instruction: String,
             origin_thread: Option<String>,
+            /// The thread within `origin_thread` the approval was raised in
+            /// (#1890). Both grant kinds already record it; dropping it here
+            /// would resume a threaded approval against unparented channel
+            /// history instead of the conversation that prompted it.
+            origin_parent: Option<crate::ports::types::EventSeq>,
         }
 
         let grants = self.deps.approval_requests.grants();
@@ -590,6 +636,7 @@ impl HarnessBrain {
                 tool: grant.tool,
                 agent: grant.agent,
                 origin_thread: grant.origin_thread,
+                origin_parent: grant.origin_parent,
             }
         } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
             // No exact-arguments pin, and deliberately so: a standing grant
@@ -606,6 +653,7 @@ impl HarnessBrain {
                 tool: standing.tool,
                 agent: standing.agent,
                 origin_thread: standing.origin_thread,
+                origin_parent: standing.origin_parent,
             }
         } else {
             return Ok(None);
@@ -701,6 +749,11 @@ impl HarnessBrain {
         // is recorded on the card the hand-off opens.
         let drained = match self
             .delegation_runner(run_turn.as_ref(), &record)
+            // The conversation the approval was raised in (#1890) — both halves
+            // of it. A grant records `origin_parent` beside `origin_thread` for
+            // exactly this reason, so a threaded approval resumes in its own
+            // thread rather than against the channel's unparented history.
+            .in_thread(grant.origin_parent)
             .drain_and_execute(
                 grant.origin_thread.as_deref(),
                 delegation::MessageContext::default(),
@@ -734,10 +787,21 @@ impl HarnessBrain {
             // fires, so the bubble rendered as a normal (if oddly-worded)
             // answer with no "Add credits & resend" CTA — even though a
             // marker was sitting there, parked and redeemable, the whole time.
-            // Swap in the SAME notice text the interactive and confined-turn
-            // paths already emit so the console recognises and renders it.
+            // Swap in the unauthored pause notice so the bubble reads as the
+            // runtime terminal state it is rather than as an answer.
+            //
+            // Issue #1846 review (Codex #3870562590): the NO-RESEND prefix,
+            // not the redeemable one. `run_steered_background` means
+            // `run_inner` parks this marker with `background: true`, and
+            // `redeem_budget_pause` refuses exactly that shape
+            // (`src/server/ops/budget_pause.rs`) — so offering the CTA here
+            // reserved the marker, restored it, and returned 400 on every
+            // click. Resuming an approval continuation needs the grant's own
+            // identity, which the generic chat-message redeem path does not
+            // carry; until it does, the honest surface is a notice with no
+            // button rather than a button that cannot work.
             Ok(outcome) => match &outcome.budget_paused {
-                Some(pause) => budget_pause_notice(pause),
+                Some(pause) => budget_pause_notice_no_resend(pause),
                 None => outcome.reply,
             },
             Err(err) => {
@@ -3115,6 +3179,7 @@ impl HarnessBrain {
                 CompanyEvent::OperatorMessage {
                     text,
                     chat,
+                    parent,
                     deliverable,
                     mentions,
                     attachments,
@@ -3227,6 +3292,26 @@ impl HarnessBrain {
                     // console routes them to this thread; a delegated desk reply
                     // in this cycle rides the same operator thread, so it gets the
                     // same id.
+                    //
+                    // Passed through AS THE OPERATOR SENT IT — `None` when they
+                    // addressed no desk — and deliberately NOT normalized to
+                    // `DEFAULT_DESK` (#1890). A codex review on #1896 read
+                    // `run_with_steer`'s `if let Some(incoming) = turn_chat_id`
+                    // guard and concluded an unaddressed threaded message loses
+                    // its root; it does not. `turn_chat_id` comes from the
+                    // turn-stream route, which already falls back to
+                    // `DEFAULT_DESK` (see `LiveRoute::Chat`'s construction), so
+                    // an unaddressed chat turn binds to General and keeps its
+                    // thread like any other.
+                    //
+                    // Normalizing here would be actively wrong: this same
+                    // `chat_id` reaches card creation, a card's
+                    // `origin_chat_id`, and `is_copilot_thread` — and a `None`
+                    // origin means "no conversation raised this card", which
+                    // `chat_history::owns` routes to no desk on purpose.
+                    // Turning it into `Some("General")` posts board-marker lines
+                    // into the operator's main line, the exact bug that arm is
+                    // documented to prevent.
                     let chat_id = chat.as_deref();
                     // Issue #989: the dispatch-start baseline for "did this
                     // responder write anything it did not publish?" — taken
@@ -3282,6 +3367,12 @@ impl HarnessBrain {
                         // Who else this message named (issue: mentions). Context
                         // for the turn, never a second dispatch.
                         .also_mentioned(also_mentioned)
+                        // The thread this message belongs to (#1890). Its own
+                        // `parent` IS the root — a reply is parented to its
+                        // question's parent, never to the question — so an
+                        // unparented message carries `None` and lands on the
+                        // channel-level conversation.
+                        .in_thread(*parent)
                         // Issue #1846 review (Codex #3864988176): the operator's
                         // own words, so a delegate's budget-pause marker re-parks
                         // with what the operator actually asked for rather than
@@ -3949,6 +4040,7 @@ description = "Runs Acme."
     /// (and its `[[harness]]` block) without restating the whole deps literal.
     fn brain_over_mock_with(dir: &std::path::Path, record: CompanyRecord) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -4166,6 +4258,8 @@ description = "Runs Acme."
                 spent_usd: 1.25,
                 cap_usd: 1.0,
             }),
+            // This fixture scripts a SPEND halt; a budget pause is the separate
+            // signal added in issue #1846 and is not what it exercises.
             budget_paused: None,
         };
         let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
@@ -4227,6 +4321,7 @@ description = "Runs Acme."
                     // Test fixture, not the ACP fold (PR #1880 review).
                     abnormal_stop: None,
                     halted_for_spend: None,
+                    // Added by #1846 after these fixtures were written.
                     budget_paused: None,
                 },
                 approval_requests: Some(requests.clone()),
@@ -4344,8 +4439,20 @@ description = "Builds it."
     /// A brain wired to a real task store (shared handle returned for seeding /
     /// asserting), over the offline mock provider.
     fn brain_with_tasks(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+        brain_with_tasks_notified(dir, false)
+    }
+
+    /// Same as [`brain_with_tasks`], but also wires the task store as the
+    /// notification store (issue #1865, PR #1883 review comment 3878668326):
+    /// [`FsOps`] implements both, so a test can seed a card, drive a cycle,
+    /// and then read back any `dispatch_failed` row a refusal filed.
+    fn brain_with_tasks_notified(
+        dir: &std::path::Path,
+        notify: bool,
+    ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: if notify { Some(tasks.clone()) } else { None },
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -4442,6 +4549,7 @@ description = "Builds it."
     ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(BudgetExhaustedProvider),
@@ -4609,6 +4717,7 @@ members = ["engineer"]
         with_workspace: bool,
     ) -> (HarnessBrain, Arc<FsOps>) {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -6310,6 +6419,62 @@ members = ["engineer"]
         );
     }
 
+    /// Issue #1865 (CodeRabbit review, PR #1883 review comment 3878668326): a
+    /// board-created card (no `origin_chat_id`, exactly [`card`]'s shape) with
+    /// an off-roster assignee bounces to `todo` and gets the bounce chip
+    /// (c6c3a3083), but before this fix filed no `dispatch_failed`
+    /// notification — the relay `refuse_dispatch` falls back to only fires
+    /// when an `origin_chat_id` exists, and `settle_run_end` makes the
+    /// attempt terminal before the cycle's own backstop notifier ever sees
+    /// it. That left the refusal visible only to someone already looking at
+    /// the board, unlike every other bounced-dispatch path
+    /// (`CompanyRuntime::abandon_run`, the cycle's terminality backstop, the
+    /// boot reaper's card sweep, and `workflow_build`'s `settle_to_todo`),
+    /// which all raise this same notification.
+    #[tokio::test]
+    async fn a_refused_dispatch_with_no_origin_chat_files_a_dispatch_failed_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks_notified(dir.path(), true);
+        tasks
+            .upsert(&CompanyId::new("acme"), &card("t1", "Shane"))
+            .await
+            .unwrap();
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t1".into(),
+                    run_id: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let refused = only_card(&tasks).await;
+        assert_eq!(refused.column, COLUMN_TODO);
+        assert!(
+            refused.origin_chat_id.is_none(),
+            "this is exactly the board-created shape with no relay target: {refused:?}"
+        );
+
+        let notes = crate::ports::notifications::NotificationStore::list(
+            tasks.as_ref(),
+            &CompanyId::new("acme"),
+            "anyone",
+        )
+        .await
+        .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "dispatch_failed"
+                    && n.notification.subject.id == "t1"),
+            "a board card refused with no origin chat must still file a \
+             dispatch_failed notification, got {notes:?}"
+        );
+    }
+
     /// The other half of #205: a card the orchestrator picks up because nobody
     /// was named gets that orchestrator written onto it, so the board names who
     /// is actually doing the work instead of showing a blank assignee.
@@ -6536,6 +6701,7 @@ members = ["engineer"]
     fn brain_over(dir: &std::path::Path, record: CompanyRecord) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -7861,6 +8027,7 @@ members = ["eng1", "eng2"]
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8014,6 +8181,7 @@ members = ["eng1", "eng2"]
         let log = Arc::new(FailFirstLog::default());
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8110,6 +8278,7 @@ members = ["eng1", "eng2"]
         requests: crate::harness::policy::ApprovalRequestQueue,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8447,6 +8616,7 @@ members = ["eng1", "eng2"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8513,6 +8683,7 @@ members = ["eng1", "eng2"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(BudgetExhaustedProvider),
@@ -8673,6 +8844,58 @@ members = ["eng1", "eng2"]
         );
     }
 
+    /// A threaded approval continuation must preserve the approval's thread root
+    /// when it re-dispatches the granted call. The bound agent's observable
+    /// context proves the target is threaded rather than channel-only.
+    #[tokio::test]
+    async fn an_approved_threaded_grant_redispatches_in_its_origin_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let root = crate::ports::types::EventSeq::new(7);
+        requests
+            .grants()
+            .grant(crate::runtime::grants::GrantedCall {
+                approval_id: ApprovalId::new("appr-threaded"),
+                agent: "ceo".into(),
+                tool: "workspace_write".into(),
+                args: serde_json::json!({}),
+                at_millis: now_millis(),
+                origin_thread: Some("general".into()),
+                origin_parent: Some(root),
+                origin_task: None,
+            });
+        let base = brain_with_queue_and_events(
+            dir.path(),
+            requests,
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf())),
+        );
+        let pool = Arc::new(HarnessPool::new());
+        let brain = HarnessBrain::new(pool.clone(), (*base.deps).clone(), record());
+        pool.ensure(&record(), &brain.deps).await.expect("ensure");
+
+        brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-threaded", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let agent = pool
+            .agents
+            .read()
+            .await
+            .get(&CompanyId::new("acme"))
+            .and_then(|roster| roster.iter().find(|agent| agent.agent_id == "ceo"))
+            .cloned()
+            .expect("the approved turn keeps the agent resident");
+        assert_eq!(
+            *agent.bound_chat.lock().await,
+            None,
+            "approval continuation runs unstreamed; binding is covered by the delegated target"
+        );
+    }
+
     /// No continuation reply was journaled by the brain itself (issue #469).
     async fn no_replies_journaled(log: &Arc<dyn crate::ports::EventLog>) -> bool {
         log.read_from(&CompanyId::new("acme"), crate::ports::EventSeq::new(0), 100)
@@ -8691,11 +8914,17 @@ members = ["eng1", "eng2"]
     /// granting agent exactly as an ordinary paused message would — proven
     /// below by reading it straight off `BudgetPauseSet`. Before this fix, the
     /// bubble `redispatch_granted_call` built from that outcome carried
-    /// `outcome.reply` (the budget-paused placeholder text) verbatim, which
-    /// does not start with `BUDGET_PAUSE_NOTICE_PREFIX` — so the console's
-    /// `isBudgetPauseNotice` check never recognised it, and the operator saw
-    /// an ordinary-looking reply with no "Add credits & resend" CTA for a
-    /// marker that was sitting there, parked and redeemable, the whole time.
+    /// `outcome.reply` (the budget-paused placeholder text) verbatim, so the
+    /// operator saw an ordinary-looking reply rather than the runtime's own
+    /// pause notice.
+    ///
+    /// Issue #1846 review (Codex #3870562590): the notice it now carries is the
+    /// NO-RESEND one. The marker asserted below is real but not redeemable —
+    /// `run_steered_background` parks it with `background: true`, the one shape
+    /// `redeem_budget_pause` refuses (`src/server/ops/budget_pause.rs`) — so
+    /// the redeemable prefix would have drawn a CTA that returned 400 on every
+    /// click. Both prefixes are asserted: matching the new one is only half the
+    /// contract, since the console branches on the old one.
     #[tokio::test]
     async fn a_budget_paused_approval_continuation_surfaces_the_notice_and_parks_a_marker() {
         let dir = tempfile::tempdir().unwrap();
@@ -8736,9 +8965,17 @@ members = ["eng1", "eng2"]
         let bubble = &result.channel_responses[0];
         assert_eq!(bubble.channel, "ceo");
         assert!(
-            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
-            "the console's SystemPill only renders the highlighted pause card for this exact \
-             prefix — got: {}",
+            bubble
+                .text
+                .starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "an approval continuation parks a background marker the redeem route refuses, so \
+             its notice must carry the non-redeemable prefix — got: {}",
+            bubble.text
+        );
+        assert!(
+            !bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: this prefix is what the console keys its \"Add credits & \
+             resend\" CTA off, and this marker's redeem returns 400: {}",
             bubble.text
         );
         assert!(
@@ -8747,9 +8984,9 @@ members = ["eng1", "eng2"]
             bubble.text
         );
 
-        // And a re-issue marker really was parked for the granting agent —
-        // the CTA this notice's text is asking the console to render would
-        // have nothing to redeem otherwise.
+        // And a re-issue marker really was parked for the granting agent: the
+        // notice is non-redeemable because of HOW it was parked (background),
+        // not because nothing was parked at all.
         let marker = crate::runtime::grants::budget_pauses_for(&CompanyId::new("acme"))
             .peek("ceo")
             .expect("run_steered_background parks a marker on the same terms run_inner does");
@@ -8954,6 +9191,7 @@ members = ["eng1", "eng2"]
         use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -9281,7 +9519,7 @@ members = ["eng1", "eng2"]
             _company: &CompanyId,
             _agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
             if let Some(requests) = &self.approval_requests {
                 for index in 0..(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
@@ -9310,10 +9548,10 @@ members = ["eng1", "eng2"]
             agent_id: &str,
             message: &str,
             _control: &crate::company::steer::SteerControl,
-            chat_id: Option<&str>,
+            chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
-            self.run(company, agent_id, message, chat_id).await
+            self.run(company, agent_id, message, chat).await
         }
 
         async fn run_steered_background(
@@ -9324,7 +9562,13 @@ members = ["eng1", "eng2"]
             _control: &crate::company::steer::SteerControl,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
-            self.run(company, agent_id, message, None).await
+            self.run(
+                company,
+                agent_id,
+                message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
         }
     }
 
@@ -9346,6 +9590,7 @@ members = ["eng1", "eng2"]
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),
@@ -9691,6 +9936,7 @@ members = ["eng1", "eng2"]
             selector_calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),
@@ -10083,6 +10329,7 @@ members = ["eng1", "eng2"]
             steer: steer.clone(),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),
@@ -10778,7 +11025,7 @@ members = ["eng1", "eng2"]
             _company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
             self.seen.lock().unwrap().push(agent_id.to_string());
             Ok(crate::harness::built_in::TurnOutcome {
@@ -10797,7 +11044,7 @@ members = ["eng1", "eng2"]
             a: &str,
             m: &str,
             _: &crate::company::steer::SteerControl,
-            chat: Option<&str>,
+            chat: crate::runtime::delegation::ChatTarget<'_>,
             _: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
             self.run(c, a, m, chat).await
@@ -10810,7 +11057,8 @@ members = ["eng1", "eng2"]
             _: &crate::company::steer::SteerControl,
             _: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
-            self.run(c, a, m, None).await
+            self.run(c, a, m, crate::runtime::delegation::ChatTarget::default())
+                .await
         }
     }
 
@@ -10867,14 +11115,27 @@ kind = "built_in"
         let company = CompanyId::new("acme");
         let out = brain
             .run_turn()
-            .run(&company, "researcher", "hi", None)
+            .run(
+                &company,
+                "researcher",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("routes to the deep lane");
         assert_eq!(out.reply, "deep");
         assert_eq!(&*deep.seen.lock().unwrap(), &["researcher".to_string()]);
 
         // The unbound agent must not reach it — it belongs to the default pool.
-        let _ = brain.run_turn().run(&company, "ceo", "hi", None).await;
+        let _ = brain
+            .run_turn()
+            .run(
+                &company,
+                "ceo",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await;
         assert_eq!(
             &*deep.seen.lock().unwrap(),
             &["researcher".to_string()],
@@ -10913,7 +11174,12 @@ kind = "built_in"
         // with "company not found".
         let out = brain
             .run_turn()
-            .run(&CompanyId::new("acme"), "researcher", "hi", None)
+            .run(
+                &CompanyId::new("acme"),
+                "researcher",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("the deep lane's roster is built at boot");
         assert!(out.reply.contains("hi"), "{}", out.reply);
@@ -10934,7 +11200,12 @@ kind = "built_in"
 
         let err = brain
             .run_turn()
-            .run(&CompanyId::new("acme"), "researcher", "hi", None)
+            .run(
+                &CompanyId::new("acme"),
+                "researcher",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect_err("must not fall back to the default lane");
         let msg = err.to_string();
@@ -11042,7 +11313,12 @@ agent = "claude"
 
         let err = brain
             .run_turn()
-            .run(&CompanyId::new("acme"), "ceo", "hi", None)
+            .run(
+                &CompanyId::new("acme"),
+                "ceo",
+                "hi",
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect_err("must not fall back to the embedded engine");
         let msg = err.to_string();
@@ -11131,16 +11407,90 @@ agent = "claude"
             "the pre-fix defect: falling through to confined_bubble would attribute the pause \
              notice to the copilot itself"
         );
+        // Issue #1846 review (Codex #3870562586): the NO-RESEND prefix. This
+        // assertion used to require `BUDGET_PAUSE_NOTICE_PREFIX`, which is
+        // precisely what the console keys its "Add credits & resend" button
+        // off — and `run_confined` never parks a marker, so that button could
+        // only ever 404. Asserting the negative too: the whole defect is the
+        // two prefixes being conflated, and a test that only checked the new
+        // one would still pass if the redeemable prefix were ever made a
+        // prefix of it.
         assert!(
-            bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
-            "the console's SystemPill only renders the highlighted pause card for this exact \
-             prefix: {}",
+            bubble
+                .text
+                .starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "a confined pause parks no marker, so it must carry the non-redeemable prefix: {}",
+            bubble.text
+        );
+        assert!(
+            !bubble.text.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: this prefix renders an Add-Credits CTA whose GET returns null \
+             and whose POST 404s, because CONFINED_AGENT_ID never has a marker: {}",
             bubble.text
         );
         assert!(
             bubble.text.to_ascii_lowercase().contains("add credits"),
             "the actionable ask survives into the notice: {}",
             bubble.text
+        );
+    }
+
+    /// Issue #1846 review (Codex #3870562590) — **the regression.** An approval
+    /// continuation that pauses for credits must not advertise a redeem the
+    /// server refuses.
+    ///
+    /// The continuation runs through `run_steered_background`, so `run_inner`
+    /// parks its marker with `background: true`, and `redeem_budget_pause`
+    /// rejects exactly that shape with a 400 (`src/server/ops/budget_pause.rs`).
+    /// Emitting `BUDGET_PAUSE_NOTICE_PREFIX` therefore put a button on screen
+    /// that reserved the marker, restored it, and failed — every single click.
+    ///
+    /// This pins the notice BUILDER rather than driving a whole continuation:
+    /// the defect is entirely in which prefix that arm chooses, and the two
+    /// constants are what the console branches on.
+    #[test]
+    fn an_approval_continuation_pause_offers_no_redeem_cta() {
+        let pause = crate::harness::BudgetPause {
+            agent: "maya".to_string(),
+            summary: "Add credits to your account, then start this again.".to_string(),
+        };
+
+        let notice = budget_pause_notice_no_resend(&pause);
+
+        assert!(
+            notice.starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "{notice}"
+        );
+        assert!(
+            !notice.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "the pre-fix defect: a background-parked marker is refused by the redeem route, so \
+             this prefix's CTA can only ever return 400: {notice}"
+        );
+        assert!(
+            notice.to_ascii_lowercase().contains("add credits"),
+            "the operator still has to be told the lever: {notice}"
+        );
+        assert!(
+            notice.contains(&pause.summary),
+            "the provider's own summary survives into the notice: {notice}"
+        );
+    }
+
+    /// The two prefixes must stay genuinely distinct: the console decides
+    /// whether to render an actionable button by `startsWith`, so if the
+    /// redeemable prefix were ever edited to become a prefix of the
+    /// non-redeemable one, every no-resend notice would silently regain the
+    /// broken CTA. Cheap coupling test, mirrored on the frontend by
+    /// `isBudgetPauseNotice`'s own fixtures.
+    #[test]
+    fn the_redeemable_and_no_resend_prefixes_are_not_prefixes_of_each_other() {
+        assert!(
+            !BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX.starts_with(BUDGET_PAUSE_NOTICE_PREFIX),
+            "a no-resend notice would match `isBudgetPauseNotice` and regain the CTA"
+        );
+        assert!(
+            !BUDGET_PAUSE_NOTICE_PREFIX.starts_with(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX),
+            "a redeemable notice would stop matching and lose its working CTA"
         );
     }
 

@@ -90,7 +90,14 @@ pub(crate) const PANICKED_BEFORE_FINISH: &str = concat!(
 /// the raw engine error here would broadcast whatever internal detail it
 /// happens to carry to everyone in the company instead of just the people who
 /// open that run.
-const RUN_FAILED_DETAIL: &str =
+///
+/// Shared with the orchestrator's own `run_workflow` tool path (PR #1883
+/// review comment 3877185396): that call is the second run-outcome
+/// chokepoint [`WorkflowSpawn::notifications`] names as not routing through
+/// here, and its failure arm owes the identical wording rather than a second,
+/// possibly-drifting sentence for the same fact — the same reasoning
+/// [`PANICKED_BEFORE_FINISH`] above already applies.
+pub(crate) const RUN_FAILED_DETAIL: &str =
     "the run errored before it could finish; open its run history for the reason";
 
 /// Everything starting a supervised workflow run needs, and nothing else.
@@ -358,6 +365,27 @@ impl WorkflowSpawn {
                 // notification is reserved for the three that leave a run
                 // with nothing more it can do on its own.
                 match &result {
+                    // Issue #1865 (PR #1883 review comment 3878430677): tested
+                    // BEFORE the stranded/blocked arms below. The clean
+                    // node-boundary cancel arm in `run_workflow_inner`
+                    // (`src/workflows/runner.rs`, `if outcome.cancelled`)
+                    // carries `blocked_nodes: blocks.take()` — whatever the
+                    // run had already gated before the operator's stop landed
+                    // — so a cancelled run can reach this match with a
+                    // non-empty `blocked_nodes` exactly like a run that is
+                    // genuinely waiting on a person. Without this arm the
+                    // `blocked` arm below would fire "this run stopped
+                    // because a step is waiting on a person to decide
+                    // something" for a run an operator already decided to
+                    // stop — nobody needs to go decide anything, because the
+                    // run will not continue either way. This mirrors
+                    // `WorkflowRunVerdict::of`, which checks `cancelled`
+                    // before `blocked_nodes` for the identical reason ("a
+                    // stop somebody asked for is not a fault"); this guard's
+                    // own doc comment above lists only `failed`/`blocked`/
+                    // `stranded` as the readings it notifies for, and a
+                    // cancelled run is none of those.
+                    Ok(run) if run.cancelled => {}
                     // Issue #1865 (Codex review): tested BEFORE the generic
                     // `blocked_nodes` arm below. `HarnessAgentRunner` pushes a
                     // `WorkflowBlockedNode` whenever a turn gated anything at
@@ -472,6 +500,10 @@ impl WorkflowSpawn {
     /// full verdict read, which needs the live-approvals queue join this
     /// hot path deliberately does not make (see the sync run response's own
     /// `stranded_approvals` comment in `server::ops::workflows`).
+    ///
+    /// Thin wrapper over [`file_run_unhealthy_notification`] — see that
+    /// function for why the write itself is free-standing rather than kept
+    /// only here.
     async fn notify_run_unhealthy(
         &self,
         workflow_id: &str,
@@ -491,8 +523,22 @@ impl WorkflowSpawn {
     }
 }
 
-/// Append a company-wide workflow-run notification without exposing engine
-/// details. Shared by supervised and agent-started workflow entry points.
+/// Files a durable notification that a workflow run settled unhealthy —
+/// failed, blocked, or stranded (issue #1865). Best-effort and after the
+/// journal write, matching every other notification producer in the tree: a
+/// notification that could not be filed must not touch the run's own
+/// outcome, which has already landed.
+///
+/// Free-standing rather than a [`WorkflowSpawn`] method so the orchestrator's
+/// `run_workflow` tool (PR #1883 review comment 3877185396) can reach the
+/// identical write. That tool is the second run-outcome chokepoint
+/// [`WorkflowSpawn::notifications`]'s own doc comment names as not routing
+/// through this type at all — it never builds a `WorkflowSpawn` (no spawned
+/// task, no `RunStore` handle; see that call site's own comment on why it
+/// cannot re-raise the way this module's catch does) — so duplicating this
+/// write inline there, instead of sharing it, would be exactly the kind of
+/// second copy of a rule this module's file-level doc comment already warns
+/// drifts.
 pub(crate) async fn file_run_unhealthy_notification(
     notifications: &dyn crate::ports::notifications::NotificationStore,
     company: &CompanyId,
@@ -1105,6 +1151,92 @@ mod tests {
             "a run with a pending delivery must NOT be announced as fully \
              stranded — the parked report is still actionable, exactly like \
              `RunVerdictFacts::fully_stranded` excludes it: {notes:?}"
+        );
+    }
+
+    /// A runner that returns a settled, `cancelled: true` run carrying the
+    /// exact shape the clean node-boundary cancel arm in
+    /// `run_workflow_inner` (`src/workflows/runner.rs`, `if
+    /// outcome.cancelled`) leaves behind: `pending_approvals` is zeroed, per
+    /// that arm's own doc comment ("a stop still routes nothing and parks no
+    /// gate"), but `blocked_nodes` is still `blocks.take()` — whatever the
+    /// run had already gated before the operator's stop landed.
+    struct CancelledWithBlockedNodesRunner;
+
+    #[async_trait]
+    impl WorkflowRunner for CancelledWithBlockedNodesRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &WorkflowRunContext,
+        ) -> Result<WorkflowRun> {
+            Ok(WorkflowRun {
+                output: Value::Null,
+                pending_approvals: Vec::new(),
+                deliveries: Vec::new(),
+                cancelled: true,
+                nodes: Vec::new(),
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                    node_id: "node1".to_string(),
+                    tools: vec!["some_tool".to_string()],
+                    approval_ids: vec!["appr-1".to_string()],
+                    unparkable: 0,
+                    stranded: 0,
+                }],
+                approvals: Vec::new(),
+            })
+        }
+    }
+
+    /// Issue #1865 (PR #1883 review comment 3878430677): a cancelled run
+    /// must NOT file the `workflow_run_blocked` notification even when it
+    /// carries a non-empty `blocked_nodes` — the clean node-boundary cancel
+    /// arm in `run_workflow_inner` preserves whatever the run had already
+    /// gated via `blocked_nodes: blocks.take()`, so this shape is real, not
+    /// synthetic. `WorkflowRunVerdict::of` checks `cancelled` before
+    /// `blocked_nodes` for the identical reason ("a stop somebody asked for
+    /// is not a fault"); before the fix, this notification guard had no such
+    /// check, so an operator's own stop reported "this run stopped because a
+    /// step is waiting on a person to decide something" — sending them
+    /// looking for an Approvals card on a run that will never continue
+    /// either way.
+    #[tokio::test]
+    async fn a_cancelled_run_does_not_notify_blocked() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-spawn-cancelled-blocked-")
+            .tempdir()
+            .expect("tempdir");
+        let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let notifications = Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let spawn = WorkflowSpawn {
+            company: company.clone(),
+            events: events.clone(),
+            supervisor: RunSupervisor::new(),
+            runner: Arc::new(CancelledWithBlockedNodesRunner),
+            runs: Arc::new(crate::store::FsOps::new(dir.path().to_path_buf())),
+            notifications: notifications.clone(),
+        };
+
+        let (run_id, handle) = spawn
+            .spawn(empty_workflow(), Value::Null, false, false)
+            .expect("under the default cap");
+        handle.await.expect("join").expect("run settles Ok");
+
+        use crate::ports::notifications::NotificationStore;
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        assert!(
+            notes.iter().all(|n| n.notification.subject.id != run_id),
+            "a cancelled run must file NO unhealthy notification at all — a \
+             deliberate stop is not one of the failed/blocked/stranded \
+             readings this mechanism exists for: {notes:?}"
         );
     }
 }

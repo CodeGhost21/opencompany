@@ -2077,6 +2077,50 @@ impl WorkspaceStore for FsOps {
         Ok(true)
     }
 
+    /// Checked and removed under the single per-company index lock every
+    /// writer here takes — `create`, `write`, `delete` and this method all
+    /// serialize on the same `path_lock(workspace_index_json)` guard, so a
+    /// concurrent `create` either lands its write entirely before this method
+    /// takes the lock (and is seen by the fresh `load_index` below) or waits
+    /// for this method to finish first. There is no window between the
+    /// emptiness check and the removal for it to land in.
+    async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        let path = self.bundle(company).workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        if !index.contains_key(id) {
+            return Ok(false);
+        }
+        if index
+            .values()
+            .any(|node| node.parent_id.as_deref() == Some(id))
+        {
+            return Ok(false);
+        }
+        let physical = self.physical_path(company, &index, id)?;
+        index.remove(id);
+        if tokio::fs::try_exists(&physical).await.unwrap_or(false) {
+            let meta = tokio::fs::symlink_metadata(&physical)
+                .await
+                .map_err(|e| io_err(&physical, e))?;
+            if meta.is_dir() {
+                // Non-recursive: the check above, taken under this same lock,
+                // already proved nothing parents to `id`, so there is nothing
+                // beneath it for a recursive sweep to find.
+                tokio::fs::remove_dir(&physical)
+                    .await
+                    .map_err(|e| io_err(&physical, e))?;
+            } else {
+                tokio::fs::remove_file(&physical)
+                    .await
+                    .map_err(|e| io_err(&physical, e))?;
+            }
+        }
+        self.save_index(company, &index).await?;
+        Ok(true)
+    }
+
     async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
         Ok(self.load_index(company).await?.is_empty())
     }

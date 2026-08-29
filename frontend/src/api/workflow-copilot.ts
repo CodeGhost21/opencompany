@@ -430,7 +430,9 @@ function configCatalogLines(): string[] {
 }
 
 /** One run as a single grounding line — the three terminal readings issue #383
- * separated, kept distinct here too, plus where a failure landed. */
+ * separated, kept distinct here too, plus where a failure landed, plus the
+ * `degraded` reading issue #1865 added for a run that settled clean but left
+ * an errored node behind it. */
 function describeRun(run: WorkflowRunOutcome): string {
   const when = new Date(run.atMillis).toISOString();
   const how = run.scheduled ? "scheduled" : "manual";
@@ -451,6 +453,22 @@ function describeRun(run: WorkflowRunOutcome): string {
   // then reason from that as fact.
   const blocked = run.blockedNodes ?? [];
   const parked = run.approvals?.length ?? 0;
+  const erroredNodes = nodes.filter((n) => n.status === "error");
+  // Issue #1865 (PR #1883 review): the LAST reading, exactly where both
+  // `WorkflowRunVerdict::of` (host) and `verdictOf` (console) rank it — after
+  // every arm above, all of which describe something more actionable. A node
+  // under `on_error: continue|route` errored and the graph kept going past
+  // it, or an agent node's turn truncated at the iteration cap; either way
+  // the run has no top-level `error`, is not cancelled and blocked nobody, so
+  // without this arm it fell through to the bare "finished" below while its
+  // own step trail named an errored node — the exact contradiction (`finished;
+  // steps: agent=error(...)`) issue #881 closed for `blocked` above, just
+  // reachable through the newer verdict. Prefers the host's own word; the
+  // `erroredNodes` fallback covers a host predating #1865 that nevertheless
+  // sent the node trail, the same "prefer the host's word, fall back to the
+  // signal it reads" shape {@link verdictOf} uses in `run-health.ts`.
+  const degraded =
+    run.verdict === "degraded" || (run.verdict === undefined && erroredNodes.length > 0);
   const outcome = run.running
     ? "still running"
     : run.error
@@ -461,9 +479,8 @@ function describeRun(run: WorkflowRunOutcome): string {
           ? `BLOCKED at ${blocked.map((b) => b.nodeId).join(", ")} — produced no deliverable and the steps after did not run; parked ${parked} approval(s), which does NOT continue this run`
           : undelivered.length
             ? `finished, but ${undelivered.length} report(s) were not delivered`
-            : run.verdict === "degraded" ||
-                nodes.some((node) => node.status === "error")
-              ? "finished with degraded steps"
+            : degraded
+              ? `DEGRADED: ${erroredNodes.map((n) => n.nodeId).join(", ") || "a step"} errored but the graph continued past it — not a clean finish`
               : "finished";
   const approvals = run.pendingApprovals.length
     ? ` awaiting approval: ${run.pendingApprovals.join(", ")};`

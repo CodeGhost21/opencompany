@@ -124,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
         audit_root: dir.path().to_path_buf(),
         model_override,
         tasks: None,
+        notifications: None,
         skills: None,
         skills_source_dir: None,
         skills_registry: std::sync::Arc::from([]),
@@ -168,7 +169,13 @@ async fn main() -> anyhow::Result<()> {
 
     println!("── prompt → ceo ──\n{prompt}\n");
     let outcome = pool
-        .run(&record.id, "ceo", &prompt, &deps, Some("General"))
+        .run(
+            &record.id,
+            "ceo",
+            &prompt,
+            &deps,
+            opencompany::runtime::delegation::ChatTarget::channel(Some("General")),
+        )
         .await?;
     let reply = outcome.reply;
     println!("── ceo reply ──\n{reply}\n");

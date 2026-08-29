@@ -259,6 +259,7 @@ async fn harness(
 ) -> (HarnessPool, HarnessDeps, CompanyRecord, Arc<RecordingMeter>) {
     let meter = Arc::new(RecordingMeter::default());
     let deps = HarnessDeps {
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -450,7 +451,7 @@ async fn a_real_supervised_turn_searches_and_meters_exactly_one_priced_call() {
             "ceo",
             "What does our competitor charge?",
             &deps,
-            None,
+            crate::runtime::delegation::ChatTarget::default(),
         )
         .await
         .expect("turn runs");
@@ -554,9 +555,15 @@ async fn a_real_turn_past_the_daily_cap_is_refused_without_reaching_the_backend(
     let (pool, deps, record, meter) =
         harness(model_url, search_url, "\"search\"", "full", 1, dir.path()).await;
 
-    pool.run(&record.id, "ceo", "Research the market.", &deps, None)
-        .await
-        .expect("turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "Research the market.",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("turn runs");
 
     assert_eq!(
         backend.calls.load(Ordering::SeqCst),
@@ -596,9 +603,15 @@ async fn a_wildcard_grant_turn_is_never_offered_the_search_tool() {
     let (pool, deps, record, meter) =
         harness(model_url, search_url, "\"*\"", "full", 50, dir.path()).await;
 
-    pool.run(&record.id, "ceo", "Research the market.", &deps, None)
-        .await
-        .expect("turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "Research the market.",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("turn runs");
 
     let advertised = advertised_tools(&script);
     assert!(
@@ -642,9 +655,15 @@ async fn a_read_only_desk_is_denied_the_search_even_when_it_is_wired() {
     )
     .await;
 
-    pool.run(&record.id, "ceo", "What do they charge?", &deps, None)
-        .await
-        .expect("turn runs");
+    pool.run(
+        &record.id,
+        "ceo",
+        "What do they charge?",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
+    .await
+    .expect("turn runs");
 
     // The tool was offered (it is granted and credentialed) but the policy
     // refused the call, so no money moved.
