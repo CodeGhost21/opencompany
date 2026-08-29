@@ -5015,6 +5015,7 @@ pub(crate) fn workflow_wiring_deps(
         notifications: Some(runtime.notifications().clone()),
         ledgers: None,
         ledger_registry: Default::default(),
+        meter,
         workspace_root: std::env::temp_dir(),
         mcp_home: None,
         workspace_git_enabled: false,
