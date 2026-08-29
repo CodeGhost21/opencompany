@@ -748,7 +748,7 @@ impl LocalAcpAgent {
         // recorded, not a desired value that the session's config options do
         // not offer — a false record would mislead the next start into
         // thinking the model was applied when the session is on its default.
-        self.write_session_record(company, agent_id, &id, applied_model);
+        self.write_session_record(company, agent_id, &id, applied_model.as_deref());
 
         sessions.insert(session_key.to_string(), id.clone());
         Ok(id)
