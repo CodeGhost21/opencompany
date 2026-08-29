@@ -438,6 +438,8 @@
     --brand-paypal-back: #008cff;
     --brand-paypal-front: #60cdff;
     --brand-paypal-overlap: #008cff;
+    --chrome: var(--surface-dark-2);
+    --chrome-border: var(--surface-dark-active);
 }
 
 .dark {
