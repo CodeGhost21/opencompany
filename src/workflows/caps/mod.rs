@@ -5057,7 +5057,7 @@ mod tests {
             _control: &crate::company::steer::SteerControl,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> crate::Result<crate::harness::TurnOutcome> {
-            self.run(company, agent_id, message, None).await
+            self.run(company, agent_id, message, crate::runtime::delegation::ChatTarget::channel(None)).await
         }
     }
 
