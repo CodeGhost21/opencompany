@@ -160,6 +160,14 @@ pub use workflow_outcome::{
 pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;
 pub(crate) use workflow_scheduler::workflow_schedule_id;
+// Used by the orchestrator's `run_workflow` tool (currently `openhuman`-only)
+// and by the panic-path catch_unwind handler, which is unconditional. The
+// re-export is therefore unconditional to avoid resolution errors when
+// orchestrator is compiled without the openhuman feature.
+pub(crate) use workflow_spawn::PANICKED_BEFORE_FINISH;
+pub use workflow_spawn::WorkflowSpawn;
+pub use workspace_events::WorkspaceAnnouncer;
+pub use workspace_quota::{
     DEFAULT_MAX_BLOB_BYTES, QuotaEnforcedWorkspace, UPLOAD_BODY_LIMIT_BYTES, WorkspaceQuota,
 };
 
