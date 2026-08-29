@@ -270,6 +270,9 @@ pub struct HarnessDeps {
     /// the whole roster addresses the configured workload (e.g. `chat-v1`).
     /// `None` keeps each agent's tier-derived default.
     pub model_override: Option<String>,
+    /// The company's durable notification store, used by workflow tools to
+    /// announce failures and other unhealthy outcomes.
+    pub notifications: Arc<dyn crate::ports::notifications::NotificationStore>,
     /// The company's task board, so a [`TaskDispatched`] cycle can load the
     /// dispatched card and write its result back. `None` off the task path (the
     /// chat brain leaves the board untouched).
