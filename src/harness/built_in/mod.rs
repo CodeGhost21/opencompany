@@ -5007,7 +5007,7 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
-        notifications: runtime.notifications().clone(),
+        notifications: Some(runtime.notifications().clone()),
         meter,
         workspace_root: std::env::temp_dir(),
         mcp_home: None,
