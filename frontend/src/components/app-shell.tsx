@@ -2025,7 +2025,9 @@ export function AppShell({
   }, [feed.now, refreshMentions]);
 
   const notificationItems = mentionFeed.filter(isOperationalNotification);
-  const unreadOperationalCount = notificationItems.filter((n) => n.readAt === undefined).length;
+  const unreadOperationalCount = notificationItems.filter(
+    (n) => n.readAt === undefined,
+  ).length;
   const markNotificationRead = useCallback(
     (id: string) => {
       setMentionFeed((items) =>
