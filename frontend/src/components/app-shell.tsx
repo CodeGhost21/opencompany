@@ -221,7 +221,42 @@ interface NavItem {
   icon: LucideIcon;
 }
 
-function SidebarNavigation({
+function NotificationPanel({
+  notifications,
+  onRead,
+  onReadAll,
+}: {
+  notifications: NotificationDto[];
+  onRead: (id: string) => void;
+  onReadAll: () => void;
+}) {
+  const actionable = notifications.filter((n) =>
+    ["dispatch_failed", "approval_expired", "workflow_run_started", "workflow_run_finished"].includes(n.kind),
+  );
+  return (
+    <Popover>
+      <PopoverTrigger render={<Button variant="ghost" size="icon" aria-label="Notifications" />}>
+        <Bell />
+        {actionable.some((n) => n.readAt === undefined) && <span className="sr-only">Unread notifications</span>}
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-96">
+        <PopoverTitle className="flex items-center justify-between">
+          Notifications
+          <Button variant="ghost" size="sm" onClick={onReadAll}>Mark all read</Button>
+        </PopoverTitle>
+        <div className="mt-2 max-h-80 space-y-2 overflow-auto">
+          {actionable.length === 0 ? <p className="text-sm text-muted-foreground">No notifications.</p> : actionable.map((n) => (
+            <button key={n.id} type="button" className="block w-full rounded-md p-2 text-left text-sm hover:bg-muted" onClick={() => onRead(n.id)}>
+              <span className={n.readAt === undefined ? "font-medium" : "text-muted-foreground"}>{n.title}</span>
+              <span className="mt-1 block text-xs text-muted-foreground">{new Date(n.createdAt).toLocaleString()}</span>
+            </button>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
   view,
   pending,
   notificationCount,
