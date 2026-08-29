@@ -2024,7 +2024,7 @@ export function AppShell({
     refreshMentions();
   }, [feed.now, refreshMentions]);
 
-  const notificationItems = mentionFeed.filter((n) => n.kind !== "mention");
+  const notificationItems = mentionFeed.filter(isOperationalNotification);
   const markNotificationRead = useCallback(
     (id: string) => {
       setMentionFeed((items) =>
