@@ -716,9 +716,7 @@ impl LocalAcpAgent {
             self.read_session_record(company, agent_id)
                 .and_then(|record| record.model)
         } else {
-            (!self.env.is_empty())
-                .then(|| self.model.clone())
-                .flatten()
+            (!self.env.is_empty()).then(|| self.model.clone()).flatten()
         };
         if let Some(model) = to_apply.as_deref()
             && let Some(config_id) = model_config_id(&raw, model)
