@@ -1403,7 +1403,7 @@ impl HarnessAgentRunner {
     /// failure and park the identical question. The gated-call case does not
     /// have that problem — approving there mints the grant that makes the
     /// retry succeed.
-    async fn park_node_blocker(&self, node_id: Option<&str>, message: &str) -> Option<String> {
+    async fn park_node_blocker(&self, resolved_node_id: &str, message: &str) -> Option<String> {
         let class = crate::harness::built_in::blockers::classify_blocker_message(message)?;
         if !class.kind.parks() {
             return None;
@@ -1419,10 +1419,12 @@ impl HarnessAgentRunner {
             // The one case an approval's own task link cannot express — see
             // `BlockerPayload::step`. #1864's node-level restart needs to know
             // which node inside which run stopped, and a workflow run has no
-            // card behind it to name instead.
+            // card behind it to name instead. Use the resolved node id (with
+            // agent_ref fallback) to match BlockerStep::Node with
+            // WorkflowBlockedNode.
             step: Some(crate::ports::blockers::BlockerStep::Node {
                 run_id: self.run_id.clone(),
-                node_id: node_id.unwrap_or_default().to_string(),
+                node_id: resolved_node_id.to_string(),
             }),
             reason: message.to_string(),
             needed: class.needed.to_string(),
