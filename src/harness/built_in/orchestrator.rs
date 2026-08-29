@@ -3272,6 +3272,7 @@ pub fn orchestrator_tools(
         events.clone(),
         workflow_refs.clone(),
         run_outputs.clone(),
+        None, // notifications not wired in orchestrator_tools context
     )));
     // `read_run_output` (issue #418) is the run tool's companion: it reads full
     // node output out of the same bounded cache the run tool populates, so a
