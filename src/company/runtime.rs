@@ -3399,7 +3399,7 @@ impl CompanyRuntime {
         Some((task_id, format!("{} ({})", payload.reason, payload.needed)))
     }
 
-    async fn notify_approval_expired(&self, id: &ApprovalId, was_blocker: bool) {
+    async fn notify_approval_expired(&self, id: &ApprovalId, was_blocker: bool, has_linked_task: bool) {
         let note = crate::ports::notifications::Notification {
             id: crate::ports::generate_id(),
             kind: "approval_expired".to_string(),
@@ -3411,9 +3411,12 @@ impl CompanyRuntime {
             // Issue #1861: a question nobody answered is not "denied by
             // default" — there was nothing to deny. Saying so would tell an
             // operator a decision was made against work that is simply still
-            // waiting to be explained.
-            title: if was_blocker {
+            // waiting to be explained. Only claim a card came back if the
+            // blocker was actually linked to a task (has_linked_task).
+            title: if was_blocker && has_linked_task {
                 "A question nobody answered timed out; its card is back in To-do".to_string()
+            } else if was_blocker {
+                "A question nobody answered timed out".to_string()
             } else {
                 "An approval expired unanswered and was denied by default".to_string()
             },
