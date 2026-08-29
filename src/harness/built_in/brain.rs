@@ -4392,7 +4392,11 @@ description = "Runs Acme."
             .iter()
             .filter(|event| matches!(event.event, CompanyEvent::AgentReply { .. }))
             .collect();
-        assert_eq!(replies.len(), 2, "the pause placeholder and notice are durable");
+        assert_eq!(
+            replies.len(),
+            2,
+            "the pause placeholder and notice are durable"
+        );
     }
 
     #[tokio::test]
