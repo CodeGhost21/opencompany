@@ -694,6 +694,11 @@ impl LocalAcpAgent {
         } else {
             self.agent_models.get(agent_id).cloned()
         };
+        // Track whether the model was actually applied: only record the
+        // applied model, not a desired-but-unavailable one, so the session
+        // record does not falsely claim a model was set when the session
+        // stayed on its default/previous model.
+        let mut applied_model = None;
         if let Some(model) = to_apply.as_deref()
             && let Some(config_id) = model_config_id(&raw, model)
         {
@@ -712,6 +717,7 @@ impl LocalAcpAgent {
                         "acp session/set_config_option (model `{model}`): {error}"
                     ))
                 })?;
+            applied_model = Some(model);
         }
 
         // Written for both paths, and after the steering above rather than
@@ -719,8 +725,11 @@ impl LocalAcpAgent {
         // teammate has *and what model it is on*, and the second half is only
         // settled here. A resumed session whose model was just corrected
         // rewrites its record with the new value, so the next start does not
-        // see a mismatch that no longer exists.
-        self.write_session_record(company, agent_id, &id, desired.as_deref());
+        // see a mismatch that no longer exists. Only the *applied* model is
+        // recorded, not a desired value that the session's config options do
+        // not offer — a false record would mislead the next start into
+        // thinking the model was applied when the session is on its default.
+        self.write_session_record(company, agent_id, &id, applied_model);
 
         sessions.insert(session_key.to_string(), id.clone());
         Ok(id)
