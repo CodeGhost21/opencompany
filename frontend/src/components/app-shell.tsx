@@ -3351,11 +3351,7 @@ export function AppShell({
               <SidebarNavigation
                 view={view}
                 pending={pending}
-                notificationCount={
-                  mentionFeed.filter(
-                    (n) => n.readAt === undefined && n.kind !== "mention",
-                  ).length
-                }
+                notificationCount={unreadOperationalCount}
                 onNavigate={setView}
               />
             </SidebarContent>
