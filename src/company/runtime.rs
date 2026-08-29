@@ -52,6 +52,8 @@ use crate::ports::tasks::COLUMN_IN_PROGRESS as IN_PROGRESS;
 /// The board column a task must enter to be planned (issue #337). Read from the
 /// task port for the same reason the dispatch literal is.
 use crate::ports::tasks::COLUMN_PLANNING as PLANNING;
+/// The board column where unstarted and failed cards rest.
+use crate::ports::tasks::COLUMN_TODO;
 
 /// Whether an upsert moves a card **into** `in_progress` (the dispatch edge).
 /// A card already in `in_progress` re-saved is not a fresh dispatch.
