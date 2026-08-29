@@ -260,6 +260,7 @@ function isOperationalNotification(notification: NotificationDto): boolean {
   return OPERATIONAL_NOTIFICATION_KINDS.has(notification.kind);
 }
 
+function NotificationPanel({
   notifications,
   onRead,
   onReadAll,
