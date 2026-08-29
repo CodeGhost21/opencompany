@@ -710,12 +710,12 @@ impl LocalAcpAgent {
         // defeat the very guard at `resume_session`'s `desired_model.is_none()
         // && record.model.is_some()` check on the next restart (CodeRabbit,
         // PR #1904 review).
-        let mut applied_model = if was_resumed {
+        let mut applied_model: Option<String> = if was_resumed {
             self.read_session_record(company, agent_id)
                 .and_then(|record| record.model)
         } else {
             (!self.env.is_empty())
-                .then(|| self.model.map(str::to_string))
+                .then(|| self.model.clone())
                 .flatten()
         };
         if let Some(model) = to_apply.as_deref()
@@ -736,7 +736,7 @@ impl LocalAcpAgent {
                         "acp session/set_config_option (model `{model}`): {error}"
                     ))
                 })?;
-            applied_model = Some(model);
+            applied_model = Some(model.to_string());
         }
 
         // Written for both paths, and after the steering above rather than
