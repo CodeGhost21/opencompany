@@ -6513,9 +6513,10 @@ members = ["engineer"]
         );
         assert!(posted.text.contains("Shane"), "{}", posted.text);
         // Issue #1852: `refuse_dispatch` relays through the same
-        // `relay_reply` as a settled run, so it carries the card id too —
-        // once journaled, the origin thread's refusal bubble links back to
-        // the card it refused.
+        // `relay_reply` as a settled run, so it carries the card id too — but
+        // `CompanyRuntime::journal_dispatch_replies` strips it back to `None`
+        // before journaling, since the settle already left a
+        // `DeskTaskCompleted` link and this would only duplicate it.
         assert_eq!(posted.task_id.as_deref(), Some("t-origin"));
     }
 
