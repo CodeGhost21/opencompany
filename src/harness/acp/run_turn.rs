@@ -140,6 +140,7 @@ fn count_of(count: usize, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
 
+/// Map one [`AcpUpdate`] to the live frame the console renders, or `None` for
 /// an update with no operator-facing row.
 ///
 /// The live counterpart of [`fold`], and deliberately the same shape: a
