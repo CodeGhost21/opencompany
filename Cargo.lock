@@ -3333,7 +3333,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots 1.0.9",
- "zip 6.0.0",
+ "zip 7.2.0",
 ]
 
 [[package]]
@@ -6931,20 +6931,6 @@ dependencies = [
  "indexmap",
  "memchr",
  "thiserror 2.0.20",
- "zopfli",
-]
-
-[[package]]
-name = "zip"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb2a05c7c36fde6c09b08576c9f7fb4cda705990f73b58fe011abf7dfb24168b"
-dependencies = [
- "arbitrary",
- "crc32fast",
- "flate2",
- "indexmap",
- "memchr",
  "zopfli",
 ]
 
