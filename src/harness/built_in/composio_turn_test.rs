@@ -726,7 +726,13 @@ async fn the_composio_routing_brief_reaches_the_model_system_prompt() {
 
     let dir = tempfile::tempdir().unwrap();
     let (pool, deps, record) = harness(model_url, composio_url, dir.path()).await;
-    pool.run(&record.id, "ceo", "What can you do on GitHub?", &deps, None)
+    pool.run(
+        &record.id,
+        "ceo",
+        "What can you do on GitHub?",
+        &deps,
+        crate::runtime::delegation::ChatTarget::default(),
+    )
         .await
         .expect("turn runs");
 
