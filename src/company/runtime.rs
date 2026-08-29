@@ -2775,6 +2775,18 @@ impl CompanyRuntime {
     /// does next.
     ///
     /// [`TaskLink`]: crate::runtime::journal::TaskLink
+    /// Whether a pending approval is a blocker (question the operator must answer).
+    /// Unlike `unanswered_blocker`, this returns true regardless of task linkage,
+    /// so unlinked blockers (from workflow nodes or chat) are recognized.
+    fn is_blocker(&self, id: &ApprovalId) -> bool {
+        let pending = match self.journal.pending().into_iter().find(|p| &p.id == id) {
+            Some(p) => p,
+            None => return false,
+        };
+        let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
+        pending.effect.kind.starts_with(&prefix)
+    }
+
     fn unanswered_blocker(&self, id: &ApprovalId) -> Option<(String, String)> {
         use crate::runtime::journal::TaskLink;
 
