@@ -3665,7 +3665,10 @@ async fn list_runs(
     // an earlier `ok` node event. A progress-drain failure still retains this
     // fact rather than allowing history to become green.
     let degraded = !run.nodes.is_empty()
-        && run.nodes.iter().any(|n| n.status == WorkflowNodeStatus::Error);
+        && run
+            .nodes
+            .iter()
+            .any(|n| n.status == WorkflowNodeStatus::Error);
     // settled every open row, after the #1009 cross-check has flipped the dead
     // ones to `error: INTERRUPTED_BY_RESTART`, and (issue #1189) after the
     // reconciliation above.
