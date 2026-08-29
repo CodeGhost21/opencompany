@@ -3828,7 +3828,7 @@ impl Tool for RunWorkflowTool {
                 // miss must not also cost the alert.
                 if let Some(notifications) = self.notifications.as_ref() {
                     crate::runtime::file_run_unhealthy_notification(
-                        notifications,
+                        notifications.as_ref(),
                         &self.company,
                         &wid,
                         &ctx.run_id,
@@ -3905,7 +3905,7 @@ impl Tool for RunWorkflowTool {
                             .any(|d| matches!(d.status, crate::ports::DeliveryStatus::Pending))
                     {
                         crate::runtime::file_run_unhealthy_notification(
-                            notifications,
+                            notifications.as_ref(),
                             &self.company,
                             &wid,
                             &ctx.run_id,
@@ -3916,7 +3916,7 @@ impl Tool for RunWorkflowTool {
                         .await;
                     } else if !run.blocked_nodes.is_empty() {
                         crate::runtime::file_run_unhealthy_notification(
-                            notifications,
+                            notifications.as_ref(),
                             &self.company,
                             &wid,
                             &ctx.run_id,
@@ -4040,7 +4040,7 @@ impl Tool for RunWorkflowTool {
                 // journal miss must not also cost the alert.
                 if let Some(notifications) = self.notifications.as_ref() {
                     crate::runtime::file_run_unhealthy_notification(
-                        notifications,
+                        notifications.as_ref(),
                         &self.company,
                         &wid,
                         &ctx.run_id,
