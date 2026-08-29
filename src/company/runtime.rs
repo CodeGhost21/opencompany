@@ -3304,7 +3304,7 @@ impl CompanyRuntime {
             // and after the retirement, which already propagates its own
             // error: a notification that could not be filed must not undo a
             // default-deny that already happened.
-            self.notify_approval_expired(id, is_blocker).await;
+            self.notify_approval_expired(id, is_blocker, unanswered.is_some()).await;
             // …and the board, which is the surface an operator actually
             // watches. Best-effort for the same reason: the default-deny has
             // already happened, and a board write that fails must not undo it —
