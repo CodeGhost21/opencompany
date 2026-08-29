@@ -5489,14 +5489,16 @@ mod tests {
                     reply_to: None,
                     steps: Vec::new(),
                 },
-                // A `reply_to` naming an empty chat id — degenerate, must not
-                // journal into "".
+                // A `reply_to` naming an empty chat id — not degenerate:
+                // `origin_chat_id` preserves `Some("")` for a card spawned
+                // from General, and `chat_history::same_conversation` treats
+                // "" as an alias for General, so this must still journal.
                 OutboundMessage {
                     message_id: None,
                     task_id: Some("t-2".to_string()),
                     channel: "ceo".to_string(),
                     agent: None,
-                    text: "orphaned".to_string(),
+                    text: "General-chat relay".to_string(),
                     mentions: Vec::new(),
                     reply_to: Some(ReplyTo {
                         chat_id: String::new(),
