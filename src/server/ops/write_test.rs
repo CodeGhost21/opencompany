@@ -7450,40 +7450,7 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
 /// proposal graph, straight through the task store (the builder pass that would
 /// normally mint it is behind the `openhuman` feature). Returns the card id.
 async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
-    let runtime = state
-        .registry()
-        .get(&CompanyId::new("acme"))
-        .expect("company");
-    let id = crate::ports::generate_id();
-    let record = TaskRecord {
-        id: id.clone(),
-        title: "Automate the weekly digest".to_string(),
-        note: None,
-        column: "in_review".to_string(),
-        priority: "medium".to_string(),
-        assignee: "ceo".to_string(),
-        updated_at_millis: 1,
-        origin_chat_id: None,
-        parent_task_id: None,
-        output: None,
-        plan: None,
-        planning_attempts: Vec::new(),
-        deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
-        workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
-            summary: "Email the digest".to_string(),
-            ops,
-            generated_at_millis: 1,
-            run_id: "run-build-1".to_string(),
-        }),
-        origin_run_id: None,
-        origin_workflow_id: None,
-    };
-    runtime
-        .tasks()
-        .upsert(runtime.id(), &record)
-        .await
-        .expect("seed the proposal card");
-    id
+    seed_proposal_card_assigned(state, ops, "ceo").await
 }
 
 /// [`seed_proposal_card`], with the assignee set to whatever the caller
