@@ -950,6 +950,8 @@ pub fn build_agent(
             // The company store, for the `add_agent` tool to persist overlay
             // teammates through the same path the console `POST .../team` uses.
             deps.store.clone(),
+            // Durable company-wide notification store for unhealthy workflow runs.
+            deps.notifications.clone(),
             // Issue #661 (M7): the same revision store the console's workflow
             // PUT/DELETE routes write through, so an agent edit is undoable and
             // an agent delete cascades the history on identical terms.
