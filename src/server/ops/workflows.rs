@@ -2863,11 +2863,14 @@ impl WorkflowRunOutcome {
             // the fact. The live/synchronous run response (`run_workflow`) does
             // not have this gap — it reads the in-memory, already-relabelled
             // `WorkflowRun.nodes` directly.
+            // Issue #1865: a degraded node fact may be carried separately when
+            // progress draining failed, so history does not score the run green.
             errored_nodes: self
                 .nodes
                 .iter()
                 .filter(|n| n.status == WorkflowNodeStatus::Error)
-                .count(),
+                .count()
+                + usize::from(self.degraded),
         })
     }
 }

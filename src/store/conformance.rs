@@ -1561,7 +1561,10 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         .into_iter()
         .find(|t| t.id == populated.id)
         .expect("the populated card persists");
-    assert_eq!(populated_back, populated, "all populated fields must survive");
+    assert_eq!(
+        populated_back, populated,
+        "all populated fields must survive"
+    );
 
     // Issue #337: a card carrying a full plan round-trips **byte-identically**
     // on every backend.
