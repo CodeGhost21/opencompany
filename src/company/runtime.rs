@@ -985,14 +985,15 @@ impl CompanyRuntime {
             .map(|t| t.column);
         let dispatch = task_enters_in_progress(prev_column.as_deref(), &task.column);
         let plan = task_enters_planning(prev_column.as_deref(), &task.column);
-        // Issue #1865: a card re-entering In Progress is a fresh attempt, so
-        // any bounce chip left over from a *previous* failed attempt is stale
-        // the moment this one starts — a card mid-retry must not go on
-        // advertising the reason its last try came back. Cloned rather than
-        // mutating the caller's `task` in place: this is the single write
-        // site for REST mutations and the caller may hold or re-render its own
-        // copy afterwards.
-        let write: std::borrow::Cow<'_, TaskRecord> = if dispatch && task.bounced.is_some() {
+        // Issue #1865: a card leaving todo is a fresh attempt or a state
+        // change, so any bounce chip left over from a *previous* failed attempt
+        // is stale the moment this one starts — a card moved to planning or
+        // another column should not advertise the reason its last todo attempt
+        // came back. Cloned rather than mutating the caller's `task` in place:
+        // this is the single write site for REST mutations and the caller may
+        // hold or re-render its own copy afterwards.
+        let clear_bounced = prev_column == Some(COLUMN_TODO) && task.column != COLUMN_TODO && task.bounced.is_some();
+        let write: std::borrow::Cow<'_, TaskRecord> = if clear_bounced {
             let mut cleared = task.clone();
             cleared.bounced = None;
             std::borrow::Cow::Owned(cleared)
