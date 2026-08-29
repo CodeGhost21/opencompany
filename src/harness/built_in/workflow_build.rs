@@ -725,13 +725,16 @@ async fn settle_to_todo(
     card.workflow_proposal = None;
     card.column = COLUMN_TODO.to_string();
     card.updated_at_millis = now_millis();
-    if let Err(err) = runtime.tasks().upsert(runtime.id(), &card).await {
-        tracing::warn!(
-            company = %runtime.id(),
-            task = %task_id,
-            error = %err,
-            "[builder] could not return the card to To-do; it stays In Progress until the next boot"
-        );
+    match runtime.tasks().upsert(runtime.id(), &card).await {
+        Ok(()) => runtime.notify_dispatch_failed(task_id, &reason).await,
+        Err(err) => {
+            tracing::warn!(
+                company = %runtime.id(),
+                task = %task_id,
+                error = %err,
+                "[builder] could not return the card to To-do; it stays In Progress until the next boot"
+            );
+        }
     }
     finish_run(runtime, run_id, RunStatus::Failed, Some(&reason), usage).await;
 }
