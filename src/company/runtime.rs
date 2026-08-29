@@ -2705,6 +2705,11 @@ impl CompanyRuntime {
             // that there is no way back to what was being asked, and a card
             // returned without its question is a card nobody can act on.
             let unanswered = self.unanswered_blocker(id);
+            // Issue #1861: detect blockers independently of task linkage,
+            // so unlinked blockers (from workflow nodes or chat) are recognized
+            // as blockers, not ordinary approvals, even though unanswered
+            // returns None for them.
+            let is_blocker = self.is_blocker(id);
             self.retire_approval(id, ExpiryReason::Ttl, now).await?;
             // Issue #1865: a blocker nobody answered is exactly the silent
             // failure this notification exists for — "awaiting approval"
@@ -2712,7 +2717,7 @@ impl CompanyRuntime {
             // and after the retirement, which already propagates its own
             // error: a notification that could not be filed must not undo a
             // default-deny that already happened.
-            self.notify_approval_expired(id, unanswered.is_some()).await;
+            self.notify_approval_expired(id, is_blocker).await;
             // …and the board, which is the surface an operator actually
             // watches. Best-effort for the same reason: the default-deny has
             // already happened, and a board write that fails must not undo it —
