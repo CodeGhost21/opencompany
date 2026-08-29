@@ -8027,8 +8027,55 @@ name = "Morning"
         );
     }
 
+    /// A runner panic is converted into an agent-visible error, and the RAII
+    /// supervisor slot is gone when the tool returns. This covers both cleanup
+    /// obligations without changing the runner architecture.
     #[tokio::test]
-    async fn run_workflow_tool_loads_and_invokes_the_runner() {
+    async fn panicking_run_cleans_up_its_active_attempt() {
+        struct PanickingRunner;
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for PanickingRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &WorkflowFile,
+                _input: Value,
+                _ctx: &crate::ports::WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                panic!("test runner panic")
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(PanickingRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let supervisor = crate::runtime::RunSupervisor::default();
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            supervisor.clone(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+        );
+
+        let result = tool
+            .execute(json!({"id": "demo"}))
+            .await
+            .expect("panic is converted to a tool result");
+        assert!(result.is_error, "panic must be agent-visible: {result:?}");
+        assert!(
+            result.output_for_llm(false).contains("internal error"),
+            "the result should not leak panic payload: {result:?}"
+        );
+        assert_eq!(supervisor.len(), 0, "the active attempt must be cleaned up");
+    }
+
         let dir = tempfile::tempdir().unwrap();
         seed_demo_workflow(dir.path());
 
