@@ -41,9 +41,9 @@ not enable that feature. See that module's own docs for the full reasoning.
 `local` has a real implementation as of issue #1245 — `LocalAcpAgent`
 (`src-tauri/src/acp/local_agent.rs`), wired through `AppState::with_acp_agents`
 and `desktop::register`. `runner` does not yet: `src/runner/dispatch.rs`
-declares `RunnerDispatch`, but it does not implement `AcpAgent`, and nothing
-wires it into `lanes::build`. A `runner`-transport harness resolves
-`unavailable` on every build today, `local` included.
+implements `AcpAgent` on `RunnerDispatch`, but nothing wires it into
+`lanes::build`, so a `runner`-transport harness resolves `unavailable` on
+every build today.
 
 ## One conversation per teammate, and it survives a restart
 
