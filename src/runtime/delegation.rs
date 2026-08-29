@@ -2682,6 +2682,9 @@ impl<'a> DelegationRunner<'a> {
             body,
         ));
         card.column = lifecycle::settled_landing_column(end, parked_approvals).to_string();
+        // Set bounced for failed/cancelled runs landing on todo (issue #1865).
+        let settled_status = lifecycle::settled_run_status(end, parked_approvals);
+        card.bounced = crate::runtime::advance::bounced_reason(&card.column, settled_status, body);
         card.updated_at_millis = now_millis();
         if let Some(tasks) = self.tasks {
             tasks.upsert(self.company, card).await?;
