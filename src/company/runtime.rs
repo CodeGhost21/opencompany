@@ -2994,7 +2994,6 @@ impl CompanyRuntime {
                 .reply_to
                 .as_ref()
                 .map(|reply_to| reply_to.chat_id.as_str())
-                .filter(|chat_id| !chat_id.is_empty())
             else {
                 continue;
             };
