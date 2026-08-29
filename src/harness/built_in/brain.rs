@@ -1486,7 +1486,7 @@ impl HarnessBrain {
         self.settle_run(
             sink.as_deref(),
             settled,
-            // Only a failure carries a reason: `error` is "why this went
+            // A failure or blocked attempt carries a reason: `error` is "why this went
             // wrong", not "what the agent said". Stamping a success's reply
             // here would put the deliverable in a field every reader renders
             // as a fault.
