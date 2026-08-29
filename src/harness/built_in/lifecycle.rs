@@ -524,9 +524,10 @@ mod test {
             relayed.reply_to.as_ref().map(|r| r.chat_id.as_str()),
             Some("strategy")
         );
-        // Issue #1852: the relay carries the card's own id, so once the
-        // runtime journals it the origin thread's bubble links back to the
-        // card that answered it.
+        // Issue #1852: the relay carries the card's own id for field-contract
+        // consistency, but `CompanyRuntime::journal_dispatch_replies` strips
+        // it back to `None` before journaling — the settle already left a
+        // `DeskTaskCompleted` link, and this would only duplicate it.
         assert_eq!(relayed.task_id.as_deref(), Some("t-1"));
         assert!(
             relayed.text.contains("is ready for review"),
