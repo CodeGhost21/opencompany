@@ -1628,7 +1628,12 @@ impl HarnessBrain {
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
         crate::runtime::advance::notify_dispatch_failed(
-            self.notifications.as_ref(),
+            self.deps.notifications.as_deref().unwrap_or_else(|| {
+                // A task-enabled brain normally always has the company's notification
+                // store. Test-only brains may omit it, so use the inert store only for
+                // this best-effort alert path.
+                &crate::ports::notifications::NullNotificationStore
+            }),
             &self.record().id,
             &card.id,
             &text,
