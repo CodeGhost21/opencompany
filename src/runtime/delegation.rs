@@ -1551,10 +1551,11 @@ impl<'a> DelegationRunner<'a> {
         //
         // Issue #1906: what makes the skip lossless is NOT that the delegate's
         // text gets folded onto the bubble in the relay's place. #1886 wrote
-        // such a fold and it never reached the operator — the one non-test
-        // caller (`HarnessBrain::handle_operator_message`) replaces the whole
-        // reply with `BUDGET_PAUSED_PLACEHOLDER_REPLY` whenever `budget_paused`
-        // is `Some`, and `desk_paused` implies exactly that. The real reason is
+        // such a fold and it never reached the operator — both of
+        // `handle_operator_message`'s non-test callers (`HarnessBrain`, in the
+        // interactive and the `ScheduleFired` paths) replace the whole reply
+        // with `BUDGET_PAUSED_PLACEHOLDER_REPLY` whenever `budget_paused` is
+        // `Some`, and `desk_paused` implies exactly that. The real reason is
         // simpler and does not depend on the caller at all: that same override
         // already discarded the RELAY's reply on every pause, so the inference
         // call it costs buys the operator nothing at a provider that has just
