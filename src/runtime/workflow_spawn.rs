@@ -524,7 +524,6 @@ pub(crate) async fn file_run_unhealthy_notification(
         );
     }
 }
-}
 
 async fn settle_cancelled_workflow_attempts(
     runs: &dyn RunStore,
