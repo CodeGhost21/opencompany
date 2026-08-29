@@ -1905,11 +1905,9 @@ impl HarnessAgentRunner {
                 // Only the park differs from #881's; everything after it is
                 // shared, so a host-classified blocker and an agent-declared
                 // one reach the operator as one shape.
-                if let Some(approval_id) =
-                    self.park_node_blocker(node_id.as_deref(), &message).await
-                {
+                if let Some(approval_id) = self.park_node_blocker(&lineage_node, &message).await {
                     self.blocks.push(crate::ports::WorkflowBlockedNode {
-                        node_id: node_id.clone().unwrap_or_else(|| agent_ref.to_string()),
+                        node_id: lineage_node.clone(),
                         // No tools: nothing the agent called was gated. What
                         // stopped this node is the node itself.
                         tools: Vec::new(),
