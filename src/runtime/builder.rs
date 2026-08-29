@@ -3077,6 +3077,7 @@ impl RuntimeBuilder {
                                 serves: None,
                                 context: context.clone(),
                                 store: store.clone(),
+                                notifications: ops.notifications.clone(),
                                 // The harness must write usage to the SELECTED
                                 // backend, not always the filesystem. The read
                                 // side (`company.usage`) reads `ops.usage` — the
