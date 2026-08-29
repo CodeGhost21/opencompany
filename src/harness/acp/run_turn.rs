@@ -194,7 +194,7 @@ fn live_frame_from(update: &AcpUpdate, state: &mut LiveState) -> Option<TurnStre
                 kind: "tool_result",
                 seq,
                 tool_call_id: Some(id.clone()),
-                result: result.clone(),
+                result: safe_result(result.as_deref()),
                 status: Some(status.wire_word()),
                 ..TurnStreamEvent::default()
             })
