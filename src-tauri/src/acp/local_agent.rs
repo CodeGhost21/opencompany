@@ -453,9 +453,19 @@ impl LocalAcpAgent {
             model: model.map(str::to_string),
         };
         let path = self.session_record_path(company, agent_id);
+        // Written to a same-directory temp file and renamed over the record,
+        // never written in place: a kill or a full disk mid-`fs::write` can
+        // truncate the file to empty or partial JSON, which `read_session_record`
+        // then silently treats as absent — losing the only pointer to the
+        // conversation this record exists to preserve. A rename is atomic on
+        // the platforms this ships for, so a crash lands on either the old
+        // record or the new one, never a half-written one (CodeRabbit, PR
+        // #1904 review).
+        let tmp_path = path.with_extension("json.tmp");
         let written = serde_json::to_string(&record)
             .map_err(|error| error.to_string())
-            .and_then(|json| std::fs::write(&path, json).map_err(|error| error.to_string()));
+            .and_then(|json| std::fs::write(&tmp_path, json).map_err(|error| error.to_string()))
+            .and_then(|()| std::fs::rename(&tmp_path, &path).map_err(|error| error.to_string()));
         if let Err(error) = written {
             tracing::warn!(
                 path = %path.display(),
