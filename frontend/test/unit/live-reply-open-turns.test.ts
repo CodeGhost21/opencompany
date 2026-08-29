@@ -38,4 +38,13 @@ describe("deciding whether a thread still has work in flight", () => {
   it("is per thread", () => {
     expect(hasOtherOpenTurns({ other: [turn("t9")] }, "eng", "t1")).toBe(false);
   });
+
+  it("ignores an id-less entry, which the poll can never settle", () => {
+    // `onSendDetached` can append a row the host minted no turn id for; the
+    // poll skips anything without a `turnId`, so counting it here would block
+    // this clear forever.
+    const idLess: OpenTurn = { queued: false };
+    expect(hasOtherOpenTurns({ eng: [idLess] }, "eng")).toBe(false);
+    expect(hasOtherOpenTurns({ eng: [idLess, turn("t2")] }, "eng")).toBe(true);
+  });
 });
