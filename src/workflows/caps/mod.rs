@@ -1585,7 +1585,7 @@ impl HarnessAgentRunner {
                 Ok(approval_id) => {
                     rows.push(row(
                         Some(blocker_request.tool.clone()),
-                        crate::ports::WorkflowApprovalOutcome::Approved,
+                        crate::ports::WorkflowApprovalOutcome::Parked,
                         Some(approval_id.to_string()),
                     ));
                 }
