@@ -160,7 +160,24 @@ pub fn classify_blocker_message(message: &str) -> Option<BlockerClass> {
     let haystack = message.to_ascii_lowercase();
     SHAPES
         .iter()
-        .find(|shape| shape.leaves.iter().any(|leaf| haystack.contains(leaf)))
+        .find(|shape| {
+            shape.leaves.iter().any(|leaf| {
+                // Special handling for " 401" to require word boundaries and avoid
+                // matching "port 4010" or similar false positives (issue #1861).
+                if *leaf == " 401" {
+                    // Look for " 401" followed by a word boundary (space, end of string, or punctuation).
+                    if let Some(pos) = haystack.find(" 401") {
+                        let end = pos + " 401".len();
+                        let has_trailing_boundary = end >= haystack.len()
+                            || haystack[end..].starts_with(|c: char| !c.is_ascii_alphanumeric());
+                        return has_trailing_boundary;
+                    }
+                    false
+                } else {
+                    haystack.contains(leaf)
+                }
+            })
+        })
         .map(|shape| shape.class)
 }
 
