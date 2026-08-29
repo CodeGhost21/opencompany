@@ -939,6 +939,17 @@ async fn run_workflow_inner(
         {
             notices.push(run_output_persist_failed_notice());
         }
+        // Issue #1865 (PR #1883 review): the third sibling reclassification —
+        // `94c8e0507` closed this gap on the genuine-failure/blocked `Err` arm
+        // above, but a clean node-boundary cancel is its own early return with
+        // its own `nodes`, reached without ever passing through that arm or the
+        // clean-finish arm at the bottom of this function. A node that only
+        // truncated at the iteration cap (or paused for budget) before an
+        // operator cancelled a later/parallel node kept its `Ok` row here too,
+        // even though its own attempt already settled `Failed` — the same
+        // disagreement, a third exit.
+        let mut nodes = nodes;
+        reclassify_capped_nodes(&mut nodes, &capped.take());
         return Ok(WorkflowRun {
             output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
             pending_approvals: Vec::new(),
