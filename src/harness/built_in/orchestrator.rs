@@ -8062,6 +8062,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
 
         let result = tool
