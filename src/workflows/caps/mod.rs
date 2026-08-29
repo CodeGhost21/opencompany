@@ -1583,6 +1583,8 @@ impl HarnessAgentRunner {
                 .await
             {
                 Ok(approval_id) => {
+                    push_tool(&mut summary.tools, &blocker_request.tool);
+                    summary.approval_ids.push(approval_id.to_string());
                     rows.push(row(
                         Some(blocker_request.tool.clone()),
                         crate::ports::WorkflowApprovalOutcome::Parked,
