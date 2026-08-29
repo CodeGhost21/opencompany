@@ -69,15 +69,18 @@ impl CompanyGql {
 
     /// The approvals currently awaiting the operator for this company.
     ///
-    /// Contents are role-gated exactly as on the REST list (issue #618). This
-    /// is the surface that made the question worth asking: it maps the same
-    /// projection, so a redaction applied only to the REST handlers would leave
-    /// the whole boundary reachable through one GraphQL field.
+    /// Contents are role-gated exactly as on the REST list (issue #618), and
+    /// ownership is resolved exactly as there (#1891). This is the surface that
+    /// made the question worth asking: it maps the same projection, so either
+    /// applied only to the REST handlers would leave the whole boundary
+    /// reachable through one GraphQL field — the redaction as a contents hole,
+    /// and the raw park stamp as a client putting an approval on a card the
+    /// host does not consider its owner.
     async fn approvals(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<ApprovalGql>> {
         let auth = ctx.data::<GqlAuth>()?;
         Ok(crate::server::approval_visibility::for_principal(
             auth,
-            self.runtime.pending_approvals(),
+            self.runtime.pending_approvals_resolved().await,
         )
         .into_iter()
         .map(ApprovalGql::from)

@@ -32,6 +32,11 @@ pub mod capabilities;
 pub mod company_key;
 /// Operator-set company logo, stored in the company manifest.
 pub mod company_logo;
+/// `PATCH {scope}` — the account-activation funnel's conscious naming step
+/// (issue #1844): sets the company's display name and stamps
+/// [`crate::ports::types::CompanyRecord::name_confirmed`]. See
+/// [`crate::company::activation`] for how that flag feeds the funnel.
+pub mod company_profile;
 pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
@@ -209,6 +214,7 @@ pub fn router() -> Router<AppState> {
         .merge(search::router())
         .merge(company_logo::router())
         .merge(company_key::router())
+        .merge(company_profile::router())
         .merge(composio::router())
         .merge(domain::router())
         .merge(deep_trace::router())

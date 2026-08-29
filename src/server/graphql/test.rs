@@ -2086,6 +2086,7 @@ async fn workspace_search_resolves_hits_with_paths_and_totals() {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     workspace.create(&id, &folder, None).await.unwrap();
     let note = crate::ports::workspace::WorkspaceNode {
@@ -2177,6 +2178,7 @@ async fn given_a_binary_node(state: &AppState, name: &str, mime: &str, bytes: &[
         mime: Some(mime.to_string()),
         size: None,
         sha256: None,
+        adopted: false,
     };
     workspace.create_binary(&id, &node, bytes).await.unwrap();
     node.id
@@ -2318,6 +2320,7 @@ async fn a_prose_note_projects_no_binary_metadata() {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     workspace
         .create(&id, &note, Some("# Charter\n\nprose, not bytes.\n"))

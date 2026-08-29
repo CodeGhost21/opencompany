@@ -315,6 +315,7 @@ pub async fn ensure_workspace_scaffold(
                     mime: None,
                     size: None,
                     sha256: None,
+                    adopted: false,
                 };
                 if let Err(error) = store.create(company, &readme, Some(body)).await {
                     tracing::warn!(
@@ -784,6 +785,7 @@ mod tests {
                         mime: None,
                         size: None,
                         sha256: None,
+                        adopted: false,
                     },
                 )
             })
@@ -967,6 +969,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             None,
         )
@@ -1009,6 +1012,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             Some("# not a folder"),
         )
@@ -1190,6 +1194,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             None,
         )
@@ -1245,6 +1250,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             Some("# notes about the ceo"),
         )
@@ -1282,6 +1288,72 @@ mod tests {
         }
 
         assert!(ws.is_empty(&company).await.unwrap());
+    }
+
+    /// Issue #1839: a folder a rival adopted survives that rival's rollback.
+    ///
+    /// The residual half of #1801 removes a folder one caller minted and then
+    /// failed to write beneath. But a second caller can adopt the same folder in
+    /// the window — `adopt_or_create_folder` hands it back and stamps the lease —
+    /// and the minter's `rollback_empty_minted_folders` must then leave it
+    /// standing, because the adopter is about to write into it. The still-empty
+    /// guard alone could not tell the two apart; the lease is what does.
+    #[tokio::test]
+    async fn rollback_leaves_an_adopted_folder_but_sweeps_an_unadopted_one() {
+        let (_dir, ws) = store().await;
+        let company = CompanyId::new("acme");
+
+        // The minter creates `agents/cmo/` — its id is what a failed write would
+        // roll back.
+        let (adopted_id, created) = ensure_agent_folder_tracked(ws.as_ref(), &company, "cmo")
+            .await
+            .unwrap();
+        assert!(created, "the first call minted the folder");
+
+        // A rival publisher adopts the very same folder, taking the lease.
+        let root_id = ws
+            .tree(&company)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == AGENTS_ROOT)
+            .unwrap()
+            .id;
+        let claim = ws
+            .adopt_or_create_folder(&company, Some(&root_id), "cmo", agent("cmo"))
+            .await
+            .unwrap();
+        assert!(!claim.was_created(), "the rival adopted, it did not mint");
+        assert!(claim.node().adopted, "adoption took the lease");
+
+        // A second minted folder nobody adopts is the genuine #1801 leak.
+        let (leaked_id, _) = ensure_agent_folder_tracked(ws.as_ref(), &company, "cto")
+            .await
+            .unwrap();
+
+        // The minter's write failed; it rolls back both folders it minted.
+        rollback_empty_minted_folders(
+            ws.as_ref(),
+            &company,
+            &[adopted_id.clone(), leaked_id.clone()],
+        )
+        .await;
+
+        let names: Vec<String> = ws
+            .tree(&company)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert!(
+            names.contains(&"cmo".to_string()),
+            "an adopted empty folder must survive the minter's rollback: {names:?}"
+        );
+        assert!(
+            !names.contains(&"cto".to_string()),
+            "but an unadopted empty minted folder is still swept: {names:?}"
+        );
     }
 
     /// The desk minter is the same shape one root over — and since issue #645
@@ -1349,6 +1421,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             None,
         )
@@ -1625,6 +1698,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             Some("# keep me"),
         )
@@ -1685,6 +1759,7 @@ mod tests {
                             mime: None,
                             size: None,
                             sha256: None,
+                            adopted: false,
                         },
                         Some("landed mid-rollback"),
                     )

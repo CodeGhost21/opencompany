@@ -2250,7 +2250,7 @@ mod tests {
             company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(company, agent_id).await
         }
@@ -2261,7 +2261,7 @@ mod tests {
             agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(company, agent_id).await
@@ -2386,7 +2386,7 @@ to = "done"
             _company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.seen.lock().unwrap().push(agent_id.to_string());
             Ok(crate::harness::TurnOutcome {
@@ -2406,7 +2406,7 @@ to = "done"
             agent_id: &str,
             message: &str,
             _control: &crate::company::steer::SteerControl,
-            chat_id: Option<&str>,
+            chat_id: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.run(company, agent_id, message, chat_id).await
@@ -2420,7 +2420,13 @@ to = "done"
             _control: &crate::company::steer::SteerControl,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
-            self.run(company, agent_id, message, None).await
+            self.run(
+                company,
+                agent_id,
+                message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
         }
     }
 

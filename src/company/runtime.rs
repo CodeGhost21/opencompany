@@ -44,6 +44,9 @@ use crate::ports::{
 use crate::ports::ScheduleFireStore;
 // Separate line (#596) for the same reason.
 use crate::ports::WorkflowRunOutputStore;
+// Separate line, same reasons as above: `set_lifecycle` needs the
+// per-company write lock (PR #1875 review finding, second round).
+use crate::ports::store::company_write_lock;
 
 /// The board column a task must enter to be dispatched to its assignee. Read
 /// from the task port (#205) so this edge and the write boundary that validates
@@ -3483,12 +3486,111 @@ impl CompanyRuntime {
         live
     }
 
+    /// The parked queue, with each approval's **owning card** resolved (#1891).
+    ///
+    /// What every HTTP reader of the queue should call. [`Self::pending_approvals`]
+    /// projects `task` as the raw link the park stamped, and that link is only
+    /// the *fallback* half of the ownership rule the task detail read applies:
+    /// the attempt (`Effect::run_id`) outranks it wherever there is one, which
+    /// `the_attempt_id_outranks_the_card_link_when_both_are_present` pins. So an
+    /// approval parked under one card's attempt while stamped with another
+    /// card's link was handed out under the stamp, and a console joining on it
+    /// put the row on the wrong card. Read-only that was a wrong label; once the
+    /// board card grew Approve and Decline (#1891) it became an operator
+    /// resolving somebody else's request, which is why the resolution belongs
+    /// here rather than in a console that cannot see an attempt id at all.
+    ///
+    /// **Costs one store read per distinct attempt behind the queue**, not per
+    /// approval and not per card — the ids are deduplicated first, and a queue
+    /// whose parks name no attempt (a chat turn, a scheduler tick) does none.
+    /// That is what keeps it affordable on a route the console polls: the
+    /// alternative the board rejected in #883 was re-reading task detail per
+    /// card per poll.
+    pub async fn pending_approvals_resolved(&self) -> Vec<ApprovalSummary> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut summaries = self.pending_approvals();
+        // Approval id → the **task attempt** that parked it.
+        //
+        // `Effect::run_id` holds two id spaces — a task attempt (#242) and, on
+        // the workflow path, a workflow run — and `generate_id` is only
+        // process-locally unique, so the value alone cannot say which
+        // ([`workflow_run_of`] says exactly this). Resolving a workflow run id
+        // against the run store is therefore not merely useless but unsafe: a
+        // collision with a persisted attempt id would find that attempt's card
+        // and relabel a workflow approval onto it — inventing a card for a
+        // request no card owns, on the surface that now decides.
+        //
+        // So the park *site* discriminates, through the one predicate that
+        // already encodes the rule rather than a second copy of it: a park
+        // `workflow_run_of` claims is a workflow park and is left alone. What
+        // remains is a park linked to a card, where `run_id` is unambiguously
+        // an attempt — which is exactly the misattribution case this exists to
+        // correct, a park stamped with one card while its attempt belongs to
+        // another.
+        //
+        // Conservative in the ambiguous direction, the same way
+        // `workflow_run_of` is: the cost of under-claiming is a blocked row the
+        // board does not draw, and of over-claiming is an operator deciding
+        // another owner's request from this card. Those are not comparable.
+        let attempts: HashMap<String, String> = self
+            .journal
+            .pending()
+            .into_iter()
+            .filter(|p| workflow_run_of(p).is_none())
+            .filter_map(|p| {
+                p.effect
+                    .run_id
+                    .clone()
+                    .map(|run_id| (p.id.as_ref().to_string(), run_id))
+            })
+            .collect();
+        if attempts.is_empty() {
+            return summaries;
+        }
+        let distinct: HashSet<&str> = attempts.values().map(String::as_str).collect();
+        let mut owners: HashMap<String, Option<String>> = HashMap::with_capacity(distinct.len());
+        for run_id in distinct {
+            // Only a **successful** read is recorded. An entry means the store
+            // answered — `Some(card)` or a definite "no card" — and an absent
+            // one means it could not be asked, which `resolve_owners` leaves
+            // the stamped link alone for (#1895 review).
+            //
+            // The distinction is the whole of this arm. Folding a failed read
+            // into "no owner" (an `.ok()` away) unlinks a still-parked
+            // approval, `approvalsForTask` then drops the row, and the card
+            // re-enables Resume while the approval is very much still parked —
+            // a transient store blip handing the operator the re-dispatch this
+            // PR exists to keep out of their hand. A stale link is a label that
+            // may be wrong; a dropped blocker is a card that lies about being
+            // free.
+            match self.runs().get_run(self.id(), run_id).await {
+                Ok(run) => {
+                    owners.insert(run_id.to_string(), run.and_then(|run| run.task_id));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        run_id,
+                        error = %err,
+                        "could not resolve an approval's owning card; keeping its parked link",
+                    );
+                }
+            }
+        }
+        crate::runtime::approval_ownership::resolve_owners(&mut summaries, &attempts, &owners);
+        summaries
+    }
+
     /// The approvals currently awaiting the operator.
     ///
     /// The single projection point for [`ApprovalSummary`], and therefore the
     /// single place issue #372's `agent` + `payload` are filled in. The payload
     /// is redacted and bounded **here**, before it is a summary at all, so no
     /// caller can accidentally serialize the raw effect.
+    ///
+    /// **`task` is the raw park link here.** Every reader that shows an
+    /// approval *against a card* wants [`Self::pending_approvals_resolved`]
+    /// instead — see there for why the stamp alone is not the ownership answer.
     pub fn pending_approvals(&self) -> Vec<ApprovalSummary> {
         self.journal
             .pending()
@@ -3839,6 +3941,19 @@ impl CompanyRuntime {
     /// no durable record yet is a [`OpenCompanyError::CompanyNotFound`].
     pub async fn set_lifecycle(&self, to: impl Into<String>, by: Actor) -> Result<String> {
         let to = to.into();
+        // Held across the whole load-modify-save cycle (PR #1875 review
+        // finding, second round): `server/provision.rs` calls this directly
+        // for pause/resume, with no lock of its own, so without this a
+        // `PATCH {scope}` name-confirm racing this transition could load
+        // before the rename's `save` lands and save after it, silently
+        // writing the confirmed rename's manifest and `name_confirmed` back
+        // to their pre-rename values — undoing a write that already returned
+        // success and potentially reopening the onboarding name step. Every
+        // other `CompanyStore` load-modify-save cycle in the console
+        // (`company_profile.rs`, `company_logo.rs`, `activation.rs`, …)
+        // already serializes on this same per-company lock.
+        let write_lock = company_write_lock(&self.id);
+        let _lock = write_lock.lock().await;
         let mut record = self
             .store
             .load(&self.id)
@@ -3846,7 +3961,47 @@ impl CompanyRuntime {
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.id.to_string()))?;
         let from = record.lifecycle.clone();
         record.lifecycle = to.clone();
-        self.store.save(&record).await?;
+        // `save_importing`, not `save` (PR #1875 review finding): a bare
+        // lifecycle flip is not `RuntimeBuilder::build`'s activation-aware
+        // migration deciding this record has been seen — it is the console's
+        // pause/resume/suspend/archive control, which can fire on a legacy
+        // pre-#1843 record `build`'s "existing but not running" arm has
+        // deliberately left un-migrated. `save`'s unconditional `true` would
+        // poison that record's gate-seen marker while it is still
+        // unmigrated, permanently blocking the grandfather arm on every
+        // later `running` boot. Forward whatever the marker already is,
+        // unless the grandfather back-fill below fires — that is the one
+        // case this method itself decides the migration, so it persists
+        // `true` for the same reason every deciding arm in `builder.rs` does.
+        let gate_seen = self.store.activation_gate_seen(&self.id).await?;
+        // Grandfather an unmigrated legacy record the moment an in-place
+        // resume (PR #1875 review finding, third round) puts it back to
+        // `running` without going through another `RuntimeBuilder::build` —
+        // the only other place this back-fill runs (`builder.rs`'s own
+        // "running and unlatched" arm). A company already registered in
+        // `state.registry()` never rebuilds across pause/resume (`transition`
+        // in `server/provision.rs` calls straight into this method on the
+        // live runtime), so a legacy pre-#1843 company — never seen by
+        // activation-aware code — that gets paused and resumed by the same
+        // long-lived process would otherwise keep reading as
+        // unconfirmed/unactivated, and the onboarding gate would wrongly
+        // reappear for an established operator, until the process eventually
+        // restarts and `build` finally applies the migration. Gated on
+        // `!gate_seen` and an unset latch exactly like the builder's own arm,
+        // so a genuinely new company still mid-onboarding (whose first save
+        // already stamped the marker `true`) is never falsely grandfathered
+        // by a resume.
+        let gate_seen_to_persist =
+            if to == "running" && !gate_seen && record.activation_completed_at.is_none() {
+                record.name_confirmed = true;
+                record.activation_completed_at = Some(crate::ports::now_millis());
+                true
+            } else {
+                gate_seen
+            };
+        self.store
+            .save_importing(&record, gate_seen_to_persist)
+            .await?;
         self.events
             .append(
                 &self.id,
@@ -4423,6 +4578,56 @@ mod tests {
             .expect("load")
             .expect("record");
         (runtime, record, home)
+    }
+
+    /// `set_lifecycle` must serialize its load-modify-save cycle against
+    /// `company_write_lock`, exactly like every other console load-modify-save
+    /// (PR #1875 review finding, second round). Proven the same way
+    /// `put_logo_serializes_against_the_company_write_lock`
+    /// (`server/ops/company_logo.rs`) proves it for that handler: hold the
+    /// lock externally, drive the real method, and demand it cannot finish
+    /// while the lock is held.
+    #[tokio::test]
+    async fn set_lifecycle_serializes_against_the_company_write_lock() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+        let runtime = std::sync::Arc::new(runtime);
+        let id = runtime.id().clone();
+
+        let lock = crate::ports::store::company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            runtime_for_task
+                .set_lifecycle(
+                    "paused",
+                    crate::ports::types::Actor {
+                        kind: crate::ports::types::ActorKind::Operator,
+                        id: "op".to_string(),
+                    },
+                )
+                .await
+        });
+
+        // The method must be blocked behind the held lock — give it every
+        // chance to (wrongly) race ahead before declaring it stuck.
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "set_lifecycle completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent writers (e.g. a racing name-confirm PATCH)"
+        );
+
+        drop(guard);
+        let from = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("set_lifecycle never resumed after the lock was released")
+            .expect("task panicked")
+            .expect("set_lifecycle failed");
+        assert_eq!(from, "running", "the fixture starts running");
     }
 
     /// The shared workflow-wiring fixture, re-exported under the name these

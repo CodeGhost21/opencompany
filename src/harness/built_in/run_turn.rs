@@ -19,7 +19,7 @@ use crate::company::steer::SteerControl;
 use crate::harness::run_trace::RunTraceSink;
 use crate::harness::{HarnessDeps, HarnessPool, TurnOutcome};
 use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::delegation::RunTurn;
+use crate::runtime::delegation::{ChatTarget, RunTurn};
 
 /// The built-in harness's [`RunTurn`]: re-attaches [`HarnessDeps`] onto each
 /// pool turn.
@@ -48,10 +48,10 @@ impl RunTurn for HarnessRunTurn {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome> {
         self.pool
-            .run(company, agent_id, message, &self.deps, chat_id)
+            .run(company, agent_id, message, &self.deps, chat)
             .await
     }
 
@@ -61,12 +61,12 @@ impl RunTurn for HarnessRunTurn {
         agent_id: &str,
         message: &str,
         control: &SteerControl,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.pool
             .run_steered(
-                company, agent_id, message, &self.deps, control, chat_id, run_sink,
+                company, agent_id, message, &self.deps, control, chat, run_sink,
             )
             .await
     }

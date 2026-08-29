@@ -902,6 +902,7 @@ async fn store_validated_avatar(
         mime: Some(sniffed.to_string()),
         size: None,
         sha256: None,
+        adopted: false,
     };
     let stored = workspace.create_binary(company, &node, bytes).await?;
     Ok(format!("blob:{}", stored.id))
@@ -1562,6 +1563,7 @@ mod test {
             mime: Some(mime.to_string()),
             size: None,
             sha256: None,
+            adopted: false,
         }
     }
 
@@ -1577,6 +1579,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         }
     }
 

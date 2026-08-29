@@ -2722,6 +2722,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         let own = WorkspaceOrigin::Agent {
             id: "ceo".to_string(),
@@ -2817,6 +2818,7 @@ mod tests {
                     mime: None,
                     size: None,
                     sha256: None,
+                    adopted: false,
                 },
                 Some("draft"),
             )
@@ -2871,6 +2873,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             }
         };
         store
@@ -2971,6 +2974,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             };
         store
             .create(&company, &node("agents", "agents", None, own.clone()), None)
