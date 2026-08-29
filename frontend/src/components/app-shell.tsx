@@ -25,8 +25,8 @@ import {
   type TurnStep,
   type Verdict,
 } from "@/api/types";
-import { Button } from "@/components/ui/button";
-  PopoverContent,
+import {
+  Popover,
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
