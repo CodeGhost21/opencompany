@@ -1200,7 +1200,7 @@ mod test {
         assert_eq!(outcome.steps.len(), 1, "the update amends, never appends");
         assert_eq!(outcome.steps[0].label, "Read a file");
         assert_eq!(outcome.steps[0].status, TurnStepStatus::Ok);
-        assert_eq!(outcome.steps[0].result.as_deref(), Some("5 characters"));
+        assert_eq!(outcome.steps[0].result.as_deref(), Some("6 characters"));
     }
 
     #[test]
