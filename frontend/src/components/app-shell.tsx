@@ -32,7 +32,10 @@ import {
 } from "@/components/ui/popover";
 import {
   Sidebar,
-  SidebarContent,
+  PopoverContent,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
   SidebarFooter,
   SidebarGroup,
   SidebarHeader,
