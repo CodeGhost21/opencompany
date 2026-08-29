@@ -7982,6 +7982,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
             "ceo".to_string(),
             None,
             vec!["fs:*".to_string()],
@@ -8057,6 +8058,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo", "input": { "seed": 1 } }))
@@ -8103,6 +8105,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8139,6 +8142,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             unwired
@@ -8161,6 +8165,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             unknown
@@ -8205,6 +8210,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8242,6 +8248,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8316,6 +8323,7 @@ name = "Morning"
             None,
             refs,
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8371,6 +8379,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8397,6 +8406,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "nope" }))
@@ -8420,6 +8430,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool.execute(json!({})).await.expect("execute");
         assert!(result.is_error);
@@ -8443,6 +8454,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "../secrets" }))
@@ -8557,6 +8569,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = run
             .execute(json!({ "id": "greeter" }))
@@ -8626,6 +8639,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
 
         let result = run
@@ -8705,6 +8719,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             !run.execute(json!({ "id": "greeter" }))
@@ -8807,6 +8822,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = run
             .execute(json!({ "id": "hosted" }))
