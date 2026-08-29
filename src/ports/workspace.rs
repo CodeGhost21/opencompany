@@ -196,6 +196,7 @@ pub fn new_folder(name: &str, parent_id: Option<&str>, origin: WorkspaceOrigin) 
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     }
 }
 
@@ -323,6 +324,34 @@ pub struct WorkspaceNode {
     /// [`blob_metadata`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Whether a second caller has *adopted* this folder through
+    /// [`WorkspaceStore::adopt_or_create_folder`] and now has a legitimate
+    /// reason to write beneath it (issue #1839).
+    ///
+    /// # Why a folder needs a lease flag
+    ///
+    /// The empty-folder rollback issue #1801 added
+    /// ([`rollback_empty_minted_folders`](crate::company::workspace_scaffold::rollback_empty_minted_folders))
+    /// undoes a *minted* folder whose write then failed. But a folder one caller
+    /// minted, a second caller can adopt — `adopt_or_create_folder` hands the
+    /// loser [`FolderClaim::Adopted`] and, by design, does **not** add it to that
+    /// caller's own `minted` set. Nothing then recorded that the folder has a
+    /// second writer, so the minter's later rollback could sweep the folder the
+    /// adopter was about to write into. This flag is that record: an adoption
+    /// stamps it `true`, and [`delete_if_empty`](WorkspaceStore::delete_if_empty)
+    /// refuses a folder carrying it. See the guard on `delete_if_empty`.
+    ///
+    /// # Sticky, and conservative on the migration
+    ///
+    /// `#[serde(default)]` **is** the migration: every node written before this
+    /// field existed loads as `false` on all three backends, no rewrite — and
+    /// `false` is the conservative reading, because it leaves a pre-#1839 empty
+    /// folder exactly as rollback-eligible as it is today. The flag only ever
+    /// *adds* a folder to the set of things a delete refuses; it never shrinks
+    /// it. It is never cleared: an adopted-then-emptied folder waits for
+    /// Tidy/Repair, whose job empty-folder cleanup already is.
+    #[serde(default)]
+    pub adopted: bool,
 }
 
 impl WorkspaceNode {
@@ -368,6 +397,7 @@ pub fn stamped_binary(node: &WorkspaceNode, bytes: &[u8]) -> Result<WorkspaceNod
         mime: Some(mime),
         size: Some(size),
         sha256: Some(sha256),
+        adopted: false,
         ..node.clone()
     })
 }
@@ -726,7 +756,15 @@ pub trait WorkspaceStore: Send + Sync {
     /// lock, so its override only re-checks immediately before deleting.
     async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let nodes = self.tree(company).await?;
-        if !nodes.iter().any(|node| node.id == id) {
+        let Some(node) = nodes.iter().find(|node| node.id == id) else {
+            return Ok(false);
+        };
+        // A folder a second caller has adopted has a legitimate writer, even
+        // while it is still childless (issue #1839). The adopter's write has
+        // not landed yet, so an emptiness check alone would let the minter's
+        // rollback sweep the folder out from under it. The lease flag is the
+        // record that says "someone else is about to write here"; refuse.
+        if node.adopted {
             return Ok(false);
         }
         if nodes
@@ -765,6 +803,14 @@ mod tests {
         let node: WorkspaceNode = serde_json::from_str(legacy).expect("legacy node must load");
         assert_eq!(node.created_by, WorkspaceOrigin::Operator);
         assert_eq!(node.updated_by, WorkspaceOrigin::Operator);
+        // Issue #1839: the adoption lease is `#[serde(default)]`, so a node
+        // written before it existed loads as `false` — the conservative reading
+        // that leaves a pre-#1839 empty folder exactly as rollback-eligible as it
+        // is today. That default IS the whole migration: no rewrite, no backfill.
+        assert!(
+            !node.adopted,
+            "a legacy node without the field must load unadopted"
+        );
     }
 
     /// The internally-tagged wire shape, pinned.
@@ -815,6 +861,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         let json = serde_json::to_string(&node).unwrap();
         assert_eq!(serde_json::from_str::<WorkspaceNode>(&json).unwrap(), node);
@@ -841,6 +888,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         let json = serde_json::to_string(&node).unwrap();
         assert!(!json.contains("mime"), "{json}");
@@ -864,6 +912,7 @@ mod tests {
             mime: Some("image/png".to_string()),
             size: Some(1234),
             sha256: Some("abc123".to_string()),
+            adopted: false,
         };
         let json = serde_json::to_string(&node).unwrap();
         assert_eq!(serde_json::from_str::<WorkspaceNode>(&json).unwrap(), node);
