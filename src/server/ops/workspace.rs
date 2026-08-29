@@ -833,6 +833,7 @@ async fn upload(
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
 
     match text_body(&mime, &bytes) {
@@ -979,6 +980,7 @@ async fn chat_upload(
         mime: Some(mime.clone()),
         size: None,
         sha256: None,
+        adopted: false,
     };
     // Chat uploads all land at the workspace root (`parent_id: None`), so a
     // second attachment reusing an earlier one's exact filename — the same
@@ -1126,6 +1128,7 @@ async fn create_node(
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     company
         .runtime
