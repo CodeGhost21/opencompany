@@ -12,14 +12,23 @@
 //! arrives, and a `prompt` call drains only its own session's buffer after
 //! `session/prompt` returns rather than reading whatever the sink last saw.
 //!
-//! **One turn at a time per session.** Both that drain and the live observer
-//! registered beside it assume it: they key on `sessionId`, so two concurrent
-//! turns on the *same* (company, agent) pair would interleave their updates
-//! into one drain and one observer. That is the assumption this file has
-//! always made — a session is one teammate, and a teammate answers one turn at
-//! a time — not something the live path newly introduces. Two *different*
-//! teammates on one harness are unaffected: they hold different sessions, and
-//! the demultiplexing above is what keeps them apart.
+//! **One turn at a time per session, enforced rather than assumed.** Both that
+//! drain and the live observer registered beside it key on `sessionId`, so two
+//! concurrent turns on the *same* (company, agent) pair would interleave their
+//! updates into one drain and one observer — the second registration
+//! displacing the first, and the first's teardown then silencing the second.
+//!
+//! This file used to state the single-turn property as an assumption about
+//! callers. It is not one they honour: a workflow's parallel gate can fan out
+//! to two sibling nodes bound to the same teammate, and a workflow node can
+//! overlap a chat turn (PR #1904 review). So [`LocalAcpAgent::session_lock`]
+//! makes it true instead — one prompt at a time per session, which is also
+//! what a *conversation* means. Two turns for one teammate now queue rather
+//! than corrupt each other's transcript.
+//!
+//! Two *different* teammates on one harness are unaffected: they hold
+//! different sessions and different locks, and the demultiplexing above is
+//! what keeps their updates apart.
 //!
 //! ## Sessions outlive the process that opened them
 //!
@@ -144,6 +153,12 @@ pub struct LocalAcpAgent {
     client: AsyncMutex<Option<Arc<AcpClient>>>,
     /// `session_key` (`"{company}::{agent_id}"`) → ACP `sessionId`.
     sessions: AsyncMutex<HashMap<String, String>>,
+    /// One lock per ACP `sessionId`, held for the length of a turn — see the
+    /// module docs. Handed out by [`LocalAcpAgent::session_lock`] and kept for
+    /// the agent's life: a session is few and long-lived, and dropping a lock
+    /// between turns would let a queued turn take a fresh one and race the
+    /// turn it was supposed to wait for.
+    session_locks: AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     /// `session/update` notifications, demultiplexed by ACP `sessionId` —
     /// see the module docs for why this exists at all.
     pending_updates: Arc<StdMutex<HashMap<String, Vec<Value>>>>,
@@ -172,16 +187,30 @@ pub struct LocalAcpAgent {
 /// What is written down about a (company, agent) pair's conversation, so a
 /// later process can pick it back up.
 ///
-/// Two fields and no timestamp on purpose: the adapter is the authority on
-/// whether a session still exists, and it answers that question definitively
-/// on `session/load`. A local "probably too old" heuristic could only ever
-/// throw away a session the adapter would happily have loaded.
+/// No timestamp on purpose: the adapter is the authority on whether a session
+/// still exists, and it answers that question definitively on `session/load`.
+/// A local "probably too old" heuristic could only ever throw away a session
+/// the adapter would happily have loaded.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SessionRecord {
     /// Which catalogue harness minted it — see [`LocalAcpAgent::read_session_record`].
     harness: String,
     #[serde(rename = "sessionId")]
     session_id: String,
+    /// The model this session was left on, as far as this host knows —
+    /// whether an env var carried it at spawn or a
+    /// `session/set_config_option` applied it afterwards. `None` means no
+    /// model was ever chosen and the session runs on the adapter's own
+    /// default.
+    ///
+    /// Recorded because a resumed session restores its **session-scoped**
+    /// model config, and this is the only way to notice that the config no
+    /// longer matches what the company asks for (PR #1904 review). Absent
+    /// from records written before this field existed, which `serde` reads
+    /// as `None` — the same value a never-configured session has, so an old
+    /// record resumes exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 /// Registers a live observer for one turn and removes it on drop.
@@ -251,6 +280,7 @@ impl LocalAcpAgent {
             workspace_root,
             client: AsyncMutex::new(None),
             sessions: AsyncMutex::new(HashMap::new()),
+            session_locks: AsyncMutex::new(HashMap::new()),
             pending_updates: Arc::new(StdMutex::new(HashMap::new())),
             live: Arc::new(StdMutex::new(HashMap::new())),
             load_session: std::sync::atomic::AtomicBool::new(false),
@@ -378,10 +408,27 @@ impl LocalAcpAgent {
     /// A record naming a *different* harness is ignored rather than tried: a
     /// `claude-agent-acp` session id means nothing to `codex-acp`, and the
     /// record outlives a teammate being rebound from one to the other.
-    fn read_session_record(&self, company: &CompanyId, agent_id: &str) -> Option<String> {
+    fn read_session_record(&self, company: &CompanyId, agent_id: &str) -> Option<SessionRecord> {
         let raw = std::fs::read_to_string(self.session_record_path(company, agent_id)).ok()?;
         let record: SessionRecord = serde_json::from_str(&raw).ok()?;
-        (record.harness == self.harness.id).then_some(record.session_id)
+        (record.harness == self.harness.id).then_some(record)
+    }
+
+    /// The model this teammate should be on, whatever mechanism delivers it —
+    /// its own override if it has one, else the harness's default, else the
+    /// adapter's.
+    ///
+    /// Deliberately blind to `self.env`, unlike the steering decision in
+    /// [`Self::session_for`]: this answers "what should be true of this
+    /// teammate", not "who is responsible for making it true". The env var is
+    /// one delivery mechanism among two, and a session that got its model
+    /// that way is on the same model as one that got it by
+    /// `session/set_config_option`.
+    fn desired_model(&self, agent_id: &str) -> Option<String> {
+        self.agent_models
+            .get(agent_id)
+            .cloned()
+            .or_else(|| self.model.clone())
     }
 
     /// Remembers `session_id` so the next process can resume this conversation.
@@ -391,10 +438,17 @@ impl LocalAcpAgent {
     /// beginning a fresh conversation — which is exactly what happened before
     /// any of this existed. Failing the turn over it would trade a working
     /// agent for a bookkeeping error.
-    fn write_session_record(&self, company: &CompanyId, agent_id: &str, session_id: &str) {
+    fn write_session_record(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        session_id: &str,
+        model: Option<&str>,
+    ) {
         let record = SessionRecord {
             harness: self.harness.id.to_string(),
             session_id: session_id.to_string(),
+            model: model.map(str::to_string),
         };
         let path = self.session_record_path(company, agent_id);
         let written = serde_json::to_string(&record)
@@ -438,11 +492,41 @@ impl LocalAcpAgent {
         company: &CompanyId,
         agent_id: &str,
         root: &Path,
+        desired_model: Option<&str>,
     ) -> Option<(String, Value)> {
         if !self.load_session.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
-        let session_id = self.read_session_record(company, agent_id)?;
+        let record = self.read_session_record(company, agent_id)?;
+
+        // A session whose model no longer matches, and which cannot be
+        // corrected, must not be resumed (PR #1904 review).
+        //
+        // `session/load` restores the session's own model config, and the
+        // only lever this side has for changing it is
+        // `session/set_config_option` — which needs a value to set. When an
+        // admin removes a teammate's override from a harness that declares no
+        // model of its own, the wanted state is "back to the adapter's
+        // default", and there is no value that expresses it. Resuming would
+        // silently keep the model the operator just deleted.
+        //
+        // So the conversation is given up instead, and only in that exact
+        // case: a recorded model, nothing to replace it with. Losing the
+        // history of a teammate whose model just changed is the honest cost —
+        // and a smaller surprise than a teammate that answers on a model the
+        // company no longer lists.
+        if desired_model.is_none() && record.model.is_some() {
+            tracing::info!(
+                company = %company.as_ref(),
+                agent = %agent_id,
+                was = %record.model.unwrap_or_default(),
+                "[acp] the model override was removed and no default replaces it; \
+                 starting a fresh session rather than resuming on the old model"
+            );
+            return None;
+        }
+
+        let session_id = record.session_id;
 
         // The replay this triggers arrives as ordinary `session/update`
         // notifications on the shared sink. Two things keep it out of the
@@ -525,7 +609,14 @@ impl LocalAcpAgent {
         // Resume before opening: this is the first turn *this process* runs
         // for the teammate, which is not the same thing as the first turn the
         // teammate has ever run.
-        let resumed = self.resume_session(client, company, agent_id, root).await;
+        // What this teammate should be on, decided once and used for three
+        // things: whether a remembered session is still resumable, what to
+        // steer the session to, and what to write down about it.
+        let desired = self.desired_model(agent_id);
+
+        let resumed = self
+            .resume_session(client, company, agent_id, root, desired.as_deref())
+            .await;
         let was_resumed = resumed.is_some();
         let (id, raw) = match resumed {
             Some(resumed) => resumed,
@@ -547,7 +638,6 @@ impl LocalAcpAgent {
                         )
                     })?
                     .to_string();
-                self.write_session_record(company, agent_id, &id);
                 (id, raw)
             }
         };
@@ -587,13 +677,19 @@ impl LocalAcpAgent {
         //
         // So a resumed session always falls back to the harness's own model,
         // and only a *fresh* one trusts the spawn to have handled it.
-        let harness_default = if was_resumed {
-            self.model.as_ref()
+        //
+        // So a resumed session always applies `desired`, and only a *fresh*
+        // one trusts the spawn to have handled it.
+        let to_apply = if was_resumed {
+            desired.clone()
+        } else if self.env.is_empty() {
+            desired.clone()
         } else {
-            self.env.is_empty().then_some(self.model.as_ref()).flatten()
+            // The spawn's env var carried the harness default, so only a
+            // per-agent override still needs sending.
+            self.agent_models.get(agent_id).cloned()
         };
-        let desired = self.agent_models.get(agent_id).or(harness_default);
-        if let Some(model) = desired
+        if let Some(model) = to_apply.as_deref()
             && let Some(config_id) = model_config_id(&raw, model)
         {
             client
@@ -613,8 +709,31 @@ impl LocalAcpAgent {
                 })?;
         }
 
+        // Written for both paths, and after the steering above rather than
+        // beside `session/new`: the record's job is to say which session this
+        // teammate has *and what model it is on*, and the second half is only
+        // settled here. A resumed session whose model was just corrected
+        // rewrites its record with the new value, so the next start does not
+        // see a mismatch that no longer exists.
+        self.write_session_record(company, agent_id, &id, desired.as_deref());
+
         sessions.insert(session_key.to_string(), id.clone());
         Ok(id)
+    }
+
+    /// This session's turn lock, created on first use.
+    ///
+    /// Keyed by ACP `sessionId` rather than by `session_key` because the
+    /// session is what actually gets corrupted by two concurrent prompts: it
+    /// is one conversation, one update stream, and one entry in both the
+    /// pending-update buffer and the live-observer map.
+    async fn session_lock(&self, session_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.session_locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+        )
     }
 
     /// `session_key` is `"{company}::{agent_id}"` — recovers `agent_id` by
@@ -726,6 +845,13 @@ impl AcpAgent for LocalAcpAgent {
             .session_for(&client, company, session_key, agent_id, &root)
             .await?;
 
+        // One turn at a time on this session — see the module docs. Taken
+        // before the buffer is cleared and held past the drain, so a queued
+        // turn cannot clear a running turn's updates out from under it, or
+        // displace its observer.
+        let turn_lock = self.session_lock(&session_id).await;
+        let _turn = turn_lock.lock().await;
+
         // Clear any stale buffer before the turn starts, so the drain below
         // sees exactly this turn's updates and nothing left over from one
         // that timed out or was cancelled without being read — or from a
@@ -822,19 +948,22 @@ mod test {
         let acme = CompanyId::new("acme");
         std::fs::create_dir_all(dir.path().join("acme").join("ceo")).unwrap();
 
-        assert_eq!(agent.read_session_record(&acme, "ceo"), None);
-        agent.write_session_record(&acme, "ceo", "sess-1");
+        assert!(agent.read_session_record(&acme, "ceo").is_none());
+        agent.write_session_record(&acme, "ceo", "sess-1", None);
         assert_eq!(
-            agent.read_session_record(&acme, "ceo"),
+            agent
+                .read_session_record(&acme, "ceo")
+                .map(|r| r.session_id),
             Some("sess-1".to_string())
         );
 
         // Per pair, never shared: two teammates resuming one conversation is
         // the same defect as two desks sharing a session key.
-        assert_eq!(agent.read_session_record(&acme, "cto"), None);
-        assert_eq!(
-            agent.read_session_record(&CompanyId::new("globex"), "ceo"),
-            None
+        assert!(agent.read_session_record(&acme, "cto").is_none());
+        assert!(
+            agent
+                .read_session_record(&CompanyId::new("globex"), "ceo")
+                .is_none()
         );
     }
 
@@ -847,11 +976,11 @@ mod test {
         let acme = CompanyId::new("acme");
         std::fs::create_dir_all(dir.path().join("acme").join("ceo")).unwrap();
 
-        agent(dir.path()).write_session_record(&acme, "ceo", "sess-1");
+        agent(dir.path()).write_session_record(&acme, "ceo", "sess-1", None);
 
         let codex = LocalAcpAgent::new("codex", None, HashMap::new(), dir.path().to_path_buf())
             .expect("`codex` is a catalogue harness");
-        assert_eq!(codex.read_session_record(&acme, "ceo"), None);
+        assert!(codex.read_session_record(&acme, "ceo").is_none());
     }
 
     #[test]
@@ -871,13 +1000,78 @@ mod test {
         let acme = CompanyId::new("acme");
         std::fs::create_dir_all(dir.path().join("acme").join("ceo")).unwrap();
 
-        agent.write_session_record(&acme, "ceo", "sess-dead");
-        agent.write_session_record(&acme, "ceo", "sess-new");
+        agent.write_session_record(&acme, "ceo", "sess-dead", None);
+        agent.write_session_record(&acme, "ceo", "sess-new", None);
         assert_eq!(
-            agent.read_session_record(&acme, "ceo"),
+            agent
+                .read_session_record(&acme, "ceo")
+                .map(|r| r.session_id),
             Some("sess-new".to_string()),
             "the replacement is what the next start resumes"
         );
+    }
+
+    #[test]
+    fn a_record_remembers_which_model_its_session_is_on() {
+        // Why the model is recorded at all (PR #1904 review): a resumed
+        // session restores its own *session-scoped* model config, so without
+        // this there is no way to notice the config no longer matches what
+        // the company asks for.
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent(dir.path());
+        let acme = CompanyId::new("acme");
+        std::fs::create_dir_all(dir.path().join("acme").join("ceo")).unwrap();
+
+        agent.write_session_record(&acme, "ceo", "sess-1", Some("claude-opus-4-6"));
+        let record = agent.read_session_record(&acme, "ceo").expect("written");
+        assert_eq!(record.model.as_deref(), Some("claude-opus-4-6"));
+
+        // A record written before this field existed reads as "no model ever
+        // chosen" — the same value a never-configured session has, so an old
+        // record resumes exactly as it did.
+        std::fs::write(
+            agent.session_record_path(&acme, "ceo"),
+            r#"{"harness":"claude","sessionId":"sess-old"}"#,
+        )
+        .unwrap();
+        let legacy = agent.read_session_record(&acme, "ceo").expect("still read");
+        assert_eq!(legacy.session_id, "sess-old");
+        assert_eq!(legacy.model, None);
+    }
+
+    #[test]
+    fn the_desired_model_is_the_override_then_the_harness_default() {
+        // Deliberately blind to `self.env`: this answers what should be true
+        // of the teammate, not who delivers it. A session that got its model
+        // from the spawn env is on the same model as one that got it from
+        // `session/set_config_option`, and the record must say so either way.
+        let dir = tempfile::tempdir().unwrap();
+        let mut overrides = HashMap::new();
+        overrides.insert("cto".to_string(), "claude-haiku-4-5".to_string());
+        let configured = LocalAcpAgent::new(
+            "claude",
+            Some("claude-sonnet-4-5"),
+            overrides,
+            dir.path().to_path_buf(),
+        )
+        .expect("`claude` is a catalogue harness");
+
+        assert_eq!(
+            configured.desired_model("cto").as_deref(),
+            Some("claude-haiku-4-5"),
+            "a teammate's own override wins"
+        );
+        assert_eq!(
+            configured.desired_model("ceo").as_deref(),
+            Some("claude-sonnet-4-5"),
+            "and the harness default covers everyone else — even though the \
+             spawn env is what actually carries it"
+        );
+
+        // Nothing declared anywhere: the adapter's own default, which no
+        // `session/set_config_option` can name.
+        let bare = agent(dir.path());
+        assert_eq!(bare.desired_model("ceo"), None);
     }
 
     #[test]
@@ -907,10 +1101,11 @@ mod test {
         let dir = tempfile::tempdir().unwrap();
         let agent = agent(dir.path());
         // No `acme/ceo/` directory, so the write has nowhere to land.
-        agent.write_session_record(&CompanyId::new("acme"), "ceo", "sess-1");
-        assert_eq!(
-            agent.read_session_record(&CompanyId::new("acme"), "ceo"),
-            None
+        agent.write_session_record(&CompanyId::new("acme"), "ceo", "sess-1", None);
+        assert!(
+            agent
+                .read_session_record(&CompanyId::new("acme"), "ceo")
+                .is_none()
         );
     }
 

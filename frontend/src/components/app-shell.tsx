@@ -1298,6 +1298,21 @@ export function AppShell({
   useEffect(() => {
     chatChannelByThreadRef.current = chatChannelByThread;
   }, [chatChannelByThread]);
+  /**
+   * Mirrors `openTurns` for the same reason `chatChannelByThreadRef` mirrors
+   * its map: `reReadSettledThread` needs the value as of *when its response
+   * lands*, not as of when the request started.
+   *
+   * What it guards is the live-row clear below. `settle` drops only the turn
+   * that ended and deliberately keeps a queued sibling watched, so a thread
+   * with more work still has an entry here — and a thread-wide clear that
+   * ignored it would delete the rows of a turn that is still running, on the
+   * wide window a history round trip opens (PR #1904 review).
+   */
+  const openTurnsRef = useRef(openTurns);
+  useEffect(() => {
+    openTurnsRef.current = openTurns;
+  }, [openTurns]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1379,9 +1394,18 @@ export function AppShell({
           // timeline sat under the channel claiming work was in flight until
           // the next send or a reload (PR #1904 review). Harmless while ACP
           // published no rows at all; not harmless now that it does.
-          setLiveStepsByThread((prev) =>
-            prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
-          );
+          //
+          // …but only when the thread has nothing else running. A thread can
+          // hold several detached turns, and `settle` keeps the queued ones
+          // watched; clearing unconditionally would wipe a *newer* turn's rows
+          // whenever its frames arrived while this history read was in flight,
+          // which on a round trip is a wide window. The newer turn's own
+          // settle clears them when it gets there.
+          if (!openTurnsRef.current[threadId]?.length) {
+            setLiveStepsByThread((prev) =>
+              prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+            );
+          }
           setThreads((ts) =>
             ts.map((t) => {
               if (t.id !== threadId) return t;
