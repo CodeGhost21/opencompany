@@ -1890,6 +1890,7 @@ export function AppShell({
     void client.markNotificationsRead(undefined, company).catch(refreshMentions);
   }, [client, company, refreshMentions]);
 
+  const mentionCounts = useMemo(() => {
     // `main` may be undefined while the desks/roster effect has not resolved —
     // passing a fabricated `""` would file every legacy "General"/"main"
     // mention under a channel the rail never has, invisible and unclearable.
