@@ -1627,18 +1627,15 @@ impl HarnessBrain {
             crate::runtime::advance::bounced_reason(&card.column, RunStatus::Failed, &text);
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
-        crate::runtime::advance::notify_dispatch_failed(
-            self.deps.notifications.as_deref().unwrap_or_else(|| {
-                // A task-enabled brain normally always has the company's notification
-                // store. Test-only brains may omit it, so use the inert store only for
-                // this best-effort alert path.
-                &crate::ports::notifications::NullNotificationStore
-            }),
-            &self.record().id,
-            &card.id,
-            &text,
-        )
-        .await;
+        if let Some(notifications) = self.deps.notifications.as_deref() {
+            crate::runtime::advance::notify_dispatch_failed(
+                notifications,
+                &self.record().id,
+                &card.id,
+                &text,
+            )
+            .await;
+        }
         // A refusal is a real, terminal attempt — one that spent nothing. It
         // settles like any other ending (#242), so the card's run history shows
         // "this was tried and refused, and why" rather than a gap.
