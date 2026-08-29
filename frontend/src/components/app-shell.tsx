@@ -257,6 +257,7 @@ function NotificationPanel({
   );
 }
 
+function SidebarNavigation({
   view,
   pending,
   notificationCount,
