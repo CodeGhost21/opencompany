@@ -500,7 +500,7 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
                     _ => TurnStepStatus::Running,
                 };
                 if result.is_some() {
-                    step.result = result;
+                    step.result = safe_result(result.as_deref());
                 }
             }
         }
