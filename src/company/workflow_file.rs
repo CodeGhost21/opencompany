@@ -803,7 +803,21 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
         // `validate(&raw, false)`), so a saved graph whose desk was since
         // removed must still load. The desk existence check is strict/
         // author-time only, in `workflow_create::validate_draft_against_record`.
-        owner_desk: raw.owner_desk,
+        //
+        // Normalized, though (issue #1882 review, "preserve padded stale
+        // owners"): whitespace is not part of a desk's identity, and every
+        // *write* boundary already trims through
+        // [`RawWorkflow::normalize_owner_desk`]. Leaving the read side
+        // unnormalized made a stored ` engineering ` compare unequal to the
+        // trimmed draft the same value round-trips into, which defeats the
+        // unchanged-owner grandfathering in
+        // `validate_draft_against_record` — an unrelated edit to a workflow
+        // whose padded desk went stale would be refused, and a padded desk
+        // whose display name is now taken by another desk would be silently
+        // re-resolved onto it. Trimming here makes the stored side agree with
+        // the draft side by construction, at the one place every reader of a
+        // saved graph goes through.
+        owner_desk: RawWorkflow::normalize_owner_desk(raw.owner_desk),
         nodes: raw
             .nodes
             .into_iter()
