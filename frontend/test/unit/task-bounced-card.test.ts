@@ -42,7 +42,10 @@ async function render(task: Task) {
       createElement(TaskItem, {
         task,
         dragging: false,
-        block: null,
+        rows: [],
+        askerNames: new Map(),
+        deciding: new Map(),
+        failed: {},
         now: T0,
         onOpen: () => {},
         onResume: () => {},
