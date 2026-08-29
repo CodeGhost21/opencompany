@@ -329,7 +329,12 @@ export function hasOtherOpenTurns(
   settledTurnId?: string,
 ): boolean {
   const turns = openTurns[threadId] ?? [];
-  return turns.some((turn) => !settledTurnId || turn.turnId !== settledTurnId);
+  // An id-less entry (`onSendDetached`'s row for a turn the host could not
+  // mint an id for) can never be watched or settled by the poll, so counting
+  // it here would block this clear forever (CodeRabbit, PR #1904 review).
+  return turns.some(
+    (turn) => turn.turnId && (!settledTurnId || turn.turnId !== settledTurnId),
+  );
 }
 
 export function mergeOpenTurns(
