@@ -3775,6 +3775,7 @@ mod tests {
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
+            RunCappedNodes::default(),
             RunApprovals::default(),
             RunArtifacts::default(),
             board_claim,
