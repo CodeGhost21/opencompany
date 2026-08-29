@@ -49,9 +49,11 @@ const FAILED_READ_LIMIT = 200;
 /**
  * The operator's landing page (issue #1321).
  *
- * A graph remains available at `#/company/graph`; this page concentrates on
- * what needs a person, work that stopped, and durable failed runs since the
- * last time *this browser* opened it. The boundary is browser-local because
+ * The page opens on the company graph — the picture #1321 moved off to
+ * `#/company/graph`, brought back here as a panel rather than as the whole
+ * page. Below it, and still the reason this page exists, is what needs a
+ * person: work that stopped, and durable failed runs since the last time *this
+ * browser* opened it. The full-page graph stays where #1321 put it. The boundary is browser-local because
  * the host has no persisted company-wide event read cursor yet.
  */
 export function OperatorOverview({
