@@ -5007,14 +5007,6 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
-        notifications: None,
-        ledgers: None,
-        ledger_registry: Default::default(),
-        provider: Arc::new(provider::MockProvider::default()),
-        provider_slug: "mock".to_string(),
-        serves: None,
-        context: runtime.context.clone(),
-        store: runtime.store.clone(),
         notifications: runtime.notifications().clone(),
         meter,
         workspace_root: std::env::temp_dir(),
