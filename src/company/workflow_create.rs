@@ -1646,6 +1646,9 @@ pub(crate) async fn update_company_workflow(
     expected_version: Option<&str>,
     wired_channels: Option<&[String]>,
 ) -> Result<WorkflowFile> {
+    // --- Input normalization (before validation or locking) ------------------
+    draft.owner_desk = RawWorkflow::normalize_owner_desk(draft.owner_desk.take());
+
     // --- Input validation (no lock; pure function of the draft) -------------
     validate_draft_shape(&draft)?;
 
