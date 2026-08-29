@@ -269,14 +269,7 @@ function NotificationPanel({
   onRead: (id: string) => void;
   onReadAll: () => void;
 }) {
-  const actionable = notifications.filter((n) =>
-    [
-      "dispatch_failed",
-      "approval_expired",
-      "workflow_run_started",
-      "workflow_run_finished",
-    ].includes(n.kind),
-  );
+  const actionable = notifications.filter(isOperationalNotification);
   return (
     <Popover>
       <PopoverTrigger
