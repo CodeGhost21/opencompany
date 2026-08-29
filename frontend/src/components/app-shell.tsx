@@ -2621,8 +2621,7 @@ export function AppShell({
         let idx = event.toolCallId
           ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
           : -1;
-        if (idx < 0) idx = rows.findIndex((r) => r.status === "running");
-        const status = event.status === "error" ? ("error" as const) : ("ok" as const);
+        if (idx < 0 && event.toolCallId) return prev;
         if (idx >= 0) {
           rows[idx] = {
             ...rows[idx],
