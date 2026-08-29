@@ -368,10 +368,10 @@ light mode and `#008cff` in dark mode, while the front P uses `#0070ba` in light
 mode and `#60cdff` in dark mode. The back P's dark value clears 3:1 at 5.74:1;
 its light value would measure only 1.61:1 on the dark card. The front P is the
 mirror case on the light ground: its light value clears 3:1 at 5.22:1 on the
-card. The crossing uses `#0066a8` in light mode so it remains darker than
-`#0070ba` and preserves the mark's depth cue; it clears 3:1 at 6.06:1. In
- dark mode it uses `#008cff`, the back P's value, retaining the existing
- treatment there. A two-tone mark
+white card, where its dark value would measure only 1.80:1. The crossing uses
+`#0066a8` in light mode so it remains darker than `#0070ba` and preserves the
+mark's depth cue; it clears 3:1 at 6.06:1. In dark mode it uses `#008cff`, the
+back P's value, retaining the existing treatment there. A two-tone mark
 also cannot take `currentColor`, so these are referenced as
 `fill-(--brand-paypal-*)` on the paths rather than inherited from the call site.
 
