@@ -1530,7 +1530,10 @@ impl HarnessAgentRunner {
         // `park_node_blocker` without a node-turn continuation (they are
         // questions, not gated tool calls), so they must not pass through this
         // gated-call path which journals with Some(node_turn).
-        let blocker_count = requests.iter().filter(|r| r.effect.kind.starts_with("blocker.")).count();
+        let blocker_count = requests
+            .iter()
+            .filter(|r| r.effect.kind.starts_with("blocker."))
+            .count();
         requests.retain(|r| !r.effect.kind.starts_with("blocker."));
         if blocker_count > 0 {
             tracing::warn!(

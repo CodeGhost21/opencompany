@@ -978,7 +978,9 @@ impl<'a> CycleRunner<'a> {
                     // The notification badge names the class only; the full
                     // error reason is already on the card note and in the log.
                     if column == crate::ports::tasks::COLUMN_TODO {
-                        self.rt.notify_dispatch_failed(task_id, RUN_CYCLE_FAILED_ERROR).await;
+                        self.rt
+                            .notify_dispatch_failed(task_id, RUN_CYCLE_FAILED_ERROR)
+                            .await;
                     }
                 }
                 Ok(None) => {}
