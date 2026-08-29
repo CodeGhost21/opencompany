@@ -817,7 +817,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
         // re-resolved onto it. Trimming here makes the stored side agree with
         // the draft side by construction, at the one place every reader of a
         // saved graph goes through.
-        owner_desk: raw.owner_desk,
+        owner_desk: RawWorkflow::normalize_owner_desk(raw.owner_desk),
         nodes: raw
             .nodes
             .into_iter()
