@@ -882,12 +882,6 @@ async fn run_workflow_inner(
                 &run_id,
                 &trigger_input,
                 &blocked,
-            stash_blocked_agent_nodes(
-                delivery.as_ref(),
-                &workflow.id,
-                &run_id,
-                &trigger_input,
-                &blocked,
             )
             .await;
             // Reclassify capped nodes before they move into the blocked run, the
