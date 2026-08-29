@@ -938,7 +938,10 @@ mod test {
     fn acp_results_are_reduced_to_shape_not_remote_text() {
         let secret = "API key: do-not-publish";
         let outcome = fold(turn(vec![
-            AcpUpdate::ToolCall { id: "t".into(), title: "Read".into() },
+            AcpUpdate::ToolCall {
+                id: "t".into(),
+                title: "Read".into(),
+            },
             AcpUpdate::ToolCallUpdate {
                 id: "t".into(),
                 status: "completed".into(),
