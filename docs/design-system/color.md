@@ -361,7 +361,8 @@ rather than a label it only has to clear 3:1, which it does on both grounds
 PayPal's monogram on Finance → Wallet needs five, because the mark is two
 overlapping P's and their crossing is its own colour: `--brand-paypal-back`,
 `--brand-paypal-front`, `--brand-paypal-overlap`, and themed
-`--brand-paypal-back-on-dark` / `--brand-paypal-front-on-dark` pairs. Both P
+`--brand-paypal-back-on-dark` / `--brand-paypal-front-on-dark` /
+`--brand-paypal-overlap-on-dark` pairs. Both P
 colours move between themes to preserve contrast: the back P uses `#002991` in
 light mode and `#008cff` in dark mode, while the front P uses `#0070ba` in light
 mode and `#60cdff` in dark mode. The back P's dark value clears 3:1 at 5.74:1;
