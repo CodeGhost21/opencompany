@@ -722,7 +722,7 @@ async fn run_workflow_inner(
     // on the failure/blocked arms below; `nodes` stays the output-free row list
     // the journal and `WorkflowRun.nodes` carry. A drain failure yields an empty
     // map, so a persist on that path simply records "produced none".
-    let (nodes, partial_nodes, node_transcripts): (
+    let (mut nodes, partial_nodes, node_transcripts): (
         Vec<crate::ports::WorkflowRunNodeRow>,
         serde_json::Map<String, Value>,
         serde_json::Map<String, Value>,
