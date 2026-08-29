@@ -1991,6 +1991,30 @@ mod tests {
         assert_eq!(file.owner_desk, None);
     }
 
+    /// **Regression, issue #1882 review ("preserve padded stale owners").**
+    /// A stored `owner_desk` carrying surrounding whitespace parses to the
+    /// TRIMMED value, and a blank one to `None` — the same "blank means
+    /// absent" rule [`RawWorkflow::normalize_owner_desk`] already applies at
+    /// every write boundary.
+    ///
+    /// RED-FIRST: this load path used to carry `raw.owner_desk` through
+    /// verbatim, so the stored side of the unchanged-owner comparison in
+    /// `workflow_create::validate_draft_against_record` was padded while the
+    /// draft side had been trimmed on the way in. The two never compared
+    /// equal, which defeated the grandfathering: an unrelated edit could be
+    /// refused over a stale desk, or silently re-resolved onto a different
+    /// desk that had since taken the same display name.
+    #[test]
+    fn a_padded_owner_desk_parses_trimmed_and_a_blank_one_parses_absent() {
+        let padded = format!("{LOADABLE_WORKFLOW}\nowner_desk = \"  engineering  \"");
+        let file = parse_workflow(&padded).expect("parses");
+        assert_eq!(file.owner_desk.as_deref(), Some("engineering"));
+
+        let blank = format!("{LOADABLE_WORKFLOW}\nowner_desk = \"   \"");
+        let file = parse_workflow(&blank).expect("parses");
+        assert_eq!(file.owner_desk, None, "blank is absent, not `Some(\"   \")`");
+    }
+
     /// A workflow TOML that DOES carry `owner_desk` round-trips it — the
     /// lenient load path (`validate(&raw, false)`) carries the value through
     /// unvalidated; desk existence is checked only at author time.
