@@ -129,6 +129,7 @@ function statusIcon(status: RunStatus) {
       return <Ban className="size-4" />;
     case "waiting_approval":
     case "paused":
+    case "blocked":
       return <Hourglass className="size-4" />;
     default:
       return <Loader2 className="size-4 animate-spin" />;
