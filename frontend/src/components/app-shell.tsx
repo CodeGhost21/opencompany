@@ -238,11 +238,13 @@ function SidebarNavigation({
               <span>{item.label}</span>
             </SidebarMenuButton>
             {item.view === "approvals" && pending > 0 && (
+              <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+            )}
+            {item.view === "approvals" && notificationCount > 0 && (
+              <SidebarMenuBadge className="right-8">{notificationCount}</SidebarMenuBadge>
+            )}
+            {item.view === "approvals" && pending > 0 && (
               <>
-                <SidebarMenuBadge>{pending}</SidebarMenuBadge>
-                {notificationCount > 0 && (
-                  <SidebarMenuBadge>{notificationCount}</SidebarMenuBadge>
-                )}
                 {/* Issue #1018: the badge is the sidebar's only attention
                     signal and `SidebarMenuBadge` hides itself on the
                     collapsed rail, so a collapsed sidebar said nothing was
