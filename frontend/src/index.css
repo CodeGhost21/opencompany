@@ -412,16 +412,21 @@
     /* PayPal's monogram, which is three colours rather than one: the back P,
        the front P, and the region where they cross.
 
-       The back P is the only one that moves with the theme, and it has to.
-       #002991 on the dark canvas measures 1.61:1 — under the 3:1 a mark needs,
-       and far enough under that the back P stops reading as a letter and starts
-       reading as a hole. #008cff is PayPal's own next step up and clears it at
-       5.77:1. Same argument as `--brand-discord-on-light` above: still their
-       palette, only a different step of it.
+       Both P colours move with the theme, and each has to. The back P at
+       #002991 on the dark card measures 1.61:1 — under the 3:1 a mark needs,
+       and far enough under that it stops reading as a letter and starts
+       reading as a hole. #008cff is PayPal's own next step up and clears it
+       at 5.74:1. The front P is the mirror case on the other ground: #60cdff
+       on the white card measures 1.80:1, so #0070ba is its light-theme value
+       and clears the same bar at 5.22:1. Same argument as
+       `--brand-discord-on-light` above: still their palette, only a different
+       step of it.
 
-       On dark the back P and the crossing region land on the same value, which
-       is correct — the crossing only exists to darken the front P where it
-       passes over the back one, and there is nothing left to darken. */
+       The crossing region needs no theme of its own: #008cff clears 3:1 on
+       the white card at 3.39:1, and on dark it lands on the back P's own
+       value — the crossing only exists to darken the front P where it passes
+       over the back one, and in dark mode it takes the back P's colour
+       outright. */
     --brand-paypal-back: #002991;
     --brand-paypal-back-on-dark: #008cff;
     --brand-paypal-front: #0070ba;
