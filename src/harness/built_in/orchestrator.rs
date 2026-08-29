@@ -79,6 +79,7 @@ use crate::harness::lifecycle::ReviewDecision;
 use crate::harness::workflow_refs::WorkflowRefQueue;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
+use crate::ports::notifications::NotificationStore;
 use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent};
 use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
@@ -3253,6 +3254,10 @@ pub fn orchestrator_tools(
     minter: String,
     minter_tools: Option<Vec<String>>,
     minter_grants: Vec<String>,
+    // Issue #1865: where `run_workflow` files a `workflow_run_failed`
+    // notification on a run the agent itself started — see
+    // `RunWorkflowTool::notifications` for why this is optional.
+    notifications: Option<Arc<dyn NotificationStore>>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(QueryCompanyTool::new(
         company.clone(),
@@ -3271,6 +3276,7 @@ pub fn orchestrator_tools(
         events.clone(),
         workflow_refs.clone(),
         run_outputs.clone(),
+        notifications,
     )));
     // `read_run_output` (issue #418) is the run tool's companion: it reads full
     // node output out of the same bounded cache the run tool populates, so a
@@ -3570,6 +3576,19 @@ pub struct RunWorkflowTool {
     /// so the read tool built in the same `build_agent` pass sees what this one
     /// stores. A cancelled or failed run stores nothing.
     run_outputs: RunOutputCache,
+    /// Issue #1865 (PR #1883 review comment 3877185396): where a failed run
+    /// files its `workflow_run_failed` notification, on the same terms as the
+    /// console run route, the cron scheduler, and the approval-resume path —
+    /// this tool is the one run-outcome chokepoint `WorkflowSpawn` does not
+    /// cover (see [`crate::runtime::WorkflowSpawn`]'s own `notifications` doc
+    /// comment), because an agent-started run stays inside the calling turn
+    /// rather than routing through `WorkflowSpawn::spawn`.
+    ///
+    /// `None` (the default build, and most of the tool's own tests) simply
+    /// skips the notification — the run itself still journals and answers the
+    /// tool call either way, exactly as `events` degrades above; only the
+    /// company-wide alert is lost.
+    notifications: Option<Arc<dyn NotificationStore>>,
 }
 
 impl RunWorkflowTool {
@@ -3577,8 +3596,10 @@ impl RunWorkflowTool {
     /// (`companies/<name>`, whose `workflows/` subtree holds the seed graphs),
     /// the company store (holding the runtime-authored graph bodies), the
     /// shared runner handle, the company's journal, the shared queue a
-    /// dispatched card's output link is staged on (issue #339), and the run
-    /// output cache the `read_run_output` companion reads back (issue #418).
+    /// dispatched card's output link is staged on (issue #339), the run
+    /// output cache the `read_run_output` companion reads back (issue #418),
+    /// and the company's notification store a failed run alerts through
+    /// (issue #1865).
     // Each argument is a distinct wired dependency; the tool is built from
     // exactly one place (`orchestrator_tools`), so there is nothing a parameter
     // struct would deduplicate — same rationale as `orchestrator_tools` above.
@@ -3592,6 +3613,7 @@ impl RunWorkflowTool {
         events: Option<Arc<dyn EventLog>>,
         workflow_refs: WorkflowRefQueue,
         run_outputs: RunOutputCache,
+        notifications: Option<Arc<dyn NotificationStore>>,
     ) -> Self {
         Self {
             company,
@@ -3602,6 +3624,7 @@ impl RunWorkflowTool {
             events,
             workflow_refs,
             run_outputs,
+            notifications,
         }
     }
 }
@@ -3923,6 +3946,27 @@ impl Tool for RunWorkflowTool {
                             error: message.as_str(),
                             partial: err.partial_run(),
                         }),
+                    )
+                    .await;
+                }
+                // Issue #1865 (PR #1883 review comment 3877185396): this is
+                // the second run-outcome chokepoint alongside `WorkflowSpawn`
+                // — console, scheduled, and resumed failures already file a
+                // `workflow_run_failed` notification through that type, but
+                // an agent-started run never routed through it (see
+                // `WorkflowSpawn`'s own `notifications` doc comment) and so
+                // stayed silent to every operator not watching this turn.
+                // Fired unconditionally like the journal write above, not
+                // gated on it landing — the two are independent stores, and a
+                // journal miss must not also cost the alert.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    crate::runtime::file_run_unhealthy_notification(
+                        notifications,
+                        &self.company,
+                        &wid,
+                        &ctx.run_id,
+                        "failed",
+                        crate::runtime::RUN_FAILED_DETAIL,
                     )
                     .await;
                 }
@@ -7867,6 +7911,29 @@ name = "Morning"
         }
     }
 
+    /// A [`WorkflowRunner`] test double whose `run` always returns `Err` — the
+    /// engine-failed shape issue #1865's review comment 3877185396 flagged as
+    /// silent: `RunWorkflowTool`'s `Ok(Err(err))` arm journaled a finish but
+    /// filed no `workflow_run_failed` notification, unlike the console run
+    /// route, the cron scheduler, and the approval-resume path, which all
+    /// file one through `WorkflowSpawn`.
+    struct FailingRunner;
+
+    #[async_trait::async_trait]
+    impl WorkflowRunner for FailingRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &crate::ports::WorkflowRunContext,
+        ) -> crate::Result<WorkflowRun> {
+            Err(crate::error::OpenCompanyError::Harness(
+                "the engine blew up".to_string(),
+            ))
+        }
+    }
+
     /// Writes `DEMO_WF` to `<dir>/workflows/demo.toml`.
     fn seed_demo_workflow(dir: &std::path::Path) {
         let wf = dir.join("workflows");
@@ -7920,6 +7987,7 @@ name = "Morning"
             "ceo".to_string(),
             None,
             vec!["fs:*".to_string()],
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's
@@ -7992,6 +8060,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo", "input": { "seed": 1 } }))
@@ -8038,6 +8107,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8074,6 +8144,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             unwired
@@ -8096,6 +8167,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             unknown
@@ -8140,6 +8212,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8177,6 +8250,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8251,6 +8325,7 @@ name = "Morning"
             None,
             refs,
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8306,6 +8381,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8313,6 +8389,65 @@ name = "Morning"
             .expect("execute");
         assert!(result.is_error, "expected an error result");
         assert!(result.output_for_llm(false).contains("wired"), "{result:?}");
+    }
+
+    /// Issue #1865 (PR #1883 review comment 3877185396): an agent-started run
+    /// that the engine returns `Err` on is the second run-outcome chokepoint
+    /// `WorkflowSpawn` does not cover — console, scheduled, and resumed
+    /// failures all file a `workflow_run_failed` notification through that
+    /// type, but this tool's own `Ok(Err(err))` arm used to journal a finish
+    /// and stop, leaving every agent-started failure invisible to an operator
+    /// not watching this turn. Reused `crate::store::FsOps` as the
+    /// notification-store double, the same one `WorkflowSpawn`'s own
+    /// equivalent test (`a_failed_run_does_not_leak_the_raw_engine_error_into_its_notification`
+    /// in `runtime::workflow_spawn`) uses.
+    #[tokio::test]
+    async fn run_workflow_tool_files_a_notification_when_the_engine_run_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(FailingRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let company = CompanyId::new("acme");
+        let notifications: Arc<dyn NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+
+        let tool = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "the engine failed: {result:?}");
+
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        let failed = notes
+            .iter()
+            .find(|n| n.notification.kind == "workflow_run_failed")
+            .expect(
+                "an agent-started run that fails must file the same durable notification a \
+                 console, scheduled, or resumed run does",
+            );
+        assert!(
+            failed
+                .notification
+                .title
+                .contains(crate::runtime::RUN_FAILED_DETAIL),
+            "{:?}",
+            failed.notification.title
+        );
     }
 
     #[tokio::test]
@@ -8332,6 +8467,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "nope" }))
@@ -8355,6 +8491,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool.execute(json!({})).await.expect("execute");
         assert!(result.is_error);
@@ -8378,6 +8515,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "../secrets" }))
@@ -8492,6 +8630,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = run
             .execute(json!({ "id": "greeter" }))
@@ -8561,6 +8700,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
 
         let result = run
@@ -8640,6 +8780,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             !run.execute(json!({ "id": "greeter" }))
@@ -8742,6 +8883,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = run
             .execute(json!({ "id": "hosted" }))
@@ -9301,6 +9443,7 @@ name = "Morning"
             None,
             refs,
             cache,
+            None,
         );
         (tool, runner)
     }
