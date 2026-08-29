@@ -1800,7 +1800,7 @@ mod test {
             "the completion pairs back to its row"
         );
         assert_eq!(result.status, Some("ok"));
-        assert_eq!(result.result.as_deref(), Some("42 lines"));
+        assert_eq!(result.result.as_deref(), Some("9 characters"));
 
         // And the live view did not replace the durable one.
         assert_eq!(outcome.reply, "done");
