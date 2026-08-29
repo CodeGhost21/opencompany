@@ -4327,6 +4327,75 @@ description = "Runs Acme."
     }
 
     #[tokio::test]
+    async fn schedule_fired_journals_a_budget_pause_notice() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let outcome = crate::harness::built_in::TurnOutcome {
+            reply: "checkpoint".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            // Test fixture, not the ACP fold (PR #1880 review).
+            abnormal_stop: None,
+            // Issue #1906: this fixtures a BUDGET pause, not a spend halt — the
+            // halt sibling is pinned by `schedule_fired_journals_halt_notices`.
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: "ceo".to_string(),
+                summary: "the provider is exhausted".to_string(),
+            }),
+        };
+        let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
+            .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
+                outcome,
+                approval_requests: None,
+            })));
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        // Issue #1906: a scheduled tick that pauses for lack of credits must
+        // not present the interrupted turn as a completed answer — the primary
+        // bubble carries the pause placeholder and a system notice follows it.
+        assert_eq!(result.channel_responses.len(), 2);
+        assert_eq!(
+            result.channel_responses[0].text,
+            BUDGET_PAUSED_PLACEHOLDER_REPLY
+        );
+        assert!(
+            result.channel_responses[1]
+                .text
+                .starts_with(BUDGET_PAUSE_NOTICE_PREFIX)
+        );
+        assert!(
+            result
+                .channel_responses
+                .iter()
+                .skip(1)
+                .all(|response| response.agent.as_deref() == Some(crate::ports::SYSTEM_AUTHOR))
+        );
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let replies: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.event, CompanyEvent::AgentReply { .. }))
+            .collect();
+        assert_eq!(replies.len(), 2, "the pause placeholder and notice are durable");
+    }
+
+    #[tokio::test]
     async fn schedule_fired_journals_approval_overflow_notice() {
         use crate::ports::EventLog;
         use crate::ports::types::EventSeq;
