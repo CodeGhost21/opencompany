@@ -7,6 +7,7 @@ import type { LocalScope } from "@/connections/types";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { commitOverviewVisit, openOverviewVisit } from "@/lib/overview-visit";
 import { chatHref } from "@/lib/run-source";
+import { PageHeader } from "@/components/page-header";
 
 /**
  * The company graph, drawn as this page's first panel.
@@ -14,10 +15,9 @@ import { chatHref } from "@/lib/run-source";
  * Lazy for the same reason the graph lazies its own physics: the landing page's
  * job is to paint what needs a person, and a cold load should not wait on the
  * force simulation — or on the six reads the graph takes — to do it. The panel
- * below reserves its height, so the frame does not jump when the chunk lands.
+ * below states its own height, so the frame does not jump when the chunk lands.
  */
 const Overview = lazy(() => import("@/views/Overview").then((m) => ({ default: m.Overview })));
-import { PageHeader } from "@/components/page-header";
 
 interface Props {
   client: OpenCompanyClient;
@@ -53,8 +53,9 @@ const FAILED_READ_LIMIT = 200;
  * `#/company/graph`, brought back here as a panel rather than as the whole
  * page. Below it, and still the reason this page exists, is what needs a
  * person: work that stopped, and durable failed runs since the last time *this
- * browser* opened it. The full-page graph stays where #1321 put it. The boundary is browser-local because
- * the host has no persisted company-wide event read cursor yet.
+ * browser* opened it — a boundary that is browser-local because the host has no
+ * persisted company-wide event read cursor yet. The full-page graph stays where
+ * #1321 put it, and the panel's header links to it.
  */
 export function OperatorOverview({
   client,
@@ -292,7 +293,10 @@ export function OperatorOverview({
               </div>
             }
           >
-            <Overview client={client} company={company} companyName={companyName} embedded />
+            {/* No `companyName`: this page stopped taking one when its header
+                became `PageHeader`, and the graph's own fallback chain names
+                the core node from the company slug when it is not given. */}
+            <Overview client={client} company={company} embedded />
           </Suspense>
         </div>
       </section>
