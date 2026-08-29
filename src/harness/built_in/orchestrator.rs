@@ -3598,6 +3598,7 @@ impl RunWorkflowTool {
         events: Option<Arc<dyn EventLog>>,
         workflow_refs: WorkflowRefQueue,
         run_outputs: RunOutputCache,
+        notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
     ) -> Self {
         Self {
             company,
@@ -3608,6 +3609,7 @@ impl RunWorkflowTool {
             events,
             workflow_refs,
             run_outputs,
+            notifications,
         }
     }
 }
