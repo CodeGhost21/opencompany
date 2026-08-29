@@ -285,18 +285,6 @@ pub struct HarnessDeps {
     /// written either way, so an unwired artifact store loses nothing that
     /// existed previously.
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
-    /// The company's notification store, so the orchestrator's `run_workflow`
-    /// tool can file a `workflow_run_failed` notification on the same terms as
-    /// the console run route, the cron scheduler, and the approval-resume path
-    /// (issue #1865, PR #1883 review comment 3877185396) — that tool is the
-    /// one run-outcome chokepoint `WorkflowSpawn` does not cover, since an
-    /// agent-started run stays inside the calling turn rather than routing
-    /// through `WorkflowSpawn::spawn` (see that type's own `notifications`
-    /// doc comment). `None` — the default build, and most of this struct's
-    /// test constructions — simply skips the notification, exactly as `tasks`
-    /// and `artifacts` degrade above: the run itself still journals and
-    /// answers the tool call either way, only the company-wide alert is lost.
-    pub notifications: Option<Arc<dyn NotificationStore>>,
     /// The company's ledgers, so an agent can read what has already been
     /// decided, goaled or ruled out, record what it decides, and declare an axis
     /// nobody anticipated. `None` builds no ledger tools at all — which is right
