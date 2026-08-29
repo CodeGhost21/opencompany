@@ -78,9 +78,16 @@ Four things make the attempt safe to make unconditionally:
   refuse the same situation with different codes. `claude-agent-acp` answers
   `Resource not found` (`-32002`); `codex-acp` answers `Internal error`
   (`-32603`, `data.details = "no rollout found for thread id …"`). Matching on
-  a code would have left one of them hard-failing an operator's turn. The
-  record is dropped either way, so the next cold start does not re-spend the
-  round trip.
+  a code would have left one of them hard-failing an operator's turn.
+- **The record is kept when a load fails, not dropped.** `Gone` (the adapter
+  exited) and `Io` (a failed stdio write) are failures of the *transport*, and
+  neither says the session is invalid — while the `session/new` that follows
+  is about to fail against that same dead client, which would leave the next
+  start with nothing to resume. So nothing deletes the record; a successful
+  `session/new` overwrites it. A session that really is gone is therefore
+  replaced rather than retried forever, and the cost of a genuinely dead
+  record is one refused load per cold start, only while every `session/new` is
+  also failing.
 - **A session is not loadable until it has completed a turn.** Both adapters
   refuse an id that was minted by `session/new` and never prompted — there is
   no rollout to replay yet. The record is written at `session/new` regardless,

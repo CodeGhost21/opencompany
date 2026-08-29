@@ -79,6 +79,22 @@ use crate::turn_stream::{LiveRoute, TurnStreamCtx, TurnStreamEvent};
 /// [`RunTurn`] over an [`AcpAgent`].
 pub struct AcpRunTurn {
     agent: Arc<dyn AcpAgent>,
+    /// One lock per session key, so a teammate runs one turn at a time *here*
+    /// as well as in the transport.
+    ///
+    /// The transport holds its own lock over the same property, and both are
+    /// wanted, because they protect different things. The transport's guards
+    /// transport state — the update buffer and the observer registry — for any
+    /// caller at all. This one exists because **cancellation only makes sense
+    /// at this layer**: `session/cancel` names a session, not a turn, so a
+    /// cancel forwarded by a turn that has not started yet lands on whichever
+    /// turn currently owns the session and stops *that* one instead
+    /// (PR #1904 review).
+    ///
+    /// Holding the slot here means a turn only ever forwards a cancel while
+    /// its own prompt is the one in flight, and a turn cancelled while still
+    /// queued simply never runs.
+    turn_locks: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Per-turn state the live mapping carries between updates.
@@ -222,7 +238,20 @@ fn observer_for(ctx: Option<TurnStreamCtx>) -> Option<AcpObserver> {
 
 impl AcpRunTurn {
     pub fn new(agent: Arc<dyn AcpAgent>) -> Self {
-        Self { agent }
+        Self {
+            agent,
+            turn_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// This session key's turn slot, created on first use.
+    fn turn_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.turn_locks.lock().expect("acp turn locks");
+        Arc::clone(
+            locks
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 
     /// The session an agent's turns share.
@@ -260,6 +289,10 @@ impl AcpRunTurn {
         stream: Option<TurnStreamCtx>,
     ) -> Result<TurnOutcome> {
         let key = Self::session_key(company, agent_id);
+        let slot = self.turn_lock(&key);
+        // An unsteerable turn simply waits its turn; there is no cancel to
+        // race, so nothing more is needed here.
+        let _slot = slot.lock().await;
         let observer = observer_for(stream);
         let turn = self
             .agent
@@ -708,6 +741,30 @@ impl AcpRunTurn {
             rpc: cancel_rpc,
         } = bounds;
         let key = Self::session_key(company, agent_id);
+
+        // Wait for this teammate's turn slot **steerably**. A turn cancelled
+        // while it is still queued must never reach the adapter: its cancel
+        // would name the session, which at that moment belongs to whichever
+        // turn is actually running, and would stop that one instead. So a
+        // cancel here ends this turn where it stands — nothing was started, so
+        // there is nothing to stop.
+        //
+        // `SteerControl` is poll-shaped rather than awaitable, so this polls
+        // on the same cadence the running turn does below.
+        let slot = self.turn_lock(&key);
+        let _slot = loop {
+            tokio::select! {
+                slot = slot.lock() => break slot,
+                () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                    if control.pending().is_some() {
+                        return Err(OpenCompanyError::InvalidRequest(
+                            "the turn was cancelled before it started".to_string(),
+                        ));
+                    }
+                }
+            }
+        };
+
         // Held for the whole select below: the observer must outlive every
         // branch, including the post-cancel grace wait, or a turn that keeps
         // producing updates after a cancel would stop streaming them at the
@@ -1400,6 +1457,79 @@ mod test {
             2,
             "one cancel on the steer, one best-effort nudge on the way out"
         );
+    }
+
+    #[tokio::test]
+    async fn a_turn_cancelled_before_it_starts_never_reaches_the_agent() {
+        // The sharp edge serialising turns introduced (PR #1904 review):
+        // `session/cancel` names a *session*, not a turn. A queued turn that
+        // forwarded its cancel would stop whichever turn currently owns the
+        // session — an unrelated turn, still working.
+        //
+        // Driven by holding the slot with a turn that never finishes, so the
+        // second turn is unambiguously still queued when it is cancelled.
+        let agent = Arc::new(Scripted {
+            turn: AcpTurn {
+                updates: vec![],
+                stop_reason: "end_turn".into(),
+            },
+            hang: true,
+            hold_for_cancel: false,
+            cancel_hangs: false,
+            cancel_fails: false,
+            cancels: Default::default(),
+            cancel_started: tokio::sync::Notify::new(),
+        });
+        let cancels = agent.cancels.clone();
+        let run_turn = Arc::new(AcpRunTurn::new(agent));
+        let company = CompanyId::new("acme");
+
+        // The lock owner: hangs forever, holding the slot.
+        let owner = {
+            let run_turn = Arc::clone(&run_turn);
+            let company = company.clone();
+            tokio::spawn(async move {
+                let control = crate::company::steer::SteerControl::new();
+                run_turn
+                    .run_steered(
+                        &company,
+                        "ceo",
+                        "first",
+                        &control,
+                        ChatTarget::default(),
+                        None,
+                    )
+                    .await
+            })
+        };
+        // Let it take the slot before the queued turn asks for it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let queued = crate::company::steer::SteerControl::new();
+        queued.request(crate::company::steer::SteerAction::Cancel);
+        let err = run_turn
+            .run_steered(
+                &company,
+                "ceo",
+                "second",
+                &queued,
+                ChatTarget::default(),
+                None,
+            )
+            .await
+            .expect_err("a turn cancelled while queued does not run");
+
+        assert!(
+            format!("{err}").contains("cancelled before it started"),
+            "the error says it never started: {err}"
+        );
+        assert_eq!(
+            cancels.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "and no cancel reached the agent, which would have stopped the OTHER turn"
+        );
+
+        owner.abort();
     }
 
     #[test]

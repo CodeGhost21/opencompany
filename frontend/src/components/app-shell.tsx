@@ -2178,9 +2178,20 @@ export function AppShell({
       // `onSendEnd` does this for a turn this console POSTed; a turn it did not
       // has no send to end, and without this its rows would sit under the
       // channel until the next turn on the same thread replaced them.
-      setLiveStepsByThread((prev) =>
-        prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
-      );
+      //
+      // Guarded on the same condition `reReadSettledThread` uses, and for the
+      // same reason (PR #1904 review): a thread can hold several detached
+      // turns, and this clear is thread-wide. An earlier turn's reply landing
+      // while a later one is still working would erase the rows of the turn
+      // that is *currently* running — which reads as a teammate that stopped,
+      // the exact appearance this timeline exists to prevent. The rows left
+      // standing belong to work that really happened, and the open turn's own
+      // settle clears them.
+      if (!openTurnsRef.current[event.chatId]?.length) {
+        setLiveStepsByThread((prev) =>
+          prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
+        );
+      }
     },
     // `useEvents` holds its callbacks in refs, so this identity churning as the
     // map lands cannot re-open the SSE stream.
