@@ -31,6 +31,8 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  Sidebar,
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
