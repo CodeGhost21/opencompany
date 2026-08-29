@@ -164,6 +164,7 @@ pub(crate) use workflow_scheduler::workflow_schedule_id;
 // and by the panic-path catch_unwind handler, which is unconditional. The
 // re-export is therefore unconditional to avoid resolution errors when
 // orchestrator is compiled without the openhuman feature.
+#[allow(unused_imports)]
 pub(crate) use workflow_spawn::PANICKED_BEFORE_FINISH;
 pub use workflow_spawn::WorkflowSpawn;
 pub use workspace_events::WorkspaceAnnouncer;
