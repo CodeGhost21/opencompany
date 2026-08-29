@@ -3664,11 +3664,6 @@ async fn list_runs(
     // rows are reclassified in memory by the runner, but the journal can contain
     // an earlier `ok` node event. A progress-drain failure still retains this
     // fact rather than allowing history to become green.
-    let degraded = !run.nodes.is_empty()
-        && run
-            .nodes
-            .iter()
-            .any(|n| n.status == WorkflowNodeStatus::Error);
     // settled every open row, after the #1009 cross-check has flipped the dead
     // ones to `error: INTERRUPTED_BY_RESTART`, and (issue #1189) after the
     // reconciliation above.
@@ -3682,6 +3677,11 @@ async fn list_runs(
     // moved underneath it: the exact staleness a *stored* verdict would have,
     // reintroduced by placement.
     for run in &mut runs {
+        run.degraded = run.degraded || (!run.nodes.is_empty()
+            && run
+                .nodes
+                .iter()
+                .any(|n| n.status == WorkflowNodeStatus::Error));
         run.verdict = run.derive_verdict();
     }
 
