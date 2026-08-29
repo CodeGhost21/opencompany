@@ -934,7 +934,21 @@ mod test {
     }
 
     #[test]
-    fn a_tool_only_turn_gets_a_generic_reply_not_raw_tool_titles() {
+    fn acp_results_are_reduced_to_shape_not_remote_text() {
+        let secret = "API key: do-not-publish";
+        let outcome = fold(turn(vec![
+            AcpUpdate::ToolCall { id: "t".into(), title: "Read".into() },
+            AcpUpdate::ToolCallUpdate {
+                id: "t".into(),
+                status: "completed".into(),
+                result: Some(secret.into()),
+            },
+        ]));
+        assert_eq!(outcome.steps[0].result.as_deref(), Some("23 characters"));
+        assert!(!outcome.steps[0].result.as_deref().unwrap().contains(secret));
+    }
+
+
         // No MessageChunk at all — the agent's entire turn was tool calls.
         // PR #1880 review: the reply must not copy the tools' raw ACP titles
         // — unlike the built-in harness's step label, a title comes straight
