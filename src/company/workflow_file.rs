@@ -2006,11 +2006,17 @@ mod tests {
     /// desk that had since taken the same display name.
     #[test]
     fn a_padded_owner_desk_parses_trimmed_and_a_blank_one_parses_absent() {
-        let padded = format!("{LOADABLE_WORKFLOW}\nowner_desk = \"  engineering  \"");
+        let padded = LOADABLE_WORKFLOW.replace(
+            "id = \"valid\"",
+            "id = \"valid\"\n        owner_desk = \"  engineering  \"",
+        );
         let file = parse_workflow(&padded).expect("parses");
         assert_eq!(file.owner_desk.as_deref(), Some("engineering"));
 
-        let blank = format!("{LOADABLE_WORKFLOW}\nowner_desk = \"   \"");
+        let blank = LOADABLE_WORKFLOW.replace(
+            "id = \"valid\"",
+            "id = \"valid\"\n        owner_desk = \"   \"",
+        );
         let file = parse_workflow(&blank).expect("parses");
         assert_eq!(file.owner_desk, None, "blank is absent, not `Some(\"   \")`");
     }
