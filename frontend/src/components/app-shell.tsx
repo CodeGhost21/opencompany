@@ -1879,7 +1879,16 @@ export function AppShell({
     refreshMentions();
   }, [feed.now, refreshMentions]);
 
-  const mentionCounts = useMemo(() => {
+  const notificationItems = mentionFeed.filter((n) => n.kind !== "mention");
+  const markNotificationRead = useCallback((id: string) => {
+    setMentionFeed((items) => items.map((n) => n.id === id ? { ...n, readAt: Date.now() } : n));
+    void client.markNotificationsRead([id], company).catch(refreshMentions);
+  }, [client, company, refreshMentions]);
+  const markAllNotificationsRead = useCallback(() => {
+    setMentionFeed((items) => items.map((n) => n.kind !== "mention" ? { ...n, readAt: Date.now() } : n));
+    void client.markNotificationsRead(undefined, company).catch(refreshMentions);
+  }, [client, company, refreshMentions]);
+
     // `main` may be undefined while the desks/roster effect has not resolved —
     // passing a fabricated `""` would file every legacy "General"/"main"
     // mention under a channel the rail never has, invisible and unclearable.
