@@ -1094,6 +1094,13 @@ export function ChatView({
   }, [client, company]);
   useEffect(() => {
     let live = true;
+    // Issue #1906: `budgetPauseMessageIdByAgent` now also holds NO-RESEND
+    // notices, so this can read back a marker for a notice that will never
+    // draw a CTA to spend it. That is one wasted GET on a rare path, and the
+    // alternative — filtering to redeemable notices here — would rebuild the
+    // very blind spot the widened scan exists to remove, since "which notice
+    // is latest" and "which notice gets a button" have to be answered by the
+    // same map or an older notice's CTA goes stale-but-enabled again.
     for (const [agentId, messageId] of budgetPauseMessageIdByAgent) {
       if (budgetPauseMarkerByNotice.has(messageId)) continue;
       void client

@@ -178,9 +178,17 @@ pub(crate) fn budget_pause_notice(pause: &crate::harness::BudgetPause) -> String
 /// second (the marker exists and is refused). This prefix carries the SAME
 /// information and deliberately does not match the console's
 /// `isBudgetPauseNotice`, so the notice renders as an ordinary system bubble
-/// with no unusable action on it. Pinned by
-/// `a_confined_copilot_pause_offers_no_redeem_cta` and
-/// `an_approval_continuation_pause_offers_no_redeem_cta`.
+/// with no unusable action on it.
+///
+/// Each arm is pinned where it chooses:
+/// `a_confined_copilot_pause_offers_no_redeem_cta` calls `confined_turn_bubble`,
+/// and
+/// `a_budget_paused_approval_continuation_surfaces_the_notice_and_parks_a_marker`
+/// drives a real continuation and reads the bubble it emits. The builder alone
+/// is pinned by `the_no_resend_notice_builder_uses_the_non_redeemable_prefix`,
+/// which is all it ever pinned — issue #1906 renamed it from
+/// `an_approval_continuation_pause_offers_no_redeem_cta`, a name that promised
+/// the arm above's coverage for a test that runs no continuation.
 pub(crate) const BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX: &str =
     "⏸ Paused — out of credits (add credits, then start this again):";
 
@@ -3375,6 +3383,16 @@ impl HarnessBrain {
                     // here with a short, honest placeholder so the authored
                     // bubble never claims words the teammate did not produce,
                     // and the full explanation lives in exactly one place.
+                    //
+                    // Issue #1906: this override is WHOLESALE, and that is the
+                    // fact the delegation layer has to be written against. It
+                    // discards the CEO relay's reply, and it discarded #1886's
+                    // fold of the delegates' text — anything appended to
+                    // `OperatorTurn::reply` upstream is unreachable from here
+                    // on any paused turn. If a delegate's own words should ever
+                    // reach the operator through a pause, they need a channel
+                    // of their own (a sibling bubble), not more text on a
+                    // string this line replaces.
                     if turn.budget_paused.is_some() {
                         operator_reply = BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string();
                     }
@@ -3681,21 +3699,29 @@ impl HarnessBrain {
                         // separate facts (issue #885).
                         channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
                         agent: Some(responder.clone()),
-                        text: turn.reply,
+                        text: if turn.budget_paused.is_some() {
+                            BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string()
+                        } else {
+                            turn.reply
+                        },
                         reply_to: None,
                         steps: turn.steps,
                         mentions: Vec::new(),
                     }];
                     responses.extend(turn.bubbles);
-                    // Issue #926/#1032, scheduled edition: a turn that paused at
-                    // its step cap or halted for spend says so in its own
-                    // sibling bubble, exactly as the operator path does. Here
-                    // the journal is the turn's only durable record — the
-                    // operator channel is in-memory for a cron tick — so
-                    // omitting them would present interrupted scheduled work as
-                    // a completed answer. Unauthored on the operator path; here
-                    // they must carry an author to be journaled at all, so they
-                    // take the same system author `system_notice` uses.
+                    // Issue #926/#1032/#1846, scheduled edition: a turn that
+                    // paused at its step cap, halted for spend, or paused for
+                    // lack of budget says so in its own sibling bubble, exactly
+                    // as the operator path does. Here the journal is the turn's
+                    // only durable record — the operator channel is in-memory
+                    // for a cron tick — so omitting them would present
+                    // interrupted scheduled work as a completed answer.
+                    // Unauthored on the operator path; here they must carry an
+                    // author to be journaled at all, so they take the same
+                    // system author `system_notice` uses. Separate `if`s, not
+                    // `else`s, mirroring the operator path: the flags are
+                    // sticky across the turns one tick runs, and each notice is
+                    // owed even when another fires.
                     if turn.hit_iteration_cap {
                         responses.push(OutboundMessage {
                             message_id: None,
@@ -3720,6 +3746,21 @@ impl HarnessBrain {
                             mentions: Vec::new(),
                         });
                     }
+                    if let Some(pause) = &turn.budget_paused {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: budget_pause_notice(pause),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    // The pause placeholder and notices are journaled here — a
+                    // scheduled turn's journal is its only durable record, and
+                    // no live operator is reading the in-memory channel.
                     // Drain what the scheduled turn published (#445) and file it
                     // onto the card the turn opened — or a freshly minted one —
                     // exactly as an operator turn's publish is filed.
@@ -4281,6 +4322,79 @@ description = "Runs Acme."
             .filter(|event| matches!(event.event, CompanyEvent::AgentReply { .. }))
             .collect();
         assert_eq!(replies.len(), 3, "all scheduled notices are durable");
+    }
+
+    #[tokio::test]
+    async fn schedule_fired_journals_a_budget_pause_notice() {
+        use crate::ports::EventLog;
+        use crate::ports::types::EventSeq;
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let outcome = crate::harness::built_in::TurnOutcome {
+            reply: "checkpoint".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            // Test fixture, not the ACP fold (PR #1880 review).
+            abnormal_stop: None,
+            // Issue #1906: this fixtures a BUDGET pause, not a spend halt — the
+            // halt sibling is pinned by `schedule_fired_journals_halt_notices`.
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: "ceo".to_string(),
+                summary: "the provider is exhausted".to_string(),
+            }),
+        };
+        let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
+            .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
+                outcome,
+                approval_requests: None,
+            })));
+        let result = brain
+            .run_cycle(
+                request(vec![CompanyEvent::ScheduleFired {
+                    cron: "0 9 * * *".into(),
+                    prompt: "daily standup".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        // Issue #1906: a scheduled tick that pauses for lack of credits must
+        // not present the interrupted turn as a completed answer — the primary
+        // bubble carries the pause placeholder and a system notice follows it.
+        assert_eq!(result.channel_responses.len(), 2);
+        assert_eq!(
+            result.channel_responses[0].text,
+            BUDGET_PAUSED_PLACEHOLDER_REPLY
+        );
+        assert!(
+            result.channel_responses[1]
+                .text
+                .starts_with(BUDGET_PAUSE_NOTICE_PREFIX)
+        );
+        assert!(
+            result
+                .channel_responses
+                .iter()
+                .skip(1)
+                .all(|response| response.agent.as_deref() == Some(crate::ports::SYSTEM_AUTHOR))
+        );
+        let events = log
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let replies: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.event, CompanyEvent::AgentReply { .. }))
+            .collect();
+        assert_eq!(
+            replies.len(),
+            2,
+            "the pause placeholder and notice are durable"
+        );
     }
 
     #[tokio::test]
@@ -11341,11 +11455,20 @@ agent = "claude"
     /// Emitting `BUDGET_PAUSE_NOTICE_PREFIX` therefore put a button on screen
     /// that reserved the marker, restored it, and failed — every single click.
     ///
-    /// This pins the notice BUILDER rather than driving a whole continuation:
-    /// the defect is entirely in which prefix that arm chooses, and the two
-    /// constants are what the console branches on.
+    /// Issue #1906: this pins the notice BUILDER only, and its name now says
+    /// so. It calls `budget_pause_notice_no_resend` directly and asserts the
+    /// result starts with the constant that function formats with — a
+    /// tautology over `format!`. Revert the continuation arm at
+    /// `run_steered_background`'s tail to `budget_pause_notice` and this test
+    /// still passes, so the name it used to carry — "an approval continuation
+    /// pause offers no redeem CTA" — promised coverage it does not provide.
+    /// That coverage is real and lives in
+    /// `a_budget_paused_approval_continuation_surfaces_the_notice_and_parks_a_marker`,
+    /// which drives the continuation and reads the bubble it emits. Kept under
+    /// the honest name anyway: it is the cheap guard on the builder itself,
+    /// which is what the console branches on.
     #[test]
-    fn an_approval_continuation_pause_offers_no_redeem_cta() {
+    fn the_no_resend_notice_builder_uses_the_non_redeemable_prefix() {
         let pause = crate::harness::BudgetPause {
             agent: "maya".to_string(),
             summary: "Add credits to your account, then start this again.".to_string(),
@@ -11377,7 +11500,11 @@ agent = "claude"
     /// redeemable prefix were ever edited to become a prefix of the
     /// non-redeemable one, every no-resend notice would silently regain the
     /// broken CTA. Cheap coupling test, mirrored on the frontend by
-    /// `isBudgetPauseNotice`'s own fixtures.
+    /// `budget-pause-notice.test.ts`'s "does not match the NO-RESEND sibling
+    /// prefix" fixture — which asserts the negative against the real
+    /// `BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX` string rather than an invented
+    /// near-miss (issue #1906: the claim was made here before that fixture
+    /// existed).
     #[test]
     fn the_redeemable_and_no_resend_prefixes_are_not_prefixes_of_each_other() {
         assert!(

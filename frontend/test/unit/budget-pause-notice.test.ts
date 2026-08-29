@@ -29,11 +29,13 @@ vi.mock("sonner", () => {
 const {
   budgetProximityExpiresAt,
   handleEvent,
+  isAnyBudgetPauseNotice,
   isBudgetPauseNotice,
   isBudgetPauseNoticeSuperseded,
   isBudgetProximityExpired,
   nextUtcMidnightAfter,
   parseBudgetPauseAgent,
+  BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX,
   BUDGET_PAUSE_NOTICE_PREFIX,
   BUDGET_PROXIMITY_TTL_MS,
 } = await import("@/hooks/use-events");
@@ -64,6 +66,59 @@ describe("isBudgetPauseNotice", () => {
     expect(isBudgetPauseNotice("You have 100 remaining credits this month.")).toBe(false);
     expect(isBudgetPauseNotice("Paused — waiting for your review.")).toBe(false);
     expect(isBudgetPauseNotice("")).toBe(false);
+  });
+
+  // Issue #1906: the host's own
+  // `the_redeemable_and_no_resend_prefixes_are_not_prefixes_of_each_other`
+  // claims this side mirrors it. It did not — nothing under `test/` carried
+  // the no-resend string at all, so the "the near-miss is the mechanism"
+  // contract was pinned on one side only. Asserted against the REAL constant
+  // rather than a hand-typed near-miss: an invented lookalike would keep
+  // passing after a host edit that made the two prefixes overlap for real.
+  it("does not match the NO-RESEND sibling prefix — that notice gets no CTA", () => {
+    const noResend =
+      `${BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX} Paused — maya's turn ran out of inference ` +
+      "budget/credits, so it stopped instead of failing silently.";
+    expect(isBudgetPauseNotice(noResend)).toBe(false);
+    expect(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX.startsWith(BUDGET_PAUSE_NOTICE_PREFIX)).toBe(false);
+    expect(BUDGET_PAUSE_NOTICE_PREFIX.startsWith(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX)).toBe(false);
+  });
+});
+
+describe("isAnyBudgetPauseNotice", () => {
+  // Issue #1906: the supersession question ("did a pause park a marker for
+  // this agent") is not the render question ("does this notice get a
+  // button"), and conflating them is what stranded an enabled CTA.
+  it("matches BOTH prefixes", () => {
+    expect(
+      isAnyBudgetPauseNotice(
+        `${BUDGET_PAUSE_NOTICE_PREFIX} Paused — maya's turn ran out of inference budget/credits.`,
+      ),
+    ).toBe(true);
+    expect(
+      isAnyBudgetPauseNotice(
+        `${BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX} Paused — maya's turn ran out of inference budget/credits.`,
+      ),
+    ).toBe(true);
+  });
+
+  it("still ignores ordinary text", () => {
+    expect(isAnyBudgetPauseNotice("Paused — waiting for your review.")).toBe(false);
+    expect(isAnyBudgetPauseNotice("")).toBe(false);
+  });
+});
+
+describe("parseBudgetPauseAgent on a no-resend notice", () => {
+  // Both notices format the SAME `budget_paused_summary` (host
+  // `src/harness/built_in/mod.rs`), so widening the supersession scan to the
+  // no-resend prefix only works if the agent id is still parseable out of it
+  // — otherwise those notices are counted as "a pause happened" but filed
+  // under no agent, and supersede nothing.
+  it("extracts the teammate id past the longer prefix", () => {
+    const text =
+      `${BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX} Paused — maya's turn ran out of inference ` +
+      "budget/credits, so it stopped instead of failing silently.";
+    expect(parseBudgetPauseAgent(text)).toBe("maya");
   });
 });
 
@@ -186,6 +241,63 @@ describe("latestBudgetPauseMessageIdByAgent", () => {
       "channel-b": [],
     };
     expect(latestBudgetPauseMessageIdByAgent(transcripts).size).toBe(0);
+  });
+
+  // ── issue #1906: a no-resend notice supersedes too ─────────────────────
+  //
+  // **The regression.** The scan filtered through `isBudgetPauseNotice`, so a
+  // NO-RESEND notice was invisible to it — while the marker it parked still
+  // overwrote the previous one on the host. maya pauses on an interactive
+  // turn (redeemable notice, marker M1); a pending approval for maya is then
+  // approved, its continuation runs through `run_steered_background`, pauses,
+  // and parks M2 (`background: true`) over M1 behind a no-resend notice. The
+  // redeemable notice stayed this map's answer for maya, so its "Add credits
+  // & resend" button stayed enabled — and clicking it sent `?id=M1.id`, a
+  // marker that no longer exists, for a `RedeemMatch::Stale` 409 that
+  // refreshing never cleared. Before #1886's no-resend split the same
+  // sequence greyed the button out, because both notices carried the one
+  // prefix this scan knew.
+  function noResendNotice(agentId: string): string {
+    return `${BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX} Paused — ${agentId}'s turn ran out of inference budget/credits.`;
+  }
+
+  it("a NO-RESEND notice supersedes an earlier redeemable one for the same agent", () => {
+    const transcripts: Transcripts = {
+      "channel-a": [
+        msg("msg-1", notice("maya"), 1_000),
+        msg("msg-2", noResendNotice("maya"), 2_000),
+      ],
+    };
+    const latest = latestBudgetPauseMessageIdByAgent(transcripts);
+    expect(latest.get("maya")).toBe("msg-2");
+    // …which is the whole point: the older, redeemable card must go grey
+    // rather than keep offering a redeem the host answers 409.
+    expect(isBudgetPauseNoticeSuperseded("maya", "msg-1", latest)).toBe(true);
+  });
+
+  it("a no-resend notice for a DIFFERENT agent leaves this one's CTA live", () => {
+    const transcripts: Transcripts = {
+      "channel-a": [msg("msg-1", notice("maya"), 1_000)],
+      "channel-b": [msg("msg-2", noResendNotice("ceo"), 2_000)],
+    };
+    const latest = latestBudgetPauseMessageIdByAgent(transcripts);
+    expect(isBudgetPauseNoticeSuperseded("maya", "msg-1", latest)).toBe(false);
+    expect(latest.get("ceo")).toBe("msg-2");
+  });
+
+  it("a redeemable notice AFTER a no-resend one takes the agent back", () => {
+    // The host parks a fresh, redeemable marker on the next interactive
+    // pause; the newer notice must win on its own timestamp, or the button
+    // that WOULD work stays disabled forever.
+    const transcripts: Transcripts = {
+      "channel-a": [
+        msg("msg-1", noResendNotice("maya"), 1_000),
+        msg("msg-2", notice("maya"), 2_000),
+      ],
+    };
+    const latest = latestBudgetPauseMessageIdByAgent(transcripts);
+    expect(latest.get("maya")).toBe("msg-2");
+    expect(isBudgetPauseNoticeSuperseded("maya", "msg-2", latest)).toBe(false);
   });
 });
 
