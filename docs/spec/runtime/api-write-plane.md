@@ -59,6 +59,7 @@ GET    …/policy                              the autonomy tier + spend cap + d
 PUT    …/policy                              set the tier, spend cap, deadline, and/or always-ask list
 DELETE …/policy                              reset the policy to the manifest's
 GET    …/activation                          the account-activation funnel (issue #1843)
+PATCH  {scope}                               set/confirm the company's display name (issue #1844)  [admin]
 GET    …/tools/grants                        the `[tools].allow` in force + what a connect page may grant (#1796)
 PUT    …/tools/grants                        grant one namespace from a connect page  [admin]
 DELETE …/tools/grants                        withdraw one console grant (`?namespace=`) or all of them  [admin]
@@ -396,6 +397,18 @@ audit entry missing. Every call after the latch is set short-circuits before any
 Composio round trip or journal scan, so polling an already-activated company
 stays cheap. Any member may call it — it decides nothing on the company's
 behalf, only answers a question.
+
+`PATCH {scope}` (issue #1844) is the funnel's naming step: it sets
+`[company].name` and stamps `CompanyRecord::name_confirmed`, the field
+`nameConfirmed` above mirrors. Admin-only, body is `{"name": "…"}`, `422` on a
+blank name. Unlike every other console write it lands directly on the
+manifest field rather than an overlay — see the route's own doc comment
+(`src/server/ops/company_profile.rs`) for why that survives a rebuild.
+Idempotent and re-callable after confirmation (an ordinary rename), but the
+`OnboardingStepCompleted` audit event fires only on the first call. A company
+saved by build code that predates the funnel is told apart from a fresh
+company's own interrupted first boot by the store-level
+`CompanyStore::activation_gate_seen` marker — see that method's doc comment.
 
 ### Tool grants
 
