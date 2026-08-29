@@ -316,6 +316,7 @@ impl Tool for CheckWorkflowTool {
             Some(fix) => {
                 spec.id = fix.id.clone();
                 spec.name = fix.name.clone();
+                spec.owner_desk = fix.owner_desk.clone();
             }
             None => {
                 spec.id = safe_workflow_id(
@@ -337,7 +338,7 @@ impl Tool for CheckWorkflowTool {
                     &self.ctx.company.record,
                     self.ctx.company.source_dir.as_deref(),
                     Some(&self.ctx.company.wired_channels),
-                    None,
+                    self.ctx.previous_owner_desk(),
                 ) {
                     problems.push(err.to_string());
                 }
@@ -468,6 +469,11 @@ impl Tool for ProposeWorkflowTool {
             Some(fix) => {
                 spec.id = fix.id.clone();
                 spec.name = fix.name.clone();
+                // The saved owner is host-owned across a correction, the same
+                // footing as the id and the name (issue #1882 review): neither
+                // tool advertises `ownerDesk`, so a model echo of it is noise
+                // and an omission of it would silently unassign the workflow.
+                spec.owner_desk = fix.owner_desk.clone();
             }
             None => {
                 spec.id = safe_workflow_id(
@@ -511,7 +517,7 @@ impl Tool for ProposeWorkflowTool {
                             &self.ctx.company.record,
                             self.ctx.company.source_dir.as_deref(),
                             Some(&self.ctx.company.wired_channels),
-                            None,
+                            self.ctx.previous_owner_desk(),
                         ) {
                             errors.push(err.to_string());
                         }
