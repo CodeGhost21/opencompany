@@ -1559,12 +1559,7 @@ impl HarnessAgentRunner {
             blocker_request.effect.payload =
                 serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
             // Park the blocker directly using the delivery system.
-            let parking = match self
-                .deps
-                .delivery
-                .as_ref()
-                .and_then(|d| d.parking.as_ref())
-            {
+            let parking = match self.deps.delivery.as_ref().and_then(|d| d.parking.as_ref()) {
                 Some(p) => p,
                 None => {
                     summary.unparkable += 1;

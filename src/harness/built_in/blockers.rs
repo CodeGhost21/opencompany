@@ -169,8 +169,7 @@ pub fn classify_blocker_message(message: &str) -> Option<BlockerClass> {
                 if *leaf == " 401" || *leaf == "429" {
                     if let Some(pos) = haystack.find(leaf) {
                         let start_boundary = pos == 0
-                            || haystack[..pos]
-                                .ends_with(|c: char| !c.is_ascii_alphanumeric());
+                            || haystack[..pos].ends_with(|c: char| !c.is_ascii_alphanumeric());
                         let end = pos + leaf.len();
                         let has_trailing_boundary = end >= haystack.len()
                             || haystack[end..].starts_with(|c: char| !c.is_ascii_alphanumeric());
