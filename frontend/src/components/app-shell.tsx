@@ -205,10 +205,12 @@ interface NavItem {
 function SidebarNavigation({
   view,
   pending,
+  notificationCount,
   onNavigate,
 }: {
   view: View;
   pending: number;
+  notificationCount: number;
   onNavigate: (view: View) => void;
 }) {
   const { isMobile, setOpenMobile } = useSidebar();
