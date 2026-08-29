@@ -56,7 +56,7 @@ use crate::error::OpenCompanyError;
 use crate::harness::TurnOutcome;
 pub use crate::ports::acp::{AcpAgent, AcpAgentFactory, AcpTurn, AcpUpdate};
 use crate::ports::types::{CompanyId, TurnStep, TurnStepKind, TurnStepStatus};
-use crate::runtime::delegation::RunTurn;
+use crate::runtime::delegation::{ChatTarget, RunTurn};
 
 /// [`RunTurn`] over an [`AcpAgent`].
 pub struct AcpRunTurn {
@@ -343,7 +343,7 @@ impl RunTurn for AcpRunTurn {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
-        _chat_id: Option<&str>,
+        _chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome> {
         self.run_once(company, agent_id, message).await
     }
@@ -354,7 +354,7 @@ impl RunTurn for AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
-        _chat_id: Option<&str>,
+        _chat: ChatTarget<'_>,
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.steered(company, agent_id, message, control).await
@@ -944,7 +944,7 @@ mod test {
         let run_turn: &dyn RunTurn = &AcpRunTurn::new(agent);
 
         let outcome = run_turn
-            .run(&CompanyId::new("acme"), "ceo", "go", None)
+            .run(&CompanyId::new("acme"), "ceo", "go", ChatTarget::default())
             .await
             .expect("a turn runs");
 
@@ -968,7 +968,14 @@ mod test {
         control.request(crate::company::steer::SteerAction::Cancel);
 
         let outcome = run_turn
-            .run_steered(&CompanyId::new("acme"), "ceo", "go", &control, None, None)
+            .run_steered(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                ChatTarget::default(),
+                None,
+            )
             .await
             .expect("a steered turn still answers");
         assert_eq!(outcome.reply, "partial");
@@ -998,7 +1005,14 @@ mod test {
         control.request(crate::company::steer::SteerAction::Cancel);
 
         let outcome = run_turn
-            .run_steered(&CompanyId::new("acme"), "ceo", "go", &control, None, None)
+            .run_steered(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                ChatTarget::default(),
+                None,
+            )
             .await
             .expect("a failed cancel still ends in a turn");
         assert_eq!(outcome.reply, "done");

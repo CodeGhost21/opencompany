@@ -803,6 +803,18 @@ pub struct ApprovalPolicy {
     /// The shared workspace, when this harness has one. It is queried only for
     /// the four mutation tools' authorship-aware auto-tier exception.
     workspace: Option<WorkspaceReader>,
+    /// The company's CONNECTED Composio toolkits (issue #1759, slice S2), used to
+    /// deflect a raw web call aimed at one of their API hosts.
+    ///
+    /// **Empty at every non-harness construction site** — the default — which
+    /// keeps every one of them (and every test that sets nothing) letting web
+    /// calls through exactly as before. Only `build_roster` chains
+    /// [`with_connected_composio_toolkits`](Self::with_connected_composio_toolkits),
+    /// from `deps.composio` (the same allowlist S1's `composio_brief` names), and
+    /// only when the company has Composio wired. The set is the S1 brief's twin:
+    /// S1 tells the agent to route these providers through Composio, this refuses
+    /// the raw `http_request` / `curl` / `web_fetch` that ignores it.
+    connected_composio_toolkits: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -853,6 +865,9 @@ impl ApprovalPolicy {
             // exactly as before — see `with_mcp_reads`.
             mcp_reads: McpReadSet::default(),
             workspace: None,
+            // No connected toolkits by default, so the S2 web-deflection arm is
+            // inert — see `with_connected_composio_toolkits`.
+            connected_composio_toolkits: Vec::new(),
         }
     }
 
@@ -904,6 +919,21 @@ impl ApprovalPolicy {
         company: CompanyId,
     ) -> Self {
         self.workspace = Some(WorkspaceReader { store, company });
+        self
+    }
+
+    /// Installs the company's connected Composio toolkits so the S2 guardrail can
+    /// deflect a raw web call aimed at one of their API hosts (issue #1759).
+    ///
+    /// Without this the set is empty and the web-deflection arm is inert — which
+    /// is exactly what every non-harness construction site and every test wants:
+    /// a build with no Composio configured has no connected provider to route
+    /// around, so `http_request` / `curl` / `web_fetch` gate exactly as before.
+    /// Chained by `build_roster` from `deps.composio` (the same allowlist S1's
+    /// [`composio_brief`](crate::harness::composio_catalog::composio_brief)
+    /// names), and only when a toolkit is actually connected.
+    pub fn with_connected_composio_toolkits(mut self, toolkits: Vec<String>) -> Self {
+        self.connected_composio_toolkits = toolkits;
         self
     }
 
@@ -1426,6 +1456,40 @@ impl ToolPolicy for ApprovalPolicy {
         // that is supposed to survive that.
         //
         // Adding the arm below the grant check would silently invert that.
+
+        // 0.5. S2 web-deflection (issue #1759): a raw web call aimed at a
+        //      CONNECTED Composio provider's API host is refused, with the
+        //      Composio route named.
+        //
+        // Defense-in-depth behind S1's routing brief: even when the agent ignores
+        // the prompt, `http_request` / `curl` / `web_fetch` to `api.github.com`
+        // and its kin are blocked, because unauthenticated they only ever 401/403
+        // — the connection credential lives in Composio, not the web tools. The
+        // observed failure was exactly this: a raw `http_request` to
+        // `api.github.com` → 403.
+        //
+        // ABOVE the grant arms, and for the same reason the reserved `never_do`
+        // slot is: a grant is an operator approving one specific call, but this
+        // call cannot succeed by this route for anyone, so no grant should smuggle
+        // it past the block. A hard deny, never a rewrite — the guardrail points
+        // at the right door rather than silently walking the agent through it.
+        //
+        // Scoped strictly to hosts of toolkits this company actually connected
+        // (the field is empty unless `build_roster` wired a live Composio set),
+        // so a provider host whose toolkit is NOT connected — and every
+        // non-provider host — passes through untouched (requirement #2). The
+        // decision and the host table live in `composio_catalog`; the web-tool
+        // family lives in `toolbelt`; this arm only joins them.
+        if !self.connected_composio_toolkits.is_empty()
+            && crate::harness::toolbelt::is_web_request_tool(tool)
+            && let Some(url) = request.arguments.get("url").and_then(|v| v.as_str())
+            && let Some(reason) = crate::harness::composio_catalog::web_call_deflection(
+                &self.connected_composio_toolkits,
+                url,
+            )
+        {
+            return ToolPolicyDecision::deny(reason);
+        }
 
         // 1. `readonly` outranks a grant — the brake wins (issue #243).
         //
@@ -2658,6 +2722,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         let own = WorkspaceOrigin::Agent {
             id: "ceo".to_string(),
@@ -2753,6 +2818,7 @@ mod tests {
                     mime: None,
                     size: None,
                     sha256: None,
+                    adopted: false,
                 },
                 Some("draft"),
             )
@@ -2807,6 +2873,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             }
         };
         store
@@ -2907,6 +2974,7 @@ mod tests {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             };
         store
             .create(&company, &node("agents", "agents", None, own.clone()), None)
@@ -5780,6 +5848,123 @@ mod tests {
             decision_name(&d),
             "park",
             "the operator declared the shape, not the command"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The S2 http_request deflection guardrail (issue #1759)
+    // -----------------------------------------------------------------------
+
+    /// A policy that would otherwise wave everything through (`full`), so any
+    /// deny in these tests is the S2 arm and nothing else.
+    fn full_with_connected(toolkits: &[&str]) -> ApprovalPolicy {
+        policy("full", &[], None)
+            .with_connected_composio_toolkits(toolkits.iter().map(|t| t.to_string()).collect())
+    }
+
+    /// The headline case: `http_request` to `api.github.com` when `github` is
+    /// connected is denied, and the refusal names the Composio path.
+    #[tokio::test]
+    async fn http_request_to_a_connected_provider_is_denied_with_the_composio_route() {
+        let p = full_with_connected(&["github"]);
+        let decision = p
+            .check(&request(
+                "http_request",
+                serde_json::json!({"url": "https://api.github.com/repos/o/r/issues"}),
+            ))
+            .await;
+        match decision {
+            ToolPolicyDecision::Deny { reason } => {
+                assert!(reason.contains("composio_execute"), "{reason}");
+                assert!(reason.contains("composio_list_tools"), "{reason}");
+                assert!(reason.contains("401") || reason.contains("403"), "{reason}");
+            }
+            other => panic!("expected a deny naming the Composio route, got {other:?}"),
+        }
+    }
+
+    /// Requirement #2: the same host passes through UNCHANGED when its toolkit is
+    /// NOT connected — the company may legitimately hit a public endpoint of a
+    /// provider it has not wired. Proven by asserting the decision is identical
+    /// to the one a policy with no connected toolkits gives: S2 did not touch it.
+    /// (Under `full` an un-deflected `http_request` is not `Allow` outright — the
+    /// per-call judge parks it — so "unchanged" is the precise claim, not
+    /// "allowed".)
+    #[tokio::test]
+    async fn http_request_to_the_same_host_passes_through_when_its_toolkit_is_not_connected() {
+        let url = "https://api.github.com/repos/o/r";
+        let baseline = full_with_connected(&[])
+            .check(&request("http_request", serde_json::json!({ "url": url })))
+            .await;
+        // The S2 arm must never itself be a deny — the baseline is the
+        // un-guarded decision this passthrough must reproduce.
+        assert!(
+            !matches!(baseline, ToolPolicyDecision::Deny { .. }),
+            "baseline (no connected toolkits) must not deny: {baseline:?}"
+        );
+
+        // Some other toolkit connected, but not github → identical to baseline.
+        let other_connected = full_with_connected(&["slack"])
+            .check(&request("http_request", serde_json::json!({ "url": url })))
+            .await;
+        assert_eq!(
+            other_connected, baseline,
+            "an unconnected provider host must pass through unchanged"
+        );
+    }
+
+    /// A non-provider host is never deflected, whatever is connected — it passes
+    /// through to the ordinary policy exactly as if S2 were not installed.
+    #[tokio::test]
+    async fn http_request_to_a_non_provider_host_passes_through() {
+        let url = "https://example.com/data.json";
+        let baseline = full_with_connected(&[])
+            .check(&request("http_request", serde_json::json!({ "url": url })))
+            .await;
+        let guarded = full_with_connected(&["github", "gmail"])
+            .check(&request("http_request", serde_json::json!({ "url": url })))
+            .await;
+        assert_eq!(
+            guarded, baseline,
+            "a non-provider host must pass through unchanged"
+        );
+    }
+
+    /// `curl` and `web_fetch` follow the same rule as `http_request` — the whole
+    /// `url`-taking web family is deflected, not just one tool.
+    #[tokio::test]
+    async fn curl_and_web_fetch_are_deflected_on_the_same_terms() {
+        let p = full_with_connected(&["github"]);
+        for tool in ["curl", "web_fetch"] {
+            let decision = p
+                .check(&request(
+                    tool,
+                    serde_json::json!({"url": "https://api.github.com/repos/o/r"}),
+                ))
+                .await;
+            assert!(
+                matches!(decision, ToolPolicyDecision::Deny { .. }),
+                "{tool} must be deflected to Composio, got {decision:?}"
+            );
+        }
+    }
+
+    /// The deflection outranks a single-use grant: a grant is an operator
+    /// approving one call, but a raw call to a connected provider cannot succeed
+    /// by this route for anyone, so the guardrail still refuses it.
+    #[tokio::test]
+    async fn the_deflection_outranks_a_grant() {
+        let p = full_with_connected(&["github"]);
+        let args = serde_json::json!({"url": "https://api.github.com/repos/o/r"});
+        // Even if a grant existed for this exact call, the arm above the grant
+        // check refuses it. `http_request` is not grantable, but the ordering is
+        // what this pins: the deny fires before any grant arm is consulted.
+        assert!(
+            matches!(
+                p.check(&request("http_request", args)).await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "the S2 arm must sit above the grant checks"
         );
     }
 }

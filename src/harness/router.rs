@@ -43,7 +43,7 @@ use crate::error::OpenCompanyError;
 use crate::harness::built_in::TurnOutcome;
 use crate::harness::built_in::run_trace::RunTraceSink;
 use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::delegation::RunTurn;
+use crate::runtime::delegation::{ChatTarget, RunTurn};
 
 /// Routes each agent's turn to the [`RunTurn`] of the harness it is bound to.
 pub struct HarnessRouter {
@@ -194,10 +194,10 @@ impl RunTurn for HarnessRouter {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome> {
         self.engine_for(agent_id)?
-            .run(company, agent_id, message, chat_id)
+            .run(company, agent_id, message, chat)
             .await
     }
 
@@ -207,11 +207,11 @@ impl RunTurn for HarnessRouter {
         agent_id: &str,
         message: &str,
         control: &SteerControl,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.engine_for(agent_id)?
-            .run_steered(company, agent_id, message, control, chat_id, run_sink)
+            .run_steered(company, agent_id, message, control, chat, run_sink)
             .await
     }
 
@@ -343,7 +343,7 @@ mod tests {
             _company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: ChatTarget<'_>,
         ) -> Result<TurnOutcome> {
             self.seen.lock().unwrap().push(agent_id.to_string());
             Ok(TurnOutcome {
@@ -363,7 +363,7 @@ mod tests {
             agent_id: &str,
             message: &str,
             _control: &SteerControl,
-            chat_id: Option<&str>,
+            chat_id: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             self.run(company, agent_id, message, chat_id).await
@@ -377,7 +377,8 @@ mod tests {
             _control: &SteerControl,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
-            self.run(company, agent_id, message, None).await
+            self.run(company, agent_id, message, ChatTarget::default())
+                .await
         }
 
         async fn end_cycle(&self, company: &CompanyId) {
@@ -417,7 +418,7 @@ mod tests {
             _company: &CompanyId,
             _agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: ChatTarget<'_>,
         ) -> Result<TurnOutcome> {
             Ok(TurnOutcome {
                 reply: self.label.clone(),
@@ -436,7 +437,7 @@ mod tests {
             agent_id: &str,
             message: &str,
             _control: &SteerControl,
-            chat_id: Option<&str>,
+            chat_id: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             self.run(company, agent_id, message, chat_id).await
@@ -450,7 +451,8 @@ mod tests {
             _control: &SteerControl,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
-            self.run(company, agent_id, message, None).await
+            self.run(company, agent_id, message, ChatTarget::default())
+                .await
         }
 
         async fn ensure(&self, _company: &CompanyRecord) -> Result<()> {
@@ -508,12 +510,15 @@ mod tests {
             .bind("researcher", "deep");
 
         let out = router
-            .run(&company(), "researcher", "hi", None)
+            .run(&company(), "researcher", "hi", ChatTarget::default())
             .await
             .unwrap();
         assert_eq!(out.reply, "deep");
 
-        let out = router.run(&company(), "ceo", "hi", None).await.unwrap();
+        let out = router
+            .run(&company(), "ceo", "hi", ChatTarget::default())
+            .await
+            .unwrap();
         assert_eq!(out.reply, "embedded", "an unbound agent takes the default");
 
         assert_eq!(&*deep.seen.lock().unwrap(), &["researcher".to_string()]);
@@ -535,7 +540,14 @@ mod tests {
 
         assert_eq!(
             router
-                .run_steered(&company(), "researcher", "hi", &control, None, None)
+                .run_steered(
+                    &company(),
+                    "researcher",
+                    "hi",
+                    &control,
+                    ChatTarget::default(),
+                    None
+                )
                 .await
                 .unwrap()
                 .reply,
@@ -578,7 +590,7 @@ mod tests {
             .bind("coder", "my_laptop");
 
         let err = router
-            .run(&company(), "coder", "hi", None)
+            .run(&company(), "coder", "hi", ChatTarget::default())
             .await
             .expect_err("must not fall back");
         let msg = err.to_string();
@@ -599,7 +611,7 @@ mod tests {
     async fn an_unknown_harness_binding_fails_closed() {
         let router = HarnessRouter::new("embedded").with_engine("embedded", SpyEngine::new("e"));
         let err = router
-            .run(&company(), "ghost_bound", "hi", None)
+            .run(&company(), "ghost_bound", "hi", ChatTarget::default())
             .await
             .expect("agent is unbound, so it takes the default")
             .reply;
@@ -608,7 +620,7 @@ mod tests {
         let router = router.bind("ghost_bound", "nowhere");
         assert!(
             router
-                .run(&company(), "ghost_bound", "hi", None)
+                .run(&company(), "ghost_bound", "hi", ChatTarget::default())
                 .await
                 .is_err()
         );
@@ -630,7 +642,7 @@ mod tests {
         router.ensure(&record()).await.unwrap();
 
         let err = router
-            .run(&company(), "researcher", "hi", None)
+            .run(&company(), "researcher", "hi", ChatTarget::default())
             .await
             .expect_err("the failed lane's turn must error");
         let msg = err.to_string();
@@ -638,7 +650,10 @@ mod tests {
         assert!(msg.contains("deep"), "{msg}");
         assert!(msg.contains("warm-up"), "names the failed warm-up: {msg}");
 
-        let out = router.run(&company(), "ceo", "hi", None).await.unwrap();
+        let out = router
+            .run(&company(), "ceo", "hi", ChatTarget::default())
+            .await
+            .unwrap();
         assert_eq!(out.reply, "embedded", "the healthy lane keeps working");
     }
 
@@ -657,7 +672,7 @@ mod tests {
         router.ensure(&record()).await.unwrap();
         assert!(
             router
-                .run(&company(), "researcher", "hi", None)
+                .run(&company(), "researcher", "hi", ChatTarget::default())
                 .await
                 .is_err(),
             "the failed lane errors before recovery"
@@ -666,7 +681,7 @@ mod tests {
         deep.set_fail(false);
         router.ensure(&record()).await.unwrap();
         let out = router
-            .run(&company(), "researcher", "hi", None)
+            .run(&company(), "researcher", "hi", ChatTarget::default())
             .await
             .unwrap();
         assert_eq!(out.reply, "deep", "recovery needs no restart");
@@ -698,7 +713,7 @@ mod tests {
         router.ensure_with_policy(&record(), &policy).await.unwrap();
 
         let err = router
-            .run(&company(), "researcher", "hi", None)
+            .run(&company(), "researcher", "hi", ChatTarget::default())
             .await
             .expect_err("the failed lane's turn must error");
         let msg = err.to_string();
@@ -706,14 +721,17 @@ mod tests {
         assert!(msg.contains("deep"), "{msg}");
         assert!(msg.contains("warm-up"), "names the failed warm-up: {msg}");
 
-        let out = router.run(&company(), "ceo", "hi", None).await.unwrap();
+        let out = router
+            .run(&company(), "ceo", "hi", ChatTarget::default())
+            .await
+            .unwrap();
         assert_eq!(out.reply, "embedded", "the healthy lane keeps working");
 
         // A later success clears the entry, so the lane comes back.
         deep.set_fail(false);
         router.ensure_with_policy(&record(), &policy).await.unwrap();
         let out = router
-            .run(&company(), "researcher", "hi", None)
+            .run(&company(), "researcher", "hi", ChatTarget::default())
             .await
             .unwrap();
         assert_eq!(out.reply, "deep", "recovery needs no restart");

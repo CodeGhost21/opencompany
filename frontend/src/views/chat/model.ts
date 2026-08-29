@@ -1164,6 +1164,27 @@ export type TimelineItem =
  * which is how an operator ends up approving something they were never shown.
  * Each gets its own card, exactly as before this existed.
  */
+/**
+ * The key that decides which approvals share one card (#842, #1891).
+ *
+ * The turn's `batch` when the host named one, and the approval's **own id**
+ * otherwise — which is what makes "ungrouped" the safe default: an id is
+ * unique, so a batchless approval can only ever group with itself. An absent
+ * key means "the host did not say which turn this came from" (a workflow node,
+ * a scheduler tick, an older host), and folding those together would invent a
+ * batch out of two facts that are only alike in being unknown, which is how an
+ * operator ends up approving something they were never shown.
+ *
+ * Extracted so the board card groups exactly as the transcript does (#1895
+ * review). It rendered a paused card's whole queue as one `ApprovalRow`, so a
+ * card holding two turns' parks — or several batchless ones — offered a single
+ * Approve that authorised across them. The rule was already written down here;
+ * the second surface just wasn't reading it.
+ */
+export function approvalBatchKey(approval: ApprovalSummary): string {
+  return approval.batch ?? `solo:${approval.id}`;
+}
+
 export function buildTimelineItems(
   entries: TimelineEntry[],
   approvals: ApprovalSummary[],
@@ -1183,10 +1204,7 @@ export function buildTimelineItems(
   // second one below it.
   const batches = new Map<string, ApprovalSummary[]>();
   for (const approval of approvals) {
-    // The id is the fallback key, which is what makes "ungrouped" the safe
-    // default: an id is unique, so a batchless approval can only ever group
-    // with itself.
-    const key = approval.batch ?? `solo:${approval.id}`;
+    const key = approvalBatchKey(approval);
     const bucket = batches.get(key);
     if (bucket) bucket.push(approval);
     else batches.set(key, [approval]);
