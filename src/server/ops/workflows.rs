@@ -870,6 +870,11 @@ async fn validate_workflow(
         &record,
         company.runtime.source_dir(),
         Some(&company.runtime.deliverable_channel_ids()),
+        // This route pre-flights a body, not a specific saved workflow: it is
+        // reached for a create and for an edit alike and has no stored owner to
+        // grandfather against (issue #1882 review). It keeps the documented
+        // false-negative direction described above `validate_workflow`.
+        None,
     )
     .map_err(ApiError)?;
     Ok(Json(ValidateWorkflowResponse { valid: true }))
