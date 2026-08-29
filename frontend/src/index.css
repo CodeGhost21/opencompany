@@ -435,14 +435,6 @@
 }
 
 .dark {
-    --brand-paypal-back: #008cff;
-    --brand-paypal-front: #60cdff;
-    --brand-paypal-overlap: #008cff;
-    --chrome: var(--surface-dark-2);
-    --chrome-border: var(--surface-dark-active);
-}
-
-.dark {
     /* Surfaces climb *toward* the viewer with lightness, the same
        direction as light mode. The canvas is near-black, and each layer
        above it is a measured step up — never a translucent white wash,
@@ -451,6 +443,9 @@
     --foreground: var(--ink-dark-primary);
     --card: var(--surface-dark-1);
     --card-foreground: var(--ink-dark-primary);
+    --brand-paypal-back: #008cff;
+    --brand-paypal-front: #60cdff;
+    --brand-paypal-overlap: #008cff;
     /* Rung 3, not rung 4. `--border` is rung 4, and a popover painted rung 4
        renders its own edge in its own fill — the dialog loses its outline
        entirely. Rung 3 keeps the popover above the card (rung 1) and leaves
