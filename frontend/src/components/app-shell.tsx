@@ -2703,7 +2703,12 @@ export function AppShell({
         </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
+          <SidebarNavigation
+            view={view}
+            pending={pending}
+            notificationCount={mentionFeed.filter((n) => n.readAt === undefined && n.kind !== "mention").length}
+            onNavigate={setView}
+          />
         </SidebarContent>
         <SidebarFooter>
           {/* Who you are signed in as, above the controls that act on the
