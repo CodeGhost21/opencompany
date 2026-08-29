@@ -3157,7 +3157,6 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                     // actually being returned. Zero here is the honest default —
                     // this row has not been reconciled against the queue yet.
                     stranded_approvals: 0,
-                    degraded: false,
                     verdict: WorkflowRunVerdict::Running,
                 });
             }
