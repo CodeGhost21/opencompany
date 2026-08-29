@@ -9,7 +9,7 @@
  * Unlike {@link ChargebeeIcon} this cannot use `currentColor`: a two-tone mark
  * has no single colour to inherit. The fills come from `--brand-paypal-*`
  * instead, which is the same "deliberately not our palette" statement one layer
- * down. Only the back P changes with the theme; see `index.css` for why.
+ * down. Both P colours change with the theme; see `index.css` for why.
  *
  * Traced from the 256px monogram PNG in PayPal's press assets, so the curves
  * are a close fit rather than their exact published Bézier control points. If
