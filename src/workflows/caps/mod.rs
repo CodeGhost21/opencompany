@@ -1507,7 +1507,24 @@ impl HarnessAgentRunner {
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
         let notice = drained.overflow_notice();
         let discarded = drained.discarded;
-        let requests = drained.requests;
+        let mut requests = drained.requests;
+
+        // Issue #1861: filter out blocker requests. They are parked via
+        // `park_node_blocker` without a node-turn continuation (they are
+        // questions, not gated tool calls), so they must not pass through this
+        // gated-call path which journals with Some(node_turn).
+        let blocker_count = requests.iter().filter(|r| r.effect.kind.starts_with("blocker.")).count();
+        requests.retain(|r| !r.effect.kind.starts_with("blocker."));
+        if blocker_count > 0 {
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                blocker_count,
+                "workflow agent node: {} blocker requests were filtered from gated-call path; \
+                 they should be parked directly via park_node_blocker (issue #1861)",
+                blocker_count
+            );
+        }
 
         // Issue #638: told to the operator, not only logged. Raised BEFORE the
         // parking guard below, and that ordering is a fix in itself — the guard
