@@ -1121,6 +1121,15 @@ function requiresSignIn(status: SetupStatus, values: Record<string, string>): bo
  * together, is the fuller fix and is its own change.
  */
 export function offeredAuthModes(status: SetupStatus, current: string): string[] {
+  // A field `env` owns is one this screen is *reporting*, not offering, and it
+  // cannot report a mode it has filtered out. It also cannot tell which mode
+  // that is: `FieldDto.value` is read from `config.toml` alone
+  // (`effective_value` in `src/server/setup.rs`), so an `OPENCOMPANY_AUTH_MODE`
+  // the host is actually running never reaches this list. Withholding on top of
+  // that would show a locked picker whose every option is wrong. Nothing here
+  // is selectable in that state, so nothing can be walked into.
+  const field = status.fields.find((f) => f.key === "auth_mode");
+  if (field !== undefined && !field.editable) return status.auth_modes;
   return status.auth_modes.filter((mode) => mode !== "wallet" || current === "wallet");
 }
 
@@ -1709,6 +1718,11 @@ function ReviewStep({
           id="setup-company-name"
           data-testid="setup-company-name"
           value={name}
+          // The host clamps to this too (`MAX_COMPANY_NAME`), because the id is
+          // derived from the name and becomes a directory component. Bounded
+          // here as well so the operator sees the limit rather than meeting it
+          // as a truncation after the fact.
+          maxLength={60}
           placeholder="Your company's name"
           onChange={(e) => onName(e.target.value)}
         />

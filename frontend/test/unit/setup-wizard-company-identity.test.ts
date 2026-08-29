@@ -383,6 +383,44 @@ describe("the sign-in modes a first run may offer", () => {
     expect(offeredAuthModes(host(["email", "wallet"]), "wallet")).toEqual(["email", "wallet"]);
   });
 
+  it("reports every mode, wallet included, when env owns the field", () => {
+    // `FieldDto.value` is read from `config.toml` alone, so an
+    // `OPENCOMPANY_AUTH_MODE=wallet` never reaches `current`. The picker is
+    // locked in that state and is reporting rather than offering — filtering
+    // there would show an operator a disabled list whose every option is wrong.
+    const envOwned = status({
+      auth_modes: ["none", "email", "wallet"],
+      fields: [
+        {
+          key: "auth_mode",
+          value: null,
+          layer: "env",
+          editable: false,
+          requires_restart: false,
+          secret: false,
+        },
+      ],
+    });
+    expect(offeredAuthModes(envOwned, "")).toEqual(["none", "email", "wallet"]);
+  });
+
+  it("still withholds wallet when the field is the wizard's to write", () => {
+    const editable = status({
+      auth_modes: ["none", "email", "wallet"],
+      fields: [
+        {
+          key: "auth_mode",
+          value: "email",
+          layer: "config.toml",
+          editable: true,
+          requires_restart: false,
+          secret: false,
+        },
+      ],
+    });
+    expect(offeredAuthModes(editable, "")).toEqual(["none", "email"]);
+  });
+
   it("leaves every other mode exactly as the host offered it", () => {
     expect(offeredAuthModes(host(["none", "email"]), "")).toEqual(["none", "email"]);
     expect(offeredAuthModes(host(["email"]), "email")).toEqual(["email"]);

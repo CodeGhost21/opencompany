@@ -877,11 +877,26 @@ async fn apply_inner(
     // literal id `company`, so an operator who cleared the field would get a
     // company called nothing at an id naming nothing — deriving is the better
     // answer to "I typed no name" than obeying it is.
-    let chosen_name = req
+    let chosen_name: Option<String> = req
         .name
         .as_deref()
         .map(str::trim)
+        .filter(|name| !name.is_empty())
+        // Bounded at the boundary, by the same 60 characters `company_name`
+        // clamps its derivation to. Not cosmetic: `company_id_from_name` keeps
+        // every alphanumeric character it is given, and that id becomes one
+        // directory component under the store — so a pasted paragraph makes the
+        // apply fail while writing the bundle, on most filesystems at 255
+        // bytes. Truncated rather than refused, because a name is not a
+        // credential and the operator can see what they typed.
+        .map(|name| {
+            name.chars()
+                .take(crate::company::setup::MAX_COMPANY_NAME)
+                .collect::<String>()
+        })
+        .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty());
+    let chosen_name = chosen_name.as_deref();
 
     let seeded = match (&req.company, &req.template, state.registry().is_empty()) {
         // A designed company wins over a template slug: the operator answered

@@ -544,6 +544,14 @@ pub const MIN_AGENTS: usize = 4;
 
 /// The most agents a setup pass may land. Beyond this a new operator is being
 /// handed clutter to tidy rather than a team to work with.
+/// The longest company name this flow accepts, in characters.
+///
+/// Shared by the derivation and by an operator's own name, because the reason
+/// for the bound is the same either way: `company_id_from_name` keeps every
+/// alphanumeric character, and the id becomes a directory component under the
+/// store.
+pub const MAX_COMPANY_NAME: usize = 60;
+
 pub const MAX_AGENTS: usize = 6;
 
 /// The longest mandate a card should carry. A model asked for a one-line
@@ -1476,7 +1484,7 @@ fn company_name(answers: &SetupAnswers) -> String {
         .unwrap_or(raw)
         .to_string();
     let head = head.as_str();
-    let trimmed: String = head.chars().take(60).collect();
+    let trimmed: String = head.chars().take(MAX_COMPANY_NAME).collect();
     if trimmed.trim().is_empty() {
         "My Company".to_string()
     } else {

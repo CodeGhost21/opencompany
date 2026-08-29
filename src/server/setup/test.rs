@@ -1194,6 +1194,55 @@ async fn a_template_seed_names_the_operator_as_its_admin() {
     );
 }
 
+/// A pasted paragraph is truncated, not turned into a directory nobody can
+/// write.
+///
+/// `company_id_from_name` keeps every alphanumeric character it is handed, and
+/// that id becomes one component under the store — so an unbounded name fails
+/// the apply while writing the bundle, on most filesystems at 255 bytes. The
+/// derivation has always clamped at `MAX_COMPANY_NAME`; a name the operator
+/// supplies now meets the same bound.
+#[tokio::test]
+async fn a_very_long_name_is_bounded_before_it_becomes_an_id() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+    let long = "Northwind ".repeat(40);
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "agentic_law_firm",
+            "name": long,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["seeded_company"]
+        .as_str()
+        .expect("a company was seeded");
+    assert!(
+        id.len() <= crate::company::setup::MAX_COMPANY_NAME,
+        "the id is a directory component and must stay one: {id}"
+    );
+    let registered = state
+        .registry()
+        .get(&crate::ports::types::CompanyId::new(id))
+        .expect("the seeded company is registered");
+    let record = registered
+        .store()
+        .load(&crate::ports::types::CompanyId::new(id))
+        .await
+        .expect("the bundle is readable")
+        .expect("the bundle exists");
+    assert!(
+        record.manifest.company.name.chars().count() <= crate::company::setup::MAX_COMPANY_NAME,
+        "the name is bounded too, not just the id: {}",
+        record.manifest.company.name
+    );
+}
+
 /// A blank name is not a name.
 ///
 /// `company_id_from_name` slugs an empty string to the literal id `company`, so
