@@ -25,8 +25,7 @@ import {
   type TurnStep,
   type Verdict,
 } from "@/api/types";
-import {
-  Sidebar,
+import { Button } from "@/components/ui/button";
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
