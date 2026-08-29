@@ -5341,6 +5341,7 @@ members = ["engineer"]
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             Some("an operator's note, in the way"),
         )

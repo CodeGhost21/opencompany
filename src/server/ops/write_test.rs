@@ -7420,6 +7420,7 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         },
         Some("the agent's draft"),
     )

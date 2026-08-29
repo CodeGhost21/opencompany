@@ -1753,7 +1753,16 @@ impl WorkspaceStore for FsOps {
                 }
             }
         }
-        if let Some(existing) = existing_folder_claim(index.values(), parent, name)? {
+        if let Some(mut existing) = existing_folder_claim(index.values(), parent, name)? {
+            // Stamp the adoption lease under the same index lock every other
+            // writer takes (issue #1839), so it is durable before this returns
+            // and a concurrent `delete_if_empty` cannot miss it. Authorship is
+            // untouched — adoption still does not rewrite whose folder it is.
+            if !existing.adopted {
+                existing.adopted = true;
+                index.insert(existing.id.clone(), existing.clone());
+                self.save_index(company, &index).await?;
+            }
             return Ok(FolderClaim::Adopted(existing));
         }
         let node = new_folder(name, parent, origin);
@@ -2089,7 +2098,14 @@ impl WorkspaceStore for FsOps {
         let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut index = self.load_index(company).await?;
-        if !index.contains_key(id) {
+        let Some(node) = index.get(id) else {
+            return Ok(false);
+        };
+        // An adopted folder has a second writer whose create has not landed yet
+        // (issue #1839). The flag-write and this check both take the index lock
+        // above, so they serialize: once an adoption has stamped `adopted`, this
+        // refuses — closing Race 1 on this backend rather than narrowing it.
+        if node.adopted {
             return Ok(false);
         }
         if index
@@ -2416,6 +2432,7 @@ mod test {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         }
     }
 
@@ -2858,6 +2875,13 @@ mod test {
         conformance::assert_workspace_sibling_names(Arc::new(FsOps::new(&root))).await;
     }
 
+    #[tokio::test]
+    async fn conformance_workspace_adoption_lease() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_adoption_lease(Arc::new(FsOps::new(&root))).await;
+    }
+
     /// Issue #887, and the backend the case was written against: this is the
     /// one that failed it. Node content was written with a bare
     /// `tokio::fs::write`, so a reader inside the `O_TRUNC` window saw a
@@ -2894,6 +2918,7 @@ mod test {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             None,
         )
@@ -2913,6 +2938,7 @@ mod test {
                 mime: None,
                 size: None,
                 sha256: None,
+                adopted: false,
             },
             Some("# Voice"),
         )
