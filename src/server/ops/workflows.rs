@@ -1616,17 +1616,12 @@ async fn run_workflow(
                 // stops a run whose approvals queue is unwired, or whose turn
                 // gated more calls than the per-batch cap, from reporting
                 // `awaiting-approval` on a card nobody will ever see.
-                stranded_approvals: run
-                    .approvals
-                    .iter()
-                    .filter(|a| a.outcome.unparkable())
-                    .count(),
                 // Issue #1861: count stranded nodes (those with no live approvals),
                 // not stranded approval rows. A node with one live gate and
                 // multiple unparkable calls still has a live gate waiting for
                 // approval; a node with no approval_ids but positive unparkable
                 // has no one to ask and cannot proceed.
-                stranded_nodes: run
+                stranded_approvals: run
                     .blocked_nodes
                     .iter()
                     .filter(|n| n.approval_ids.is_empty() && n.unparkable > 0)
