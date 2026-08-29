@@ -344,7 +344,13 @@ impl WorkflowSpawn {
                 // notification is reserved for the three that leave a run
                 // with nothing more it can do on its own.
                 match &result {
-                    Ok(run) if !run.blocked_nodes.is_empty() => {
+                    // A blocked node that has at least one live approval is waiting
+                    // on a person. A node with no live approvals but unparkable
+                    // approvals is stranded — nobody was asked.
+                    Ok(run)
+                        if !run.blocked_nodes.is_empty()
+                            && run.blocked_nodes.iter().any(|n| !n.approval_ids.is_empty()) =>
+                    {
                         self.notify_run_unhealthy(
                             &workflow.id,
                             &ctx.run_id,
