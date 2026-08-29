@@ -1473,7 +1473,7 @@ impl HarnessAgentRunner {
                 tracing::info!(
                     company = %self.company,
                     run_id = %self.run_id,
-                    node = node_id.unwrap_or("-"),
+                    node = resolved_node_id,
                     approval_id = %approval_id,
                     kind = class.kind.as_str(),
                     "workflow agent node: parked a blocker for the operator instead of failing"
