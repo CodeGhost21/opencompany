@@ -422,16 +422,16 @@
        `--brand-discord-on-light` above: still their palette, only a different
        step of it.
 
-       The crossing region needs no theme of its own: #008cff clears 3:1 on
-       the white card at 3.39:1, and on dark it lands on the back P's own
-       value — the crossing only exists to darken the front P where it passes
-       over the back one, and in dark mode it takes the back P's colour
-       outright. */
+       The crossing region needs a darker light-theme value so the overlap
+       still reads as depth over the front P: #0066a8 is darker than #0070ba
+       and clears 3:1 on the white card at 6.06:1. On dark it uses #008cff,
+       the back P's own value, so it retains the existing treatment there. */
     --brand-paypal-back: #002991;
     --brand-paypal-back-on-dark: #008cff;
     --brand-paypal-front: #0070ba;
     --brand-paypal-front-on-dark: #60cdff;
-    --brand-paypal-overlap: #008cff;
+    --brand-paypal-overlap: #0066a8;
+    --brand-paypal-overlap-on-dark: #008cff;
 }
 
 .dark {
