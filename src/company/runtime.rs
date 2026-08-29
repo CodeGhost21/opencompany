@@ -994,7 +994,7 @@ impl CompanyRuntime {
         // came back. Cloned rather than mutating the caller's `task` in place:
         // this is the single write site for REST mutations and the caller may
         // hold or re-render its own copy afterwards.
-        let clear_bounced = prev_column == Some(COLUMN_TODO) && task.column != COLUMN_TODO && task.bounced.is_some();
+        let clear_bounced = prev_column.as_deref() == Some(COLUMN_TODO) && task.column != COLUMN_TODO && task.bounced.is_some();
         let write: std::borrow::Cow<'_, TaskRecord> = if clear_bounced {
             let mut cleared = task.clone();
             cleared.bounced = None;
