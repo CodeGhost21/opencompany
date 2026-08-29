@@ -64,8 +64,26 @@ struct Shape {
 /// Order matters: the first match wins, so a phrase that could belong to two
 /// rows must sit under the row that describes it better. Rate limiting is
 /// listed above the generic auth row for exactly that reason — a 429 body
-/// frequently mentions the key it is throttling.
+/// frequently mentions the key it is throttling. MCP-specific errors are listed
+/// before generic transient patterns to avoid misclassification of MCP failures
+/// as transient stops (issue #1861).
 const SHAPES: &[Shape] = &[
+    // ---- infrastructure: MCP connections (most specific, checked first) ------
+    Shape {
+        leaves: &[
+            "could not connect to mcp server",
+            "mcp server is not connected",
+            "connection is not authorised",
+            "reconnect the app",
+            "oauth token has expired",
+            "invalid_grant",
+        ],
+        class: BlockerClass {
+            kind: BlockerKind::Infrastructure,
+            source: BlockerSource::Tool,
+            needed: "the integration reconnected from Apps",
+        },
+    },
     // ---- transient: recognised precisely so it does NOT park ----------------
     Shape {
         leaves: &[
@@ -113,21 +131,6 @@ const SHAPES: &[Shape] = &[
             kind: BlockerKind::Infrastructure,
             source: BlockerSource::Provider,
             needed: "a working API key for this provider",
-        },
-    },
-    Shape {
-        leaves: &[
-            "could not connect to mcp server",
-            "mcp server is not connected",
-            "connection is not authorised",
-            "reconnect the app",
-            "oauth token has expired",
-            "invalid_grant",
-        ],
-        class: BlockerClass {
-            kind: BlockerKind::Infrastructure,
-            source: BlockerSource::Tool,
-            needed: "the integration reconnected from Apps",
         },
     },
 ];
