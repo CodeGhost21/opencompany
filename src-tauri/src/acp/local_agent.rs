@@ -368,7 +368,7 @@ impl LocalAcpAgent {
             .as_bool()
             .unwrap_or(false);
         self.load_session
-            .store(load_session, std::sync::atomic::Ordering::Relaxed);
+            .store(load_session, std::sync::atomic::Ordering::Release);
 
         let client = Arc::new(client);
         *guard = Some(client.clone());
@@ -496,7 +496,7 @@ impl LocalAcpAgent {
         root: &Path,
         desired_model: Option<&str>,
     ) -> Option<(String, Value)> {
-        if !self.load_session.load(std::sync::atomic::Ordering::Relaxed) {
+        if !self.load_session.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
         let record = self.read_session_record(company, agent_id)?;
