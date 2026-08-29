@@ -49,7 +49,6 @@ async function render(task: Task) {
         now: T0,
         onOpen: () => {},
         onResume: () => {},
-        onReview: () => {},
       }),
     );
   });
