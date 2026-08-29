@@ -364,8 +364,10 @@ overlapping P's and their crossing is its own colour: `--brand-paypal-back`,
 `--brand-paypal-back-on-dark` / `--brand-paypal-front-on-dark` pairs. Both P
 colours move between themes to preserve contrast: the back P uses `#002991` in
 light mode and `#008cff` in dark mode, while the front P uses `#0070ba` in light
-mode and `#60cdff` in dark mode. The back P's dark value clears 3:1 at 5.77:1;
-its light value would measure only 1.61:1 on the dark canvas. A two-tone mark
+mode and `#60cdff` in dark mode. The back P's dark value clears 3:1 at 5.74:1;
+its light value would measure only 1.61:1 on the dark card. The front P is the
+mirror case on the light ground: its light value clears 3:1 at 5.22:1 on the
+white card, where its dark value would measure only 1.80:1. A two-tone mark
 also cannot take `currentColor`, so these are referenced as
 `fill-(--brand-paypal-*)` on the paths rather than inherited from the call site.
 
