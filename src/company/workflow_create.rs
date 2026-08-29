@@ -5149,6 +5149,7 @@ to = "done"
             &record,
             None,
             Some(&["engineering".to_string()]),
+            None,
         )
         .expect_err("the courtesy pass must refuse what apply would refuse");
         assert!(
@@ -5162,6 +5163,7 @@ to = "done"
             &record,
             None,
             Some(&["engineering".to_string()]),
+            None,
         )
         .expect("a wired target passes the same pass");
     }
