@@ -1555,9 +1555,11 @@ impl HarnessBrain {
             );
         }
 
-        self.journal_task_outcome(&card, &responder, result_text, artifact_ids)
-            .await;
-
+        // The terminal timeline is written before the relay is returned so the
+        // event journal preserves the causal order: task outcome, then the
+        // origin-thread relay. The dispatch-cycle wrapper persists the returned
+        // relay after this function completes.
+        //
         // Issue #151 §3.2: answer in the conversation the card was spawned
         // from. Only a card that remembers an origin posts back — one created
         // straight on the board, or written before `origin_chat_id` existed,
@@ -1575,15 +1577,13 @@ impl HarnessBrain {
         // It still carries the card's landing column, so the operator reads one
         // line and knows both what came back and where the card went. Steps are
         // deliberately empty: a dispatched card discards them into the note.
+        self.journal_task_outcome(&card, &responder, result_text, artifact_ids)
+            .await;
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
-        Ok(Some(lifecycle::relay_reply(
-            &card,
-            &responder,
-            &self.orchestrator(),
-            origin,
-        )))
+        let relay = lifecycle::relay_reply(&card, &responder, &self.orchestrator(), origin);
+        Ok(Some(relay))
     }
 
     /// Ends a dispatch that never ran because its `assignee` names nobody this
@@ -1618,19 +1618,17 @@ impl HarnessBrain {
         self.settle_run_end(sink, TaskRunEnd::Failed, &text, 0)
             .await;
 
-        // A refusal ran no turn, so it published nothing.
-        self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
-            .await;
-
         let Some(origin) = card.origin_chat_id.clone() else {
+            // A refusal has no relay, but its terminal outcome still belongs
+            // on the task timeline.
+            self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
+                .await;
             return Ok(None);
         };
-        Ok(Some(lifecycle::relay_reply(
-            &card,
-            &orchestrator,
-            &orchestrator,
-            origin,
-        )))
+        let relay = lifecycle::relay_reply(&card, &orchestrator, &orchestrator, origin);
+        self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
+            .await;
+        Ok(Some(relay))
     }
 
     /// Opens the trace sink for this dispatch's attempt row (issue #242), or
@@ -6514,6 +6512,12 @@ members = ["engineer"]
             "the orchestrator answers for its own roster"
         );
         assert!(posted.text.contains("Shane"), "{}", posted.text);
+        // Issue #1852: `refuse_dispatch` relays through the same
+        // `relay_reply` as a settled run, so it carries the card id too — but
+        // `CompanyRuntime::journal_dispatch_replies` strips it back to `None`
+        // before journaling, since the settle already left a
+        // `DeskTaskCompleted` link and this would only duplicate it.
+        assert_eq!(posted.task_id.as_deref(), Some("t-origin"));
     }
 
     /// A dispatch for a card that no longer exists is a silent no-op, not an
