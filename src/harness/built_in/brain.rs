@@ -3701,7 +3701,11 @@ impl HarnessBrain {
                         // separate facts (issue #885).
                         channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
                         agent: Some(responder.clone()),
-                        text: turn.reply,
+                        text: if turn.budget_paused.is_some() {
+                            BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string()
+                        } else {
+                            turn.reply
+                        },
                         reply_to: None,
                         steps: turn.steps,
                         mentions: Vec::new(),
