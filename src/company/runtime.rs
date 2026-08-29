@@ -5538,12 +5538,16 @@ mod tests {
             .collect();
         assert_eq!(
             relays.len(),
-            1,
-            "only the reply_to-shaped response may be journaled, found {relays:?}"
+            2,
+            "both reply_to-shaped responses must be journaled — an empty \
+             chat_id is General, not absent — found {relays:?}"
         );
         let CompanyEvent::AgentReply {
             chat_id, task_id, ..
-        } = relays[0]
+        } = relays
+            .iter()
+            .find(|event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id == "strategy"))
+            .expect("the named-thread relay must be present")
         else {
             unreachable!()
         };
@@ -5553,6 +5557,15 @@ mod tests {
         // `DeskTaskCompleted` card link into this same thread, so this bubble
         // must not add a second one. See the drop site's own comment.
         assert_eq!(task_id, &None);
+
+        let CompanyEvent::AgentReply { chat_id, .. } = relays
+            .iter()
+            .find(|event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id.is_empty()))
+            .expect("the empty-chat_id General relay must be present")
+        else {
+            unreachable!()
+        };
+        assert_eq!(chat_id, "", "General's own empty chat_id must be preserved verbatim");
     }
 
     /// Issue #435: the guard that decides whether a remembered thread root is
