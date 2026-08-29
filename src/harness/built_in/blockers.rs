@@ -164,13 +164,17 @@ pub fn classify_blocker_message(message: &str) -> Option<BlockerClass> {
             shape.leaves.iter().any(|leaf| {
                 // Special handling for " 401" to require word boundaries and avoid
                 // matching "port 4010" or similar false positives (issue #1861).
-                if *leaf == " 401" {
-                    // Look for " 401" followed by a word boundary (space, end of string, or punctuation).
-                    if let Some(pos) = haystack.find(" 401") {
-                        let end = pos + " 401".len();
+                // Special handling for numeric and space-prefixed tokens to require word boundaries
+                // and avoid matching false positives like "port 4010" → " 401" or "4290" → "429".
+                if *leaf == " 401" || *leaf == "429" {
+                    if let Some(pos) = haystack.find(leaf) {
+                        let start_boundary = pos == 0
+                            || haystack[..pos]
+                                .ends_with(|c: char| !c.is_ascii_alphanumeric());
+                        let end = pos + leaf.len();
                         let has_trailing_boundary = end >= haystack.len()
                             || haystack[end..].starts_with(|c: char| !c.is_ascii_alphanumeric());
-                        return has_trailing_boundary;
+                        return start_boundary && has_trailing_boundary;
                     }
                     false
                 } else {
