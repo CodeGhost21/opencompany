@@ -119,7 +119,27 @@ struct LiveState {
     started: std::collections::HashSet<String>,
 }
 
-/// Map one [`AcpUpdate`] to the live frame the console renders, or `None` for
+fn safe_result(result: Option<&str>) -> Option<String> {
+    let text = result?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        match value {
+            Value::Array(items) => return Some(count_of(items.len(), "item")),
+            Value::Object(fields) if !fields.is_empty() => {
+                return Some(count_of(fields.len(), "field"));
+            }
+            _ => {}
+        }
+    }
+    Some(count_of(text.chars().count(), "character"))
+}
+
+fn count_of(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
 /// an update with no operator-facing row.
 ///
 /// The live counterpart of [`fold`], and deliberately the same shape: a
