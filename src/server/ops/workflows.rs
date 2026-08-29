@@ -3661,7 +3661,12 @@ async fn list_runs(
         }
     }
 
-    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
+    // Keep the degraded fact separate from the node rows: capped / budget-paused
+    // rows are reclassified in memory by the runner, but the journal can contain
+    // an earlier `ok` node event. A progress-drain failure still retains this
+    // fact rather than allowing history to become green.
+    let degraded = !run.nodes.is_empty()
+        && run.nodes.iter().any(|n| n.status == WorkflowNodeStatus::Error);
     // settled every open row, after the #1009 cross-check has flipped the dead
     // ones to `error: INTERRUPTED_BY_RESTART`, and (issue #1189) after the
     // reconciliation above.
