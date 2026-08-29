@@ -211,6 +211,7 @@
     if (isBlocked(run)) return "blocked";
     if (undeliveredCount(run.deliveries) > 0) return "undelivered";
     if (awaitingCount(run) > 0) return "awaiting-approval";
+    if ((run.nodes || []).some((node) => node.status === "error")) return "degraded";
     return "ok";
   }
 
