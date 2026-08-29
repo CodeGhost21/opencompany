@@ -519,6 +519,13 @@ pub fn build_agent(
     // `authorize` / `execute` tools additionally park for operator approval via
     // the `ApprovalPolicy`. Gated on the `composio` feature; the default/
     // `openhuman` build never compiles this.
+    // Issue #1759: the connected toolkits to name in the capability-grounding +
+    // Composio-routing brief, captured HERE — where the tools are actually wired
+    // — and rendered into the persona further down. `Some` only when the tools
+    // land on the belt (grant + resolved credential), so the brief can never
+    // advertise a Composio surface this agent does not hold.
+    #[cfg(feature = "composio")]
+    let mut composio_toolkits: Option<Vec<String>> = None;
     #[cfg(feature = "composio")]
     if crate::company::grants_composio_explicit(grants) {
         match &deps.composio {
@@ -526,14 +533,17 @@ pub fn build_agent(
             // usage sample per completed call, so the Usage view's
             // calls-by-provider chart reflects real connected-tool activity
             // (issue #152). A `None` meter simply leaves metering off.
-            Some(config) => tools.extend(crate::harness::composio::composio_tools(
-                config,
-                crate::harness::composio::ComposioMetering {
-                    company: company.clone(),
-                    agent: manifest_agent.id.clone(),
-                    meter: deps.meter.clone(),
-                },
-            )),
+            Some(config) => {
+                composio_toolkits = Some(config.toolkits.clone());
+                tools.extend(crate::harness::composio::composio_tools(
+                    config,
+                    crate::harness::composio::ComposioMetering {
+                        company: company.clone(),
+                        agent: manifest_agent.id.clone(),
+                        meter: deps.meter.clone(),
+                    },
+                ));
+            }
             None => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
@@ -848,6 +858,27 @@ pub fn build_agent(
     // have is how you get a turn spent calling something that does not exist.
     if publishing {
         persona.push_str(&crate::harness::publish::publish_brief());
+    }
+
+    // Issue #1759: ground the agent in its connected-integration surface and
+    // route provider actions through it. Appended ONLY when the Composio tools
+    // were actually wired above (`composio_toolkits` is `Some`), so — like every
+    // other tool brief here — it never describes a surface this agent does not
+    // hold. The brief itself is a pure renderer in `composio_catalog` (not behind
+    // the `composio` feature) so CI's `openhuman` test lane exercises it; this
+    // call site is feature-gated because the tools it describes are.
+    //
+    // Same `deps.capabilities` check as the `shell`/`code` sandbox brief above
+    // (PR #1780 review): `composio_toolkits` reflects only the GRANT, not the
+    // per-turn capability tier. When a `free`/`starter`/`pro` plan's Composio
+    // budget is exhausted, `filter_by_capabilities` strips every
+    // `composio_*` tool from the belt below — without this check the brief
+    // would still tell the agent to call one.
+    #[cfg(feature = "composio")]
+    if toolbelt::composio_capability_admits(composio_toolkits.is_some(), &deps.capabilities)
+        && let Some(toolkits) = composio_toolkits.as_deref()
+    {
+        persona.push_str(&crate::harness::composio_catalog::composio_brief(toolkits));
     }
 
     // Skill read surface (read-only catalogue slice). Only materializes when the

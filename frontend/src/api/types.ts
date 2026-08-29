@@ -491,16 +491,31 @@ export interface ApprovalSummary {
    */
   group?: "spend" | "send" | "sign" | "publish" | "hire" | "identity" | "other";
   /**
-   * Which board task this approval was parked for (#333). Mirrors `TaskLink` in
-   * `src/runtime/journal.rs`.
+   * Which board task **owns** this approval (#333, resolved by #1891).
    *
    * Three states, deliberately: `{link: "task"}` is owned by that card,
    * `{link: "unlinked"}` is owned by no card (a workflow delivery, an
    * operator-chat turn, a scheduler tick), and *absent* means the park predates
    * the field. Only the last one is ambiguous — the server keeps a run-window
    * heuristic for it, and for nothing else.
+   *
+   * **The host's answer, not the park's stamp.** Until #1891 this mirrored the
+   * raw `TaskLink` the parking cycle wrote, which is only the *fallback* half
+   * of the host's ownership rule: the attempt behind a park outranks the card
+   * it was stamped with wherever there is one, and the task detail read has
+   * always applied that (`approval_owner`). So an approval parked under one
+   * card's attempt and stamped with another's arrived here under the stamp, and
+   * a client joining on it put the row on the wrong card. `pending_approvals_resolved`
+   * now applies the same rule before serialising, so this field and
+   * `…/tasks/{id}`'s `approvals` cannot disagree.
+   *
+   * That is what makes joining on it safe enough to hang a decision off — see
+   * `approvalsForTask` in `@/lib/task-approvals`, which is how the board card
+   * finds what it is blocked on and what it is offering to resolve.
    */
   task?: { link: "task"; id: string } | { link: "unlinked" };
+  /** The host-resolved task owner, when an authoritative task-detail projection provides it. */
+  ownerTaskId?: string;
   /**
    * The roster teammate whose blocked tool call this is (#372). Mirrors
    * `Effect::agent`: present exactly when the effect came from a harness tool

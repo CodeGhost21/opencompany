@@ -445,6 +445,7 @@ async fn run_workflow_inner(
             workflow_id: &workflow.id,
             run_id: &run_id,
             run_request,
+            trigger_input: &trigger_input,
             dry_run,
             notices: notices.clone(),
             board: board.clone(),
@@ -881,7 +882,14 @@ async fn run_workflow_inner(
                 &run_id,
                 &trigger_input,
                 &blocked,
-            );
+            stash_blocked_agent_nodes(
+                delivery.as_ref(),
+                &workflow.id,
+                &run_id,
+                &trigger_input,
+                &blocked,
+            )
+            .await;
             // Reclassify capped nodes before they move into the blocked run, the
             // same as the settled arm does. A node that hit the iteration cap
             // reports Ok but settled Failed, so both must agree on Error.
@@ -1188,7 +1196,8 @@ async fn run_workflow_inner(
         &run_id,
         &trigger_input,
         &blocked_nodes,
-    );
+    )
+    .await;
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
     // via a `notices` sentence, not only via the node's own status — the
     // per-node chip is easy to miss on a run that otherwise looks fine, and a
@@ -1720,18 +1729,24 @@ struct PausedGates<'a> {
 /// id and this run's trigger input — keyed by the per-(run, node) turn key its
 /// gated calls armed `ContinuationQueue` under at park time (issue #899, Stage 1).
 ///
-/// # Why here, and not where the calls are parked
+/// # Why the durable mirror is still written here, not where the calls are parked
 ///
-/// The calls are parked mid-turn from `HarnessAgentRunner`, which carries no
-/// trigger input. This is the one place with the workflow id, the trigger input
-/// and the list of blocked nodes together — exactly as `park_pending_gates` is
-/// the one place a gate's facts come together. A node with no parked approval id
-/// is skipped: nothing can be decided, so nothing will ever release a stash.
+/// The in-memory arm itself now happens where the calls are parked —
+/// `HarnessAgentRunner` is built with the run's trigger input (issue #1825, P1
+/// follow-up) precisely so `park_gated_calls` can call `arm` before a card is
+/// journaled and clickable, closing the race this function's own comment above
+/// describes. What that call site does *not* have is the settled `blocked`
+/// list — a node only shows up there once the engine has decided the run
+/// stopped for it — so the durable journal record still has to be written
+/// from here, once per this run's whole batch of blocked nodes, exactly as
+/// `park_pending_gates` is the one place a gate's facts come together. A node
+/// with no parked approval id is skipped: nothing can be decided, so nothing
+/// will ever release a stash.
 ///
 /// A build with no approvals queue wired stashes nothing and is silent — the
 /// same node already logged its own "could not be parked" line, and there is no
 /// resolve path to release a stash to.
-fn stash_blocked_agent_nodes(
+async fn stash_blocked_agent_nodes(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     workflow_id: &str,
     run_id: &str,
@@ -1741,12 +1756,126 @@ fn stash_blocked_agent_nodes(
     let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
         return;
     };
-    for node in blocked {
-        if node.approval_ids.is_empty() {
+
+    // Issue #1816 (Stage 2 follow-up): arm every eligible node's in-memory
+    // stash BEFORE awaiting any durable journal write. This settle can name
+    // several blocked nodes at once (a fan-out that pauses on more than one
+    // gate), and their approval cards are already parked and clickable from
+    // agent execution — an operator can act on any of them the instant this
+    // function starts. The old loop interleaved the synchronous `arm()` with
+    // an awaited `record_blocked_node_stashed()` call per node, which opens a
+    // window, per node, where that node's card is clickable but its stash is
+    // not armed yet: a decision landing in that window finds nothing to
+    // release, consumes the approval anyway, and a later arm for that same
+    // turn then stashes facts with no remaining decision to release them —
+    // stranding the approved run. Arming every node up front (a purely
+    // in-memory, non-awaiting pass) closes that window for the whole batch at
+    // once instead of leaving it open per node; only the durable mirroring
+    // below still awaits.
+    //
+    // Issue #1825 (P1 follow-up): `arm` below is now a no-op for every node in
+    // `blocked` whose calls actually parked — `HarnessAgentRunner::park_gated_calls`
+    // arms the same stash itself, at node park time, before the first card is
+    // journaled and clickable (see `crate::runtime::blocked_nodes`'s module
+    // doc). This function ran only after the agent returned and the engine
+    // settled, which — even with the synchronous pass above — was still after
+    // every card for this run's blocked nodes had gone live; an operator fast
+    // enough to approve inside that outer window hit the same empty-stash race
+    // the paragraph above closed for the inner one. The pass stays here
+    // because it is still the only place with the full settled `blocked` list
+    // the durable mirror below needs, and `arm`'s first-write-wins semantics
+    // make the redundant call free.
+    //
+    // Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector):
+    // "free" stopped being true the moment park time started performing both
+    // arms. Every node reaching this filter has a non-empty `approval_ids`,
+    // which `park_gated_calls` only ever populates *after* its own
+    // unconditional arm has already run for this exact turn — so `is_armed`
+    // being false here cannot mean "never armed"; the only way to get here
+    // is a decision that resolved the node's whole batch and released the
+    // stash before this settle pass got to it (an operator fast enough to
+    // decide the *last* card in the window between the agent returning and
+    // this function running). Re-arming a released turn resurrects it with
+    // no decision left to redeem it, and the durable write two lines down
+    // would then append a `BlockedNodeStashed` *after* the `BlockedNodeReleased`
+    // that already retired it — durable on replay, and a late approval-bank
+    // retry landing on the resurrection can mark it approved and have a
+    // future boot's `reconcile_stranded_blocked_nodes` dispatch the run a
+    // second time. Filtering on `is_armed` here, before either write, is
+    // cheap and catches it before either arm happens rather than sweeping up
+    // after.
+    let turns: Vec<_> = blocked
+        .iter()
+        .filter(|node| !node.approval_ids.is_empty())
+        .filter_map(|node| {
+            let turn =
+                crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
+            if !parking.blocked_nodes.is_armed(&turn) {
+                tracing::info!(
+                    %workflow_id,
+                    %run_id,
+                    node = %node.node_id,
+                    "[approval] skipping this blocked node's settle-time stash: it is no \
+                     longer armed, meaning its whole batch was already decided and released \
+                     before this settle pass ran — re-arming it now would resurrect a turn \
+                     with nothing left to redeem it"
+                );
+                return None;
+            }
+            parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+            Some((turn, &node.node_id))
+        })
+        .collect();
+
+    for (turn, node_id) in turns {
+        // Issue #1825 (P2, fourth follow-up — found by chatgpt-codex-connector):
+        // the `is_armed` check above ran once, synchronously, before this loop
+        // awaited anything — it only proves each turn was still live at the
+        // moment the whole batch was collected. For every turn but the first,
+        // a sibling's own awaited durable write (right below, one iteration
+        // ago) gives a landing decision time to run `retire_blocked_stash`
+        // in between: that clears this turn's in-memory stash and appends its
+        // `BlockedNodeReleased` before this iteration ever reaches it. Without
+        // this re-check, the write below would then append a `BlockedNodeStashed`
+        // behind that terminal record — durable on replay — resurrecting an
+        // already-dispatched turn for a future boot's `reconcile_stranded_blocked_nodes`
+        // to redeem a second time. Re-checking immediately before the write
+        // narrows the window to the same shape every other park-time write in
+        // this module already accepts (see the P1 fourth follow-up's own
+        // residual in `caps::park_gated_calls`), not the whole width of this
+        // batch's sibling I/O.
+        if !parking.blocked_nodes.is_armed(&turn) {
+            tracing::info!(
+                %workflow_id,
+                %run_id,
+                node = %node_id,
+                "[approval] skipping this blocked node's durable stash write: a decision \
+                 released it while an earlier sibling in this same settle batch was still \
+                 being durably written — re-appending now would resurrect an already-dispatched \
+                 turn"
+            );
             continue;
         }
-        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
-        parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+        // Issue #1816 (Stage 2): mirror the in-memory arm into the durable
+        // journal so an approval landing after a process/host replacement can
+        // still locate this run. Best-effort — a failed write leaves the
+        // in-memory stash serving the no-restart case, and failing the settled
+        // run over an approvals-queue write is the wrong trade (same stance as
+        // the park itself).
+        if let Err(error) = parking
+            .journal
+            .record_blocked_node_stashed(&turn, workflow_id, trigger_input)
+            .await
+        {
+            tracing::warn!(
+                %workflow_id,
+                %run_id,
+                node = %node_id,
+                %error,
+                "[approval] a blocked node's continuation facts could not be durably \
+                 stashed; the in-memory stash still covers a resolve without a restart"
+            );
+        }
     }
 }
 
@@ -1800,6 +1929,41 @@ async fn park_pending_gates(
     // fan-out are one decision batch owed exactly one continuation. Keyed on the
     // run because the run is what gets re-dispatched.
     let turn = crate::runtime::workflow_resume::workflow_turn_key(run_id);
+
+    // Issue #1825 (P1, found by chatgpt-codex-connector): hold this turn's
+    // `ContinuationQueue` counter open across the whole loop below, the same
+    // shape of fix `park_gated_calls`'s fourth follow-up applied in
+    // `workflows::caps` for the identical race.
+    //
+    // The loop below parks this run's gates one at a time, and each successful
+    // `park_and_journal` arms the counter for its own card (issue #469/#978's
+    // per-card mechanism, unchanged, and closed against its OWN in-flight
+    // window by the fifth follow-up above `park_and_journal`). With no hold
+    // here, an operator can resolve an EARLIER card — already parked, already
+    // counted — while a LATER card in this loop is still being attempted. If
+    // that later park then fails, `park_and_journal`'s own error branch
+    // releases the slot it armed for it; when that release happens to be the
+    // batch's last decrement, the batch it hands back — every sibling decided
+    // while this loop was still running — is dropped inside that failure
+    // branch, with no caller left to route it through `resume_workflow_run`.
+    // The already-decided siblings are not lost from the approval journal
+    // (each was resolved and recorded independently of this counter); what is
+    // lost is the automatic re-dispatch, silently, with nothing telling the
+    // operator the run is now stranded.
+    //
+    // The hold pins outstanding at least 1 above the count of decided cards
+    // until every gate here has actually been attempted, so no single card's
+    // own arm/release pair — including a failed one's — can ever be the
+    // batch's last word while a sibling is still in flight. Released below,
+    // once the loop is done.
+    //
+    // Skipped for a single-gate run: there is no "rest of the batch" to
+    // protect against, and holding would only insert an extra decrement
+    // between that lone card's approval and its release.
+    let holds_continuation = pending.len() > 1;
+    if holds_continuation {
+        parking.continuations.arm(&turn);
+    }
 
     for node_id in pending {
         if denied.iter().any(|refused| refused == node_id) {
@@ -1917,6 +2081,42 @@ async fn park_pending_gates(
                  continued"
             ),
         }
+    }
+
+    // Issue #1825 (P1): release the hold armed above, now that every gate in
+    // this run has actually been attempted — whether it parked or failed.
+    // `Some(batch)` back means this release was itself the batch's last
+    // decision: every card this loop parked was already decided by the time
+    // the loop finished attempting the rest, which needs an operator (or an
+    // API caller) faster than this function's own sequential parks.
+    //
+    // `park_pending_gates` runs deep inside the engine with no handle back to
+    // the `CompanyRuntime` that owns `resume_workflow_run` — the only place
+    // that spawns this run's continuation — short of re-entering this run's
+    // own execution while it is still mid-run, which is a worse hazard than
+    // the one this hold exists to close (a duplicate dispatch, just moved).
+    // So, exactly like `park_gated_calls`'s own release in `workflows::caps`,
+    // this rare batch is left exactly as the loop above already left it: every
+    // decision durably recorded in the approval journal, independent of this
+    // counter. Only the automatic re-dispatch is deferred — and unlike a
+    // blocked agent node, a workflow run has no boot-time reconciliation sweep
+    // of its own yet, so nothing recovers this automatically; the operator has
+    // to notice the run is still `Blocked` and re-run it. An empty batch
+    // (every gate below failed to park, so nothing was ever decided) needs no
+    // warning — there is nothing stranded.
+    if holds_continuation
+        && let Some(batch) = parking.continuations.decide(&turn, None)
+        && !batch.is_empty()
+    {
+        tracing::warn!(
+            company = %record.id,
+            workflow = %workflow_id,
+            %run_id,
+            decisions = batch.len(),
+            "workflow: every gate this run parked was already decided before the rest of the \
+             batch finished parking; the approvals are recorded but the run will not \
+             auto-resume — re-run the workflow to pick it back up"
+        );
     }
 }
 
@@ -2226,7 +2426,7 @@ mod tests {
             company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(company, agent_id).await
         }
@@ -2237,7 +2437,7 @@ mod tests {
             agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(company, agent_id).await
@@ -2362,7 +2562,7 @@ to = "done"
             _company: &CompanyId,
             agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.seen.lock().unwrap().push(agent_id.to_string());
             Ok(crate::harness::TurnOutcome {
@@ -2382,7 +2582,7 @@ to = "done"
             agent_id: &str,
             message: &str,
             _control: &crate::company::steer::SteerControl,
-            chat_id: Option<&str>,
+            chat_id: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.run(company, agent_id, message, chat_id).await
@@ -2396,7 +2596,13 @@ to = "done"
             _control: &crate::company::steer::SteerControl,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
-            self.run(company, agent_id, message, None).await
+            self.run(
+                company,
+                agent_id,
+                message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
         }
     }
 
@@ -4736,6 +4942,258 @@ to = "done"
         assert_eq!(gates, 2);
     }
 
+    /// The graph the next test uses: three sibling `requires_approval` gates
+    /// fanning out from one trigger — the run-level analogue of
+    /// `parallel_gate_fanout_test`'s `FANOUT_TOML`, sized to exercise
+    /// `park_pending_gates`'s own loop directly rather than a full
+    /// `CompanyRuntime`.
+    const THREE_GATES: &str = r#"
+id = "three-gate"
+name = "Three Gate"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate1"
+kind = "tool_call"
+name = "Gate1"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "gate2"
+kind = "tool_call"
+name = "Gate2"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "gate3"
+kind = "tool_call"
+name = "Gate3"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "gate1"
+[[edge]]
+from = "start"
+to = "gate2"
+[[edge]]
+from = "start"
+to = "gate3"
+[[edge]]
+from = "gate1"
+to = "done"
+[[edge]]
+from = "gate2"
+to = "done"
+[[edge]]
+from = "gate3"
+to = "done"
+"#;
+
+    /// Issue #1825 (P1, found by chatgpt-codex-connector): "Preserve a
+    /// completed batch when a later park fails."
+    ///
+    /// # The race this closes
+    ///
+    /// `park_pending_gates` parks a run's gates one at a time, and each
+    /// successful `park_and_journal` arms `ContinuationQueue` for the run's
+    /// shared turn key. An operator can resolve an EARLIER card while a
+    /// LATER card in this loop is still being attempted; if that later park
+    /// then fails, `park_and_journal`'s own error branch releases the slot it
+    /// armed for it. Pre-fix, nothing held the counter open across the loop,
+    /// so that release could itself be the batch's last decrement — and the
+    /// batch it got back (every sibling decided while this loop was still
+    /// running) was dropped inside that failure branch: no caller was left to
+    /// route it anywhere, and `ContinuationQueue::decide` discards the turn's
+    /// whole banked state, the already-approved sibling's event included, the
+    /// moment `outstanding` hits zero.
+    ///
+    /// # How this is reproduced deterministically
+    ///
+    /// Three gates share one turn. `RaceThenFail` wraps the approval gate
+    /// `park_pending_gates` parks through: its SECOND `park()` call first
+    /// decides the FIRST card via the SAME `ContinuationQueue` handle
+    /// `park_and_journal` arms — simulating a fast operator racing the loop —
+    /// then fails outright, exactly like a real `park()`/`record_parked()`
+    /// fault. The THIRD gate parks normally, on the same principle as
+    /// `approving_the_first_card_of_a_multi_call_node_does_not_complete_the_batch_early`
+    /// in `workflows::caps::mod`. If the first card's decision survived the
+    /// second card's faulted park, deciding the third (simulating the
+    /// operator's next click) must hand back BOTH events; if it was dropped,
+    /// only the third's.
+    #[tokio::test]
+    async fn a_batch_completed_by_a_failed_park_is_not_silently_dropped() {
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Effect, PolicyDecision, Verdict};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Mutex as AsyncMutex;
+
+        /// Delegates every call to `inner`, except that the SECOND `park` it
+        /// sees first decides the FIRST approval it minted — via the same
+        /// `ContinuationQueue` the real park path arms — then fails,
+        /// simulating an operator racing ahead of `park_pending_gates`'s own
+        /// loop into a park that then errors.
+        struct RaceThenFail {
+            inner: Arc<dyn ApprovalGate>,
+            continuations: crate::runtime::continuation::ContinuationQueue,
+            turn: String,
+            calls: AtomicUsize,
+            first_approval: AsyncMutex<Option<ApprovalId>>,
+            third_approval: AsyncMutex<Option<ApprovalId>>,
+            /// What `ContinuationQueue::decide` returned for the interleaved
+            /// decision on the first card — the assertion this test exists
+            /// for. Outer `Option`: whether the interleave actually ran.
+            early_decide_result: AsyncMutex<Option<Option<Vec<CompanyEvent>>>>,
+        }
+
+        #[async_trait]
+        impl ApprovalGate for RaceThenFail {
+            async fn evaluate(
+                &self,
+                company: &CompanyId,
+                effect: &Effect,
+            ) -> crate::Result<PolicyDecision> {
+                self.inner.evaluate(company, effect).await
+            }
+
+            async fn park(&self, company: &CompanyId, effect: Effect) -> crate::Result<ApprovalId> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => {
+                        let id = self.inner.park(company, effect).await?;
+                        *self.first_approval.lock().await = Some(id.clone());
+                        Ok(id)
+                    }
+                    1 => {
+                        let first = self
+                            .first_approval
+                            .lock()
+                            .await
+                            .clone()
+                            .expect("the first card must have parked before the second");
+                        let event = CompanyEvent::ApprovalResolved {
+                            approval_id: first,
+                            verdict: Verdict::Approve,
+                            by: Actor {
+                                kind: ActorKind::Operator,
+                                id: "operator".to_string(),
+                            },
+                        };
+                        let result = self.continuations.decide(&self.turn, Some(event));
+                        *self.early_decide_result.lock().await = Some(result);
+                        Err(OpenCompanyError::InvalidRequest(
+                            "simulated park fault".to_string(),
+                        ))
+                    }
+                    2 => {
+                        let id = self.inner.park(company, effect).await?;
+                        *self.third_approval.lock().await = Some(id.clone());
+                        Ok(id)
+                    }
+                    other => panic!("unexpected park call #{other}"),
+                }
+            }
+
+            async fn resolve(
+                &self,
+                id: &ApprovalId,
+                verdict: Verdict,
+                by: Actor,
+            ) -> crate::Result<Option<Effect>> {
+                self.inner.resolve(id, verdict, by).await
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut deps, _journal) = deps_with_parking(dir.path());
+        let file = parse_workflow(THREE_GATES).expect("parses");
+
+        let ctx = WorkflowRunContext::new(false);
+        let turn = crate::runtime::workflow_resume::workflow_turn_key(&ctx.run_id);
+
+        let parking = deps
+            .delivery
+            .as_ref()
+            .and_then(|d| d.parking.clone())
+            .expect("deps_with_parking wires parking");
+        let race = Arc::new(RaceThenFail {
+            inner: parking.approvals.clone(),
+            continuations: parking.continuations.clone(),
+            turn: turn.clone(),
+            calls: AtomicUsize::new(0),
+            first_approval: AsyncMutex::new(None),
+            third_approval: AsyncMutex::new(None),
+            early_decide_result: AsyncMutex::new(None),
+        });
+        deps.delivery
+            .as_mut()
+            .unwrap()
+            .parking
+            .as_mut()
+            .unwrap()
+            .approvals = race.clone();
+
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &tools_record(),
+            &file,
+            serde_json::json!({ "request": "quarterly numbers" }),
+            &ctx,
+        )
+        .await
+        .expect("run pauses cleanly even though one gate's park faulted");
+
+        assert_eq!(
+            run.pending_approvals.len(),
+            3,
+            "the engine pauses on all three gates regardless of parking outcome: {:?}",
+            run.pending_approvals
+        );
+
+        assert_eq!(
+            race.early_decide_result.lock().await.clone(),
+            Some(None),
+            "an earlier card's decision must not complete the batch while a later card is \
+             still being attempted"
+        );
+
+        let third = race
+            .third_approval
+            .lock()
+            .await
+            .clone()
+            .expect("the third gate must have parked cleanly");
+        let final_event = CompanyEvent::ApprovalResolved {
+            approval_id: third,
+            verdict: Verdict::Approve,
+            by: Actor {
+                kind: ActorKind::Operator,
+                id: "operator".to_string(),
+            },
+        };
+        let batch = parking
+            .continuations
+            .decide(&turn, Some(final_event))
+            .expect("deciding the last outstanding card must release the batch");
+        assert_eq!(
+            batch.len(),
+            2,
+            "the first card's decision, banked while the faulted second park was still in \
+             flight, must still be in the batch the last decision releases — not dropped by \
+             the faulted park's own slot release: {batch:?}"
+        );
+    }
+
     /// A run an operator stopped parks nothing. They are not asking to be asked
     /// about gates the run never reached, and `cancelled_run` reports no pending
     /// approvals for the same reason.
@@ -6391,6 +6849,408 @@ to = "done"
         assert!(
             journal.is_empty(),
             "a dry run journals nothing at all: {journal:?}"
+        );
+    }
+
+    // --- #1825 (P1, found by chatgpt-codex-connector): arm every blocked
+    // node before awaiting journal I/O ----------------------------------
+
+    /// A [`JournalStore`] whose `append_journal` parks the caller mid-await the
+    /// first time a line matches `match_substr`, after signalling `reached` —
+    /// so a test can inspect state from a second task while the first is
+    /// genuinely suspended inside the write, not merely about to make it.
+    /// [`release`](Self::release) lets the parked append through; every append
+    /// after that — including a second match — passes straight through so
+    /// nothing deadlocks the loop under test.
+    struct GatedJournalStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        match_substr: &'static str,
+        armed: std::sync::atomic::AtomicBool,
+        reached: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl GatedJournalStore {
+        fn new(match_substr: &'static str) -> Self {
+            Self {
+                inner: Default::default(),
+                match_substr,
+                armed: std::sync::atomic::AtomicBool::new(true),
+                reached: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::ports::JournalStore for GatedJournalStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::Durability,
+        ) -> Result<()> {
+            // CodeRabbit nitpick (review 5038258829): check the substring
+            // before disarming. `swap` first meant any append that reached
+            // this store ahead of the `match_substr` line consumed the armed
+            // flag on a non-match, so the real target line would never gate —
+            // today's tests only pass because nothing writes here before it,
+            // a property this double shares with nothing that enforces it.
+            if line.contains(self.match_substr)
+                && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.reached.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// Deps whose `DeliveryParking` journals over a caller-supplied store,
+    /// otherwise wired exactly like [`deps_with_parking`] — a real gate, a
+    /// fresh [`BlockedNodeQueue`], no continuations/gates state this test
+    /// needs.
+    fn deps_with_parking_over(
+        dir: &std::path::Path,
+        store: Arc<dyn crate::ports::JournalStore>,
+    ) -> super::super::delivery::WorkflowDeliveryDeps {
+        let policy = toml::from_str("mode = \"full\"\n").expect("valid [policy] block");
+        let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));
+        let journal = Arc::new(crate::runtime::journal::RuntimeJournal::with_store(
+            store,
+            record().id,
+        ));
+        super::super::delivery::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
+            users: Arc::new(crate::store::FsOps::new(dir)),
+            bootstrap_admin: None,
+            channels: Vec::new(),
+            parking: Some(super::super::delivery::DeliveryParking {
+                approvals: gate,
+                journal,
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
+            }),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
+        }
+    }
+
+    /// A run that settles **two** blocked nodes in one call must arm both of
+    /// their in-memory stashes before either's durable mirror is awaited.
+    ///
+    /// # The race this closes
+    ///
+    /// `stash_blocked_agent_nodes` used to interleave the synchronous `arm()`
+    /// with an awaited `record_blocked_node_stashed()` call, one node at a
+    /// time. Both nodes' approval cards are already parked and clickable from
+    /// agent execution by the time this function starts — so while the first
+    /// node's durable write is suspended, its stash is armed but the second
+    /// node's is not yet, even though its card is just as clickable. A single-
+    /// node test cannot see this: the window only opens *between* nodes, so it
+    /// takes two blocked nodes in one settle, with the first node's write
+    /// gated open, to observe the second node's stash mid-window.
+    ///
+    /// This freezes the store mid-append on the *first* matching line (the
+    /// first node's `BlockedNodeStashed` write) and, while still frozen, reads
+    /// the second node's stash straight off the queue the real resolve path
+    /// reads at decide time — the same `peek` a landing decision would use to
+    /// find what to release. Fixed: both stashes are already armed by the time
+    /// the first append is even attempted, so this succeeds while frozen. On
+    /// the old interleaved loop this fails while frozen — the second node's
+    /// arm has not run yet — which is exactly the failure mode: a decision
+    /// landing on the second node in this window finds no stash, consumes the
+    /// approval anyway, and the loop's own later arm then writes a stash with
+    /// no decision left to release it, permanently stranding the run.
+    ///
+    /// Both turns are pre-armed here, matching what `park_gated_calls` does at
+    /// real park time (issue #1825, P1 second follow-up) — `stash_blocked_agent_nodes`
+    /// now skips (rather than re-arms) any turn `is_armed` reports false for,
+    /// since after that fix the only way a node with non-empty `approval_ids`
+    /// reaches this function unarmed is a released turn (see
+    /// `a_released_turn_is_not_resurrected_by_the_settle_pass` below), and this
+    /// test's whole premise depends on the settle pass actually reaching its
+    /// own durable-mirror loop for both nodes. Pre-arming only touches
+    /// `BlockedNodeQueue`, not the journal's own `blocked_stashes`, so the
+    /// durable append this test gates on still runs for real.
+    #[tokio::test]
+    async fn every_blocked_node_is_armed_before_the_first_journal_write_is_awaited() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatedJournalStore::new("BlockedNodeStashed"));
+        let deps = deps_with_parking_over(dir.path(), store.clone());
+        let parking = deps.parking.clone().expect("wired above");
+
+        let blocked = vec![
+            crate::ports::WorkflowBlockedNode {
+                node_id: "first".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-first".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+            crate::ports::WorkflowBlockedNode {
+                node_id: "second".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-second".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+        ];
+
+        let run_id = "run-1".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key("run-1", "first");
+        let second_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+        // Simulates what `park_gated_calls` already did at real park time,
+        // for both nodes, before this settle pass ever runs.
+        parking
+            .blocked_nodes
+            .arm(&first_turn, "wf-1", &trigger_input);
+        parking
+            .blocked_nodes
+            .arm(&second_turn, "wf-1", &trigger_input);
+
+        let handle = tokio::spawn(async move {
+            stash_blocked_agent_nodes(Some(&deps), "wf-1", &run_id, &trigger_input, &blocked).await;
+        });
+
+        // Blocks until the store is genuinely suspended inside the first
+        // node's durable write — not merely about to make it.
+        store.reached.notified().await;
+
+        // While that write is still frozen: the second node's card is exactly
+        // as parked and clickable as the first's, so the resolve path must
+        // already be able to find its stash here.
+        assert!(
+            parking.blocked_nodes.peek(&second_turn).is_some(),
+            "the second blocked node's stash must be armed before the first \
+             node's durable journal write is even attempted, not after it \
+             returns — a decision landing in this window must have something \
+             to release"
+        );
+
+        store.release.notify_one();
+        handle
+            .await
+            .expect("stash_blocked_agent_nodes does not panic");
+
+        // Both nodes are armed once the settle finishes, and the durable
+        // mirror caught up for both too.
+        assert!(parking.blocked_nodes.peek(&first_turn).is_some());
+        assert!(parking.blocked_nodes.peek(&second_turn).is_some());
+    }
+
+    /// Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector): a
+    /// turn whose whole batch was already decided and released before this
+    /// settle pass runs must not be resurrected by it.
+    ///
+    /// After the P1 second follow-up, every node with a non-empty
+    /// `approval_ids` was armed by `park_gated_calls` at real park time — so
+    /// if `is_armed` is false for such a node here, the only way that
+    /// happened is a release: an operator decided the node's *last* pending
+    /// card and the run dispatched (`resume_blocked_agent_node` →
+    /// `retire_blocked_stash`) in the window between the agent turn returning
+    /// and this settle pass running. Simulates that ordering directly: arms
+    /// the turn, releases it (as `retire_blocked_stash` would have), then
+    /// runs the settle pass over a `blocked` batch that still names the node
+    /// (the engine's own settled view predates the release). Pre-fix this
+    /// re-arms the released turn and durably re-stashes it, after its own
+    /// `BlockedNodeReleased`; post-fix the settle pass skips it and leaves no
+    /// trace, in memory or in the journal.
+    #[tokio::test]
+    async fn a_released_turn_is_not_resurrected_by_the_settle_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn crate::ports::JournalStore> =
+            Arc::new(crate::ports::journal::MemoryJournalStore::default());
+        let deps = deps_with_parking_over(dir.path(), store);
+        let parking = deps.parking.clone().expect("wired above");
+        let journal = parking.journal.clone();
+
+        let run_id = "run-1825-p2d".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "solo");
+
+        // What `park_gated_calls` already did at real park time.
+        parking
+            .blocked_nodes
+            .arm(&turn, "wf-1825-p2d", &trigger_input);
+        // What deciding this turn's last card already did, in the window
+        // before this settle pass got here: dispatched and retired.
+        parking.blocked_nodes.release(&turn);
+        journal
+            .record_blocked_node_released(&turn)
+            .await
+            .expect("release journals cleanly");
+
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "solo".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-solo".to_string()],
+            unparkable: 0,
+            stranded: 0,
+        }];
+        stash_blocked_agent_nodes(
+            Some(&deps),
+            "wf-1825-p2d",
+            &run_id,
+            &trigger_input,
+            &blocked,
+        )
+        .await;
+
+        assert!(
+            !parking.blocked_nodes.is_armed(&turn),
+            "the settle pass must not resurrect a turn that was already released before it ran"
+        );
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .all(|(t, ..)| t != turn),
+            "the settle pass must not durably re-stash an already-released turn either — a \
+             late approval-bank retry landing on the resurrection could make a future boot \
+             dispatch this run a second time"
+        );
+    }
+
+    /// Issue #1825 (P2, fourth follow-up — found by chatgpt-codex-connector):
+    /// "Make the settle-time stash check atomic with its append".
+    ///
+    /// # The race this closes
+    ///
+    /// `a_released_turn_is_not_resurrected_by_the_settle_pass` above proves a
+    /// turn released *before* the settle pass starts is not resurrected — its
+    /// `is_armed` check, run once while collecting `turns`, already catches
+    /// that. This test proves the gap that check alone does not close: a turn
+    /// released *during* the settle pass, while an earlier sibling's own
+    /// durable write is still awaited, one loop iteration before this turn's
+    /// own write is reached. `is_armed` was true for it when `turns` was
+    /// built (its card is exactly as clickable as any other), but by the time
+    /// its OWN await comes up, the decision has already run
+    /// `retire_blocked_stash` — the same interleaving
+    /// `every_blocked_node_is_armed_before_the_first_journal_write_is_awaited`
+    /// above freezes to prove the *arm* side lands in time; this freezes the
+    /// same point to drive a *release* through it and prove the *write* side
+    /// does not go ahead once one has.
+    ///
+    /// Pre-fix, the durable write below runs unconditionally once a turn is in
+    /// `turns`, so it appends a `BlockedNodeStashed` behind the release's own
+    /// `BlockedNodeReleased` — durable on replay, resurrecting an
+    /// already-dispatched turn. Post-fix, the write is skipped and the journal
+    /// carries no trace of it.
+    #[tokio::test]
+    async fn a_turn_released_mid_settle_batch_is_not_stashed_behind_its_own_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatedJournalStore::new("BlockedNodeStashed"));
+        let deps = deps_with_parking_over(dir.path(), store.clone());
+        let parking = deps.parking.clone().expect("wired above");
+        let journal = parking.journal.clone();
+
+        let blocked = vec![
+            crate::ports::WorkflowBlockedNode {
+                node_id: "first".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-first".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+            crate::ports::WorkflowBlockedNode {
+                node_id: "second".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-second".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+        ];
+
+        let run_id = "run-1825-p2e".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "first");
+        let second_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+        // What `park_gated_calls` already did for both, at real park time,
+        // before this settle pass ever runs.
+        parking
+            .blocked_nodes
+            .arm(&first_turn, "wf-1825-p2e", &trigger_input);
+        parking
+            .blocked_nodes
+            .arm(&second_turn, "wf-1825-p2e", &trigger_input);
+
+        let handle = tokio::spawn(async move {
+            stash_blocked_agent_nodes(
+                Some(&deps),
+                "wf-1825-p2e",
+                &run_id,
+                &trigger_input,
+                &blocked,
+            )
+            .await;
+        });
+
+        // Blocks until the settle pass is genuinely suspended inside the
+        // FIRST node's durable write — after `turns` was built (both `first`
+        // and `second` already passed their `is_armed` check), but before
+        // `second`'s own write is even attempted.
+        store.reached.notified().await;
+
+        // What deciding `second`'s last card right now, mid-batch, already
+        // does to the in-memory stash: `retire_blocked_stash` releases it,
+        // the same call `a_released_turn_is_not_resurrected_by_the_settle_pass`
+        // above reproduces directly. Its durable `BlockedNodeReleased`
+        // half is deliberately NOT reproduced here while `first`'s write is
+        // still frozen: `RuntimeJournal::append` takes `write_lock` around
+        // the whole store call (see its doc comment), which `first`'s
+        // in-flight append is still holding at this exact point, so a second
+        // append attempted here would deadlock against itself — a test
+        // artifact of freezing one append to observe another, not a real
+        // constraint on the two decisions in production (there they run on
+        // separate turns' own append calls, each taking and releasing the
+        // lock in turn). The in-memory release alone is the only signal the
+        // fix under test reads (`BlockedNodeQueue::is_armed`), so it is
+        // sufficient on its own to pose the race.
+        parking.blocked_nodes.release(&second_turn);
+
+        // Let `first`'s write complete; the loop now reaches `second`.
+        store.release.notify_one();
+        handle
+            .await
+            .expect("stash_blocked_agent_nodes does not panic");
+
+        assert!(
+            !parking.blocked_nodes.is_armed(&second_turn),
+            "a turn released mid-batch must not be resurrected in memory either"
+        );
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .all(|(t, ..)| t != second_turn),
+            "a turn released mid-batch must not be durably re-stashed behind its own release — \
+             a late approval-bank retry landing on the resurrection could make a future boot \
+             dispatch this run a second time"
+        );
+        // The sibling that was never touched is unaffected.
+        assert!(parking.blocked_nodes.is_armed(&first_turn));
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .any(|(t, ..)| t == first_turn)
         );
     }
 

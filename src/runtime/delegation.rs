@@ -36,7 +36,7 @@ use crate::ports::tasks::{
     COLUMN_PLANNING, COLUMN_TODO, TaskOutput, TaskOutputAction, TaskOutputSource,
     TaskOutputWorkflow,
 };
-use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
+use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
 use crate::runtime::cycle::{BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, assignment_matches};
@@ -51,15 +51,56 @@ use crate::runtime::cycle::{BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, assignment
 /// turn ([`run_steered_background`](RunTurn::run_steered_background)). The impl
 /// re-attaches whatever dependencies the concrete runtime needs; the runner only
 /// ever sees a [`TurnOutcome`].
+/// Which conversation a chat turn belongs to: the channel, and the thread
+/// within it (#1890).
+///
+/// One argument rather than two loose `Option`s beside each other. A bare
+/// `Option<EventSeq>` next to a bare `Option<&str>` is exactly the shape
+/// [`ChatTurn`](crate::server::operator) already documents as the hazard — a
+/// mis-ordered pair that compiles and then answers into the wrong
+/// conversation — and there is nothing in either type to catch it.
+///
+/// A `None` `thread_root` is not "no thread". It is the channel-level
+/// conversation: the one every unparented line hangs in, which is every line
+/// in a company that has never opened a thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChatTarget<'a> {
+    /// The desk / channel the turn is addressed to; `None` is unaddressed and
+    /// folds to the General desk downstream.
+    pub chat_id: Option<&'a str>,
+    /// The root message this turn's thread hangs off; `None` is the channel
+    /// itself.
+    pub thread_root: Option<EventSeq>,
+}
+
+impl<'a> ChatTarget<'a> {
+    /// A turn posted straight into a channel — the shape every caller had
+    /// before threads were part of the key.
+    pub fn channel(chat_id: Option<&'a str>) -> Self {
+        Self {
+            chat_id,
+            thread_root: None,
+        }
+    }
+
+    /// A turn inside `chat_id`, in the thread rooted at `thread_root`.
+    pub fn in_thread(chat_id: Option<&'a str>, thread_root: Option<EventSeq>) -> Self {
+        Self {
+            chat_id,
+            thread_root,
+        }
+    }
+}
+
 #[async_trait]
 pub trait RunTurn: Send + Sync {
-    /// A streamed turn on `agent_id` answering `message` in `chat_id`.
+    /// A streamed turn on `agent_id` answering `message` in `chat`.
     async fn run(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome>;
 
     /// A streamed, operator-steerable turn (pause / cancel / redirect).
@@ -74,7 +115,7 @@ pub trait RunTurn: Send + Sync {
         agent_id: &str,
         message: &str,
         control: &SteerControl,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome>;
 
@@ -120,7 +161,8 @@ pub trait RunTurn: Send + Sync {
         // and an engine with no step stream has nothing to feed it anyway. The
         // streaming harness overrides this and does record.
         let _ = run_sink;
-        self.run(company, agent_id, message, None).await
+        self.run(company, agent_id, message, ChatTarget::default())
+            .await
     }
 
     /// Like [`run_background`](Self::run_background) but streams the node's live
@@ -357,7 +399,7 @@ impl RunTurn for NoTurn {
         _company: &CompanyId,
         _agent_id: &str,
         _message: &str,
-        _chat_id: Option<&str>,
+        _chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome> {
         Err(no_turn_error())
     }
@@ -368,7 +410,7 @@ impl RunTurn for NoTurn {
         _agent_id: &str,
         _message: &str,
         _control: &SteerControl,
-        _chat_id: Option<&str>,
+        _chat: ChatTarget<'_>,
         _run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         Err(no_turn_error())
@@ -680,6 +722,19 @@ pub(crate) struct DelegationRunner<'a> {
     /// worse than before this fix, for the paths that have not been taught to
     /// carry a re-issue text.
     reissue_message: Option<String>,
+    /// The thread this turn belongs to, when it belongs to one (#1890).
+    ///
+    /// A builder for the same reason [`requested`](Self::requested) and
+    /// [`also_mentioned`](Self::also_mentioned) are, and the argument their docs
+    /// already make applies here with more force: optional context about the
+    /// turn, absent on every path that is not an operator message in a thread,
+    /// and threading it as an argument made well over a hundred call sites
+    /// restate "no thread" to say nothing — with `main` adding more of them
+    /// while the change was in review, so every rebase re-broke the branch.
+    ///
+    /// The channel stays an argument, because every caller has one and it
+    /// selects *who answers*. The thread only narrows *what they remember*.
+    thread_root: Option<EventSeq>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -738,6 +793,7 @@ impl<'a> DelegationRunner<'a> {
             requested_intent: None,
             also_mentioned: Vec::new(),
             reissue_message: None,
+            thread_root: None,
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -789,6 +845,7 @@ impl<'a> DelegationRunner<'a> {
             requested_intent: None,
             also_mentioned: Vec::new(),
             reissue_message: None,
+            thread_root: None,
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -1001,6 +1058,24 @@ impl<'a> DelegationRunner<'a> {
     /// context about the turn, absent on every path that is not an operator
     /// message, and threading it as an argument would make a dozen test call
     /// sites restate an empty vector to say nothing.
+    /// The conversation a turn in `chat_id` belongs to: that channel, plus
+    /// whatever thread [`in_thread`](Self::in_thread) bound this runner to.
+    ///
+    /// The single place the two halves are rejoined, so a caller cannot pair a
+    /// channel with the wrong thread by getting the argument order wrong — the
+    /// hazard `ChatTarget`'s own docs name.
+    fn target(&self, chat_id: Option<&'a str>) -> ChatTarget<'a> {
+        ChatTarget::in_thread(chat_id, self.thread_root)
+    }
+
+    /// Binds this turn to the thread rooted at `root` (#1890) — `None` is the
+    /// channel-level conversation, which is what every non-threaded path wants
+    /// and therefore never has to say.
+    pub(crate) fn in_thread(mut self, root: Option<EventSeq>) -> Self {
+        self.thread_root = root;
+        self
+    }
+
     pub(crate) fn also_mentioned(mut self, agents: Vec<String>) -> Self {
         self.also_mentioned = agents;
         self
@@ -1367,7 +1442,8 @@ impl<'a> DelegationRunner<'a> {
                 || (chatter && is_pure_small_talk(operator_words(message))));
         let outcome = with_chat_only_hint(
             chat_only,
-            self.run_turn.run(self.company, responder, message, chat_id),
+            self.run_turn
+                .run(self.company, responder, message, self.target(chat_id)),
         )
         .await?;
         let parked = self.approvals_queued().saturating_sub(approvals_before);
@@ -1419,6 +1495,14 @@ impl<'a> DelegationRunner<'a> {
         // bubble lands in `bubbles`.
         let mut bubbles = Vec::new();
         let mut desk_replies: Vec<(String, String)> = Vec::new();
+        // Issue #1846 review (Codex #3870516681): whether a DESK paused, kept
+        // apart from the sticky `budget_paused` above. That one is already
+        // carrying the responder's OWN pause, and a responder that paused on
+        // the turn that queued the hand-off still got a real answer back from
+        // the desk — relaying it is correct there, and is what
+        // `a_responders_own_budget_pause_survives_the_relay_replacing_the_reply`
+        // pins. Only a desk that paused has failed to answer.
+        let mut desk_paused = false;
         // Issue #246: the first card this turn opened, which is what the
         // operator bubble reports. `get_or_insert` rather than assignment keeps
         // it the FIRST — a later spawn must not overwrite the id an earlier one
@@ -1445,6 +1529,7 @@ impl<'a> DelegationRunner<'a> {
             operator_steps.extend(desk.steps);
             hit_iteration_cap |= desk.hit_iteration_cap;
             halted_for_spend = halted_for_spend.or(desk.halted_for_spend);
+            desk_paused |= desk.budget_paused.is_some();
             budget_paused = budget_paused.or(desk.budget_paused);
             desk_replies.push((desk.member, desk.reply));
         }
@@ -1453,12 +1538,29 @@ impl<'a> DelegationRunner<'a> {
         // plus the teammate reply, and surface THAT as the operator bubble — so
         // the orchestrator comes back with the answer in one coherent
         // conversation.
-        if !desk_replies.is_empty() {
+        //
+        // Issue #1846 review (Codex #3870516681): "answered" is the load-bearing
+        // word, and a desk that paused for lack of credits has NOT answered —
+        // `desk.reply` is the pause placeholder. Relaying it anyway fired a
+        // second inference call at the same exhausted provider, which paused
+        // too and parked a SECOND marker, this one for the responder. That
+        // marker has no notice pointing at it (the operator only ever sees the
+        // first delegate's pause), so it is unreachable, and being newer it can
+        // supersede a live CTA on an older notice — disabling the one button
+        // that would have worked. Skipped entirely instead; the fold below
+        // keeps the delegate's own text on the operator bubble, so nothing the
+        // operator would have read is lost.
+        //
+        // Gated on `desk_paused`, NOT on the sticky `budget_paused`: the latter
+        // also carries the RESPONDER's own pause, and a responder that paused
+        // on the turn that queued the hand-off still has a real desk answer to
+        // relay. Widening the gate to it would silently drop that answer.
+        if !desk_replies.is_empty() && !desk_paused {
             let relay_prompt = build_relay_prompt(message, &desk_replies);
             self.queue.clear();
             let relay = self
                 .run_turn
-                .run(self.company, responder, &relay_prompt, chat_id)
+                .run(self.company, responder, &relay_prompt, self.target(chat_id))
                 .await?;
             // The relay turn may only relay — a second hand-off from here is the
             // re-delegation loop this drain exists to stop, and it is dropped.
@@ -1570,6 +1672,15 @@ impl<'a> DelegationRunner<'a> {
                 );
             }
             budget_paused = budget_paused.or(relay.budget_paused);
+        } else if !desk_replies.is_empty() {
+            // The relay was skipped because a desk paused (see above). Fold the
+            // delegate's text onto the operator bubble directly, in the same
+            // shape `build_relay_prompt` would have handed the relay turn, so
+            // skipping it drops nothing — the pause itself is surfaced
+            // separately from `budget_paused` by the caller.
+            for (member, reply) in &desk_replies {
+                operator_reply.push_str(&format!("\n\n{member} replied:\n{reply}"));
+            }
         }
         // Drained after the relay, not before it: a relay turn carries the same
         // inline `create_workflow` tool, so draining at the responder's turn
@@ -2069,7 +2180,7 @@ impl<'a> DelegationRunner<'a> {
                 &member,
                 &instruction,
                 &control,
-                chat_id,
+                self.target(chat_id),
                 // Issue #242: when this drain is running inside a
                 // dispatched card, the delegate's turn is part of that
                 // card's attempt — its steps and its spend belong to the
@@ -4228,7 +4339,7 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             _company: &CompanyId,
             agent_id: &str,
             message: &str,
-            _chat_id: Option<&str>,
+            _chat_id: ChatTarget<'_>,
         ) -> Result<TurnOutcome> {
             Ok(self.next(agent_id, message, None).await)
         }
@@ -4239,7 +4350,7 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             agent_id: &str,
             message: &str,
             control: &SteerControl,
-            _chat_id: Option<&str>,
+            _chat_id: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             Ok(self.next(agent_id, message, Some(control)).await)
@@ -7348,8 +7459,15 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// [`a_nested_delegates_spend_halt_reaches_the_operator_turn`]: a delegate
     /// two levels down pauses for lack of inference budget/credits, and the
     /// operator is told — because the pause folds into the member's answer
-    /// exactly as its reply and steps already do, and survives the relay
-    /// turn's overwrite the same way a spend halt does.
+    /// exactly as its reply and steps already do.
+    ///
+    /// Issue #1846 review (Codex #3870516681): the pause no longer survives a
+    /// relay OVERWRITE, because there is no relay turn to overwrite it. A desk
+    /// that paused has not answered, so the relay is skipped (see
+    /// [`a_delegates_budget_pause_does_not_launch_the_ceo_relay`]) and the
+    /// delegate's text is folded onto the operator bubble instead. This test
+    /// scripts only the three turns that actually run: a fourth would be the
+    /// relay, and `ScriptedTurns` running dry is how a regression surfaces.
     #[tokio::test]
     async fn a_nested_delegates_budget_pause_reaches_the_operator_turn() {
         let fx = Fixture::nested();
@@ -7369,7 +7487,6 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                      stopped instead of failing silently. Add credits to your account, then \
                      resend your message to continue.",
                 ),
-                Turn::reply("Built. Research is paused for credits."),
             ],
         );
 
@@ -7387,9 +7504,18 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "the notice must name the teammate that actually paused, not the one relaying it"
         );
         assert!(pause.summary.contains("add credits") || pause.summary.contains("Add credits"));
-        // The relay really did replace the reply — so the pause survived an
-        // overwrite rather than riding along on text that happened to persist.
-        assert_eq!(out.reply, "Built. Research is paused for credits.");
+        // The fold stands in for the relay: the delegate's own text still lands
+        // on the operator bubble, so skipping the relay drops nothing.
+        assert!(
+            out.reply.contains("engineer replied:"),
+            "the desk's answer must survive the skipped relay: {}",
+            out.reply
+        );
+        assert!(
+            out.reply.contains("researcher"),
+            "including the nested delegate's paused text: {}",
+            out.reply
+        );
     }
 
     /// Issue #1846 review (Codex #3864988176): the marker a delegated pause
@@ -7714,6 +7840,85 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             cards[0].column, COLUMN_PAUSED,
             "a pause must not read as a completed answer: {:?}",
             cards[0]
+        );
+    }
+
+    /// Issue #1846 review (Codex #3870516681) — **the regression.** A desk
+    /// that paused for lack of credits has not ANSWERED, so there is nothing
+    /// for the CEO relay to hand back.
+    ///
+    /// Before this fix the fold pushed the delegate's pause placeholder into
+    /// `desk_replies`, whose non-empty check launched the relay anyway: a
+    /// second inference call at the same exhausted provider, which paused too
+    /// and parked a SECOND marker — this one for the RESPONDER, with no notice
+    /// anywhere pointing at it. Being newer, that orphan supersedes the live
+    /// CTA on the delegate's own notice, disabling the one button that would
+    /// have worked.
+    ///
+    /// The script deliberately supplies only TWO turns: the responder's
+    /// hand-off and the delegate's pause. A relay would need a third, so if
+    /// the gate ever regresses, `ScriptedTurns` runs dry and this fails loudly
+    /// rather than silently parking an extra marker.
+    #[tokio::test]
+    async fn a_delegates_budget_pause_does_not_launch_the_ceo_relay() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::budget_paused(
+                    "Paused — engineer's turn ran out of inference budget/credits.",
+                    "engineer",
+                    "Paused — engineer's turn ran out of inference budget/credits, so it \
+                     stopped instead of failing silently.",
+                ),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            out.budget_paused.is_some(),
+            "sanity: the delegate's pause still folds through to the operator"
+        );
+        assert_eq!(
+            out.budget_paused.as_ref().map(|p| p.agent.as_str()),
+            Some("engineer"),
+            "the pause named must be the delegate's, not a relay's: {:?}",
+            out.budget_paused
+        );
+
+        // Asserted on the CALLS, not on the parked markers: the marker
+        // registry is process-global and keyed by company id, and every
+        // `Fixture::nested()` shares the manifest's one id — so a sibling test
+        // parking for "chief" would make a marker assertion here pass or fail
+        // on test-execution order rather than on this behaviour. The relay
+        // launching at all is the defect; the orphan marker is its downstream
+        // consequence.
+        let calls = turns.calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "exactly two turns: the responder's hand-off and the delegate's paused turn. A \
+             third is the CEO relay firing into the same exhausted provider — the pre-fix \
+             defect, which parks a second, unreachable marker for the responder: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(_, prompt)| prompt.contains("You delegated this to your team")),
+            "no call may carry a relay prompt — that sentence is `build_relay_prompt`'s and \
+             nothing else's: {calls:?}"
+        );
+
+        assert!(
+            out.reply.contains("engineer"),
+            "skipping the relay must not drop the delegate's text from the bubble: {}",
+            out.reply
         );
     }
 

@@ -32,10 +32,11 @@ use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventStreamItem;
+use crate::ports::store::company_write_lock;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, OutboundMessage,
-    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent, TurnStep,
-    Verdict,
+    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, CompanyRecord, EventSeq,
+    OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent,
+    TurnStep, Verdict,
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
@@ -194,29 +195,100 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                     overlay_created: false,
                 }
             });
-            let overlay_desks = record.overlay_desks.iter().map(|desk| {
-                let members = record.effective_desk_members(&desk.id);
-                // For an overlay desk the founding members are `desk.members`;
-                // anything beyond them came from the desk-member overlay.
-                let overlay_members = members
-                    .iter()
-                    .filter(|m| !desk.members.contains(m))
-                    .cloned()
-                    .collect();
-                DeskDto {
-                    id: desk.id.clone(),
-                    name: desk.name.clone(),
-                    description: desk.description.clone(),
-                    members,
-                    overlay_members,
-                    responder: desk.responder,
-                    overlay_created: true,
-                }
-            });
+            // An overlay desk standing where `#general` does is not projected:
+            // the console would show it as the company-wide line, offer the
+            // edit and delete controls a desk row carries, and every one of
+            // them would be refused (`is_general_channel`). The rule this file
+            // follows is not to offer a control that will be refused. Nothing
+            // is lost by hiding it — its transcript is already folded into
+            // `#general` by `is_general_chat`, and that channel's membership is
+            // the whole roster, a superset of whatever this desk held.
+            let overlay_desks = record
+                .overlay_desks
+                .iter()
+                .filter(|desk| !shadows_general_channel(desk))
+                .map(|desk| {
+                    let members = record.effective_desk_members(&desk.id);
+                    // For an overlay desk the founding members are `desk.members`;
+                    // anything beyond them came from the desk-member overlay.
+                    let overlay_members = members
+                        .iter()
+                        .filter(|m| !desk.members.contains(m))
+                        .cloned()
+                        .collect();
+                    DeskDto {
+                        id: desk.id.clone(),
+                        name: desk.name.clone(),
+                        description: desk.description.clone(),
+                        members,
+                        overlay_members,
+                        responder: desk.responder,
+                        overlay_created: true,
+                    }
+                });
             manifest_desks.chain(overlay_desks).collect()
         })
         .unwrap_or_default();
     Ok(Json(desks))
+}
+
+/// Whether `desk_id` names the built-in `#general` channel rather than a desk
+/// (issue #1743).
+///
+/// `#general` is the company-wide conversation this host has always folded
+/// every General spelling into — `general`, `General`, `main`, and the empty
+/// string all name it, which is exactly what
+/// [`is_general_chat`](crate::server::chat_history::is_general_chat) decides.
+/// It is deliberately **not** a desk: it has no lead, no hierarchy, and its
+/// membership is the whole roster derived at read time, so there is nothing for
+/// a desk mutation to change. Every one of them is therefore refused with a
+/// reason rather than answered with a bare `404`, which is a different fact —
+/// an id the host reserves is not an id nobody created.
+///
+/// Guarded on the **manifest** on purpose: a company whose blueprint really
+/// does declare a `[[group_chat]]` with one of those ids keeps behaving exactly
+/// as it did. This only ever replaces the "no such desk" answer; it never takes
+/// a desk away from a manifest that has one.
+///
+/// Deliberately *not* `desk_exists`, which also admits operator-created overlay
+/// desks. `create_desk` refuses these ids now, but it did not before issue
+/// #1743 — so an instance can be carrying a persisted overlay desk called
+/// `general` or `main`, and exempting it would leave the channel this issue
+/// promises is permanent staffable, reorderable and deletable after all. Such a
+/// desk is excluded from `GET .../desks` too ([`shadows_general_channel`]), so
+/// the refusal is never a control the console offered.
+fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
+    let declared = record
+        .manifest
+        .group_chats
+        .iter()
+        .any(|c| c.id == desk_id || c.name.eq_ignore_ascii_case(desk_id));
+    !declared && crate::server::chat_history::is_general_chat(Some(desk_id))
+}
+
+/// Whether an operator-created overlay desk stands where the built-in
+/// `#general` channel does (issue #1743).
+///
+/// **By id, and only by id** — because that is exactly what
+/// [`CompanyRecord::resolve_desk_id`](crate::ports::types::CompanyRecord::resolve_desk_id)
+/// refuses. It declines to match an overlay desk against a General key, so a
+/// desk merely *named* `General` no longer shadows anything: it is addressed by
+/// its own id, its lead still answers there, `delegate_to_desk` still reaches
+/// it, and every write to it still works. Hiding it here would take a live desk
+/// and its transcript out of Chat while the API kept routing to it — the
+/// mirror image of the defect this projection exists to prevent.
+///
+/// A desk whose **id** is a General spelling is a different matter: no key
+/// resolves it, so there is nothing left to address and every desk write aimed
+/// at it is refused. Creation refuses both spellings now, but neither was
+/// refused before, so both are reachable persisted state rather than a
+/// hypothesis.
+///
+/// Only overlay desks. A manifest desk answering to one of those spellings is
+/// the blueprint's own General desk, which this host has always honoured, and
+/// it keeps the company-wide line along with its row here.
+fn shadows_general_channel(desk: &crate::ports::types::OverlayDesk) -> bool {
+    crate::server::chat_history::is_general_chat(Some(&desk.id))
 }
 
 /// The path of a desk sub-resource (`desk_id`).
@@ -263,12 +335,30 @@ async fn add_desk_member(
     Json(body): Json<AddDeskMember>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). A manifest-only check meant a desk
     // created in the console could be reordered and deleted but never staffed
@@ -320,12 +410,30 @@ async fn set_desk_order(
     Json(body): Json<SetDeskOrder>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). `desk_exists` covers both (the same
     // check `effective_desk_members` uses), so an operator-created desk can be
@@ -376,12 +484,30 @@ async fn remove_desk_member(
     Path(DeskMemberPath { desk_id, agent_id }): Path<DeskMemberPath>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // First validate that the desk exists at all — otherwise a caller supplying
     // an unknown desk_id gets a desk-scoped 404 rather than a confusing
     // member-scoped one (Greptile feedback). Existence spans both blueprint and
@@ -502,6 +628,16 @@ async fn create_desk(
     Json(body): Json<CreateDesk>,
 ) -> Result<(StatusCode, Json<DeskDto>), ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -524,6 +660,26 @@ async fn create_desk(
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "invalid desk id {id:?} — use lowercase letters, digits, and underscores"
         ))));
+    }
+    // A desk that claimed one of the General spellings would shadow the
+    // built-in `#general` channel: the console would show two `#general` rows
+    // and the host would route messages addressed to it at this desk's lead
+    // instead of the orchestrator (issue #1743). Refused at creation, which
+    // costs nothing — no manifest can reach this path, so no existing company
+    // loses a desk.
+    //
+    // The **display name** is reserved for the same reason and not a weaker
+    // one: `resolve_desk_id` matches a desk by id *or* by case-insensitive
+    // name, so `{"id": "ops", "name": "General"}` shadows the channel just as
+    // thoroughly — `everyone_desk` folds the built-in `main` thread to
+    // `General`, that lookup then selects this desk, and `@everyone` on the
+    // company-wide line expands to its members instead of the roster.
+    if crate::server::chat_history::is_general_chat(Some(&id))
+        || crate::server::chat_history::is_general_chat(Some(&name))
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_RESERVED.to_string(),
+        )));
     }
     if record.desk_exists(&id) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
@@ -594,6 +750,16 @@ async fn delete_desk(
     Path(DeskPath { desk_id }): Path<DeskPath>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -601,6 +767,14 @@ async fn delete_desk(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
 
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // A manifest desk belongs to the blueprint — never deletable at runtime.
     if record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
@@ -3239,10 +3413,13 @@ async fn list_approvals(
     }
     let runtime = lookup(&state, &id)?;
     // Membership got you the list; role decides whether you may read what is in
-    // it (issue #618).
+    // it (issue #618). Ownership is resolved before either (#1891): the queue
+    // is joined to cards by its consumers, and since the board card decides in
+    // place, handing out the raw park stamp would let an operator resolve
+    // another card's request from this one.
     Ok(Json(crate::server::approval_visibility::for_principal(
         &auth,
-        runtime.pending_approvals(),
+        runtime.pending_approvals_resolved().await,
     )))
 }
 
@@ -3257,12 +3434,13 @@ async fn list_approvals_single(
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
         return Err(resp.into());
     }
-    // Same contents rule as the `{id}` form (issue #618) — the two handlers are
-    // the same read behind two addressing forms, and a redaction applied to one
-    // of them would be a hole rather than a boundary.
+    // Same contents rule as the `{id}` form (issue #618) — and the same
+    // ownership resolution (#1891). The two handlers are the same read behind
+    // two addressing forms, and either applied to only one of them would be a
+    // hole rather than a boundary.
     Ok(Json(crate::server::approval_visibility::for_principal(
         &auth,
-        runtime.pending_approvals(),
+        runtime.pending_approvals_resolved().await,
     )))
 }
 
@@ -3748,7 +3926,6 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
-    use crate::ports::types::CompanyRecord;
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
     use crate::store::FsCompanyStore;
@@ -5044,6 +5221,282 @@ mode = "full"
         assert_eq!(desks[0]["overlayMembers"][0], "eng");
     }
 
+    /// `add_desk_member` must serialize its load-modify-save cycle against
+    /// `company_write_lock`, exactly like every other console load-modify-save
+    /// write (`put_logo`, `set_lifecycle`, `patch_company`) — otherwise it can
+    /// silently revert a concurrent rename: `patch_company` is guarded by
+    /// `company_write_lock` alone, so a desk write racing in on only the
+    /// unrelated `serial` cycle lock can load the pre-rename record and save
+    /// the whole thing back after the rename lands (PR #1875 review finding).
+    /// Proven the same way `put_logo_serializes_against_the_company_write_lock`
+    /// proves it: hold the lock externally, drive the real handler through the
+    /// router, and demand it cannot finish while the lock is held.
+    #[tokio::test]
+    async fn add_desk_member_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks/studio/members")
+                        .header("cookie", &cookie_for_task)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"agent_id":"eng"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        // The handler must be blocked behind the held lock — give it every
+        // chance to (wrongly) race ahead before declaring it stuck.
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "add_desk_member completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("add_desk_member never resumed after the lock was released")
+            .expect("add_desk_member task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// `set_desk_order` must serialize against `company_write_lock` too — same
+    /// load-modify-save shape and same finding as `add_desk_member`'s own test
+    /// above (PR #1875 review finding, round 9: the earlier fix covered five
+    /// handlers but this coverage only proved it for one).
+    #[tokio::test]
+    async fn set_desk_order_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+        seed_overlay_eng(&app, &cookie).await;
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            put_desk_order(
+                &app_for_task,
+                &cookie_for_task,
+                "studio",
+                r#"{"ordered_member_ids":["eng","ceo"]}"#,
+            )
+            .await
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "set_desk_order completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("set_desk_order never resumed after the lock was released")
+            .expect("set_desk_order task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// `remove_desk_member` must serialize against `company_write_lock` too
+    /// (PR #1875 review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn remove_desk_member_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+        seed_overlay_eng(&app, &cookie).await;
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/api/v1/company/desks/studio/members/eng")
+                        .header("cookie", &cookie_for_task)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "remove_desk_member completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("remove_desk_member never resumed after the lock was released")
+            .expect("remove_desk_member task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// `create_desk` must serialize against `company_write_lock` too (PR #1875
+    /// review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn create_desk_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie_for_task)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"name":"Growth","members":["eng"]}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "create_desk completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("create_desk never resumed after the lock was released")
+            .expect("create_desk task panicked");
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    /// `delete_desk` must serialize against `company_write_lock` too (PR #1875
+    /// review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn delete_desk_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        // Create the overlay desk to delete before taking the lock — this
+        // test proves serialization on the delete path, not the create path.
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/api/v1/company/desks/growth")
+                        .header("cookie", &cookie_for_task)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "delete_desk completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("delete_desk never resumed after the lock was released")
+            .expect("delete_desk task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
     /// Removing an overlay member drops it from the merged view; a manifest
     /// member cannot be removed (409), and an unknown overlay member is a 404.
     #[tokio::test]
@@ -5310,84 +5763,97 @@ mode = "full"
         assert_eq!(arr[1]["overlayCreated"], true);
     }
 
-    /// Issue #1835, both wire directions. A create that never mentions
-    /// `responder` — every existing caller, and the org chart today — answers
-    /// and lists with **no** `responder` key at all, so old consoles see the
-    /// pre-#1835 shape byte-for-byte. A create with `responder: "auto"`
-    /// answers and lists `"auto"`, and the mode survives the store round-trip
-    /// rather than collapsing back to a lead desk.
+    /// Every desk mutation aimed at the built-in `#general` channel is refused
+    /// with a reason, under **every** spelling the host folds into the General
+    /// conversation (issue #1743).
+    ///
+    /// The point of the assertion is the pair: a `409` **and** the sentence.
+    /// Before this, each of these was a bare `404`/`CompanyNotFound` — "there
+    /// is no such desk" — which is a different and wrong claim. `#general` is
+    /// not missing; it is reserved, and the caller needs to be told which.
+    ///
+    /// There is no `PATCH …/desks/{id}` route on this host at all, so this is
+    /// the complete desk mutation surface: delete, staff, unstaff, reorder.
     #[tokio::test]
-    async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
+    async fn every_desk_mutation_aimed_at_general_is_refused_with_a_reason() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
 
-        let post = |body: &'static str| {
-            let app = app.clone();
-            let cookie = cookie.clone();
-            async move {
+        for spelling in ["general", "General", "GENERAL", "main", "Main"] {
+            let cases: [(&str, String, &str); 4] = [
+                ("DELETE", format!("/api/v1/company/desks/{spelling}"), ""),
+                (
+                    "POST",
+                    format!("/api/v1/company/desks/{spelling}/members"),
+                    r#"{"agent_id":"eng"}"#,
+                ),
+                (
+                    "DELETE",
+                    format!("/api/v1/company/desks/{spelling}/members/ceo"),
+                    "",
+                ),
+                (
+                    "PUT",
+                    format!("/api/v1/company/desks/{spelling}/order"),
+                    r#"{"ordered_member_ids":["ceo"]}"#,
+                ),
+            ];
+            for (method, uri, body) in cases {
                 let response = app
+                    .clone()
                     .oneshot(
                         Request::builder()
-                            .method("POST")
-                            .uri("/api/v1/company/desks")
+                            .method(method)
+                            .uri(&uri)
                             .header("cookie", &cookie)
                             .header("content-type", "application/json")
-                            .body(Body::from(body))
+                            .body(Body::from(body.to_string()))
                             .unwrap(),
                     )
                     .await
                     .unwrap();
-                assert_eq!(response.status(), StatusCode::CREATED);
+                assert_eq!(
+                    response.status(),
+                    StatusCode::CONFLICT,
+                    "{method} {uri} must be refused, not answered 404"
+                );
                 let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(
+                    text.contains("company-wide channel"),
+                    "{method} {uri} must say why: got {text}"
+                );
             }
-        };
-
-        let lead = post(r#"{"name":"Growth desk","members":["eng"]}"#).await;
-        assert!(
-            lead.get("responder").is_none(),
-            "a mode never stated must not appear on the wire: {lead}"
-        );
-        let auto =
-            post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
-        assert_eq!(auto["responder"], "auto", "{auto}");
-
-        // The list re-reads the store, so this is the round-trip half: the
-        // manifest desk and the defaulted create stay keyless, the channel
-        // keeps its mode.
-        let desks = get_desks(&app, &cookie).await;
-        let arr = desks.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
-        assert!(arr[0].get("responder").is_none(), "manifest desk: {desks}");
-        assert!(
-            arr[1].get("responder").is_none(),
-            "defaulted create: {desks}"
-        );
-        assert_eq!(arr[2]["responder"], "auto", "{desks}");
+        }
     }
 
-    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
-    /// the selector would have no candidates and the first-member fallback no
-    /// first member, so its unmentioned messages would silently fall to the
-    /// orchestrator, contradicting the channel's own model. A **lead** desk
-    /// keeps its right to start empty and be staffed from the org chart.
-    /// Revert the guard in `create_desk` and the first assertion answers 201.
+    /// A desk create that would shadow the built-in channel is refused (409),
+    /// whichever spelling it asks for and whether the id is given explicitly or
+    /// derived from the name (issue #1743).
+    ///
+    /// Shadowing is not a cosmetic collision: a desk named `general` would take
+    /// over routing for the company-wide line, so a message meant for the
+    /// orchestrator would be answered by that desk's lead instead.
     #[tokio::test]
-    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
+    async fn a_desk_cannot_be_created_that_would_shadow_the_general_channel() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(&home, desk_manifest()).await;
         let app = router(state);
         let cookie = crate::server::test_support::fixed_cookie("acme");
 
-        let post = |body: &'static str| {
-            let app = app.clone();
-            let cookie = cookie.clone();
-            async move {
-                app.oneshot(
+        for body in [
+            r#"{"name":"Anything","id":"general"}"#,
+            r#"{"name":"Anything","id":"main"}"#,
+            r#"{"name":"General"}"#,
+            r#"{"name":"Main"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
                     Request::builder()
                         .method("POST")
                         .uri("/api/v1/company/desks")
@@ -5397,25 +5863,300 @@ mode = "full"
                         .unwrap(),
                 )
                 .await
-                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("reserved"),
+                "body {body} must be told the id is reserved"
+            );
+        }
+
+        // Nothing was created: the desk list still holds only the manifest desk.
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1);
+        assert_eq!(desks[0]["id"], "studio");
+    }
+
+    /// `#general` is **not** a desk, and `GET …/desks` says so by not listing it
+    /// (issue #1743).
+    ///
+    /// This is the guarantee that keeps every desk-shaped surface honest
+    /// without any of them needing a special case: the org chart, the assignee
+    /// picker and the desk counts all read this route, so a channel that is
+    /// absent here can never be offered a rename, a delete, a lead or a seat.
+    /// The console's own no-affordance requirement falls out of it rather than
+    /// being enforced by hiding buttons.
+    #[tokio::test]
+    async fn the_general_channel_is_not_a_desk_and_is_not_listed_as_one() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        for desk in desks.as_array().unwrap() {
+            let id = desk["id"].as_str().unwrap();
+            assert!(
+                !crate::server::chat_history::is_general_chat(Some(id)),
+                "the desk list must not carry the built-in channel, found {id}"
+            );
+        }
+    }
+
+    /// An overlay desk carrying an explicit, unreserved id but the reserved
+    /// **display name** shadows the channel just as thoroughly (issue #1743).
+    ///
+    /// `resolve_desk_id` matches a desk by id *or* by case-insensitive name, so
+    /// `{"id": "ops", "name": "General"}` is selected when
+    /// `HarnessBrain::everyone_desk` folds the built-in `main` thread to
+    /// `General` — and `@everyone` on the company-wide line then expands to
+    /// that desk's members instead of the roster. The id check alone missed it
+    /// because the id is only *derived* from the name when none is supplied.
+    #[tokio::test]
+    async fn a_desk_cannot_take_the_general_display_name_under_another_id() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for body in [
+            r#"{"id":"ops","name":"General"}"#,
+            r#"{"id":"ops","name":"general"}"#,
+            r#"{"id":"ops","name":"Main"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
+        }
+
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1, "nothing was created");
+    }
+
+    /// An overlay desk carrying a reserved **display name** under its own id is
+    /// still a desk, and is still projected (issue #1743).
+    ///
+    /// `resolve_desk_id` declines to match an overlay desk against a General
+    /// key at all, so `{id: "ops", name: "General"}` shadows nothing: `ops`
+    /// resolves it, its lead answers there, `delegate_to_desk` reaches it, and
+    /// every desk write to it is allowed. Hiding it would take a live desk and
+    /// its transcript out of Chat while the API went on routing to it — the
+    /// mirror image of the defect this projection exists to prevent, and a
+    /// worse one, because nothing would say where the conversation went.
+    ///
+    /// Creation still refuses that display name
+    /// ([`a_desk_cannot_take_the_general_display_name_under_another_id`]); this
+    /// is only about state already on disk.
+    #[tokio::test]
+    async fn an_overlay_desk_named_general_under_its_own_id_is_still_projected() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        {
+            let id = CompanyId::new("acme");
+            let runtime = state.registry().get(&id).unwrap();
+            let store = runtime.store();
+            let mut record = store.load(&id).await.unwrap().unwrap();
+            record.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "ops".to_string(),
+                name: "General".to_string(),
+                description: None,
+                responder: Default::default(),
+                members: vec!["ceo".to_string()],
+            });
+            // The resolver is the reason this row is safe to project.
+            assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+            assert_eq!(record.resolve_desk_id("General"), None);
+            assert_eq!(record.resolve_desk_id("main"), None);
+            store.save(&record).await.unwrap();
+        }
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let ops = desks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "ops")
+            .unwrap_or_else(|| panic!("the desk must still be listed: {desks}"));
+        assert_eq!(ops["name"], "General");
+        assert_eq!(ops["overlayCreated"], true);
+
+        // And it takes desk writes under its own id, like any other desk.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks/ops/members")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"eng"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // While the General *key* still names the channel, not this desk.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/General")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// An overlay desk persisted **before** the ids were reserved is still not
+    /// the built-in channel (issue #1743).
+    ///
+    /// `create_desk` accepted `general` and `main` until this issue, so this is
+    /// state an upgraded instance can be carrying. Guarding the immutability
+    /// checks on `desk_exists` would have exempted it — leaving the channel
+    /// this issue promises is permanent staffable, reorderable and deletable
+    /// after all, which is the whole claim rather than an edge of it.
+    #[tokio::test]
+    async fn a_pre_existing_overlay_desk_does_not_become_the_general_channel() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        // Persisted as an upgraded instance would be carrying it — through the
+        // store the handlers read, not through the create route, which now
+        // refuses this id.
+        {
+            let id = CompanyId::new("acme");
+            let runtime = state.registry().get(&id).unwrap();
+            let store = runtime.store();
+            let mut record = store.load(&id).await.unwrap().unwrap();
+            record.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "general".to_string(),
+                name: "Legacy general".to_string(),
+                description: None,
+                responder: Default::default(),
+                members: vec!["ceo".to_string()],
+            });
+            store.save(&record).await.unwrap();
+        }
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Not projected, so no desk surface can offer it a control at all.
+        let desks = get_desks(&app, &cookie).await;
+        for desk in desks.as_array().unwrap() {
+            assert_ne!(
+                desk["id"], "general",
+                "a shadowing overlay desk must not be listed: {desks}"
+            );
+        }
+
+        // And every write aimed at it is refused with the channel's reason,
+        // not answered as if it were an ordinary desk.
+        for (method, uri, body) in [
+            (
+                "POST",
+                "/api/v1/company/desks/general/members",
+                Some(r#"{"agent_id":"eng"}"#),
+            ),
+            ("DELETE", "/api/v1/company/desks/general", None),
+        ] {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", &cookie);
+            if body.is_some() {
+                req = req.header("content-type", "application/json");
             }
-        };
+            let response = app
+                .clone()
+                .oneshot(req.body(body.map_or_else(Body::empty, Body::from)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{method} {uri}");
+        }
+    }
 
-        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
-        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
-        let body = String::from_utf8_lossy(&bytes).to_string();
-        assert!(
-            body.contains("at least one member"),
-            "the refusal names the reason, not a generic 400: {body}"
-        );
+    /// A company whose **blueprint** really declares a desk with one of those
+    /// ids keeps it, and keeps every write that has always worked on it
+    /// (issue #1743).
+    ///
+    /// The reservation replaces the "no such desk" answer and nothing else. A
+    /// guard that refused on the id alone would have taken a desk away from
+    /// every company that authored one, which is a migration, not a feature.
+    #[tokio::test]
+    async fn a_manifest_desk_named_general_is_left_exactly_as_it_was() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
+             [[group_chat]]\nid = \"general\"\nname = \"General\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
 
-        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
-        assert_eq!(
-            empty_lead.status(),
-            StatusCode::CREATED,
-            "an empty lead desk is still legal — it gains members from the org chart"
-        );
+        // It is listed as the desk it is.
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1);
+        assert_eq!(desks[0]["id"], "general");
+
+        // Staffing it still works — the pre-#1743 behaviour, unchanged.
+        let add = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks/general/members")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"eng"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(add.status(), StatusCode::NO_CONTENT);
+
+        // And deleting it is still refused as a *blueprint* desk, with the
+        // blueprint's reason rather than the reserved-channel one.
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/general")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(delete.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("blueprint"));
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
@@ -10918,6 +11659,114 @@ mode = "full"
             runtime.mention_context(&id, &[], "Engineering").await,
             "engineering",
             "a desk with a lead still stores its canonical id"
+        );
+    }
+
+    /// Issue #1835, both wire directions. A create that never mentions
+    /// `responder` — every existing caller, and the org chart today — answers
+    /// and lists with **no** `responder` key at all, so old consoles see the
+    /// pre-#1835 shape byte-for-byte. A create with `responder: "auto"`
+    /// answers and lists `"auto"`, and the mode survives the store round-trip
+    /// rather than collapsing back to a lead desk.
+    #[tokio::test]
+    async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/company/desks")
+                            .header("cookie", &cookie)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::CREATED);
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            }
+        };
+
+        let lead = post(r#"{"name":"Growth desk","members":["eng"]}"#).await;
+        assert!(
+            lead.get("responder").is_none(),
+            "a mode never stated must not appear on the wire: {lead}"
+        );
+        let auto =
+            post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
+        assert_eq!(auto["responder"], "auto", "{auto}");
+
+        // The list re-reads the store, so this is the round-trip half: the
+        // manifest desk and the defaulted create stay keyless, the channel
+        // keeps its mode.
+        let desks = get_desks(&app, &cookie).await;
+        let arr = desks.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert!(arr[0].get("responder").is_none(), "manifest desk: {desks}");
+        assert!(
+            arr[1].get("responder").is_none(),
+            "defaulted create: {desks}"
+        );
+        assert_eq!(arr[2]["responder"], "auto", "{desks}");
+    }
+
+    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
+    /// the selector would have no candidates and the first-member fallback no
+    /// first member, so its unmentioned messages would silently fall to the
+    /// orchestrator, contradicting the channel's own model. A **lead** desk
+    /// keeps its right to start empty and be staffed from the org chart.
+    /// Revert the guard in `create_desk` and the first assertion answers 201.
+    #[tokio::test]
+    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            body.contains("at least one member"),
+            "the refusal names the reason, not a generic 400: {body}"
+        );
+
+        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
+        assert_eq!(
+            empty_lead.status(),
+            StatusCode::CREATED,
+            "an empty lead desk is still legal — it gains members from the org chart"
         );
     }
 }

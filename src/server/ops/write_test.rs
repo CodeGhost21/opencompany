@@ -6347,6 +6347,155 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
     );
 }
 
+/// The **queue** answers ownership the same way the card does (#1891).
+///
+/// [`the_attempt_id_outranks_the_card_link_when_both_are_present`] pins the task
+/// detail read. `GET …/approvals` projected the raw park stamp instead, so the
+/// two surfaces disagreed about the same approval: the card refused to show
+/// `appr-elsewhere` and the queue handed it out labelled `t-1`. Every console
+/// join on that link — the board's blocked row, the Approvals page's per-card
+/// filter — inherited the disagreement.
+///
+/// Read-only that was a wrong label. Once the board card grew Approve and
+/// Decline it became an operator resolving another card's request, so the two
+/// reads are pinned against each other here rather than left to agree by
+/// convention.
+#[tokio::test]
+async fn the_queue_resolves_ownership_the_same_way_the_card_does() {
+    use crate::ports::runs::NewRun;
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    for (id, task) in [("run-b", "t-1"), ("run-c", "t-other")] {
+        runtime
+            .runs()
+            .create_run(&company, NewRun::for_task(id, task, "ceo"))
+            .await
+            .unwrap();
+    }
+
+    let under_run = |run: &str| {
+        let mut effect = parked_effect();
+        effect.run_id = Some(run.to_string());
+        effect
+    };
+
+    // Stamped with this card, parked under another card's attempt. The card
+    // read refuses it; the queue must not label it `t-1` either.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-elsewhere"),
+            &under_run("run-c"),
+            dispatched_at + 5,
+            TaskLink::Task { id: "t-1".into() },
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    // Stamped Unlinked *and* carrying a run id — which `workflow_run_of` reads
+    // as a workflow park, because the two id spaces are indistinguishable by
+    // value. The card read claims it (it checks membership in this card's own
+    // attempt ids, which the queue has no way to do); the queue leaves it
+    // alone rather than risk relabelling a workflow approval onto a card.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-attempt-2"),
+            &under_run("run-b"),
+            dispatched_at + 6,
+            TaskLink::Unlinked,
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    // No attempt at all: the stamp is the whole answer, unchanged.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-stamped"),
+            &parked_effect(),
+            dispatched_at + 7,
+            TaskLink::Task { id: "t-1".into() },
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/approvals", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let queue = body.as_array().unwrap();
+    let owner_of = |id: &str| {
+        queue
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing from the queue: {queue:?}"))["task"]
+            .clone()
+    };
+
+    assert_eq!(
+        owner_of("appr-elsewhere"),
+        json!({ "link": "task", "id": "t-other" }),
+        "the attempt outranks the stamp on the queue, exactly as on the card",
+    );
+    assert_eq!(
+        owner_of("appr-attempt-2"),
+        json!({ "link": "unlinked" }),
+        "an Unlinked park carrying a run id is a workflow park by `workflow_run_of`'s \
+         rule, and the queue must not claim it for a card on the strength of an id \
+         whose space it cannot identify",
+    );
+    assert_eq!(
+        owner_of("appr-stamped"),
+        json!({ "link": "task", "id": "t-1" }),
+        "a park with no attempt keeps the link it was stamped with",
+    );
+
+    // The pinning half, and it is a **subset** rather than an equality, which is
+    // the honest shape of the guarantee.
+    //
+    // The queue may never claim an approval the card does not — that direction
+    // is the defect, and it is what puts a decision the operator should not
+    // have in front of them. It may fall short: `approval_owner` asks whether a
+    // run is among *this card's* attempts, which the queue cannot ask without
+    // per-card state, so where the id space is ambiguous the queue abstains.
+    // The cost of abstaining is a blocked row the board does not draw; the cost
+    // of the other direction is deciding somebody else's request.
+    let (_, card) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let on_card: std::collections::HashSet<&str> = card["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    let from_queue: std::collections::HashSet<&str> = queue
+        .iter()
+        .filter(|row| row["task"] == json!({ "link": "task", "id": "t-1" }))
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        from_queue.is_subset(&on_card),
+        "the queue must never put an approval on a card the card itself disowns: \
+         queue={from_queue:?} card={on_card:?}",
+    );
+    assert!(
+        from_queue.contains("appr-stamped"),
+        "and must still carry the unambiguous ones: {from_queue:?}",
+    );
+    assert!(
+        !from_queue.contains("appr-elsewhere"),
+        "least of all the one parked under another card's attempt: {from_queue:?}",
+    );
+}
+
 /// An approval parked by a build older than #333 carries no link at all. It
 /// keeps the pre-#333 run-window correlation rather than vanishing, so existing
 /// history still renders.
@@ -7271,6 +7420,7 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         },
         Some("the agent's draft"),
     )

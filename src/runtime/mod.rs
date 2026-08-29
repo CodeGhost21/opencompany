@@ -22,6 +22,8 @@ pub mod advance;
 /// the safety net, and bounded so an agent-authored blob cannot reach a
 /// browser unbounded. See [`approval_display`].
 pub mod approval_display;
+/// Which card owns a parked approval on the queue read (#1891).
+pub mod approval_ownership;
 /// Brain-agnostic resolution of a task card's `assignee` against the full
 /// roster — teammates, overlay teammates and desks (issue #205). Shared by the
 /// harness dispatch path and the REST write boundary so the board's assignee

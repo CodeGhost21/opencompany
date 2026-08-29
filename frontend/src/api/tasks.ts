@@ -922,7 +922,6 @@ export function taskStatusesById(
   return statuses;
 }
 
-/** The steer body. `redirect` requires `instruction`; `cancel` requires `confirm`. */
 export interface SteerInput {
   action: SteerAction;
   instruction?: string;
