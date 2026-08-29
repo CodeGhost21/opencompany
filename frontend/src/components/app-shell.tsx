@@ -2044,9 +2044,12 @@ export function AppShell({
       ),
     );
     void client
-      .markNotificationsRead(undefined, company)
+      .markNotificationsRead(
+        notificationItems.map((n) => n.id),
+        company,
+      )
       .catch(refreshMentions);
-  }, [client, company, refreshMentions]);
+  }, [client, company, notificationItems, refreshMentions]);
 
   const mentionCounts = useMemo(() => {
     // `main` may be undefined while the desks/roster effect has not resolved —
