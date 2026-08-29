@@ -2969,13 +2969,17 @@ impl CompanyRuntime {
     /// `relay_reply` — rather than one conversation recorded for the whole
     /// report, because a dispatch cycle answers exactly the one card it ran.
     ///
-    /// Gated on `reply_to` being present and non-empty. That is the one field
-    /// `relay_reply` sets that no other `OutboundMessage` producer does — the
-    /// synchronous chat-turn cycle that `journal_chat_replies`
-    /// (`server::operator`) journals leaves it `None` — so this can never
-    /// re-journal a bubble that path already wrote, and a board-created card
-    /// (no `origin_chat_id`, so `run_task`/`refuse_dispatch` return no relay
-    /// at all) contributes nothing here either.
+    /// Gated on `reply_to` being present, not on its `chat_id` being
+    /// non-empty. That is the one field `relay_reply` sets that no other
+    /// `OutboundMessage` producer does — the synchronous chat-turn cycle that
+    /// `journal_chat_replies` (`server::operator`) journals leaves it `None`
+    /// — so this can never re-journal a bubble that path already wrote, and a
+    /// board-created card (no `origin_chat_id`, so `run_task`/
+    /// `refuse_dispatch` return no relay at all) contributes nothing here
+    /// either. An **empty** `chat_id` is still a real destination, not an
+    /// absent one: `origin_chat_id` preserves `Some("")` for a card spawned
+    /// from General, and `chat_history::same_conversation` treats `""` as an
+    /// alias for General — so it must be journaled, not discarded.
     ///
     /// Best-effort, like `HarnessBrain::journal_task_outcome`'s own writes: a
     /// failure here is logged, never propagated. By the time this runs the
