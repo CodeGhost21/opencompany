@@ -803,6 +803,13 @@ async fn run_workflow_inner(
                     // snapshot on the failure arm exactly as on the blocked one.
                     notices.push(run_output_persist_failed_notice());
                 }
+                // Reclassify capped nodes before they move into the partial run,
+                // the same as the settled arm does. A node that hit the iteration
+                // cap reports Ok but settled Failed, so both must agree on Error.
+                // Ordered after `reclassify_blocked` but the two cannot collide:
+                // `run_turn` returns `Err` on the blocked arm before reaching
+                // max_tool_iterations, so no node is both blocked and capped.
+                reclassify_capped_nodes(&mut nodes, &capped.take());
                 // Issue #1008 (second half): the failure carries the partial run
                 // rather than only a message. The nodes that ran before the break
                 // really did open board cards, park approvals and raise notices,
