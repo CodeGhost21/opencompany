@@ -7981,7 +7981,7 @@ name = "Morning"
             Arc::new(MemStore::default()),
             None,
             WorkflowRefQueue::default(),
-            None,
+            RunOutputCache::default(),
             "ceo".to_string(),
             None,
             vec!["fs:*".to_string()],
