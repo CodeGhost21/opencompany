@@ -3677,11 +3677,12 @@ async fn list_runs(
     // moved underneath it: the exact staleness a *stored* verdict would have,
     // reintroduced by placement.
     for run in &mut runs {
-        run.degraded = run.degraded || (!run.nodes.is_empty()
-            && run
-                .nodes
-                .iter()
-                .any(|n| n.status == WorkflowNodeStatus::Error));
+        run.degraded = run.degraded
+            || (!run.nodes.is_empty()
+                && run
+                    .nodes
+                    .iter()
+                    .any(|n| n.status == WorkflowNodeStatus::Error));
         run.verdict = run.derive_verdict();
     }
 
