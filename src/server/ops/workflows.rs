@@ -8703,6 +8703,7 @@ mod tests {
                 board: Vec::new(),
                 blocked_nodes: Vec::new(),
                 approvals: Vec::new(),
+                degraded: false,
                 stranded_approvals: 0,
                 verdict: WorkflowRunVerdict::Ok,
             }
