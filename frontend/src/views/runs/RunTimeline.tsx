@@ -66,6 +66,7 @@ export function runStatusTone(status: RunStatus): string {
       return "border-muted-foreground/30 text-muted-foreground";
     case "waiting_approval":
     case "paused":
+    case "blocked":
       return "border-status-blocked/40 text-status-blocked-text";
     default:
       return "border-status-running/40 text-status-running-text";
