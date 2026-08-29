@@ -3116,6 +3116,9 @@ export function AppShell({
 
                 `min-w-0` so the nameplate truncates instead of pushing the
                 button off the end of a 13.5rem column. */}
+            <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
+              <HostSwitcher companyName={feed.status.name} />
+            </div>
             <NotificationPanel
               notifications={notificationItems}
               onRead={markNotificationRead}
