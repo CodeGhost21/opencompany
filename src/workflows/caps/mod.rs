@@ -5084,6 +5084,7 @@ mod tests {
             "wf-1".to_string(),
             "run-1861".to_string(),
             None,
+            json!({}),
             RunNotices::default(),
             RunBoard::default(),
             blocks.clone(),
