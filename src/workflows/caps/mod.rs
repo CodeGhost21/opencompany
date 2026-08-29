@@ -1527,30 +1527,80 @@ impl HarnessAgentRunner {
         let mut requests = drained.requests;
 
         // Issue #1861: extract and park blocker requests directly, then filter them
-        // out of the gated-call path. They are parked via `park_node_blocker` without
-        // a node-turn continuation (they are questions, not gated tool calls), so they
-        // must not pass through this gated-call path which journals with Some(node_turn).
+        // out of the gated-call path. They are parked via their already-classified
+        // effect payload (not re-classified) without a node-turn continuation (they are
+        // questions, not gated tool calls), so they must not pass through this gated-call
+        // path which journals with Some(node_turn).
         let blocker_requests: Vec<_> = requests
             .drain_filter(|r| r.effect.kind.starts_with("blocker."))
             .collect();
-        for blocker_request in blocker_requests {
-            if let Some(approval_id) = self
-                .park_node_blocker(node_id.unwrap_or("-"), &blocker_request.reason)
+        for mut blocker_request in blocker_requests {
+            // Extract the blocker payload from the effect, add the node step, and park it.
+            let mut payload: crate::ports::blockers::BlockerPayload =
+                match serde_json::from_value(blocker_request.effect.payload.clone()) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        // Malformed payload—treat as unparkable
+                        summary.unparkable += 1;
+                        rows.push(row(
+                            Some(blocker_request.tool.clone()),
+                            crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                            None,
+                        ));
+                        continue;
+                    }
+                };
+            // Add the node step using the resolved node id.
+            payload.step = Some(crate::ports::blockers::BlockerStep::Node {
+                run_id: self.run_id.clone(),
+                node_id: node_id.unwrap_or("-").to_string(),
+            });
+            // Update the effect with the augmented payload.
+            blocker_request.effect.payload =
+                serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
+            // Park the blocker directly using the delivery system.
+            let parking = match self
+                .deps
+                .delivery
+                .as_ref()
+                .and_then(|d| d.parking.as_ref())
+            {
+                Some(p) => p,
+                None => {
+                    summary.unparkable += 1;
+                    rows.push(row(
+                        Some(blocker_request.tool.clone()),
+                        crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                        None,
+                    ));
+                    continue;
+                }
+            };
+            match parking
+                .park_and_journal(
+                    &self.company,
+                    blocker_request.effect,
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    None,
+                    None,
+                )
                 .await
             {
-                rows.push(row(
-                    Some(blocker_request.tool.clone()),
-                    crate::ports::WorkflowApprovalOutcome::Approved,
-                    Some(approval_id),
-                ));
-            } else {
-                // Failed to park—treat as unparkable
-                summary.unparkable += 1;
-                rows.push(row(
-                    Some(blocker_request.tool.clone()),
-                    crate::ports::WorkflowApprovalOutcome::ParkFailed,
-                    None,
-                ));
+                Ok(approval_id) => {
+                    rows.push(row(
+                        Some(blocker_request.tool.clone()),
+                        crate::ports::WorkflowApprovalOutcome::Approved,
+                        Some(approval_id.to_string()),
+                    ));
+                }
+                Err(_) => {
+                    summary.unparkable += 1;
+                    rows.push(row(
+                        Some(blocker_request.tool.clone()),
+                        crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                        None,
+                    ));
+                }
             }
         }
 
