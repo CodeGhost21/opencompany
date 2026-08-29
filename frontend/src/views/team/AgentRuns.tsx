@@ -95,7 +95,7 @@ const FILTERS: { key: string; label: string; statuses?: RunStatus[] }[] = [
   {
     key: "parked",
     label: "Waiting",
-    statuses: ["waiting_approval", "paused"],
+    statuses: ["waiting_approval", "paused", "blocked"],
   },
   { key: "failed", label: "Failed", statuses: ["failed", "cancelled"] },
 ];
