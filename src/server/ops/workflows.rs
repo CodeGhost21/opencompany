@@ -3151,6 +3151,7 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                     // orphaned row apart from a clean finish.
                     blocked_nodes,
                     approvals,
+                    degraded: false,
                     // Re-derived by the single pass below, like the start arm's.
                     // Issue #1189: filled by the join in the tail, on the rows
                     // actually being returned. Zero here is the honest default —
