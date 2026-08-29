@@ -4530,7 +4530,10 @@ impl CompanyRecord {
     /// overlay tier only when the manifest has no match at all.
     pub fn desk_alias_is_ambiguous(&self, key: &str) -> bool {
         if self.manifest.group_chats.iter().any(|c| c.id == key)
-            || self.overlay_desks.iter().any(|d| d.id == key)
+            || (!crate::server::chat_history::is_general_chat(Some(key))
+                && self.overlay_desks.iter().any(|d| {
+                    d.id == key && !crate::server::chat_history::is_general_chat(Some(&d.id))
+                }))
         {
             return false;
         }
