@@ -4366,7 +4366,35 @@ mod tests {
         }
     }
 
-    /// Issue #661 (M5): the synchronous run response carries the run's board
+    /// The HTTP run DTO must expose a settled soft node error as the explicit
+    /// `degraded` verdict, rather than allowing clients to infer success from
+    /// otherwise-green node rows.
+    #[test]
+    fn run_response_serializes_a_degraded_verdict() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({"nodes": {"worker": {"items": ["partial"]}}}),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-degraded".into(),
+            cancelled: false,
+            verdict: WorkflowRunVerdict::Degraded,
+            nodes: vec![WorkflowRunNode {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Error,
+                elapsed_ms: 17,
+                diagnostics: Vec::new(),
+            }],
+            dry_run: false,
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        })
+        .expect("serialize");
+
+        assert_eq!(json["verdict"], "degraded", "the HTTP contract is explicit");
+        assert_eq!(json["nodes"][0]["status"], "error");
+    }
+
     /// rows, in the same camelCase shape the journal event and the history route
     /// use — so a console that pressed Run learns what the run did to the board
     /// without a second read.
