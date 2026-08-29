@@ -9,11 +9,16 @@ Split out of [harnesses.md](harnesses.md), which stays the page for what a
 harness *is* — declaring them, binding agents, routing a turn, and what a
 harness does not decide. Start there.
 
+A harness declares one or the other, never both — so they are two examples,
+not one block to paste:
+
 ```toml
 [harness.acp]
 transport = "local"      # spawn an agent on this machine
 agent     = "claude"     # claude | codex
+```
 
+```toml
 [harness.acp]
 transport = "runner"     # reach one that dialed in
 runner    = "stevens_laptop"
@@ -40,7 +45,7 @@ declares `RunnerDispatch`, but it does not implement `AcpAgent`, and nothing
 wires it into `lanes::build`. A `runner`-transport harness resolves
 `unavailable` on every build today, `local` included.
 
-### One conversation per teammate, and it survives a restart
+## One conversation per teammate, and it survives a restart
 
 A session is per **(company, agent)** — `AcpRunTurn::session_key` is
 `"{company}::{agent_id}"` — so two desks never share a conversation and the
@@ -112,7 +117,7 @@ option leaves the resumed session on what it was created with, which is a
 working teammate rather than a broken one — but on what ships today it
 actually applies.
 
-### Execution state, before the result
+## Execution state, before the result
 
 An ACP turn publishes its tool calls onto the transient turn-stream bus
 (`src/turn_stream.rs`) **as they happen**, the same bus and the same frame
@@ -172,7 +177,7 @@ The blocker is shape, not plumbing — `RunTraceSink::record` takes an
 does not; giving the sink a `TurnStep`-shaped entry point means owning step
 ordinals and the running→finalized rewrite from a second producer.
 
-### Readiness
+## Readiness
 
 For `transport = "local"`, the desktop probes four states rather than two:
 

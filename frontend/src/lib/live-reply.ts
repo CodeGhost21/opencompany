@@ -307,6 +307,31 @@ export function openTurnsFromRuns(runs: readonly OpenRunRow[]): Record<string, O
  * The head of a thread's list is untouched by an incoming shorter list: arms
  * add, they never reorder or evict.
  */
+/**
+ * Is another turn still running on `threadId`, ignoring the one that just
+ * settled?
+ *
+ * The question the console asks before clearing a thread's live tool rows. It
+ * takes `settledTurnId` explicitly rather than trusting the map to have
+ * dropped it already, because the caller's view of `openTurns` is a ref that
+ * an effect refreshes *after* React commits — and a history read that resolves
+ * before that commit would still see the settled turn and skip a clear it
+ * should have made (PR #1904 review).
+ *
+ * Excluding it by id is right whichever way the race falls: on a stale map the
+ * filter removes the turn that is already over, and on a fresh one it removes
+ * nothing. A turn opened since is present either way, which is the case that
+ * must block the clear.
+ */
+export function hasOtherOpenTurns(
+  openTurns: Readonly<Record<string, readonly OpenTurn[]>>,
+  threadId: string,
+  settledTurnId?: string,
+): boolean {
+  const turns = openTurns[threadId] ?? [];
+  return turns.some((turn) => !settledTurnId || turn.turnId !== settledTurnId);
+}
+
 export function mergeOpenTurns(
   existing: Record<string, OpenTurn[]>,
   incoming: Record<string, OpenTurn[]>,

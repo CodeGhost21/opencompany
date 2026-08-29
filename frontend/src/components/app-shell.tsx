@@ -78,7 +78,13 @@ import {
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
-import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
+import {
+  hasOtherOpenTurns,
+  mergeOpenTurns,
+  openTurnsFromRuns,
+  PendingSyncPosts,
+  type OpenTurn,
+} from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
   budgetProximityExpiresAt,
@@ -1568,7 +1574,7 @@ export function AppShell({
    * settle racing a re-arm — adds nothing.
    */
   const reReadSettledThread = useCallback(
-    (threadId: string) => {
+    (threadId: string, settledTurnId?: string) => {
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -1603,7 +1609,7 @@ export function AppShell({
           // whenever its frames arrived while this history read was in flight,
           // which on a round trip is a wide window. The newer turn's own
           // settle clears them when it gets there.
-          if (!openTurnsRef.current[threadId]?.length) {
+          if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {
             setLiveStepsByThread((prev) =>
               prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
             );
@@ -1699,7 +1705,10 @@ export function AppShell({
       // Deliberately not awaited here, and deliberately not written inline —
       // see `reReadSettledThread` for why the re-read cannot live inside this
       // effect. The line above is what tears this effect down.
-      reReadSettledThread(threadId);
+      //
+      // The turn id goes with it: the re-read's own clear must not be fooled
+      // by a ref that has not caught up with the `setOpenTurns` above.
+      reReadSettledThread(threadId, turnId);
     };
 
     const poll = () => {
@@ -2187,7 +2196,12 @@ export function AppShell({
       // the exact appearance this timeline exists to prevent. The rows left
       // standing belong to work that really happened, and the open turn's own
       // settle clears them.
-      if (!openTurnsRef.current[event.chatId]?.length) {
+      // No turn id to exclude here: a reply arriving over SSE and its turn
+      // settling on the poll are independent events, so the replying turn may
+      // still be listed. That only defers the clear to its own settle, which
+      // then runs the re-read above — the conservative direction, and the one
+      // that never erases a running turn's rows.
+      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
         setLiveStepsByThread((prev) =>
           prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
         );

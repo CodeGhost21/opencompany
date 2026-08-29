@@ -751,17 +751,44 @@ impl AcpRunTurn {
         //
         // `SteerControl` is poll-shaped rather than awaitable, so this polls
         // on the same cadence the running turn does below.
+        // The refusal below applies **only to a turn that had to queue**, and
+        // the distinction is the whole point rather than an optimisation.
+        //
+        // The hazard is a cancel forwarded by a turn that has not started: it
+        // names the session, so it stops whichever turn currently owns it. That
+        // can only happen when another turn owns the slot. On a free slot there
+        // is no other turn, and a pending cancel keeps its long-standing
+        // meaning — start, forward the cancel, let the agent wind down and
+        // report (`stopReason: "cancelled"`), which is an `Ok` outcome the
+        // caller settles as cancelled rather than failed.
         let slot = self.turn_lock(&key);
-        let _slot = loop {
-            tokio::select! {
-                slot = slot.lock() => break slot,
-                () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                    if control.pending().is_some() {
-                        return Err(OpenCompanyError::InvalidRequest(
-                            "the turn was cancelled before it started".to_string(),
-                        ));
+        let _slot = match Arc::clone(&slot).try_lock_owned() {
+            Ok(slot) => slot,
+            Err(_) => {
+                // Contended: somebody else is mid-turn on this session.
+                let queued = loop {
+                    tokio::select! {
+                        slot = Arc::clone(&slot).lock_owned() => break slot,
+                        () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                            if control.pending().is_some() {
+                                return Err(OpenCompanyError::InvalidRequest(
+                                    "the turn was cancelled before it started".to_string(),
+                                ));
+                            }
+                        }
                     }
+                };
+                // Asked once more on acquiring, because the poll above can lose
+                // the race it exists to win: a cancel arriving on a slot that
+                // frees before the next tick takes the lock branch and never
+                // looks at the control (PR #1904 review). Everything past this
+                // point talks to the agent.
+                if control.pending().is_some() {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "the turn was cancelled before it started".to_string(),
+                    ));
                 }
+                queued
             }
         };
 
@@ -1209,6 +1236,10 @@ mod test {
     /// `cancel` never answer (the bounded-RPC path).
     struct Scripted {
         turn: AcpTurn,
+        /// Milliseconds to hold the turn open before answering — how a test
+        /// owns the session's slot for a *bounded* window, so a second turn
+        /// genuinely queues and then genuinely gets in.
+        holds_ms: u64,
         hang: bool,
         hold_for_cancel: bool,
         cancel_hangs: bool,
@@ -1224,6 +1255,7 @@ mod test {
                     updates,
                     stop_reason: "end_turn".into(),
                 },
+                holds_ms: 0,
                 hang: false,
                 hold_for_cancel: false,
                 cancel_hangs: false,
@@ -1250,6 +1282,9 @@ mod test {
                 for update in &self.turn.updates {
                     observer(update);
                 }
+            }
+            if self.holds_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.holds_ms)).await;
             }
             if self.hang {
                 std::future::pending::<()>().await;
@@ -1422,6 +1457,7 @@ mod test {
                 updates: vec![],
                 stop_reason: "end_turn".into(),
             },
+            holds_ms: 0,
             hang: true,
             hold_for_cancel: false,
             cancel_hangs: false,
@@ -1473,6 +1509,7 @@ mod test {
                 updates: vec![],
                 stop_reason: "end_turn".into(),
             },
+            holds_ms: 0,
             hang: true,
             hold_for_cancel: false,
             cancel_hangs: false,
@@ -1530,6 +1567,107 @@ mod test {
         );
 
         owner.abort();
+    }
+
+    #[tokio::test]
+    async fn a_cancel_landing_as_the_slot_frees_still_stops_the_turn() {
+        // The race the 250ms poll cannot win alone (PR #1904 review): the
+        // cancel arrives while this turn is queued, and the slot frees BEFORE
+        // the next tick — so `lock_owned()` wins the select and the control is
+        // never consulted. Without the check on acquiring, a cancelled turn
+        // would reach the agent.
+        //
+        // The owner holds for 50ms against a 250ms poll, so the lock branch
+        // wins deterministically.
+        let mut owner_agent = Scripted::answering(vec![AcpUpdate::MessageChunk("first".into())]);
+        owner_agent.holds_ms = 50;
+        let agent = Arc::new(owner_agent);
+        let cancels = agent.cancels.clone();
+        let run_turn = Arc::new(AcpRunTurn::new(agent));
+        let company = CompanyId::new("acme");
+
+        let owner = {
+            let run_turn = Arc::clone(&run_turn);
+            let company = company.clone();
+            tokio::spawn(async move {
+                let control = crate::company::steer::SteerControl::new();
+                run_turn
+                    .run_steered(
+                        &company,
+                        "ceo",
+                        "first",
+                        &control,
+                        ChatTarget::default(),
+                        None,
+                    )
+                    .await
+            })
+        };
+        // Long enough that the owner holds the slot, short enough that it is
+        // still holding it when the queued turn asks.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let queued = crate::company::steer::SteerControl::new();
+        queued.request(crate::company::steer::SteerAction::Cancel);
+        let err = run_turn
+            .run_steered(
+                &company,
+                "ceo",
+                "second",
+                &queued,
+                ChatTarget::default(),
+                None,
+            )
+            .await
+            .expect_err("a turn cancelled while queued does not run");
+
+        assert!(
+            format!("{err}").contains("cancelled before it started"),
+            "the error says it never started: {err}"
+        );
+        assert_eq!(
+            cancels.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "and no cancel reached the agent, which would have stopped the OTHER turn"
+        );
+        owner.await.expect("owner joins").expect("owner answers");
+    }
+
+    #[tokio::test]
+    async fn a_pending_cancel_on_a_free_slot_still_runs_and_is_forwarded() {
+        // The other side of that boundary, and the reason the refusal is
+        // scoped to queued turns only. With no other turn on the session there
+        // is nothing a forwarded cancel could stop by mistake, so a pending
+        // cancel keeps its long-standing meaning: the turn runs, the cancel
+        // goes to the agent, and the agent winds down and reports — an `Ok`
+        // outcome the caller settles as cancelled rather than failed.
+        let mut agent = Scripted::answering(vec![AcpUpdate::MessageChunk("done".into())]);
+        agent.hold_for_cancel = true;
+        let agent = Arc::new(agent);
+        let cancels = agent.cancels.clone();
+        let run_turn = AcpRunTurn::new(agent);
+
+        let control = crate::company::steer::SteerControl::new();
+        control.request(crate::company::steer::SteerAction::Cancel);
+
+        let outcome = run_turn
+            .run_steered(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                ChatTarget::default(),
+                None,
+            )
+            .await
+            .expect("an uncontended turn still runs and returns its outcome");
+
+        assert_eq!(outcome.reply, "done");
+        assert_eq!(
+            cancels.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the cancel was forwarded, because this turn was the one running"
+        );
     }
 
     #[test]
