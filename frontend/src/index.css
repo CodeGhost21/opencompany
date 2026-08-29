@@ -435,6 +435,12 @@
 }
 
 .dark {
+    --brand-paypal-back: #008cff;
+    --brand-paypal-front: #60cdff;
+    --brand-paypal-overlap: #008cff;
+}
+
+.dark {
     /* Surfaces climb *toward* the viewer with lightness, the same
        direction as light mode. The canvas is near-black, and each layer
        above it is a measured step up — never a translucent white wash,
