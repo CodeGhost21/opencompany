@@ -78,7 +78,13 @@ import {
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
-import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
+import {
+  hasOtherOpenTurns,
+  mergeOpenTurns,
+  openTurnsFromRuns,
+  PendingSyncPosts,
+  type OpenTurn,
+} from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
   budgetProximityExpiresAt,
@@ -1500,6 +1506,21 @@ export function AppShell({
   useEffect(() => {
     chatChannelByThreadRef.current = chatChannelByThread;
   }, [chatChannelByThread]);
+  /**
+   * Mirrors `openTurns` for the same reason `chatChannelByThreadRef` mirrors
+   * its map: `reReadSettledThread` needs the value as of *when its response
+   * lands*, not as of when the request started.
+   *
+   * What it guards is the live-row clear below. `settle` drops only the turn
+   * that ended and deliberately keeps a queued sibling watched, so a thread
+   * with more work still has an entry here — and a thread-wide clear that
+   * ignored it would delete the rows of a turn that is still running, on the
+   * wide window a history round trip opens (PR #1904 review).
+   */
+  const openTurnsRef = useRef(openTurns);
+  useEffect(() => {
+    openTurnsRef.current = openTurns;
+  }, [openTurns]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1553,7 +1574,7 @@ export function AppShell({
    * settle racing a re-arm — adds nothing.
    */
   const reReadSettledThread = useCallback(
-    (threadId: string) => {
+    (threadId: string, settledTurnId?: string) => {
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -1570,6 +1591,29 @@ export function AppShell({
             scopeRef.current.client !== client
           ) return;
           const hydrated = fromHistory(entries);
+          // The turn is over, so its transient tool rows have served their
+          // purpose — the durable record just folded in is what stands now.
+          //
+          // `injectAgentReply` does this for a turn that *answered*, and for a
+          // long time that covered everything a console would see. A turn that
+          // settles **failed** journals a `TurnFailed` line and emits no
+          // `agent_reply`, so nothing cleared its rows: a detached POST has
+          // already resolved, `onSendEnd` has already run, and the live
+          // timeline sat under the channel claiming work was in flight until
+          // the next send or a reload (PR #1904 review). Harmless while ACP
+          // published no rows at all; not harmless now that it does.
+          //
+          // …but only when the thread has nothing else running. A thread can
+          // hold several detached turns, and `settle` keeps the queued ones
+          // watched; clearing unconditionally would wipe a *newer* turn's rows
+          // whenever its frames arrived while this history read was in flight,
+          // which on a round trip is a wide window. The newer turn's own
+          // settle clears them when it gets there.
+          if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {
+            setLiveStepsByThread((prev) =>
+              prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+            );
+          }
           setThreads((ts) =>
             ts.map((t) => {
               if (t.id !== threadId) return t;
@@ -1661,7 +1705,10 @@ export function AppShell({
       // Deliberately not awaited here, and deliberately not written inline —
       // see `reReadSettledThread` for why the re-read cannot live inside this
       // effect. The line above is what tears this effect down.
-      reReadSettledThread(threadId);
+      //
+      // The turn id goes with it: the re-read's own clear must not be fooled
+      // by a ref that has not caught up with the `setOpenTurns` above.
+      reReadSettledThread(threadId, turnId);
     };
 
     const poll = () => {
@@ -2140,9 +2187,25 @@ export function AppShell({
       // `onSendEnd` does this for a turn this console POSTed; a turn it did not
       // has no send to end, and without this its rows would sit under the
       // channel until the next turn on the same thread replaced them.
-      setLiveStepsByThread((prev) =>
-        prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
-      );
+      //
+      // Guarded on the same condition `reReadSettledThread` uses, and for the
+      // same reason (PR #1904 review): a thread can hold several detached
+      // turns, and this clear is thread-wide. An earlier turn's reply landing
+      // while a later one is still working would erase the rows of the turn
+      // that is *currently* running — which reads as a teammate that stopped,
+      // the exact appearance this timeline exists to prevent. The rows left
+      // standing belong to work that really happened, and the open turn's own
+      // settle clears them.
+      // No turn id to exclude here: a reply arriving over SSE and its turn
+      // settling on the poll are independent events, so the replying turn may
+      // still be listed. That only defers the clear to its own settle, which
+      // then runs the re-read above — the conservative direction, and the one
+      // that never erases a running turn's rows.
+      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+        setLiveStepsByThread((prev) =>
+          prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
+        );
+      }
     },
     // `useEvents` holds its callbacks in refs, so this identity churning as the
     // map lands cannot re-open the SSE stream.
@@ -2558,6 +2621,7 @@ export function AppShell({
         let idx = event.toolCallId
           ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
           : -1;
+        if (idx < 0 && event.toolCallId) return prev;
         if (idx < 0) idx = rows.findIndex((r) => r.status === "running");
         const status = event.status === "error" ? ("error" as const) : ("ok" as const);
         if (idx >= 0) {
@@ -2565,6 +2629,15 @@ export function AppShell({
             ...rows[idx],
             status,
             detail: event.detail ?? rows[idx].detail,
+            // `result` is what came back — the summary `StepTimeline` renders
+            // under the label. Carried for the same reason `detail` is: the
+            // live row and the folded step it is replaced by should not say
+            // different amounts about the same call. It was dropped here while
+            // only the built-in harness streamed (its rows lean on `detail`,
+            // derived from the arguments); an ACP tool call carries its
+            // summary in `result` and nothing else, so a dropped `result` is
+            // the whole of what the row could have said.
+            result: event.result ?? rows[idx].result,
             elapsedMs: event.elapsedMs,
           };
         } else {
@@ -2573,6 +2646,7 @@ export function AppShell({
             status,
             label: event.label ?? "Working",
             detail: event.detail,
+            result: event.result,
             elapsedMs: event.elapsedMs,
             toolCallId: event.toolCallId,
           });

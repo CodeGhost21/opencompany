@@ -382,6 +382,15 @@ export type CompanyStreamEvent =
       toolCallId?: string;
       label?: string;
       detail?: string;
+      /**
+       * What came back — a success's shape summary or a failure's cause,
+       * scrubbed at the source like `detail`. The wire has always carried it
+       * (`TurnStreamEvent.result`); it was simply not declared here while the
+       * only publisher was the built-in harness, whose rows lean on `detail`.
+       * An ACP tool call has no arguments to derive a detail from and reports
+       * only this.
+       */
+      result?: string;
       status?: string;
       elapsedMs?: number;
     }

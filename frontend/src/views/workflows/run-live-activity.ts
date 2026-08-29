@@ -29,6 +29,12 @@ export interface LiveToolRow {
   seq: number;
   label: string;
   detail?: string;
+  /** What came back — a success's shape summary or a failure's cause, on the
+   * result only. Carried for the same reason `detail` is, and it is the only
+   * descriptive payload an **ACP** node's completion has: an ACP tool call puts
+   * no arguments on the wire, so there is nothing to derive a `detail` from and
+   * a dropped `result` leaves the row saying only that something finished. */
+  result?: string;
   /** `running` on a start; `ok` / `error` / `awaiting_approval` on the result. */
   status: string;
   /** Wall-clock the completed call took, on the result only. */
@@ -84,6 +90,7 @@ export function foldLiveFrame(
     // The result carries detail/elapsed; a start does not, so never let a
     // start frame blank a value the result already wrote (out-of-order arrival).
     detail: isResult ? (frame.detail ?? prev?.detail) : prev?.detail,
+    result: isResult ? (frame.result ?? prev?.result) : prev?.result,
     // A result's status is terminal; a start's is only ever "running". When a
     // start arrives late, keep the status the result already wrote so a
     // completed call is not shown as running again.
