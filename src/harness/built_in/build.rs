@@ -972,6 +972,7 @@ pub fn build_agent(
             manifest_agent.id.clone(),
             manifest_agent.tools.clone(),
             grants.to_vec(),
+            Some(deps.notifications.clone()),
         ));
     }
     // Recursive desk delegation (issue #176): a NON-orchestrator agent whose
