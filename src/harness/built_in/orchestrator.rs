@@ -3785,7 +3785,7 @@ impl Tool for RunWorkflowTool {
                         &wid,
                         false,
                         &ctx.run_id,
-                        Err(crate::runtime::PANICKED_BEFORE_FINISH.into()),
+                        Err(crate::runtime::workflow_spawn::PANICKED_BEFORE_FINISH.into()),
                     )
                     .await;
                     if !journaled {
