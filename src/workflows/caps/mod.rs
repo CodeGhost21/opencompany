@@ -3066,6 +3066,7 @@ mod tests {
             "wf-1865".to_string(),
             "run-1865".to_string(),
             None,
+            json!({}),
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
