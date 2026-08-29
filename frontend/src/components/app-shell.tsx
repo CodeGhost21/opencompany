@@ -249,7 +249,17 @@ interface NavItem {
   icon: LucideIcon;
 }
 
-function NotificationPanel({
+const OPERATIONAL_NOTIFICATION_KINDS = new Set([
+  "dispatch_failed",
+  "approval_expired",
+  "workflow_run_started",
+  "workflow_run_finished",
+]);
+
+function isOperationalNotification(notification: NotificationDto): boolean {
+  return OPERATIONAL_NOTIFICATION_KINDS.has(notification.kind);
+}
+
   notifications,
   onRead,
   onReadAll,
