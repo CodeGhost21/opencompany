@@ -4860,6 +4860,7 @@ pub(crate) fn workflow_wiring_deps(
         serves: None,
         context: runtime.context.clone(),
         store: runtime.store.clone(),
+        notifications: runtime.notifications().clone(),
         meter,
         workspace_root: std::env::temp_dir(),
         mcp_home: None,
