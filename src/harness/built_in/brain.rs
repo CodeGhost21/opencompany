@@ -1563,6 +1563,10 @@ impl HarnessBrain {
             crate::runtime::advance::bounced_reason(&card.column, RunStatus::Failed, &text);
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
+        self.notify_dispatch_failed(&card.id, &text).await;
+        // A refusal is a real, terminal attempt — one that spent nothing. It
+        // settles like any other ending (#242), so the card's run history shows
+        // "this was tried and refused, and why" rather than a gap.
         self.settle_run_end(sink, TaskRunEnd::Failed, &text, 0)
             .await;
 
