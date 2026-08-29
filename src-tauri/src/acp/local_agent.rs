@@ -93,8 +93,10 @@ const MAX_TITLE_CHARS: usize = 200;
 /// that a runaway tool cannot flood the timeline or the live bus.
 const MAX_RESULT_CHARS: usize = 2_000;
 
-/// `text`, cut to `max` **characters** (never bytes — a byte slice can split a
-/// UTF-8 sequence and panic), with an ellipsis when it was cut.
+/// `text`, cut to at most `max` **characters** (never bytes — a byte slice can
+/// split a UTF-8 sequence and panic) plus a trailing ellipsis when it was cut —
+/// so a cut result is `max + 1` characters, not `max`. The ellipsis is a
+/// visible marker that truncation happened, not part of the budget it marks.
 fn bounded(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
