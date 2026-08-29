@@ -3124,8 +3124,6 @@ export function AppShell({
               onRead={markNotificationRead}
               onReadAll={markAllNotificationsRead}
             />
-              <HostSwitcher companyName={feed.status.name} />
-            </div>
             <SidebarCollapseButton />
           </div>
         </SidebarHeader>
