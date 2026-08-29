@@ -12,7 +12,6 @@ import { PageHeader } from "@/components/page-header";
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
-  companyName: string;
   feed: Pick<CompanyFeed, "approvals" | "queue">;
   scope: LocalScope;
   /**
@@ -48,7 +47,6 @@ const FAILED_READ_LIMIT = 200;
 export function OperatorOverview({
   client,
   company,
-  companyName,
   feed,
   scope,
   attemptEventTick,
@@ -243,8 +241,6 @@ export function OperatorOverview({
         gutter="px-5 sm:px-8"
         title="Overview"
         width="5xl"
-        eyebrow={companyName}
-        description="Start with the work that needs your judgment."
         actions={
           <a href="#/chat" className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
             <MessageSquare className="size-4" aria-hidden /> Start a conversation

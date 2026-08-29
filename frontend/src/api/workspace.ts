@@ -467,7 +467,7 @@ export interface MergedFolder {
 
 /** Why the repair left a node exactly where it found it. */
 export type ResidualCause =
-  "fileSharesTheName" | "fileInTheWay" | "treeMovedOn";
+  "fileSharesTheName" | "fileInTheWay" | "treeMovedOn" | "danglingParent";
 
 /** One node the repair deliberately did not touch (issue #759). */
 export interface Residual {
@@ -508,6 +508,8 @@ export function residualReason(cause: ResidualCause): string {
       return "Both copies hold a note with this name. Merging them would discard one, so both were kept — open them and keep what you want.";
     case "treeMovedOn":
       return "Something changed while the repair ran, so this was left alone. Run it again.";
+    case "danglingParent":
+      return "The folder this was filed under no longer exists, so it has no reachable path. Move it somewhere that does, or delete it if you don't need it.";
   }
 }
 

@@ -437,8 +437,15 @@ function workflowIdForApproval(approval: ApprovalSummary): string | null {
  * returns nothing at all and inherits the meta line's muted grey, which keeps
  * the quiet case exactly as it shipped — the emphasis is only worth anything if
  * most cards do not have it.
+ *
+ * Exported for the board card (#1891), which paints the deadline without the
+ * rest of {@link ApprovalMeta}: a `w-65` column has no room for the origin
+ * pills, and "Open the card" on the card you are already looking at is the same
+ * redundancy `OutputLinkRow` exists to avoid. The *tone* is not the board's to
+ * re-decide, though — a surface that invented its own amber would be the one
+ * place a passing deadline looked routine.
  */
-function deadlineToneClass(tone: DeadlineTone): string | undefined {
+export function deadlineToneClass(tone: DeadlineTone): string | undefined {
   if (tone === "passed") return "font-medium text-status-failed-text";
   if (tone === "soon") return "font-medium text-status-blocked-text";
   return undefined;

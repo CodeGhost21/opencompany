@@ -73,7 +73,7 @@ use crate::error::OpenCompanyError;
 use crate::harness::TurnOutcome;
 pub use crate::ports::acp::{AcpAgent, AcpAgentFactory, AcpObserver, AcpTurn, AcpUpdate};
 use crate::ports::types::{CompanyId, TurnStep, TurnStepKind, TurnStepStatus};
-use crate::runtime::delegation::RunTurn;
+use crate::runtime::delegation::{ChatTarget, RunTurn};
 use crate::turn_stream::{LiveRoute, TurnStreamCtx, TurnStreamEvent};
 
 /// [`RunTurn`] over an [`AcpAgent`].
@@ -539,9 +539,13 @@ impl RunTurn for AcpRunTurn {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome> {
-        let ctx = Self::chat_ctx(company, agent_id, chat_id);
+        // `chat_id` only: the live bus routes a chat turn's frames by channel
+        // (`LiveRoute::Chat`), and #1890's `thread_root` narrows *which
+        // conversation inside it* the durable reply hangs from — a dimension
+        // the transient timeline does not carry.
+        let ctx = Self::chat_ctx(company, agent_id, chat.chat_id);
         self.run_once(company, agent_id, message, Some(ctx)).await
     }
 
@@ -551,10 +555,10 @@ impl RunTurn for AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
-        let ctx = Self::chat_ctx(company, agent_id, chat_id);
+        let ctx = Self::chat_ctx(company, agent_id, chat.chat_id);
         self.steered(company, agent_id, message, control, Some(ctx))
             .await
     }
@@ -1237,7 +1241,7 @@ mod test {
         let run_turn: &dyn RunTurn = &AcpRunTurn::new(agent);
 
         let outcome = run_turn
-            .run(&CompanyId::new("acme"), "ceo", "go", None)
+            .run(&CompanyId::new("acme"), "ceo", "go", ChatTarget::default())
             .await
             .expect("a turn runs");
 
@@ -1261,7 +1265,14 @@ mod test {
         control.request(crate::company::steer::SteerAction::Cancel);
 
         let outcome = run_turn
-            .run_steered(&CompanyId::new("acme"), "ceo", "go", &control, None, None)
+            .run_steered(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                ChatTarget::default(),
+                None,
+            )
             .await
             .expect("a steered turn still answers");
         assert_eq!(outcome.reply, "partial");
@@ -1291,7 +1302,14 @@ mod test {
         control.request(crate::company::steer::SteerAction::Cancel);
 
         let outcome = run_turn
-            .run_steered(&CompanyId::new("acme"), "ceo", "go", &control, None, None)
+            .run_steered(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                ChatTarget::default(),
+                None,
+            )
             .await
             .expect("a failed cancel still ends in a turn");
         assert_eq!(outcome.reply, "done");
@@ -1458,7 +1476,7 @@ mod test {
 
         let run_turn = AcpRunTurn::new(Arc::new(Scripted::answering(a_working_turn())));
         let outcome = run_turn
-            .run(&company, "ceo", "go", Some("design"))
+            .run(&company, "ceo", "go", ChatTarget::channel(Some("design")))
             .await
             .expect("the turn answers");
 
@@ -1520,7 +1538,7 @@ mod test {
             title: "Search".into(),
         }])));
         run_turn
-            .run(&company, "ceo", "go", None)
+            .run(&company, "ceo", "go", ChatTarget::default())
             .await
             .expect("the turn answers");
 
@@ -1643,7 +1661,7 @@ mod test {
             },
         ])));
         let outcome = run_turn
-            .run(&company, "ceo", "go", Some("design"))
+            .run(&company, "ceo", "go", ChatTarget::channel(Some("design")))
             .await
             .expect("the turn answers");
 

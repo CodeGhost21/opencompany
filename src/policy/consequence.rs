@@ -751,9 +751,9 @@ const DECLARED: &[Declared] = &[
         EffectGroup::Identity,
         Reach::Consequence,
     ),
-    // ---- Hosting (issue #1079) ---------------------------------------------
+    // ---- Hosting (issues #1079, #913) --------------------------------------
     //
-    // The six `hosting_*` tools openhuman ships in `src/openhuman/hosting/`.
+    // The nine `hosting_*` tools openhuman ships in `src/openhuman/hosting/`.
     // Declared here rather than left to `undeclared()`, which is what that
     // fallback's own doc asks for: it is "a courtesy for an unregistered read,
     // not a second classifier to trust with an unreviewed capability".
@@ -762,8 +762,8 @@ const DECLARED: &[Declared] = &[
     // get them right.** `undeclared()` decides "is this a read?" with
     // `READ_ONLY_PREFIXES` matched by `name.starts_with(p)`. Every name here
     // begins with `hosting_`, so `list`/`get`/`read` can never match — the
-    // prefix test cannot see past the namespace, and all six come back
-    // `Consequence`. Widening that test to look inside a namespace is the
+    // prefix test cannot see past the namespace, and every one of them comes
+    // back `Consequence`. Widening that test to look inside a namespace is the
     // tempting general fix and is the wrong one: the fallback runs ONLY for
     // tools no belt registered (a registered one is caught by
     // `every_registered_tool_is_declared`), so making it cleverer extends trust
@@ -772,8 +772,8 @@ const DECLARED: &[Declared] = &[
     // fail-OPEN one, an effect that reads as a read. Declaring is the fix the
     // file already prescribes.
     //
-    // Three reads, per openhuman's own `hosting/README.md`, which labels each
-    // of them "Read-only.". They ask the provider what exists and what it did;
+    // Five reads, per openhuman's own `hosting/README.md`, which labels each of
+    // them "Read-only.". They ask the provider what exists and what it did;
     // nothing leaves this company and nothing is spent.
     d(
         "hosting_deployment_status",
@@ -782,6 +782,20 @@ const DECLARED: &[Declared] = &[
     ),
     d("hosting_list_sites", EffectGroup::Other, Reach::Nothing),
     d("hosting_analytics", EffectGroup::Other, Reach::Nothing),
+    // `hosting_list_deployments` is the history behind `hosting_deployment_status`
+    // — "recent deployments, newest first, with their status, target and
+    // creation time" — and carries the same label for the same reason. It is
+    // also the tool that hands `hosting_rollback` its `deployment_id`, so
+    // parking it would cost an approval on the way to every recovery.
+    d(
+        "hosting_list_deployments",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    // `hosting_domain_status` is the read half of `hosting_add_domain`: it
+    // reports whether a domain the company already attached has been verified
+    // and is serving. Attaching is the effect; asking is not.
+    d("hosting_domain_status", EffectGroup::Other, Reach::Nothing),
     // The public deployment itself: it spends money and changes what the world
     // sees at an address. `Publish` is the label an operator's card needs, and
     // the fallback gave it `Other` — its name contains no `deploy`, `publish` or
@@ -807,10 +821,21 @@ const DECLARED: &[Declared] = &[
     // this change exists to remove — so `Other`, and `Consequence` because it
     // still writes provider state and can store secrets write-only there.
     d("hosting_set_env", EffectGroup::Other, Reach::Consequence),
-    // NOTE: a `hosting_rollback` tool is in flight (issue #913). It will need a
-    // row here too — it is an outward effect on a live site, so `Publish` /
-    // `Consequence` is the shape to start from, but it is left to that change to
-    // declare rather than guessed at now.
+    // `hosting_rollback` is the tool the NOTE here used to hold a place for
+    // (issue #913). It arrived with the vendor pin, and the shape that note
+    // predicted is the one the tool asks for: it "points production traffic at
+    // an earlier deployment", and openhuman marks it `external_effect()` with
+    // the comment "Changes what the public sees on a live site, so it gates."
+    // That is `hosting_launch_site`'s sentence with the build removed, so it
+    // takes `hosting_launch_site`'s label — what the world sees at an address
+    // changes either way, and an operator's card should say so.
+    //
+    // It parks, and that is deliberate even though rollback is the *recovery*
+    // path and parking it delays a fix to a broken site. `supervised` exists to
+    // put a human in front of a change to what the public sees, and "the site
+    // is already broken" is an argument for approving quickly, not for not
+    // being asked. An operator who wants it unattended has `always_approve`.
+    d("hosting_rollback", EffectGroup::Publish, Reach::Consequence),
 ];
 
 /// A per-call declaration — the default. `const fn` so [`DECLARED`] stays a
@@ -2360,6 +2385,8 @@ mod tests {
             "hosting_deployment_status",
             "hosting_list_sites",
             "hosting_analytics",
+            "hosting_list_deployments",
+            "hosting_domain_status",
         ] {
             let consequence = c(tool);
             assert_eq!(
@@ -2382,6 +2409,7 @@ mod tests {
             "hosting_launch_site",
             "hosting_add_domain",
             "hosting_set_env",
+            "hosting_rollback",
         ] {
             let consequence = c(tool);
             assert_eq!(
@@ -2433,6 +2461,19 @@ mod tests {
     /// classify any of these correctly. If a row is dropped, the tool silently
     /// returns to that fallback rather than erroring — so the coverage is
     /// asserted directly.
+    ///
+    /// **This list is a floor, not the coverage guard, and issue #913 is why
+    /// the difference matters.** A hardcoded list only fails when a row is
+    /// *removed*; it says nothing when the vendor pin *adds* a tool. That is
+    /// exactly what happened — `hosting_rollback`, `hosting_list_deployments`
+    /// and `hosting_domain_status` arrived in the pin, were wired onto live
+    /// agents by `hosting_tools`, and this test stayed green while all three
+    /// fell through to `undeclared()`. The exhaustive check is
+    /// `every_wired_hosting_tool_is_declared` in
+    /// [`crate::harness::built_in::hosting`], which enumerates the belt itself;
+    /// it lives there because it needs the `openhuman` feature, and this file
+    /// compiles in lanes that do not have it. Keep both: this one holds in
+    /// every lane, that one is exhaustive in the lane that ships.
     #[test]
     fn every_hosting_tool_is_declared() {
         let declared: std::collections::BTreeSet<&str> = declared_tools().collect();
@@ -2440,9 +2481,12 @@ mod tests {
             "hosting_deployment_status",
             "hosting_list_sites",
             "hosting_analytics",
+            "hosting_list_deployments",
+            "hosting_domain_status",
             "hosting_launch_site",
             "hosting_add_domain",
             "hosting_set_env",
+            "hosting_rollback",
         ] {
             assert!(
                 declared.contains(tool),

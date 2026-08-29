@@ -207,6 +207,16 @@ struct BundleMeta {
     /// `#[serde(default)]` keeps older bundles importing cleanly (`None`).
     #[serde(default)]
     activation_completed_at: Option<u64>,
+    /// Whether the source company had ever been saved by activation-aware
+    /// code at export time (PR #1875 review finding). Preserved so import
+    /// does not silently stamp a legacy pre-#1843 company — one whose gate
+    /// was never seen — as activation-aware, which would block
+    /// `RuntimeBuilder::build`'s grandfather back-fill on the very next boot
+    /// and show an established operator the fresh-company onboarding gate.
+    /// `#[serde(default)]` reads a bundle written before this field existed
+    /// as `false`: exactly the legacy state such a bundle actually has.
+    #[serde(default)]
+    activation_gate_seen: bool,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -292,6 +302,12 @@ struct BundleContents {
     /// through the bundle so export→import does not silently re-gate an
     /// already-activated company behind onboarding.
     activation_completed_at: Option<u64>,
+    /// Whether the source company had ever been saved by activation-aware
+    /// code (PR #1875 review finding), carried through the bundle so import
+    /// restores a legacy pre-#1843 company with its gate still unseen —
+    /// otherwise `write_via_ports`'s save would stamp it seen on arrival and
+    /// permanently block the grandfather back-fill for that company.
+    activation_gate_seen: bool,
 }
 
 impl BundleContents {
@@ -309,6 +325,10 @@ impl BundleContents {
             .load(id)
             .await?
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(id.to_string()))?;
+        // PR #1875 review finding: read alongside the record, not derived
+        // from it — `CompanyRecord` carries no such field, only the store
+        // does (see `CompanyStore::activation_gate_seen`'s doc comment).
+        let activation_gate_seen = store.activation_gate_seen(id).await?;
 
         // Issue #358: the withdrawn half of a discussion never reaches the
         // bundle. This is the load-bearing half of that issue — hiding a
@@ -383,6 +403,7 @@ impl BundleContents {
             disabled_workflows: record.disabled_workflows,
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            activation_gate_seen,
         })
     }
 
@@ -441,29 +462,38 @@ impl BundleContents {
             &manifest.tools.allow,
             self.overlay_tool_grants.as_ref(),
         );
+        // `save_importing`, not `save`: this call is replaying a bundle's
+        // prior state rather than a normal activation-aware write, so the
+        // gate marker must land as `self.activation_gate_seen` — `false` for
+        // a legacy pre-#1843 bundle — instead of unconditionally `true`
+        // (PR #1875 review finding; see `CompanyStore::save_importing`'s doc
+        // comment for the full reasoning).
         store
-            .save(&CompanyRecord {
-                overlay_agent_edits: self.overlay_agent_edits.clone(),
-                overlay_retired_agents: self.overlay_retired_agents.clone(),
-                id: self.id.clone(),
-                manifest,
-                ledger: Vec::new(),
-                lifecycle: self.lifecycle.clone(),
-                overlay_agents: self.overlay_agents.clone(),
-                overlay_desk_members: self.overlay_desk_members.clone(),
-                overlay_desk_order: self.overlay_desk_order.clone(),
-                overlay_desks: self.overlay_desks.clone(),
-                overlay_workflows: self.overlay_workflows.clone(),
-                overlay_budgets: self.overlay_budgets.clone(),
-                overlay_policy: self.overlay_policy.clone(),
-                overlay_tool_grants: self.overlay_tool_grants.clone(),
-                overlay_desk_tools: self.overlay_desk_tools.clone(),
-                disabled_workflows: self.disabled_workflows.clone(),
-                template_provenance: self.template_provenance.clone(),
-                setup: self.setup.clone(),
-                name_confirmed: self.name_confirmed,
-                activation_completed_at: self.activation_completed_at,
-            })
+            .save_importing(
+                &CompanyRecord {
+                    overlay_agent_edits: self.overlay_agent_edits.clone(),
+                    overlay_retired_agents: self.overlay_retired_agents.clone(),
+                    id: self.id.clone(),
+                    manifest,
+                    ledger: Vec::new(),
+                    lifecycle: self.lifecycle.clone(),
+                    overlay_agents: self.overlay_agents.clone(),
+                    overlay_desk_members: self.overlay_desk_members.clone(),
+                    overlay_desk_order: self.overlay_desk_order.clone(),
+                    overlay_desks: self.overlay_desks.clone(),
+                    overlay_workflows: self.overlay_workflows.clone(),
+                    overlay_budgets: self.overlay_budgets.clone(),
+                    overlay_policy: self.overlay_policy.clone(),
+                    overlay_tool_grants: self.overlay_tool_grants.clone(),
+                    overlay_desk_tools: self.overlay_desk_tools.clone(),
+                    disabled_workflows: self.disabled_workflows.clone(),
+                    template_provenance: self.template_provenance.clone(),
+                    setup: self.setup.clone(),
+                    name_confirmed: self.name_confirmed,
+                    activation_completed_at: self.activation_completed_at,
+                },
+                self.activation_gate_seen,
+            )
             .await?;
         for entry in &self.ledger {
             store.append_ledger(&self.id, entry.clone()).await?;
@@ -515,6 +545,7 @@ impl BundleContents {
             setup: self.setup.clone(),
             name_confirmed: self.name_confirmed,
             activation_completed_at: self.activation_completed_at,
+            activation_gate_seen: self.activation_gate_seen,
         };
         write_file(
             &dest.join(META_JSON),
@@ -687,6 +718,7 @@ impl BundleContents {
             disabled_workflows: meta.disabled_workflows,
             name_confirmed: meta.name_confirmed,
             activation_completed_at: meta.activation_completed_at,
+            activation_gate_seen: meta.activation_gate_seen,
         })
     }
 }
@@ -1253,6 +1285,74 @@ mod test {
         assert_eq!(
             c2.peek(&id, &chunk[0].addr, None).await.unwrap(),
             "the quick brown fox"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// PR #1875 review finding: importing a legacy bundle — one whose source
+    /// company predates activation tracking, so `store.activation_gate_seen`
+    /// answers `false` — must land in the target store still answering
+    /// `false`. Before the fix, `write_via_ports` called plain `store.save`,
+    /// which unconditionally stamps the marker `true`; every OTHER save
+    /// really is made by activation-aware code, but import is replaying
+    /// history, not writing it, so that stamp falsely marked a restored
+    /// legacy company as already seen. That permanently blocks
+    /// `RuntimeBuilder::build`'s pre-#1843 grandfather back-fill on the
+    /// imported company's very next boot, showing an established operator
+    /// the fresh-company onboarding gate.
+    #[tokio::test]
+    async fn import_preserves_unseen_activation_gate() {
+        let home1 = tmp_root("gate-src");
+        let home2 = tmp_root("gate-dst");
+        let dest = tmp_root("gate-bundle");
+
+        // A legacy company: `company.toml` on disk, no `meta.json` at all —
+        // the exact shape a pre-#1843 bundle has. `FsCompanyStore::load`
+        // reads a missing meta.json as `Meta::default()`
+        // (`lifecycle: "running"`, no overlays), and its
+        // `activation_gate_seen` reads the same absence as `false` — both
+        // "never saved by activation-aware code".
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        let id = CompanyId::new("legacy-co");
+        let bundle = Bundle::new(home1.clone(), &id);
+        bundle.ensure_dirs().await.unwrap();
+        tokio::fs::write(bundle.company_toml(), toml::to_string(&manifest()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(
+            !s1.activation_gate_seen(&id).await.unwrap(),
+            "fixture must start as a legacy, gate-unseen record"
+        );
+
+        export_bundle(
+            &id,
+            &dest,
+            s1.clone(),
+            e1.clone(),
+            m1.clone(),
+            c1.clone(),
+            None,
+            ExportOpts::default(),
+        )
+        .await
+        .expect("export");
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let imported_id =
+            import_bundle(&dest, s2.clone(), e2.clone(), m2.clone(), c2.clone(), None)
+                .await
+                .expect("import");
+        assert_eq!(imported_id, id);
+
+        assert!(
+            !s2.activation_gate_seen(&id).await.unwrap(),
+            "importing a legacy bundle must not stamp the activation gate as \
+             seen — doing so hides an established operator's grandfather \
+             back-fill behind the fresh-company onboarding gate"
         );
 
         for dir in [home1, home2, dest] {

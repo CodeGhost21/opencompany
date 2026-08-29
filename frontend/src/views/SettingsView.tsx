@@ -6,6 +6,7 @@ import {
   Pause,
   Play,
   Power,
+  RotateCcw,
   TriangleAlert,
   Archive as ArchiveIcon,
 } from "lucide-react";
@@ -53,6 +54,8 @@ interface Props {
   company: string | null;
   feed: CompanyFeed;
   onFlag: () => void;
+  /** Start the reset (archive + start clean) flow for the active company (#1807). */
+  onResetCompany?: (id: string, name: string) => void;
 }
 
 // These are the optional capability families closest to the mandatory core /
@@ -68,7 +71,7 @@ const MANDATORY_ADJACENT_MEMORY_FAMILIES = [
 ];
 
 /** Connection details, lifecycle controls, and the feedback entry point. */
-export function SettingsView({ client, company, feed, onFlag }: Props) {
+export function SettingsView({ client, company, feed, onFlag, onResetCompany }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const { status } = feed;
@@ -147,7 +150,16 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
 
         {/* Lifecycle */}
         {scoped ? (
-          <LifecycleControls client={client} company={scoped} feed={feed} />
+          <LifecycleControls
+            client={client}
+            company={scoped}
+            feed={feed}
+            onReset={
+              onResetCompany
+                ? () => onResetCompany(scoped, feed.status.name)
+                : undefined
+            }
+          />
         ) : (
           <Card>
             <CardHeader>
@@ -240,14 +252,23 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
   );
 }
 
-function LifecycleControls({
+/**
+ * Exported (rather than kept view-local) so the Reset / Start clean button's
+ * gating and click wiring can be rendered and asserted on directly, without
+ * pulling in every other card `SettingsView` composes
+ * (`settings-lifecycle-reset-button.test.ts`).
+ */
+export function LifecycleControls({
   client,
   company,
   feed,
+  onReset,
 }: {
   client: OpenCompanyClient;
   company: string;
   feed: CompanyFeed;
+  /** Open the reset (archive + start clean) flow for this company (#1807). */
+  onReset?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   /**
@@ -372,6 +393,16 @@ function LifecycleControls({
               destructive
               onConfirm={() => void run("archive")}
             />
+          )}
+          {/* Reset = archive this company (data retained, not deleted) and
+              provision a fresh empty one in its place — the only truthful
+              "start clean" the host offers, since there is no purge route.
+              Platform-scoped like archive, so it rides the same `platform`
+              gate and is left out entirely for a magic-link operator. */}
+          {onReset && platform && !archived && (
+            <Button variant="destructive" disabled={busy} onClick={onReset}>
+              <RotateCcw className="size-4" /> Reset / Start clean
+            </Button>
           )}
           {archived && (
             <p className="text-sm text-muted-foreground">This company is archived.</p>
