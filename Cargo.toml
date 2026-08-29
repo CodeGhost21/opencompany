@@ -254,7 +254,7 @@ hmac = "0.12"
 pdf-extract = { version = "0.12", optional = true }
 calamine = { version = "0.36", optional = true }
 quick-xml = { version = "0.41", optional = true }
-zip = { version = "6", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "7", default-features = false, features = ["deflate"], optional = true }
 
 sha2 = "0.10"
 getrandom = "0.4"
