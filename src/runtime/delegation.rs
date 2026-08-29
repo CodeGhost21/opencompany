@@ -1697,7 +1697,10 @@ impl<'a> DelegationRunner<'a> {
             // left no trace anywhere. `DelegationClaim`'s drop clears the scope
             // either way, so nothing leaks — what is lost without this is the
             // log line, and that log line is the record (issue #272's reasoning,
-            // same as the relay branch's).
+            // same as the relay branch's). This branch is only reached when at
+            // least one desk answered; a turn whose hand-offs were all refused,
+            // and the relay branch's own `queue.clear()`, both predate this
+            // drain — unchanged from before #1906.
             let refused = self.queue.drain_refusals(self.max_delegations);
             if !refused.is_empty() {
                 tracing::warn!(
