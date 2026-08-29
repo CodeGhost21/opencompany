@@ -5565,7 +5565,10 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(chat_id, "", "General's own empty chat_id must be preserved verbatim");
+        assert_eq!(
+            chat_id, "",
+            "General's own empty chat_id must be preserved verbatim"
+        );
     }
 
     /// Issue #435: the guard that decides whether a remembered thread root is
