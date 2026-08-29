@@ -2795,6 +2795,11 @@ struct WorkflowRunOutcome {
     /// count becomes a fresh lie the moment somebody approves one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// The run retained a degraded node fact even when the progress collector
+    /// could not return its rows. This is a conservative read-side fact: a
+    /// failed drain must never turn a known non-clean run into `ok`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    degraded: bool,
     /// How many of [`pending_approvals`](Self::pending_approvals) have **no
     /// live card left in the queue** (issue #1189).
     ///
