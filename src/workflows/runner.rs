@@ -1167,7 +1167,6 @@ async fn run_workflow_inner(
     // wrote `on_error = "continue"` or `"route"` asked for the branch to survive
     // the block, and gets it. The run-level record stays truthful either way, so
     // the post-pass runs on this arm too rather than only on the halted one.
-    let mut nodes = nodes;
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
