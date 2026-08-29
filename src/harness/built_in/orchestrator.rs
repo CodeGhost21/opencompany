@@ -8076,6 +8076,10 @@ name = "Morning"
         assert_eq!(supervisor.len(), 0, "the active attempt must be cleaned up");
     }
 
+    }
+
+    #[tokio::test]
+    async fn run_workflow_tool_loads_and_invokes_the_runner() {
         let dir = tempfile::tempdir().unwrap();
         seed_demo_workflow(dir.path());
 
