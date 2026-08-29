@@ -1531,9 +1531,10 @@ impl HarnessAgentRunner {
         // effect payload (not re-classified) without a node-turn continuation (they are
         // questions, not gated tool calls), so they must not pass through this gated-call
         // path which journals with Some(node_turn).
-        let blocker_requests: Vec<_> = requests
-            .drain_filter(|r| r.effect.kind.starts_with("blocker."))
-            .collect();
+        let (blocker_requests, remaining): (Vec<_>, Vec<_>) = requests
+            .into_iter()
+            .partition(|r| r.effect.kind.starts_with("blocker."));
+        requests = remaining;
         for mut blocker_request in blocker_requests {
             // Extract the blocker payload from the effect, add the node step, and park it.
             let mut payload: crate::ports::blockers::BlockerPayload =
