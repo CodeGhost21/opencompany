@@ -1392,7 +1392,7 @@ mod test {
         assert_eq!(outcome.reply, "all done");
         assert_eq!(outcome.steps.len(), 2);
         assert_eq!(outcome.steps[1].status, TurnStepStatus::Ok);
-        assert_eq!(outcome.steps[1].result.as_deref(), Some("4 items"));
+        assert_eq!(outcome.steps[1].result.as_deref(), Some("7 characters"));
     }
 
     #[tokio::test]
