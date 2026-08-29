@@ -1554,7 +1554,8 @@ impl HarnessBrain {
             // wrong", not "what the agent said". Stamping a success's reply
             // here would put the deliverable in a field every reader renders
             // as a fault.
-            matches!(settled, RunStatus::Failed | RunStatus::Blocked).then_some(result_text.as_str()),
+            matches!(settled, RunStatus::Failed | RunStatus::Blocked)
+                .then_some(result_text.as_str()),
         )
         .await;
 

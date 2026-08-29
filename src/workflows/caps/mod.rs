@@ -1534,7 +1534,10 @@ impl HarnessAgentRunner {
             .drain_filter(|r| r.effect.kind.starts_with("blocker."))
             .collect();
         for blocker_request in blocker_requests {
-            if let Some(approval_id) = self.park_node_blocker(node_id.unwrap_or("-"), &blocker_request.reason).await {
+            if let Some(approval_id) = self
+                .park_node_blocker(node_id.unwrap_or("-"), &blocker_request.reason)
+                .await
+            {
                 rows.push(row(
                     Some(blocker_request.tool.clone()),
                     crate::ports::WorkflowApprovalOutcome::Approved,

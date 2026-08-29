@@ -3304,7 +3304,8 @@ impl CompanyRuntime {
             // and after the retirement, which already propagates its own
             // error: a notification that could not be filed must not undo a
             // default-deny that already happened.
-            self.notify_approval_expired(id, is_blocker, unanswered.is_some()).await;
+            self.notify_approval_expired(id, is_blocker, unanswered.is_some())
+                .await;
             // …and the board, which is the surface an operator actually
             // watches. Best-effort for the same reason: the default-deny has
             // already happened, and a board write that fails must not undo it —
@@ -3399,7 +3400,12 @@ impl CompanyRuntime {
         Some((task_id, format!("{} ({})", payload.reason, payload.needed)))
     }
 
-    async fn notify_approval_expired(&self, id: &ApprovalId, was_blocker: bool, has_linked_task: bool) {
+    async fn notify_approval_expired(
+        &self,
+        id: &ApprovalId,
+        was_blocker: bool,
+        has_linked_task: bool,
+    ) {
         let note = crate::ports::notifications::Notification {
             id: crate::ports::generate_id(),
             kind: "approval_expired".to_string(),
