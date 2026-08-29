@@ -3571,6 +3571,11 @@ pub struct RunWorkflowTool {
     /// so the read tool built in the same `build_agent` pass sees what this one
     /// stores. A cancelled or failed run stores nothing.
     run_outputs: RunOutputCache,
+    /// Issue #1861: the notification store, so unhealthy runs (blocked or
+    /// stranded) can badge the operator, just like runs triggered by the
+    /// console or scheduler. `None` skips notifications, degrading the
+    /// agent-initiated path to pre-#1861 behaviour.
+    notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
 }
 
 impl RunWorkflowTool {
