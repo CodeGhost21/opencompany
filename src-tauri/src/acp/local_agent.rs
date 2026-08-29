@@ -680,13 +680,18 @@ impl LocalAcpAgent {
         //
         // So a resumed session always applies `desired`, and only a *fresh*
         // one trusts the spawn to have handled it.
-        let to_apply = if was_resumed {
-            desired.clone()
-        } else if self.env.is_empty() {
+        // Two cases need the model sent explicitly and they collapse to one
+        // condition: a **resumed** session (an earlier process configured it,
+        // and this process's env cannot reach back into it), and a **fresh**
+        // session on a harness whose spawn exported no model var at all. In
+        // both, nothing else has put this session on the right model.
+        //
+        // The remaining case — a fresh session on a harness that did export
+        // one — is already on the harness default, so only a per-agent
+        // override still needs sending.
+        let to_apply = if was_resumed || self.env.is_empty() {
             desired.clone()
         } else {
-            // The spawn's env var carried the harness default, so only a
-            // per-agent override still needs sending.
             self.agent_models.get(agent_id).cloned()
         };
         if let Some(model) = to_apply.as_deref()
