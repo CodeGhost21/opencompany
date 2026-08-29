@@ -3732,18 +3732,21 @@ impl HarnessBrain {
                             mentions: Vec::new(),
                         });
                     }
-                    if let Some(halt) = &turn.halted_for_spend {
+                    if let Some(pause) = &turn.budget_paused {
                         responses.push(OutboundMessage {
                             message_id: None,
                             task_id: None,
                             channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
-                            text: spend_halt_notice(halt),
+                            text: budget_pause_notice(pause),
                             steps: Vec::new(),
                             reply_to: None,
                             mentions: Vec::new(),
                         });
                     }
+                    // A scheduled turn has no interactive caller to replace a
+                    // paused reply, so keep the pause placeholder and notice in
+                    // its durable journal alongside any completed bubbles.
                     // Drain what the scheduled turn published (#445) and file it
                     // onto the card the turn opened — or a freshly minted one —
                     // exactly as an operator turn's publish is filed.
