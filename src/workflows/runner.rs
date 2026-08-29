@@ -882,6 +882,10 @@ async fn run_workflow_inner(
                 &trigger_input,
                 &blocked,
             );
+            // Reclassify capped nodes before they move into the blocked run, the
+            // same as the settled arm does. A node that hit the iteration cap
+            // reports Ok but settled Failed, so both must agree on Error.
+            reclassify_capped_nodes(&mut nodes, &capped.take());
             return Ok(blocked_run(BlockedRun {
                 nodes,
                 blocked,
