@@ -109,7 +109,7 @@ const EMPTY: Sources = {
  * demand: the staleness is answered out loud instead of by omission, and an
  * operator is never reading an old wheel with no way to notice.
  */
-export function Overview({ client, company, companyName }: Props) {
+export function Overview({ client, company, companyName, embedded = false }: Props) {
   const [sources, setSources] = useState<Sources>(EMPTY);
   // Bumped by the refresh control; re-runs the read below and nothing else.
   const [reload, setReload] = useState(0);
