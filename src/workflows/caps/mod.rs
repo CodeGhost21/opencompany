@@ -5032,7 +5032,7 @@ mod tests {
             _company: &CompanyId,
             _agent_id: &str,
             _message: &str,
-            _chat_id: Option<&str>,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
         ) -> crate::Result<crate::harness::TurnOutcome> {
             Err(crate::error::OpenCompanyError::Harness(self.0.clone()))
         }
@@ -5043,10 +5043,10 @@ mod tests {
             agent_id: &str,
             message: &str,
             _control: &crate::company::steer::SteerControl,
-            chat_id: Option<&str>,
+            chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> crate::Result<crate::harness::TurnOutcome> {
-            self.run(company, agent_id, message, chat_id).await
+            self.run(company, agent_id, message, chat).await
         }
 
         async fn run_steered_background(
