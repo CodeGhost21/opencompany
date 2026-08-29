@@ -814,6 +814,19 @@ impl AcpRunTurn {
             }
         };
 
+        // Checked again here, covering the uncontended path too: a slot that
+        // was free the instant this turn tried to acquire it can still belong
+        // to a turn the caller cancelled in the same breath (e.g. a queued
+        // turn whose predecessor just finished). Without this, `try_lock_owned`
+        // succeeding would skip straight to starting the agent regardless of
+        // `control`, silently losing a cancel that arrived before the turn
+        // slot was even acquired.
+        if control.pending().is_some() {
+            return Err(OpenCompanyError::InvalidRequest(
+                "the turn was cancelled before it started".to_string(),
+            ));
+        }
+
         // Held for the whole select below: the observer must outlive every
         // branch, including the post-cancel grace wait, or a turn that keeps
         // producing updates after a cancel would stop streaming them at the
