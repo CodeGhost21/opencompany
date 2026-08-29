@@ -2018,7 +2018,10 @@ mod tests {
             "id = \"valid\"\n        owner_desk = \"   \"",
         );
         let file = parse_workflow(&blank).expect("parses");
-        assert_eq!(file.owner_desk, None, "blank is absent, not `Some(\"   \")`");
+        assert_eq!(
+            file.owner_desk, None,
+            "blank is absent, not `Some(\"   \")`"
+        );
     }
 
     /// A workflow TOML that DOES carry `owner_desk` round-trips it — the
