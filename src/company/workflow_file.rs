@@ -523,7 +523,8 @@ impl RawWorkflow {
     /// `owner_desk` agreeing on what "unset" looks like, instead of each call
     /// site needing its own trim.
     pub(crate) fn normalize_owner_desk(desk: Option<String>) -> Option<String> {
-        desk.filter(|raw| !raw.trim().is_empty())
+        desk.map(|raw| raw.trim().to_string())
+            .filter(|trimmed| !trimmed.is_empty())
     }
 }
 
