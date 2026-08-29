@@ -2173,7 +2173,7 @@ impl<'a> DelegationRunner<'a> {
         // MEMBER's tool refused must be attributed to the member, not
         // swept up with whatever its delegator left unread.
         let refusals_before = self.queue.refusals_queued();
-        let outcome = self
+        let outcome = match self
             .run_turn
             .run_steered(
                 self.company,
@@ -2187,7 +2187,40 @@ impl<'a> DelegationRunner<'a> {
                 // same run. `None` for a chat-path delegation.
                 self.run_sink.clone(),
             )
-            .await?;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(crate::error::OpenCompanyError::InvalidRequest(msg))
+                if control.pending().is_some() && msg.contains("cancelled") =>
+            {
+                // A queued ACP turn cancelled before it started returns
+                // InvalidRequest from AcpRunTurn (the "cancelled before it
+                // started" path). The `?` on run_steered would propagate
+                // that as a harness error, bypassing the control.take()
+                // branch below that returns cancelled: true — so the
+                // cancellation disposition is lost. Catch it here and
+                // produce the cancellation outcome directly.
+                self.queue.clear();
+                if let Some(card) = card.as_mut() {
+                    self.settle_work_card(
+                        card,
+                        &member,
+                        TaskRunEnd::Cancelled,
+                        // No approvals could have been queued: the turn
+                        // never started, so nothing asked for approval.
+                        0,
+                        "the turn was cancelled before it started",
+                    )
+                    .await?;
+                }
+                return Ok(DelegationOutcome {
+                    cancelled: true,
+                    spawned_task: card.map(|c| c.id),
+                    ..DelegationOutcome::default()
+                });
+            }
+            Err(err) => return Err(err),
+        };
         // Issue #1846 review (Codex #3864988176): `run_inner`'s own park (mod.rs)
         // parks whatever it was CALLED with as the delegate's turn message —
         // here, `&instruction`, the model-generated hand-off brief, not the
