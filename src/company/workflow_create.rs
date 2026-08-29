@@ -609,11 +609,20 @@ pub(crate) fn workflow_spec_from_graph(file: WorkflowFile) -> WorkflowGraphSpec 
 /// `wired_channels` is the deployment's deliverable channel set (issue #1191):
 /// `None` means the caller cannot see the wiring, and the `channel`-target rule
 /// is skipped rather than guessed at — see [`validate_draft_against_record`].
+///
+/// `previous_owner_desk` is the desk the draft's saved counterpart already
+/// carries, for a caller that is pre-flighting an EDIT of an existing workflow
+/// (issue #1882 review, PR #1882 bot finding, comment 3879878907). `None` for a
+/// create-shaped pre-flight, which has no stored body to grandfather against.
+/// See the `owner_desk` block in [`validate_draft_against_record`]: an unchanged
+/// stale desk is carried forward rather than refused, so an unrelated
+/// correction cannot be blocked by a field the caller never touched.
 pub(crate) fn courtesy_validate_draft(
     draft: &RawWorkflow,
     record: &CompanyRecord,
     source_dir: Option<&Path>,
     wired_channels: Option<&[String]>,
+    previous_owner_desk: Option<&str>,
 ) -> Result<()> {
     validate_draft_shape(draft)?;
     // Record cross-check BEFORE the render → parse round trip, matching
@@ -625,21 +634,28 @@ pub(crate) fn courtesy_validate_draft(
     // pre-flight route on this function: a pre-flight that names a different
     // problem than the submit is worse than none.
     //
-    // `previous_owner_desk: None` (issue #1882 review) — unlike the other two
-    // rules this function shares with the real write path, this is a KNOWN,
-    // documented asymmetry, not a drift: `update_company_workflow` grandfathers
-    // an unchanged stale desk under the write lock, where the current stored
-    // body is authoritative. This lockless pre-flight has no such body to
-    // compare against without a second lookup this route does not otherwise
-    // need — so it can return a false-negative `400` on an edit the real save
-    // would accept, the same tolerated direction as the id/name-uniqueness gap
-    // documented above `validate_workflow`. Never the other way around: it
-    // cannot pass a desk the write would refuse.
+    // `previous_owner_desk` is the caller's (issue #1882 review). A caller that
+    // holds the saved body — the fix-from-run copilot, which seeds its spec from
+    // exactly that body — passes it, and gets the same grandfathering
+    // `update_company_workflow` applies under the write lock: an unchanged stale
+    // desk is carried, not refused. A caller with no stored body to compare
+    // against passes `None` and keeps the KNOWN, documented asymmetry that used
+    // to be unconditional here: this lockless pre-flight can then return a
+    // false-negative `400` on an edit the real save would accept, the same
+    // tolerated direction as the id/name-uniqueness gap documented above
+    // `validate_workflow`. Never the other way around: it cannot pass a desk the
+    // write would refuse.
     //
     // The resolved-id return (issue #1882 review) is discarded here: this
     // draft is a caller's borrowed copy that this pre-flight never persists,
     // so there is nothing to normalize it into.
-    validate_draft_against_record(draft, record, source_dir, wired_channels, None)?;
+    validate_draft_against_record(
+        draft,
+        record,
+        source_dir,
+        wired_channels,
+        previous_owner_desk,
+    )?;
     let toml_src = render_workflow(draft)?;
     if toml_src.len() > MAX_WORKFLOW_TOML_BYTES {
         return Err(over_cap_error(toml_src.len()));
