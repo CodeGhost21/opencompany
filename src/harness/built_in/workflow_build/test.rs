@@ -1866,6 +1866,44 @@ async fn a_description_drafts_a_graph_via_the_agent() {
     assert!(model.calls() >= 1, "the model ran at least once");
 }
 
+/// Issue #1931 regression: the vendored `openhuman` runtime compiles in a
+/// `workflows` toolpack that claims the bare name `propose_workflow`, owned only
+/// by openhuman's OWN `workflow_builder`/`flow_discovery` agents — and withholds
+/// any tool sharing that name from every OTHER agent's advertised belt,
+/// regardless of who actually registered it (`strip_packed_from_visible` matches
+/// by name alone). That silently dropped this copilot's propose tool from the
+/// model's very first request: the model still called it (from the system
+/// prompt), got back `unknown tool`, and gave up narrating prose instead of
+/// drafting a graph — so every downstream assertion about the drafted graph
+/// failed, none of them naming the real cause.
+///
+/// This pins the invariant that would have caught it directly: the FIRST model
+/// request of a turn must advertise all three of the copilot's own tools,
+/// including the propose tool, by name — not a downstream side effect of it
+/// being missing.
+#[tokio::test]
+async fn the_first_model_request_advertises_all_three_copilot_tools() {
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("email the weekly digest", good_workflow()),
+        NativeStep::done("Proposed the weekly digest workflow for your review."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model.clone(), None).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    let _ = draft_workflow_from_description(&runtime, "email the weekly digest every Monday").await;
+
+    let seen = model.seen_tool_names();
+    let first_request_tools = seen
+        .first()
+        .expect("the model was invoked at least once");
+    for tool in ["list_effective_tools", "check_workflow", "propose_company_workflow"] {
+        assert!(
+            first_request_tools.iter().any(|name| name == tool),
+            "the first model request must advertise `{tool}`; got {first_request_tools:?}"
+        );
+    }
+}
+
 /// Issue #1042 regression: drafting the SAME description twice must draft a graph
 /// BOTH times, and the second turn must NOT replay the first turn's session
 /// transcript. Before the per-turn workspace fix, the copilot agent's stable
