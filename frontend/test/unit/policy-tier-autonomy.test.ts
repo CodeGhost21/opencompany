@@ -32,17 +32,17 @@ const TIERS = [
   {
     value: "supervised",
     label: "Supervised",
-    description: "The agents ask before every change, including their own scratch files.",
+    description: "Conservative execution restrictions. Approval prompts are explicit.",
   },
   {
     value: "auto",
     label: "Auto",
-    description: "The agents work on their own and stop before anything that leaves the company or spends money.",
+    description: "Balanced execution autonomy. Approval prompts are explicit.",
   },
   {
     value: "full",
     label: "Full",
-    description: "The agents act without asking, except for the few things on the always-ask list.",
+    description: "Broadest execution autonomy. Approval prompts are explicit.",
   },
 ];
 
@@ -199,9 +199,11 @@ describe("changing the autonomy tier", () => {
       container.querySelector<HTMLButtonElement>("[data-testid=policy-tier-full]")!.click();
     });
     expect(put).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("The agents ask before every change");
-    expect(document.body.textContent).toContain("The agents act without asking");
-    expect(document.body.textContent).toContain("always-ask list still wins");
+    expect(document.body.textContent).toContain("Conservative execution restrictions");
+    expect(document.body.textContent).toContain("Broadest execution autonomy");
+    expect(document.body.textContent).toContain(
+      "Approval prompts remain explicit through request_approval",
+    );
 
     await act(async () => {
       document
@@ -318,19 +320,15 @@ describe("changing the autonomy tier", () => {
     expect(document.body.textContent).not.toContain("Always-ask list updated");
   });
 
-  it("qualifies the always-ask reassurance when edits are unsaved", async () => {
+  it("keeps explicit-approval copy on a widening confirmation", async () => {
     const { client } = makeClient(status("supervised"));
     await mount(client);
 
-    await type(
-      container.querySelector<HTMLInputElement>("#always-approve")!,
-      "shell, http_request",
-    );
     await act(async () => {
       container.querySelector<HTMLButtonElement>("[data-testid=policy-tier-full]")!.click();
     });
     expect(document.body.textContent).toContain(
-      "Your saved always-ask list still wins, even on Full — save the list to enforce new gates.",
+      "Approval prompts remain explicit through request_approval.",
     );
   });
 });
@@ -351,13 +349,13 @@ describe("resetting to the manifest's policy", () => {
       "Give teammates more autonomy?",
     );
     expect(document.body.textContent).toContain(
-      "The agents act without asking",
+      "Broadest execution autonomy",
     );
     expect(document.body.textContent).toContain(
       "This also replaces the current always-ask list",
     );
     expect(document.body.textContent).toContain(
-      "Reset replaces the whole policy override",
+      "Reset restores the stored policy fields",
     );
 
     await act(async () => {

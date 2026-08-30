@@ -1171,12 +1171,10 @@ export function PolicySettings({ client, company }: Props) {
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
                     {pendingCapRaise !== null
-                      ? "Your saved always-ask list still wins, even under the raised cap."
+                      ? "This threshold remains inactive while policy HITL is disabled."
                       : resetAwaitingConfirmation
-                        ? "Reset replaces the whole policy override, including the always-ask list."
-                        : dirty
-                          ? "Your saved always-ask list still wins, even on Full — save the list to enforce new gates."
-                          : "Your always-ask list still wins, even on Full."}
+                        ? "Reset restores the stored policy fields; approval prompts remain explicit."
+                        : "Approval prompts remain explicit through request_approval."}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
