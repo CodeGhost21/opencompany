@@ -1,4 +1,11 @@
-import { Building2, MessageSquareWarning, PanelLeftClose, PanelLeftOpen, Plus } from "lucide-react";
+import {
+  Building2,
+  MessageSquareWarning,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  Settings2,
+} from "lucide-react";
 
 import type { CompanyStatus } from "@/api/types";
 import type { View } from "@/components/app-shell";
