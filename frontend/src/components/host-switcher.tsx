@@ -591,6 +591,7 @@ function SidebarHeaderTrigger({
             size="lg"
             className="data-[popup-open]:bg-sidebar-accent data-[popup-open]:text-sidebar-accent-foreground"
             render={<DropdownMenuTrigger />}
+            tooltip={switcherTooltip}
             {...triggerData}
           >
             {nameplate}
