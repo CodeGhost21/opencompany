@@ -240,6 +240,20 @@ impl Brain for SidecarBrain {
             while let Some(frame) = stream.next().await {
                 match frame? {
                     SidecarFrame::CycleComplete => break,
+                    SidecarFrame::Inference { call_id, request } => {
+                        if !seen.insert(call_id.clone()) {
+                            continue;
+                        }
+                        // Inference answers unblock the sidecar's cycle, so they
+                        // cannot wait for CycleComplete with effectful frames.
+                        if passes >= self.max_passes {
+                            break;
+                        }
+                        passes += 1;
+                        let response = self.inference.infer(request).await?;
+                        token_usage.fold(&response.token_usage);
+                        self.transport.answer_inference(&call_id, response).await?;
+                    }
                     frame => frames.push(frame),
                 }
             }
@@ -299,32 +313,12 @@ impl Brain for SidecarBrain {
                                 .await?;
                             continue;
                         }
-                        let approval_boundary =
-                            call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND;
                         let answer = self.service_tool_call(host, &call).await?;
-                        let boundary_accepted = approval_boundary && answer.ok;
                         self.transport.answer_tool_call(answer).await?;
-                        if boundary_accepted {
-                            break;
-                        }
+                        // Keep draining so every sibling gets an explicit refusal.
                     }
-                    SidecarFrame::Inference { call_id, request } => {
-                        if !seen.insert(call_id.clone()) {
-                            continue;
-                        }
-                        // Honor the pass cap: stop draining once the sidecar has
-                        // asked for more inference passes than the budget allows.
-                        if passes >= self.max_passes {
-                            break;
-                        }
-                        passes += 1;
-                        // The inference inversion: the host runs the model pass.
-                        let response = self.inference.infer(request).await?;
-                        // Fold the whole total (tokens, cache hits, cost) so the
-                        // runtime can meter the cycle — the host's client is the
-                        // only side that sees what the pass actually cost.
-                        token_usage.fold(&response.token_usage);
-                        self.transport.answer_inference(&call_id, response).await?;
+                    SidecarFrame::Inference { .. } => {
+                        unreachable!("inference frames are serviced while streaming")
                     }
                     SidecarFrame::CycleComplete => unreachable!("cycle completion was drained"),
                 }

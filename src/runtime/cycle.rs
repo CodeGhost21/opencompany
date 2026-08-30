@@ -580,6 +580,30 @@ impl<'a> CycleRunner<'a> {
             self.run_locked(events, cycle_id.clone(), run_id, &mut effects),
         )
         .await;
+        if outcome.is_ok() {
+            // Harness cognition consumes while redispatching and run_locked
+            // journals that buffered fact. Hosted and sidecar cognition instead
+            // receive the verdict event directly, so successful return is their
+            // delivery acknowledgement and the outer runner closes the claimed
+            // continuation here.
+            for continuation in &claimed {
+                let id = &continuation.call.approval_id;
+                if self.rt.grants.consume_continuation(id).is_some()
+                    && let Err(err) = self
+                        .rt
+                        .journal
+                        .record_approval_continuation_consumed(id)
+                        .await
+                {
+                    tracing::warn!(
+                        approval_id = %id,
+                        error = %err,
+                        "[approval] a fallback decision continuation completed but its journal \
+                         record failed; a restart may repeat the follow-up cycle"
+                    );
+                }
+            }
+        }
         // Issue #1739: the product's unit of work, reported as shape and outcome.
         //
         // Emitted here rather than inside `run_locked` for the same reason the

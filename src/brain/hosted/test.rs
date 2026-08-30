@@ -261,6 +261,7 @@ async fn effect_before_request_approval_cannot_cross_the_cycle_boundary() {
                 1,
                 json!({ "reason": "send the message" }),
             ),
+            tool_call_frame("noop", 2, json!({ "too": "late" })),
         ],
     );
     let brain = brain(transport.clone());
@@ -273,8 +274,9 @@ async fn effect_before_request_approval_cannot_cross_the_cycle_boundary() {
     assert_eq!(host.tool_calls.lock().unwrap().len(), 1);
     assert_eq!(transport.acks().len(), 1);
     assert!(!transport.acks()[0].ok);
-    assert_eq!(transport.tool_answers().len(), 1);
+    assert_eq!(transport.tool_answers().len(), 2);
     assert!(transport.tool_answers()[0].ok);
+    assert!(!transport.tool_answers()[1].ok);
 }
 
 // ── Issue #174: usage frames make the hosted path meterable ─────────────────
