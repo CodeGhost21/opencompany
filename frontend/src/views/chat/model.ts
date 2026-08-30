@@ -338,7 +338,11 @@ function generalChannel(members: TeamMember[]): Channel {
  */
 export function buildChannels(
   members: TeamMember[],
-  desks: Desk[] = defaultDesks(),
+  // Defaults to no desks, not to the fabricated trio. The parameter exists so
+  // a caller that has not read `/desks` yet can still build the rail's roster
+  // half; standing in three desks the company never declared is the bug this
+  // default used to carry into every such caller.
+  desks: Desk[] = [],
   transcripts: Transcripts = {},
 ): ChannelSection[] {
   // A desk that answers to a General spelling owns the company-wide line, and

@@ -43,7 +43,7 @@ import {
   type GrantScope,
 } from "@/api/types";
 import { MAIN_THREAD_ID } from "@/lib/chat";
-import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
