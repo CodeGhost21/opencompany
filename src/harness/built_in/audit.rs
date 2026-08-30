@@ -49,7 +49,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use openhuman_core::openhuman as oh;
 
-use oh::agent::tool_policy::GeneratedToolRuntimeContext;
 use oh::security::{AuditEvent, AuditEventType};
 use oh::tools::{
     PermissionLevel, ShellTool, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope,
@@ -247,11 +246,30 @@ impl Tool for AuditedShellTool {
         self.inner.external_effect_with_args(args)
     }
 
-    fn generated_runtime_context(
+    // Host metadata this wrapper must not swallow.
+    //
+    // `Tool` used to carry a typed `generated_runtime_context`, and this
+    // decorator forwarded it. The tinytools extraction replaced it with an
+    // ERASED pair — `host_extension` for what the tool is, `host_call_extension`
+    // for what a particular call is — because the answers are host policy
+    // (OpenCompany's generated-tool provenance, OpenHuman's pack-registry
+    // handle) and a shared vocabulary has no business naming either. The typed
+    // reader is a free function now: `oh::agent::tools::traits`'s
+    // `generated_runtime_context`, which downcasts what these return.
+    //
+    // Both must be forwarded, and forwarding is the whole job of this
+    // decorator: a wrapper that answered `None` (the default) would make every
+    // wrapped tool look like a tool with no provenance and no pack, silently,
+    // to policy that has no other way to ask.
+    fn host_extension(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        self.inner.host_extension()
+    }
+
+    fn host_call_extension(
         &self,
         args: &serde_json::Value,
-    ) -> Option<GeneratedToolRuntimeContext> {
-        self.inner.generated_runtime_context(args)
+    ) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.inner.host_call_extension(args)
     }
 
     fn max_result_size_chars(&self) -> Option<usize> {
