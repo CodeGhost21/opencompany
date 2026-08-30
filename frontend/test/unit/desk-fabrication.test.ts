@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { ApprovalSummary } from "@/api/types";
 import { approvalThreadLink } from "@/components/approval-card";
 import type { DeskDto } from "@/api/types";
-import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import { GENERAL_CHANNEL } from "@/lib/desks";
 import { MAIN_THREAD_ID } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { threadsFromDesks } from "@/lib/threads";
@@ -50,7 +50,12 @@ describe("a company with no desks (empty /desks answer)", () => {
 
   it("still lists a desk the host does return", () => {
     const desks: DeskDto[] = [
-      { id: "engineering", name: "Engineering desk", description: "How things are built" },
+      {
+        id: "engineering",
+        name: "Engineering desk",
+        description: "How things are built",
+        members: ["engineer"],
+      },
     ];
 
     expect(threadsFromDesks(desks).map((t) => t.id)).toEqual([MAIN_THREAD_ID, "engineering"]);
