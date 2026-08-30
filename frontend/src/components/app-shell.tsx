@@ -3184,11 +3184,14 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
-          {/* `#/overview` is the company graph again — the picture #1321 swapped
-              out for the operator landing page. The landing page's panels are
-              not lost: they keep their own address at `#/company/graph`'s
-              sibling below, and the graph keeps the alias #1321 gave it so
-              every link minted while it lived there still resolves. */}
+          {/* `#/overview` is the company graph again — the page #1321 swapped
+              out for the operator landing view. The graph keeps the
+              `#/company/graph` alias that issue gave it, so every link minted
+              while it lived there still resolves.
+
+              `OperatorOverview` is left in the tree, unrouted: its panels are
+              real work (#1015, #1700, #1745) and the decision about where they
+              belong is not this change's to make. Nothing renders it today. */}
           {(view === "overview" || view === "setup") && (
             <Overview client={client} company={company} companyName={feed.status.name} />
           )}
