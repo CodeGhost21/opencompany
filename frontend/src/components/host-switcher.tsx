@@ -361,6 +361,7 @@ export function HostSwitcher({
           <SidebarMenuButton
             size="lg"
             className="cursor-default hover:bg-transparent"
+            tooltip={switcherTooltip}
             {...triggerData}
           >
             {nameplate}
