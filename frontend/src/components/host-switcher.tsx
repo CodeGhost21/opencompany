@@ -330,6 +330,21 @@ export function HostSwitcher({
     </>
   );
 
+  // The collapsed rail shrinks this trigger to the 32px glyph alone
+  // (`group-data-[collapsible=icon]:size-8!` in `ui/sidebar.tsx`) and clips
+  // the nameplate's two text lines out of the visible box entirely — so a
+  // paused, suspended, archived, or emergency-stopped company loses the one
+  // place that fact was surfaced (issue #1931 review). The glyph's own status
+  // dot survives collapse, but it reports host *connectivity*, which can
+  // still read green while the company itself is stopped — the exact split
+  // `lifecycleTone`/`lifecycleLine` exists to keep apart above.
+  //
+  // `SidebarMenuButton`'s own `tooltip` prop already exists for precisely
+  // this: it renders only while `state === "collapsed"` (`ui/sidebar.tsx`), so
+  // an expanded rail is unaffected and the lifecycle line becomes reachable —
+  // on hover — the moment it would otherwise vanish.
+  const switcherTooltip = lifecycleLine ? `${primary} — ${lifecycleLine}` : primary;
+
   // Read off the closed trigger, so host count and cross-host health stay
   // answerable — by an operator and by a test — without opening anything. That
   // is what the rail gave away for free and what a dropdown otherwise hides.
