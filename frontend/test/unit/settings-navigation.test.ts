@@ -35,7 +35,11 @@ describe("Settings navigation (issue #1468)", () => {
     // something they read, and reading it should not cost three clicks. The old
     // address still resolves — `console-routes.test.ts` pins that
     // `#/settings/brain` rewrites onto the row.
-    expect(SETTINGS_PAGES.find((page) => page.id === "brain")).toBeUndefined();
+    // Widened to `string` deliberately: once `brain` is gone from the table its
+    // id is not in the union, so a narrow comparison is a type error rather
+    // than the assertion this test is making — which is about the DATA, and has
+    // to keep holding if someone puts the page back.
+    expect(SETTINGS_PAGES.map((page) => page.id as string)).not.toContain("brain");
   });
 
   it("distinguishes Settings page ids from unknown sub-hashes", () => {
