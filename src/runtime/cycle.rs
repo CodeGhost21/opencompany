@@ -5235,6 +5235,49 @@ members = ["writer"]
         assert_eq!(brain.calls(), 1);
     }
 
+    #[tokio::test]
+    async fn a_denied_explicit_request_from_a_workflow_node_returns_to_its_agent() {
+        let home_dir = tmp_home();
+        let brain = Arc::new(CountingBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key("run-1", "work");
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            turn,
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+        let id = host
+            .park_effect(harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        rt.resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            brain.calls(),
+            1,
+            "the workflow-node fork must deliver the denial as an agent continuation"
+        );
+    }
+
     /// An approval that expired past its TTL grants nothing either, even though
     /// the operator clicked approve — default-deny-on-silence wins, and it must
     /// win here too or expiry would become a way to smuggle a live grant out of

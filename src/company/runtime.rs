@@ -2133,6 +2133,26 @@ impl CompanyRuntime {
         {
             return self.resume_workflow_run(&approval_id, turn, batch).await;
         }
+        // An explicit question raised inside a workflow agent node is still a
+        // conversation continuation for that agent, not authority to replay the
+        // workflow node. The ordinary blocked-node path intentionally drops an
+        // all-denied batch; doing that here would swallow the operator's answer
+        // and leave the durable ApprovalContinuation live until expiry. The
+        // request tool is a turn boundary, so this batch is all-explicit by
+        // construction; keep the `all` guard fail-closed if a legacy mixed
+        // batch is ever replayed.
+        if let Some(turn) = turn.as_deref()
+            && crate::runtime::workflow_resume::is_node_turn(turn)
+            && batch.iter().all(|event| {
+                let CompanyEvent::ApprovalResolved { approval_id, .. } = event else {
+                    return false;
+                };
+                self.grants.peek_continuation(approval_id).is_some()
+            })
+        {
+            self.retire_blocked_stash(turn).await;
+            return self.run_continuation(&approval_id, batch).await;
+        }
         // Issue #899 (Stage 1): a blocked agent node, likewise not a brain turn.
         // Its gated calls parked under a `workflow-node:` key (disjoint from the
         // `workflow-run:` gate key above), so the same batch counting releases
