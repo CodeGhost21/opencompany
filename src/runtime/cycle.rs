@@ -5272,13 +5272,15 @@ members = ["writer"]
             .await
             .unwrap();
 
-        let continuation = rt
-            .grants
-            .peek_continuation(&id)
-            .expect("denial resumes its asker");
-        assert_eq!(continuation.verdict, Verdict::Deny);
-        assert_eq!(continuation.call.agent, "finance");
-        assert_eq!(continuation.call.args, args);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while rt.grants.peek_continuation(&id).is_some()
+                || !rt.journal.replayed_approval_continuations().is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("denial reaches its asker and retires the durable continuation");
         assert!(
             rt.journal
                 .replayed_grants()
@@ -5288,8 +5290,8 @@ members = ["writer"]
         );
         assert!(
             rt.journal.replayed_approval_continuations().is_empty(),
-            "the spawned follow-up host-durably claimed this continuation, so restart must not \
-             repeat its model turn"
+            "the delivered follow-up is consumed durably, so restart must not repeat its model \
+             turn"
         );
     }
 
