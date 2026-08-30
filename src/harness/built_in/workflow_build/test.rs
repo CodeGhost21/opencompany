@@ -253,9 +253,15 @@ impl ChatModel<()> for NativeCopilotModel {
     }
 
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        eprintln!(
+            "DEBUG native invoke #{n} tools_in_request={} last_msg={:?}",
+            request.tools.len(),
+            request.messages.last().map(|m| format!("{m:?}").chars().take(200).collect::<String>())
+        );
         self.seen_messages.lock().unwrap().push(request.messages);
         let step = self.next_step();
+        eprintln!("DEBUG native invoke #{n} responding with calls={:?} text={:?}", step.calls, step.text);
         let tool_calls: Vec<ToolCall> = step
             .calls
             .iter()
