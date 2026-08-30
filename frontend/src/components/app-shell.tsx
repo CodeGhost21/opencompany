@@ -7,7 +7,6 @@ import {
   type LucideIcon,
   MessagesSquare,
   Network,
-  Settings2,
   ShieldCheck,
   BookText,
   Wallet,
