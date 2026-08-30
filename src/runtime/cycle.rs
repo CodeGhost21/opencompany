@@ -1257,8 +1257,14 @@ approval.]"
                 if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND =>
             {
                 if let Some(agent) = effect.agent.clone() {
-                    self.mint_approval_continuation(id, agent, effect, Verdict::Approve)
-                        .await?;
+                    self.mint_approval_continuation(
+                        id,
+                        agent,
+                        effect,
+                        Verdict::Approve,
+                        by.clone(),
+                    )
+                    .await?;
                 }
             }
             ResolveOutcome::Approved(effect) => {
@@ -1269,7 +1275,7 @@ approval.]"
                 if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND =>
             {
                 if let Some(agent) = effect.agent.clone() {
-                    self.mint_approval_continuation(id, agent, effect, Verdict::Deny)
+                    self.mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
                         .await?;
                 }
             }
@@ -1671,6 +1677,7 @@ approval.]"
         agent: String,
         effect: Effect,
         verdict: Verdict,
+        by: Actor,
     ) -> Result<()> {
         let conversation = self
             .rt
@@ -1689,6 +1696,7 @@ approval.]"
                 origin_task: self.approval_work_key(id),
             },
             verdict,
+            by,
         };
         self.rt
             .journal
@@ -1859,6 +1867,19 @@ approval.]"
         by: Actor,
     ) -> Result<ResolveReceipt> {
         let now = now_millis();
+
+        if self
+            .rt
+            .approval_gate
+            .parked_effect(id)
+            .is_some_and(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+        {
+            return Err(OpenCompanyError::InvalidRequest(
+                "an explicit approval question has no executable payload to amend; decide the \
+                 question as written"
+                    .to_string(),
+            ));
+        }
 
         // Overlay the operator's edit onto the parked effect. A missing id (or
         // an expired one, caught by the gate below) yields no executable effect.
@@ -5086,6 +5107,10 @@ members = ["writer"]
         )
         .await;
 
+        let summary = &rt.pending_approvals()[0];
+        assert!(!summary.broadly_grantable);
+        assert!(!summary.broadly_deniable);
+
         rt.resolve_approval(&id, Verdict::Deny, operator())
             .await
             .unwrap();
@@ -5135,6 +5160,79 @@ members = ["writer"]
         assert_eq!(rt.pending_approvals().len(), 1);
         assert!(rt.standing_grants().is_empty());
         assert!(rt.grants.peek_continuation(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_question_refuses_approve_with_edit() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ),
+        )
+        .await;
+
+        let error = rt
+            .resolve_approval_amended(
+                &id,
+                serde_json::json!({ "question": "May I submit it tomorrow?" }),
+                operator(),
+            )
+            .await
+            .expect_err("a question carries no executable payload to edit");
+
+        assert!(error.to_string().contains("no executable payload to amend"));
+        assert_eq!(rt.pending_approvals().len(), 1);
+        assert!(rt.grants.peek_continuation(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_schedules_a_durable_explicit_decision_continuation() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one(
+            home.clone(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ),
+        )
+        .await;
+
+        CycleRunner::new(&rt)
+            .settle_approval(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        drop(rt);
+
+        let brain = Arc::new(CountingBrain::default());
+        let recovered = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        recovered.recover().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while brain.calls() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovery dispatches the owed follow-up");
+        assert_eq!(brain.calls(), 1);
     }
 
     /// An approval that expired past its TTL grants nothing either, even though

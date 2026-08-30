@@ -196,6 +196,9 @@ pub struct ApprovalContinuation {
     pub call: GrantedCall,
     /// The operator decision the follow-up must report.
     pub verdict: Verdict,
+    /// Who made the decision, retained so restart recovery can recreate the
+    /// exact `ApprovalResolved` event without inventing an actor.
+    pub by: Actor,
 }
 
 /// The hard ceiling on a standing grant's life: 7 days.

@@ -8922,6 +8922,10 @@ members = ["eng1", "eng2"]
                     origin_task: None,
                 },
                 verdict,
+                by: crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::User,
+                    id: "operator".into(),
+                },
             });
         let grants = requests.grants();
         let brain = brain_with_queue_and_events(dir.path(), requests, log);

@@ -123,6 +123,6 @@ home.
 
 Editorial standards, in the manifest's words: the publish decision on anything
 contested, anything legally exposed, and every correction.
-`[policy].mode = "auto"` does not request sign-off by itself. Before an action needs human
-approval, call `request_approval` with the exact decision and wait for the
-operator's answer.
+`[policy].mode = "auto"` does not request sign-off by itself. Before any action covered by the human boundary above, including one that
+leaves the company or spends money, call `request_approval` with the exact
+decision and wait for the operator's answer.

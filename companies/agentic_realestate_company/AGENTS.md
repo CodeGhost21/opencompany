@@ -117,6 +117,6 @@ company's shared active-work document — plus its own `agents/<id>/` home.
 ## What stops and waits for a person
 
 Purchase approvals, in the manifest's words — plus offers, contracts, anything
-binding on a tenancy, and any spend on rehab. `[policy].mode = "auto"` does not request sign-off by itself. Before an action needs human
-approval, call `request_approval` with the exact decision and wait for the
-operator's answer.
+binding on a tenancy, and any spend on rehab. `[policy].mode = "auto"` does not request sign-off by itself. Before any action covered by the human boundary above, including one that
+leaves the company or spends money, call `request_approval` with the exact
+decision and wait for the operator's answer.

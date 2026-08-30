@@ -3688,6 +3688,10 @@ mod test {
                 ..grant("appr-denied", 1_000)
             },
             verdict: crate::ports::types::Verdict::Deny,
+            by: Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "operator".into(),
+            },
         };
 
         journal

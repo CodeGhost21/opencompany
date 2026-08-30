@@ -125,6 +125,6 @@ Every specialist but `researcher` declares an explicit `context` confining
 
 The executive workshop itself, and anything that reaches a client — advice,
 decks, models, commitments about what the firm will deliver.
-`[policy].mode = "auto"` does not request sign-off by itself. Before an action needs human
-approval, call `request_approval` with the exact decision and wait for the
-operator's answer.
+`[policy].mode = "auto"` does not request sign-off by itself. Before any action covered by the human boundary above, including one that
+leaves the company or spends money, call `request_approval` with the exact
+decision and wait for the operator's answer.

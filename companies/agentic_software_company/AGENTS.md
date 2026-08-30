@@ -154,6 +154,6 @@ unconfined orchestrator.
 
 Product direction, in the manifest's words — which in practice means: what to
 build next, pricing, anything that changes what customers are promised, and
-publishing anything under the company's name. `[policy].mode = "auto"` does not request sign-off by itself. Before an action needs human
-approval, call `request_approval` with the exact decision and wait for the
-operator's answer.
+publishing anything under the company's name. `[policy].mode = "auto"` does not request sign-off by itself. Before any action covered by the human boundary above, including one that
+leaves the company or spends money, call `request_approval` with the exact
+decision and wait for the operator's answer.

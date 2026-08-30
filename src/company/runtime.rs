@@ -3552,8 +3552,26 @@ impl CompanyRuntime {
 
     /// Replays the journal to rebuild the executed-key set, the approval queue,
     /// and the live single-use grants (issue #243).
-    pub async fn recover(&self) -> Result<()> {
-        CycleRunner::new(self).recover().await
+    pub async fn recover(self: &Arc<Self>) -> Result<()> {
+        CycleRunner::new(self).recover().await?;
+
+        // A decision can become durable immediately before the process dies,
+        // before the detached follow-up gets its first poll. Replay restores the
+        // continuation data; recreate the verdict event as well so the already
+        // recorded answer is actually delivered instead of merely expiring in
+        // memory fifteen minutes later. Dropping the handles detaches the work;
+        // each task owns an Arc and the normal cycle-end drain journals
+        // `ApprovalContinuationConsumed` after delivery.
+        for continuation in self.journal.replayed_approval_continuations() {
+            drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                CompanyEvent::ApprovalResolved {
+                    approval_id: continuation.call.approval_id,
+                    verdict: continuation.verdict,
+                    by: continuation.by,
+                },
+            ))));
+        }
+        Ok(())
     }
 
     /// What every approval ever parked was, keyed by id — including approvals
@@ -3796,7 +3814,9 @@ impl CompanyRuntime {
                 // the same `subject_of` the resolve route's 400 and the mint use,
                 // so the control the card offers and the answer a resolve gets
                 // cannot disagree.
-                broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
+                broadly_grantable: p.effect.kind
+                    != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
                 // Issue #1458: a standing **denial** is enforced only on the
                 // agent turn path (`standing_deny_applies`); the workflow gate
@@ -3805,10 +3825,12 @@ impl CompanyRuntime {
                 // deny control is offered only where the runtime will actually
                 // enforce it — an agent subject — while the grant half above
                 // still covers a workflow, which can hold a standing permission.
-                broadly_deniable: matches!(
-                    crate::runtime::grants::subject_of(&p.effect),
-                    Some(crate::runtime::grants::GrantSubject::Agent(_))
-                ),
+                broadly_deniable: p.effect.kind
+                    != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && matches!(
+                        crate::runtime::grants::subject_of(&p.effect),
+                        Some(crate::runtime::grants::GrantSubject::Agent(_))
+                    ),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction
