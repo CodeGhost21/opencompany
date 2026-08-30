@@ -321,7 +321,7 @@ export function HostSwitcher({
             "truncate text-xs",
             // A stopped or paused company is stated in its own tone, the way
             // the footer row it replaces was. Everything else stays muted.
-            lifecycleLine ? LIFECYCLE_TEXT[companyState!.tone] : "text-muted-foreground",
+            lifecycleTone ? LIFECYCLE_TEXT[lifecycleTone] : "text-muted-foreground",
           )}
         >
           {secondary}
