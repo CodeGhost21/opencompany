@@ -265,7 +265,7 @@ impl ChatModel<()> for NativeCopilotModel {
     }
 
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
-        let _n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.calls.fetch_add(1, Ordering::SeqCst);
         self.seen_tool_names.lock().unwrap().push(
             request
                 .tools
