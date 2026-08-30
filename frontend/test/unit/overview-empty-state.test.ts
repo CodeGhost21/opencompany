@@ -152,4 +152,47 @@ describe("the overview empty state", () => {
     expect(graphProps.emptyState).toBe(true);
     expect(graphProps.noDesks).toBe(true);
   });
+
+  /**
+   * Codex review on PR #1931: durable memory is passed to `KnowledgeGraph`
+   * through its own `memory` prop rather than folded into `graph.nodes`, so a
+   * deskless company with no roster, tasks, or workflows but a nonempty
+   * memory constellation must not still be called `emptyState` — there is a
+   * memory graph to look at even though `graph.nodes` holds only the core.
+   */
+  it("stays hidden for a deskless company whose only content is durable memory", async () => {
+    const mocks = fakeClient();
+    const get = mocks.client.get as ReturnType<typeof vi.fn>;
+    get.mockImplementation((path: string) => {
+      if (path.endsWith("/memory")) {
+        return Promise.resolve({
+          items: [
+            {
+              id: "fact-1",
+              kind: "fact",
+              origin: "fact",
+              editable: true,
+              title: "Founded in 2024",
+              body: "The company was founded in 2024.",
+              source: "operator",
+              updatedAt: 0,
+            },
+          ],
+          totalContext: 0,
+          contextTruncated: false,
+        });
+      }
+      return Promise.resolve([]);
+    });
+
+    await render(mocks.client);
+
+    // The fact about the company: still no pillars.
+    expect(graphProps.noDesks).toBe(true);
+    // The fact about the graph proper: still only the core node.
+    expect(graphProps.nodeCount).toBe(1);
+    // But the memory constellation is not empty, so the empty state must not
+    // cover it.
+    expect(graphProps.emptyState).toBe(false);
+  });
 });
