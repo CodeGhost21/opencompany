@@ -201,7 +201,6 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
   hosting: "HostingView.tsx",
   search: "SearchView.tsx",
   skills: "SkillsView.tsx",
-  brain: "MemoryView.tsx",
   usage: "UsageView.tsx",
 };
 
