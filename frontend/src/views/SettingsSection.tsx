@@ -103,7 +103,18 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
           width its widest card (SMTP) needs, clipping it on both sides
           (issue #1383). */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="border-b lg:hidden">
+        {/* On the macOS desktop, `ContentSurface` overlays every page's top
+            28px with an absolutely-positioned, pointer-events-enabled drag
+            band (`WindowDragBar`, z-20) so the window stays movable without a
+            native title bar — content-surface.tsx explains the trade-off it
+            accepted: that band wins the click over whatever a page draws
+            underneath it. This row is the one page top that actually sits in
+            that band below `lg`, so without a higher stacking order its links
+            are unreachable at 880–1023px window widths on macOS. `relative
+            z-30` gives it its own stacking context above the drag band without
+            touching `WindowDragBar` itself, whose absolute-overlay contract
+            other pages (the graph, the workflow editor) still rely on. */}
+        <div className="relative z-30 border-b lg:hidden">
           <div className="flex gap-1 overflow-x-auto p-2">
             {SETTINGS_PAGES.map((item) => (
               <a
