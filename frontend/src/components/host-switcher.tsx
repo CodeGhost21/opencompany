@@ -296,6 +296,10 @@ export function HostSwitcher({
   // A company that is not simply running says so, ahead of the host's name and
   // ahead of "Current company": it is the more urgent of the two, and it is the
   // only place the kill switch is visible now that the footer row is gone.
+  // Paired rather than re-derived: `lifecycleLine` and `lifecycleTone` come off
+  // the same guard, so the className below never needs to re-assert
+  // `companyState` is non-null to read the tone that produced the line.
+  const lifecycleTone = companyState && companyState.tone !== "live" ? companyState.tone : null;
   const lifecycleLine = companyState && companyState.tone !== "live" ? companyState.label : null;
   const secondary = companyName
     ? (lifecycleLine ??
