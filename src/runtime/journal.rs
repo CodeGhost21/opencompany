@@ -627,9 +627,11 @@ impl JournalRecord {
             // earlier tool call already left the company. Host durability buys
             // at-most-once dispatch; a crash after the claim but before the turn
             // takes the safe at-most-once direction and may drop the follow-up.
-            Self::ApprovalContinuationDispatched { .. } => Durability::Host,
+            // Losing the queue record after `ApprovalResolved` survived leaves
+            // a decided request with no card and no follow-up to recover.
             Self::ApprovalContinuationQueued { .. }
-            | Self::ApprovalContinuationConsumed { .. }
+            | Self::ApprovalContinuationDispatched { .. } => Durability::Host,
+            Self::ApprovalContinuationConsumed { .. }
             | Self::ApprovalContinuationExpired { .. } => Durability::Process,
             // The same direction as `ApprovalGranted`, one scope wider.
             Self::StandingGrantMinted { .. } => Durability::Process,
@@ -4553,7 +4555,7 @@ mod test {
     /// pinned separately below (issue #1145) — deliberately not by loosening
     /// this list, which is the assertion that would have stopped noticing.
     #[test]
-    fn host_durable_kinds_are_exactly_the_eight_that_could_repeat_an_action() {
+    fn host_durable_kinds_are_exactly_the_nine_that_protect_approval_work() {
         let all = every_record_kind();
         let tags: HashSet<String> = all.iter().map(record_tag).collect();
         assert_eq!(
@@ -4572,6 +4574,7 @@ mod test {
             host,
             vec![
                 "ApprovalContinuationDispatched".to_string(),
+                "ApprovalContinuationQueued".to_string(),
                 "BlockedNodeApproved".to_string(),
                 "BlockedNodeDispatched".to_string(),
                 "BlockedNodeReleased".to_string(),
@@ -4580,7 +4583,7 @@ mod test {
                 "GrantConsumed".to_string(),
                 "StandingGrantRevoked".to_string()
             ],
-            "the host-durable set is these eight kinds and nothing else; \
+            "the host-durable set is these nine kinds and nothing else; \
              widening it taxes the hot path, narrowing it lets an effect duplicate, \
              a spent grant re-arm, an explicit follow-up repeat, or a blocked node's \
              stash/approval/dispatch survive a process restart but not the host crash it also \

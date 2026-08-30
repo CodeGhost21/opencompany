@@ -3979,6 +3979,7 @@ impl RuntimeBuilder {
         // under the `openhuman` harness arm) is in place, so a stash this
         // finds ready has somewhere real to resume to.
         if handover.is_none() {
+            runtime.arm_replayed_continuation_recovery();
             runtime.reconcile_stranded_blocked_nodes().await;
         }
 

@@ -393,6 +393,9 @@ pub struct CompanyRuntime {
     /// replaces it in the registry, or the rebuild failed and
     /// [`resume`](Self::resume) puts this one back to work.
     pub(crate) quiesced: Arc<AtomicBool>,
+    /// Set by a cold build when replay found explicit decision continuations;
+    /// consumed once when the runtime enters the production registry.
+    replay_continuations_on_register: AtomicBool,
     /// WS4: the embedded openhuman harness pool, when wired via
     /// [`RuntimeBuilder::with_harness`](crate::runtime::RuntimeBuilder::with_harness).
     /// Feature-gated so the default build is unaffected.
@@ -526,6 +529,7 @@ impl CompanyRuntime {
             per_agent: Arc::new(TokioMutex::new(HashMap::new())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
+            replay_continuations_on_register: AtomicBool::new(false),
             #[cfg(feature = "openhuman")]
             harness: None,
             #[cfg(feature = "openhuman")]
@@ -3587,14 +3591,29 @@ impl CompanyRuntime {
     /// and the live single-use grants (issue #243).
     pub async fn recover(self: &Arc<Self>) -> Result<()> {
         CycleRunner::new(self).recover().await?;
+        self.arm_replayed_continuation_recovery();
+        self.schedule_replayed_continuations();
+        Ok(())
+    }
 
-        // A decision can become durable immediately before the process dies,
-        // before the detached follow-up gets its first poll. Replay restores the
-        // continuation data; recreate the verdict event as well so the already
-        // recorded answer is actually delivered instead of merely expiring in
-        // memory fifteen minutes later. Dropping the handles detaches the work;
-        // each task owns an Arc and the normal cycle-end drain journals
-        // `ApprovalContinuationConsumed` after delivery.
+    /// Arms cold-boot delivery when replay found an explicit decision whose
+    /// detached follow-up had not yet been dispatch-claimed.
+    pub(crate) fn arm_replayed_continuation_recovery(&self) {
+        if !self.journal.replayed_approval_continuations().is_empty() {
+            self.replay_continuations_on_register
+                .store(true, Ordering::Release);
+        }
+    }
+
+    /// Detaches replayed decision follow-ups once the runtime is addressable.
+    /// The atomic makes a duplicate registration or rebuild swap a no-op.
+    pub(crate) fn schedule_replayed_continuations(self: &Arc<Self>) {
+        if !self
+            .replay_continuations_on_register
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
         for continuation in self.journal.replayed_approval_continuations() {
             drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
                 CompanyEvent::ApprovalResolved {
@@ -3604,7 +3623,6 @@ impl CompanyRuntime {
                 },
             ))));
         }
-        Ok(())
     }
 
     /// What every approval ever parked was, keyed by id — including approvals

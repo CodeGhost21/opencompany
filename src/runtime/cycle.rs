@@ -5223,7 +5223,8 @@ members = ["writer"]
                 .await
                 .unwrap(),
         );
-        recovered.recover().await.unwrap();
+        let registry = crate::runtime::CompanyRegistry::new();
+        registry.insert(recovered.id().clone(), recovered.clone());
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while brain.calls() == 0 {

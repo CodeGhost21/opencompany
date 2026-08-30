@@ -116,5 +116,7 @@ them into pains, rank the opportunities, deliver the digest. The
 
 ## What stops and waits for a person
 
-Deciding which opportunities to fund and pursue — plus, under `supervised`,
-every publish and every spend over a dollar.
+Deciding which opportunities to fund and pursue, every publish, and every spend
+over a dollar. Before any of these, call `request_approval` with the exact
+decision and wait for the operator's answer; `supervised` does not pause them
+automatically.

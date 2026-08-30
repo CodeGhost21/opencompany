@@ -1487,13 +1487,6 @@ impl ToolPolicy for ApprovalPolicy {
     async fn check(&self, request: &ToolPolicyRequest) -> ToolPolicyDecision {
         let tool = request.tool_name.as_str();
 
-        // Asking the operator is never itself an effect to approve or deny.
-        // The tool only queues a question; the proposed action remains subject
-        // to hard denials when the continuation tries to perform it.
-        if tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL {
-            return ToolPolicyDecision::Allow;
-        }
-
         // `request_approval` is a real turn boundary, not advice in a tool
         // result. The hosted profile requests one call per assistant message;
         // this is the fail-closed second layer for a provider that nevertheless
@@ -1504,6 +1497,13 @@ impl ToolPolicy for ApprovalPolicy {
                 "'{tool}' was not run because this turn already asked the operator for approval; \
                  stop and wait for the decision"
             ));
+        }
+
+        // Asking the operator is never itself an effect to approve or deny.
+        // The first call queues a question; a second call in the same turn was
+        // refused by the boundary above.
+        if tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL {
+            return ToolPolicyDecision::Allow;
         }
 
         // 0. `never_do` hard-deny — RESERVED SLOT, deliberately empty.
@@ -1636,9 +1636,22 @@ impl ToolPolicy for ApprovalPolicy {
             return ToolPolicyDecision::Allow;
         }
 
-        // New approvals come only from the explicit `request_approval` tool.
+        // Paid media tools are explicitly approval-producing tool calls: their
+        // own invocation stages the concrete generation request before the
+        // backend can bill it. This is tool behavior, not risk-classifier HITL.
+        // An exact one-shot grant was consumed above on the approved re-issue.
+        if matches!(tool, "media_generate_image" | "media_generate_video") {
+            return self.require_approval(
+                tool,
+                &request.arguments,
+                format!("'{tool}' explicitly stages a paid media generation for approval"),
+            );
+        }
+
+        // General approvals come only from `request_approval`; specialized
+        // approval-producing tools such as paid media stage themselves above.
         // Keep the readonly brake and old-grant redemption above this point,
-        // but bypass every arm below that would turn policy into HITL.
+        // but bypass every arm below that would turn classification into HITL.
         if !self.policy_hitl_enabled {
             return ToolPolicyDecision::Allow;
         }
@@ -1882,7 +1895,7 @@ mod tests {
             .with_requests(queue.clone());
         let claim = queue.claim(ApprovalScope::Cycle);
 
-        let decision = claim
+        let (second_request, later_call) = claim
             .scoped(async {
                 queue.push(ApprovalRequest {
                     tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
@@ -1901,13 +1914,27 @@ mod tests {
                         run_id: None,
                     },
                 });
-                policy
+                let second_request = policy
+                    .check(&request(
+                        crate::harness::approval_tool::REQUEST_APPROVAL_TOOL,
+                        serde_json::json!({
+                            "title": "Ask twice",
+                            "question": "May I ask again?"
+                        }),
+                    ))
+                    .await;
+                let later_call = policy
                     .check(&request("composio_execute", composio_send_args()))
-                    .await
+                    .await;
+                (second_request, later_call)
             })
             .await;
 
-        let ToolPolicyDecision::Deny { reason } = decision else {
+        assert!(
+            matches!(second_request, ToolPolicyDecision::Deny { .. }),
+            "a second explicit request must hit the same turn boundary"
+        );
+        let ToolPolicyDecision::Deny { reason } = later_call else {
             panic!("later sibling call must be refused");
         };
         assert!(reason.contains("already asked the operator"));
@@ -2528,6 +2555,13 @@ mod tests {
                 "{tool} must park under supervised"
             );
         }
+        let explicit_staging = policy("full", &[], None).with_policy_hitl_disabled();
+        assert!(matches!(
+            explicit_staging
+                .check(&request("media_generate_image", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
         // The catalog GET is read-only — allowed even under supervised.
         assert_eq!(
             supervised

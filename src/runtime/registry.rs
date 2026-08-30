@@ -61,7 +61,9 @@ impl CompanyRegistry {
         if self.shutting_down.load(Ordering::SeqCst) {
             runtime.mark_quiesced();
         }
-        map.insert(id, runtime);
+        map.insert(id, runtime.clone());
+        drop(map);
+        runtime.schedule_replayed_continuations();
     }
 
     /// Marks the host as shutting down, so every subsequent
