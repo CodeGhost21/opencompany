@@ -60,12 +60,6 @@ const WIDGET_SUSPENSE: Record<string, string> = {
     "outside it, so the page keeps its name for the whole time the graph's",
     "physics chunk is in flight.",
   ].join(" "),
-  "views/OperatorOverview.tsx:Overview": [
-    "The graph is the landing page's first panel, not the page. The",
-    "`<PageHeader title=\"Overview\" />` above this boundary carries the `h1`,",
-    "and the panel's own `<h2 id=\"overview-graph\">` names the section, for the",
-    "whole time the graph's chunk is in flight.",
-  ].join(" "),
   "tour/TourController.tsx:Joyride": [
     "The product tour is an overlay drawn over whatever page is mounted, and",
     "its fallback paints nothing. The page underneath is unchanged and keeps",

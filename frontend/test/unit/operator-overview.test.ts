@@ -117,11 +117,7 @@ describe("the operator overview landing page (#1321)", () => {
 
     expect(container.querySelector('[href="#/chat"]')?.textContent).toContain("Start a conversation");
     expect(container.querySelector('[href="#/approvals"]')?.textContent).toContain("Review approvals");
-    // The graph is drawn on the page again as its first panel, so the link to
-    // `#/company/graph` is the panel's "see it full-page" affordance rather
-    // than the page's only pointer at the company's structure.
-    expect(container.querySelector('[aria-labelledby="overview-graph"]')).not.toBeNull();
-    expect(container.querySelector('[href="#/company/graph"]')?.textContent).toContain("Full graph");
+    expect(container.querySelector('[href="#/company/graph"]')?.textContent).toContain("knowledge graph");
     expect(container.textContent).toContain("No work is paused or failed right now.");
   });
 

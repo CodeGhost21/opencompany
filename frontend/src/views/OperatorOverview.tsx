@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, CircleAlert, Clock3, MessageSquare, Maximize2, ShieldCheck } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, ArrowRight, CircleAlert, Clock3, MessageSquare, ShieldCheck } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { listRuns, RUN_STATUS_LABEL, type RunSummary } from "@/api/runs";
@@ -8,16 +8,6 @@ import type { CompanyFeed } from "@/hooks/use-company";
 import { commitOverviewVisit, openOverviewVisit } from "@/lib/overview-visit";
 import { chatHref } from "@/lib/run-source";
 import { PageHeader } from "@/components/page-header";
-
-/**
- * The company graph, drawn as this page's first panel.
- *
- * Lazy for the same reason the graph lazies its own physics: the landing page's
- * job is to paint what needs a person, and a cold load should not wait on the
- * force simulation — or on the six reads the graph takes — to do it. The panel
- * below states its own height, so the frame does not jump when the chunk lands.
- */
-const Overview = lazy(() => import("@/views/Overview").then((m) => ({ default: m.Overview })));
 
 interface Props {
   client: OpenCompanyClient;
@@ -49,13 +39,10 @@ const FAILED_READ_LIMIT = 200;
 /**
  * The operator's landing page (issue #1321).
  *
- * The page opens on the company graph — the picture #1321 moved off to
- * `#/company/graph`, brought back here as a panel rather than as the whole
- * page. Below it, and still the reason this page exists, is what needs a
- * person: work that stopped, and durable failed runs since the last time *this
- * browser* opened it — a boundary that is browser-local because the host has no
- * persisted company-wide event read cursor yet. The full-page graph stays where
- * #1321 put it, and the panel's header links to it.
+ * A graph remains available at `#/company/graph`; this page concentrates on
+ * what needs a person, work that stopped, and durable failed runs since the
+ * last time *this browser* opened it. The boundary is browser-local because
+ * the host has no persisted company-wide event read cursor yet.
  */
 export function OperatorOverview({
   client,
@@ -262,45 +249,6 @@ export function OperatorOverview({
       />
       <div className="mx-auto flex w-full min-h-0 max-w-5xl flex-1 flex-col gap-6 overflow-auto p-5 sm:p-8">
 
-      <section aria-labelledby="overview-graph" className="overflow-hidden rounded-xl border bg-card shadow-sm">
-        <div className="flex items-start justify-between gap-4 border-b p-5">
-          <div>
-            <h2 id="overview-graph" className="font-semibold">The company at a glance</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Desks, the teammates on them, their tools and the flows they run — as declared.
-            </p>
-          </div>
-          <a
-            href="#/company/graph"
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm font-medium hover:bg-muted"
-          >
-            <Maximize2 className="size-3.5" aria-hidden /> Full graph
-          </a>
-        </div>
-        {/*
-          The graph fills whatever box it is given (`flex-1 min-h-0` on its own
-          root), so the height is this panel's to choose. It is stated rather
-          than derived from the 880x600 viewBox: an aspect-ratio box grows with
-          the page width and would push the panels that actually need a person
-          below the fold on a wide screen, which is the trade issue #1321 was
-          complaining about. Shorter on a phone, where vertical room is scarcer.
-        */}
-        <div className="flex h-[320px] flex-col sm:h-[420px]">
-          <Suspense
-            fallback={
-              <div className="grid flex-1 place-items-center text-sm text-muted-foreground">
-                Drawing the graph…
-              </div>
-            }
-          >
-            {/* No `companyName`: this page stopped taking one when its header
-                became `PageHeader`, and the graph's own fallback chain names
-                the core node from the company slug when it is not given. */}
-            <Overview client={client} company={company} embedded />
-          </Suspense>
-        </div>
-      </section>
-
       <section aria-labelledby="overview-attention" className="rounded-xl border bg-card p-5 shadow-sm">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -354,7 +302,7 @@ export function OperatorOverview({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        The graph above is a snapshot, not a live view. <a className="underline-offset-2 hover:underline" href="#/company/graph">Open it full-page</a> to explore a desk.
+        Looking for the company&apos;s structure? <a className="underline-offset-2 hover:underline" href="#/company/graph">Open the knowledge graph</a>.
       </p>
       </div>
     </div>
