@@ -239,6 +239,11 @@ impl NativeCopilotModel {
         self.seen_messages.lock().unwrap().clone()
     }
 
+    /// The `request.tools` names recorded for each invoke so far, in call order.
+    fn seen_tool_names(&self) -> Vec<Vec<String>> {
+        self.seen_tool_names.lock().unwrap().clone()
+    }
+
     fn next_step(&self) -> NativeStep {
         let mut steps = self.steps.lock().unwrap();
         if let Some(step) = steps.pop_front() {
