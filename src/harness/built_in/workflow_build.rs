@@ -1992,7 +1992,7 @@ pub(crate) struct RunFailureContext {
 /// fresh OpenHuman [`Agent`](oh::agent::Agent) is built over the roster's own
 /// inference engine ([`build_copilot_agent`](agent::build_copilot_agent)) with the
 /// three OC-native tools (`list_effective_tools`, `check_workflow`,
-/// `propose_workflow`, see [`tools`]).
+/// `propose_company_workflow`, see [`tools`]).
 ///
 /// **The host authority is unchanged.** The propose tool runs the SAME
 /// post-processing the old inline path did — a safe/unique id (or, on the fix

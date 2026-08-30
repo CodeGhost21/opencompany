@@ -379,7 +379,7 @@ impl Tool for CheckWorkflowTool {
 }
 
 // ---------------------------------------------------------------------------
-// propose_workflow
+// propose_company_workflow
 // ---------------------------------------------------------------------------
 
 /// The acceptance signal (issue #840). Runs the SAME host authority the old
@@ -409,7 +409,7 @@ impl ProposeWorkflowTool {
 #[async_trait]
 impl Tool for ProposeWorkflowTool {
     fn name(&self) -> &str {
-        "propose_workflow"
+        "propose_company_workflow"
     }
 
     fn description(&self) -> &str {
@@ -418,7 +418,7 @@ impl Tool for ProposeWorkflowTool {
          host re-checks it under its own authority — it assigns the id, dedups the name, sets \
          approval gating, grounds every teammate and tool, and refuses an unsupported node kind. \
          If it passes you are DONE: reply in one short line. If it returns problems, fix every one \
-         and call propose_workflow again. Always run check_workflow first."
+         and call propose_company_workflow again. Always run check_workflow first."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -446,7 +446,7 @@ impl Tool for ProposeWorkflowTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        eprintln!("DEBUG propose_workflow execute called with args={args}");
+        eprintln!("DEBUG propose_company_workflow execute called with args={args}");
         let summary = args
             .get("summary")
             .and_then(Value::as_str)
@@ -542,7 +542,7 @@ impl Tool for ProposeWorkflowTool {
         } else {
             *lock_vec(&self.diag) = errors.clone();
             Ok(ToolResult::success(format!(
-                "Not accepted yet — fix each of these and call propose_workflow again:\n- {}",
+                "Not accepted yet — fix each of these and call propose_company_workflow again:\n- {}",
                 errors.join("\n- ")
             )))
         }
