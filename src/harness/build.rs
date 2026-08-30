@@ -251,6 +251,14 @@ pub fn build_agent(
     // `ContextStore`) and granted to every agent — unlike the external tools
     // below, which are scoped by the manifest `[tools]` allow-list.
     let mut tools: Vec<Box<dyn Tool>> = memory_tools(memory.clone());
+    // Approvals are an explicit agent action, not a policy side effect. Every
+    // roster agent gets this intrinsic tool regardless of its external grants.
+    tools.push(Box::new(
+        crate::harness::approval_tool::RequestApprovalTool::new(
+            manifest_agent.id.clone(),
+            deps.approval_requests.clone(),
+        ),
+    ));
     #[cfg(feature = "mcp")]
     {
         // These config-free tools read OpenHuman's live process registry, so
@@ -313,7 +321,7 @@ pub fn build_agent(
     let wants_code = grants_cover(grants, "code");
     let wants_web = grants_cover(grants, "web");
     if wants_shell || wants_code || wants_web {
-        let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.mode()));
+        let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.toolbelt_mode()));
         // `shell` and `code` are separate grant namespaces and are wired from
         // separate tool vectors — a company granting only one MUST NOT receive
         // the other's tools (the production `CapabilityFilter` is identity and
@@ -2212,7 +2220,7 @@ mod tests {
     /// (a) The EXACT tool belt a dispatched desk agent receives with the broad
     /// `*` grant. Any tool added to or removed from a dispatched agent flips
     /// this snapshot and fails CI — the whole point of the pin. The set is the
-    /// curated exec subset (shell / code / web) plus the intrinsic memory + file
+    /// curated exec subset (shell / code / web) plus intrinsic approval, memory, and file
     /// tools; it contains NO delegation tool and NO deferred family, and — the
     /// #238 addition — no `web_search`, because a bare `*` does not confer the
     /// `search` grant.
@@ -2249,6 +2257,7 @@ mod tests {
             "memory_recall",
             "memory_store",
             "read_workspace_state",
+            "request_approval",
             "shell",
             "web_fetch",
         ];
@@ -2262,6 +2271,12 @@ mod tests {
             expected.sort();
         }
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
+    }
+
+    #[test]
+    fn request_approval_is_intrinsic_and_needs_no_manifest_grant() {
+        let names = built_tool_names(&[], false);
+        assert!(names.contains(&"request_approval".to_string()), "{names:?}");
     }
 
     /// (b) The **default** depth cap (issues #178, #176): a dispatched desk

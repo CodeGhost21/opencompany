@@ -108,12 +108,10 @@ writes confined to the agent's own sandboxed workspace (`file_write`, `edit`,
 
 ### The `auto` tier
 
-That low-consequence middle is also the whole of the `auto` tier (issue #560).
-An operator had two settings and needed a third: `supervised` parks every write
-including the agent's own scratch files, so companies drown in cards; `full`
-parks nothing but the always-ask list, so it stops asking before a shell
-command or a git push too. Companies ran one and suffered, or ran the other and
-lost the gate that mattered.
+This is the historical tier boundary retained for compatibility and for a
+future policy-HITL mode. Policy HITL is currently disabled, so `supervised`,
+`auto`, and `full` do not create cards; agents ask explicitly with
+`request_approval`. `readonly` remains a hard denial.
 
 `auto`'s contract, in the operator's words: **the agent works without
 interrupting me, and stops before anything that leaves the building or spends
@@ -284,15 +282,13 @@ standard than open operator input. The old default was `payment.send` /
 the harness path believed payments and publishing were gated and none were. Two
 of the three name capabilities the product does not have; the real name behind
 the third is `publish_artifact`, which must not be defaulted because `full`
-publishing unattended is the ruling on issue #658. Under the default
-`supervised` mode the checkpoint taxonomy parks every `Spend` / `Sign` /
-`Publish` effect anyway, so the empty default costs no protection that was ever
-real. A drift test requires every future default entry to name its intended,
-declared tool target explicitly.
+publishing unattended is the ruling on issue #658. While policy HITL is
+disabled, the list is retained but inactive. A drift test still requires every
+future default entry to name its intended, declared tool target explicitly.
 
-### Precedence at the tool gate
+### Legacy precedence at the tool gate
 
-A tool call is decided in this order:
+When policy HITL is enabled, a tool call is decided in this order:
 
 1. `never_do` hard-deny — **reserved**; the delegation-rule compiler is still a
    Phase-1 stub, so no tool-level arm exists yet. It sits above the grant

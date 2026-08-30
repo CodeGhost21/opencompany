@@ -197,9 +197,9 @@ prompt = "Weekly review and operator digest"
 
   - **Dispatch is refused** for that teammate, before any model call, with a
     notice naming the cap and the reset. The rest of the company keeps running.
-  - **A priced tool call parks for approval** rather than being denied.
-    Approving it runs that one call and nothing more; the cap is not raised.
-    Free reads and sends are unaffected — a spend cap caps spend.
+  - **Priced tool calls are not turned into HITL prompts.** While policy HITL is
+    disabled, the dispatch check is the enforced boundary; spend made later in
+    an already-running turn can overshoot it by that turn's calls.
 
   Known limits, stated rather than papered over:
 
@@ -269,27 +269,18 @@ prompt = "Weekly review and operator digest"
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
-- **`[policy]`** configures the default `ApprovalGate`. `mode` takes three of
-  its four names from OpenHuman's security tiers; `auto` is opencompany's own
-  and sits between `supervised` and `full` (the agent's sandbox writes and
-  outward reads run unattended, anything that leaves the company or spends on
-  submit still parks). `always_approve` lists effect kinds that park for
-  approval regardless of amount and wins over every tier including `full`;
-  `auto_approve_under_usd` lets small spends through. The parse default is
-  `supervised`, with all money/publish/filing effects gated — but a **new**
+- **`[policy]`** retains the autonomy vocabulary and stored configuration, but
+  policy-generated HITL is currently disabled. `supervised`, `auto`,
+  `always_approve`, and `auto_approve_under_usd` do not create approval cards;
+  agents ask explicitly with `request_approval`. `readonly` remains a hard
+  denial for mutating or external agent tools. The parse default remains
+  `supervised`, but a **new**
   company is given `auto`, written into its manifest explicitly rather than
   left to that default. See
   [grants.md](../company-brain/grants.md#which-tier-a-new-company-gets)
   for why those are two separate knobs, and why moving the parse default is the
-  one thing issue #605 declined to do. **A tool name is an
-  effect kind** — the harness projects one onto the other — so
-  `["publish_artifact"]` and `["payment.send"]` are the same syntax at
-  different segment counts (issue #684). Operator-authored effect kinds remain
-  open-ended because a hosted brain may emit a kind this repository has never
-  seen; the shared matcher runs before the checkpoint taxonomy. The default is
-  **empty**: `supervised` already parks every money / publish / filing effect
-  through that taxonomy, so the conservative default is the mode, not the
-  list.
+  one thing issue #605 declined to do. Existing values remain loadable so this
+  migration does not invalidate company manifests or historical approvals.
 - **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across
@@ -439,9 +430,9 @@ prompt = "Weekly review and operator digest"
     not see, so only an operator can edit it in the console. **Operator edits
     are not capped by this** — the console and the REST handlers write through
     the `WorkspaceStore` port directly and never enter the agent tool path. Under
-    `[policy].mode = "supervised"` (the default) a write additionally parks for
-    approval, and under `readonly` it is denied — reads stay available in every
-    mode. The namespace is **not** gateable by `[plan].token_budgets`: reads
+    `supervised` no longer adds an approval prompt; under `readonly` a write is
+    denied — reads stay available in every mode. The namespace is **not**
+    gateable by `[plan].token_budgets`: reads
     cost nothing and shedding them would only make agents guess at company
     standards. The tools hit the store per call, so an operator's console edit
     is visible to the next turn with no restart.

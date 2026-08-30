@@ -1609,7 +1609,10 @@ impl RuntimeBuilder {
             Some(h) => h.approval_gate.clone(),
             None => {
                 let gate = self.approvals.unwrap_or_else(|| {
-                    Arc::new(ManifestApprovalGate::new(self.manifest.policy.clone()))
+                    Arc::new(
+                        ManifestApprovalGate::new(self.manifest.policy.clone())
+                            .with_policy_hitl_disabled(),
+                    )
                 });
                 for pending in journal.pending() {
                     gate.rehydrate(pending.id, pending.effect, pending.at_millis);

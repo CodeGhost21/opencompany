@@ -15,7 +15,7 @@ use crate::brain::medulla::wire::{
 };
 use crate::ports::types::{
     ApprovalId, ChunkAddr, ChunkHit, CompanyEvent, ContextOp, ContextOpResult, Effect,
-    EffectDisposition, ToolResult, Verdict,
+    EffectDisposition, ToolResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -465,7 +465,6 @@ fn debug_redacts_the_credential() {
 
 use crate::app::config::BrainMode;
 use crate::company::CompanyManifest;
-use crate::ports::types::{Actor, ActorKind};
 use crate::runtime::RuntimeBuilder;
 
 fn tmp_home() -> tempfile::TempDir {
@@ -565,13 +564,13 @@ async fn e2e_operator_message_drives_tool_call_and_gated_send_dm() {
 }
 
 #[tokio::test]
-async fn e2e_supervised_effect_parks_and_acks_not_ok() {
+async fn e2e_supervised_effect_runs_without_policy_hitl() {
     let home_dir = tmp_home();
     let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     transport.script_cycle(
         runtime_cid(),
-        // A Sign-group effect always parks under supervised policy.
+        // Policy HITL is disabled even for a formerly-gated Sign effect.
         vec![effect_frame("filing.submit", 0, Value::Null)],
     );
 
@@ -596,36 +595,15 @@ async fn e2e_supervised_effect_parks_and_acks_not_ok() {
         .await
         .unwrap();
 
-    // The effect parked: an approval is queued and no channel response emitted.
-    assert_eq!(report.parked.len(), 1);
-    assert_eq!(rt.pending_approvals().len(), 1);
+    assert!(report.parked.is_empty());
+    assert!(rt.pending_approvals().is_empty());
     assert!(report.responses.is_empty());
 
-    // Medulla was told the effect is pending, not that it succeeded.
+    // Medulla is told the effect completed instead of waiting on policy HITL.
     let acks = transport.acks();
     assert_eq!(acks.len(), 1);
-    assert!(!acks[0].ok);
-    assert!(
-        acks[0]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("pending approval")
-    );
-
-    // Resolving the approval executes the parked effect and drains the queue.
-    let approval_id = report.parked[0].clone();
-    rt.resolve_approval(
-        &approval_id,
-        Verdict::Approve,
-        Actor {
-            kind: ActorKind::Operator,
-            id: "owner".into(),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(rt.pending_approvals().is_empty());
+    assert!(acks[0].ok);
+    assert!(acks[0].error.is_none());
 }
 
 /// Issue #174 end to end: a real runtime on the hosted brain records the tokens

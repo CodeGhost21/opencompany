@@ -72,8 +72,7 @@ search_daily_calls = 200
 enabled = ["research_loop"]
 
 [policy]
-# `auto` runs the lab's own sandbox writes and outward reads unattended, and
-# still parks anything that leaves the company or spends money. Research is
-# read-heavy and its outward actions are searches and fetches, so unattended is
-# the right default here; the report still reaches a person before it counts.
+# `auto` runs the lab's own sandbox writes and outward reads unattended. Policy
+# HITL is disabled; agents call `request_approval` when they deliberately want
+# operator sign-off.
 mode = "auto"

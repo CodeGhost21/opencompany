@@ -21,6 +21,12 @@
 //! [`sweep_expired`](ManifestApprovalGate::sweep_expired) or observed at
 //! resolution time by [`resolve_at`](ManifestApprovalGate::resolve_at) /
 //! [`resolve_amended`](ManifestApprovalGate::resolve_amended).
+//!
+//! Production constructs this gate with
+//! [`ManifestApprovalGate::with_policy_hitl_disabled`]. Evaluation then allows
+//! effects that the legacy taxonomy would park, keeps `readonly` and emergency
+//! stop as hard denials, and still accepts explicit [`park`](ManifestApprovalGate::park)
+//! calls from `request_approval`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -121,6 +127,7 @@ pub enum ResolveOutcome {
 /// `[policy]` and holds the in-memory approval queue.
 pub struct ManifestApprovalGate {
     policy: Policy,
+    policy_hitl_enabled: bool,
     ttl_millis: u64,
     parked: Mutex<HashMap<ApprovalId, ParkedEffect>>,
     /// The governance kill switch (issue #86).
@@ -143,10 +150,18 @@ impl ManifestApprovalGate {
     pub fn new(policy: Policy) -> Self {
         Self {
             policy,
+            policy_hitl_enabled: true,
             ttl_millis: DEFAULT_TTL_MILLIS,
             parked: Mutex::new(HashMap::new()),
             emergency: AtomicBool::new(false),
         }
+    }
+
+    /// Disables policy-generated approval decisions while leaving explicit
+    /// `park` calls and the emergency-stop denial available.
+    pub fn with_policy_hitl_disabled(mut self) -> Self {
+        self.policy_hitl_enabled = false;
+        self
     }
 
     /// Engages (`true`) or releases (`false`) the emergency stop.
@@ -391,6 +406,15 @@ impl ApprovalGate for ManifestApprovalGate {
             return Ok(PolicyDecision::Deny);
         }
 
+        if !self.policy_hitl_enabled {
+            if self.policy.mode.eq_ignore_ascii_case("readonly")
+                && effect.group != EffectGroup::Other
+            {
+                return Ok(PolicyDecision::Deny);
+            }
+            return Ok(PolicyDecision::Allow);
+        }
+
         // 1. `never_do` hard-deny — the delegation-rule compiler is a Phase-1
         //    stub, so this list is currently always empty.
 
@@ -505,6 +529,39 @@ mod test {
 
     async fn decide(gate: &ManifestApprovalGate, effect: &Effect) -> PolicyDecision {
         gate.evaluate(&company(), effect).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_hitl_allows_effects_that_used_to_park() {
+        let gate =
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
+
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_hitl_does_not_weaken_the_emergency_stop() {
+        let gate =
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
+        gate.set_emergency(true);
+
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_hitl_makes_readonly_a_denial_instead_of_a_prompt() {
+        let gate = ManifestApprovalGate::new(policy("readonly", None)).with_policy_hitl_disabled();
+
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Deny
+        );
     }
 
     #[tokio::test]

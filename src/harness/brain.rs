@@ -272,9 +272,9 @@ impl HarnessBrain {
     /// asynchronously, long after the turn that spawned it has answered, so the
     /// operator had to know to go and look. The note is still written — it stays
     /// the durable record — and the post-back is additive.
-    /// Re-dispatches the agent that holds a single-use grant for `approval_id`,
-    /// instructing it to re-issue the exact call the operator approved
-    /// (issue #243).
+    /// Re-dispatches the agent that owns `approval_id`. Legacy policy approvals
+    /// re-issue the exact granted call; an explicit `request_approval` receives
+    /// the operator's approve/deny decision and continues without asking again.
     ///
     /// Returns the agent's reply as a bubble on its own channel, or `None` when
     /// there is no grant to redeem — which is the common case and must stay a
@@ -295,6 +295,7 @@ impl HarnessBrain {
     async fn redispatch_granted_call(
         &self,
         approval_id: &crate::ports::types::ApprovalId,
+        verdict: Verdict,
     ) -> Result<Option<OutboundMessage>> {
         // What the resolution actually minted, whichever scope it was (#374).
         //
@@ -308,6 +309,8 @@ impl HarnessBrain {
             agent: String,
             tool: String,
             instruction: String,
+            /// This grant carries an answer, not permission to re-run a tool.
+            explicit_request: bool,
             origin_thread: Option<String>,
             /// The task this approval was parked from (issue #796), so the
             /// re-issue turn can reclaim its held-across-park checkout and stamp
@@ -317,21 +320,48 @@ impl HarnessBrain {
 
         let grants = self.deps.approval_requests.grants();
         let grant = if let Some(grant) = grants.peek(approval_id) {
-            // Re-issue verbatim. The grant admits ONE call matching these
-            // arguments exactly, so any drift the model introduces will simply
-            // re-park — the instruction is emphatic because a re-worded argument
-            // silently costs the operator a second approval round-trip.
-            let args = serde_json::to_string(&grant.args).unwrap_or_else(|_| "{}".to_string());
-            Redispatch {
-                instruction: format!(
-                    "Operator approved your `{tool}` call. Re-issue it now with EXACTLY these \
+            if grant.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL {
+                let title = grant
+                    .args
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("your request");
+                let decision = match verdict {
+                    Verdict::Approve => "APPROVED. Continue based on that decision",
+                    Verdict::Deny => {
+                        "DENIED. Respect that decision and continue safely or stop the proposed work"
+                    }
+                };
+                Redispatch {
+                    instruction: format!(
+                        "The operator {decision} for your explicit approval request: {title}. Do \
+                         not call `request_approval` again for the same action unless circumstances \
+                         materially change."
+                    ),
+                    tool: grant.tool,
+                    agent: grant.agent,
+                    explicit_request: true,
+                    origin_thread: grant.origin_thread,
+                    origin_task: grant.origin_task,
+                }
+            } else {
+                // Re-issue verbatim. The grant admits ONE call matching these
+                // arguments exactly, so any drift the model introduces will simply
+                // re-park — the instruction is emphatic because a re-worded argument
+                // silently costs the operator a second approval round-trip.
+                let args = serde_json::to_string(&grant.args).unwrap_or_else(|_| "{}".to_string());
+                Redispatch {
+                    instruction: format!(
+                        "Operator approved your `{tool}` call. Re-issue it now with EXACTLY these \
                      arguments: {args}. Do not modify them.",
-                    tool = grant.tool,
-                ),
-                tool: grant.tool,
-                agent: grant.agent,
-                origin_thread: grant.origin_thread,
-                origin_task: grant.origin_task,
+                        tool = grant.tool,
+                    ),
+                    tool: grant.tool,
+                    agent: grant.agent,
+                    explicit_request: false,
+                    origin_thread: grant.origin_thread,
+                    origin_task: grant.origin_task,
+                }
             }
         } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
             // No exact-arguments pin, and deliberately so: a standing grant
@@ -347,6 +377,7 @@ impl HarnessBrain {
                 ),
                 tool: standing.tool,
                 agent: standing.agent,
+                explicit_request: false,
                 origin_thread: standing.origin_thread,
                 origin_task: standing.origin_task,
             }
@@ -412,9 +443,9 @@ impl HarnessBrain {
         // Issue #796: at the claim, drop any task's retained checkout whose
         // approval was denied or expired — no live grant names it, so nothing
         // will ever resume it. `grants` is the same live set peeked above.
-        self.deps
-            .checkouts
-            .sweep_orphans(|task| grants.any_for_task(task));
+        self.deps.checkouts.sweep_orphans(|task| {
+            grants.any_for_task(task) || origin_task.as_deref() == Some(task)
+        });
         // Issue #735/#796: stamp the task this grant resumes so `repo_publish`
         // can name its branch, and reclaim the checkout the parked step left so
         // the resumed step — a commit, a publish — finds its own work. A
@@ -508,7 +539,14 @@ impl HarnessBrain {
         drop(delegation_claim);
 
         let text = match outcome {
-            Ok(outcome) => outcome.reply,
+            Ok(outcome) => {
+                if grant.explicit_request {
+                    grants
+                        .consume_continuation(approval_id)
+                        .expect("the explicit decision continuation was still live");
+                }
+                outcome.reply
+            }
             Err(err) => {
                 // The grant stays live: the call did not go through, so the
                 // operator's approval has not been spent and the TTL sweep will
@@ -2714,9 +2752,9 @@ impl HarnessBrain {
                         channel_responses.push(message);
                     }
                 }
-                // Issue #243: an approval the operator APPROVED that minted a
-                // single-use grant — re-dispatch the granting agent so it
-                // actually makes the call.
+                // Approval resolutions return to the asking agent. Legacy
+                // approved calls redeem their grant; explicit requests resume
+                // on either verdict with the decision itself.
                 //
                 // This arm is the reason the feature was invisible before. The
                 // match had exactly two arms and everything else fell into
@@ -2726,10 +2764,12 @@ impl HarnessBrain {
                 // happened — indistinguishable from the tool having run.
                 CompanyEvent::ApprovalResolved {
                     approval_id,
-                    verdict: Verdict::Approve,
+                    verdict,
                     ..
                 } => {
-                    if let Some(message) = self.redispatch_granted_call(approval_id).await? {
+                    if let Some(message) =
+                        self.redispatch_granted_call(approval_id, *verdict).await?
+                    {
                         channel_responses.push(message);
                     }
                 }
@@ -6746,6 +6786,55 @@ members = ["eng1", "eng2"]
             no_replies_journaled(&log).await,
             "the brain must not journal the reply a second time; the runtime owns it"
         );
+    }
+
+    async fn assert_explicit_decision_continues(verdict: Verdict, expected: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        requests
+            .grants()
+            .grant(crate::runtime::grants::GrantedCall {
+                approval_id: ApprovalId::new("appr-explicit"),
+                agent: "ceo".into(),
+                tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.into(),
+                args: serde_json::json!({
+                    "title": "Publish the announcement",
+                    "question": "May I publish it?"
+                }),
+                at_millis: now_millis(),
+                origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
+            });
+        let grants = requests.grants();
+        let brain = brain_with_queue_and_events(dir.path(), requests, log);
+
+        let result = brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-explicit", verdict)]),
+                &NoopHost,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.channel_responses.len(), 1);
+        let text = &result.channel_responses[0].text;
+        assert!(text.contains(expected), "{text}");
+        assert!(text.contains("Publish the announcement"), "{text}");
+        assert!(!text.contains("Re-issue it"), "{text}");
+        assert!(grants.peek(&ApprovalId::new("appr-explicit")).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_approval_continues_without_reissuing_the_request_tool() {
+        assert_explicit_decision_continues(Verdict::Approve, "APPROVED").await;
+    }
+
+    #[tokio::test]
+    async fn an_explicit_denial_also_returns_to_the_requesting_agent() {
+        assert_explicit_decision_continues(Verdict::Deny, "DENIED").await;
     }
 
     /// No continuation reply was journaled by the brain itself (issue #469).

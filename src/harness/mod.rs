@@ -43,6 +43,7 @@
 /// that no lane ran and no route served — see issue #475.
 #[cfg(feature = "acp")]
 pub mod acp_run_turn;
+pub mod approval_tool;
 /// Issue #775: the fail-closed shell audit wrapper — one intent line appended
 /// (and fsynced) *before* a command runs, refusing the command outright when
 /// that append fails. Pairs with the host-owned, per-agent sink
@@ -2492,6 +2493,7 @@ pub(crate) fn build_roster(
         // the L1 dispatch gate reads — from this one call.
         let effective_budget = company.effective_budget(&manifest_agent.id);
         let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
+            .with_policy_hitl_disabled()
             .with_requests(deps.approval_requests.clone())
             // Issue #243: stamp who the parked effect belongs to, so approving it
             // can hand the grant back to this agent rather than to nobody.
@@ -2553,6 +2555,7 @@ pub(crate) fn build_roster(
         // an operator set one, and `None` (as before) when nobody has.
         let effective_budget = company.effective_budget(&manifest_agent.id);
         let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
+            .with_policy_hitl_disabled()
             .with_requests(deps.approval_requests.clone())
             // An overlay teammate is a real roster agent and re-dispatches the
             // same way a manifest one does (issue #243).

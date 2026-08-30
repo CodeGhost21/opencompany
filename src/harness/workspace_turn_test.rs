@@ -769,9 +769,8 @@ async fn supervised(deps: &HarnessDeps, grants: &str) -> (HarnessPool, CompanyRe
     (pool, record)
 }
 
-/// End-to-end, through a model: a read of the company workspace runs without
-/// asking, and a write of it parks — **and the parked card does not offer a
-/// standing scope**.
+/// End-to-end, through a model: workspace reads and writes both run without
+/// policy-generated HITL.
 ///
 /// The last clause is issue #444's headline, and nothing shorter than this can
 /// show it. The two halves of the gate live in different modules and disagreed
@@ -781,7 +780,7 @@ async fn supervised(deps: &HarnessDeps, grants: &str) -> (HarnessPool, CompanyRe
 /// carries no consequence word — and offered it for a week. This drives one real
 /// turn and asks both halves about the same call.
 #[tokio::test]
-async fn a_supervised_turn_reads_the_workspace_freely_and_parks_a_write_with_no_scope_offered() {
+async fn a_supervised_turn_reads_and_writes_the_workspace_without_policy_hitl() {
     let dir = tempfile::tempdir().unwrap();
     let (base, script) = spawn_script(vec![
         Turn::Call {
@@ -808,38 +807,17 @@ async fn a_supervised_turn_reads_the_workspace_freely_and_parks_a_write_with_no_
         .approval_requests
         .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
-    assert_eq!(
-        parked.requests.len(),
-        1,
-        "the read must not park and the write must: {:?}",
-        parked
-            .requests
-            .iter()
-            .map(|r| r.tool.clone())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(parked.requests[0].tool, "workspace_write");
-    // Not vacuous: the read that did not park was really made, and really
-    // returned — so "one parked request" is one write, not one read the belt
-    // silently withheld.
+    assert!(parked.requests.is_empty(), "{parked:?}");
     assert!(
         tool_results(&script).len() >= 2,
-        "both the read and the (blocked) write must have fed a result back"
-    );
-    assert!(
-        !parked.requests[0].effect.may_be_granted_standing(),
-        "a card for overwriting operator-owned guidance must not offer a standing scope"
+        "both the read and write must have run and fed a result back"
     );
 }
 
 /// The other side of the same boundary, so the feature is not proved dead:
-/// a write confined to the agent's **own** workspace parks the same way and
-/// *does* offer the scope.
-///
-/// Without this the test above would be satisfied by a gate that simply never
-/// offers a standing grant to anybody.
+/// The same policy-HITL-off boundary applies to the agent's own sandbox.
 #[tokio::test]
-async fn a_parked_write_to_the_agents_own_workspace_does_offer_a_standing_scope() {
+async fn a_write_to_the_agents_own_workspace_runs_without_policy_hitl() {
     let dir = tempfile::tempdir().unwrap();
     let (base, _script) = spawn_script(vec![
         Turn::Call {
@@ -862,13 +840,7 @@ async fn a_parked_write_to_the_agents_own_workspace_does_offer_a_standing_scope(
         .approval_requests
         .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
-    assert_eq!(parked.requests.len(), 1, "the sandboxed write parks");
-    assert_eq!(parked.requests[0].tool, "file_write");
-    assert!(
-        parked.requests[0].effect.may_be_granted_standing(),
-        "a write confined to the agent's own sandbox is exactly what a standing \
-         grant is for; refusing it would leave the feature with nothing to apply to"
-    );
+    assert!(parked.requests.is_empty(), "{parked:?}");
 }
 
 /// Issue #443, through the turn loop: the reads that used to park.

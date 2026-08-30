@@ -1554,6 +1554,9 @@ impl EffectGroup {
     }
 }
 
+/// The effect kind reserved for an agent's explicit operator question.
+pub const REQUEST_APPROVAL_EFFECT_KIND: &str = "request_approval";
+
 /// A side effect the brain wants to perform, submitted to the approval gate.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Effect {

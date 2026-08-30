@@ -78,6 +78,7 @@ pub struct StoreWorkflowResolver {
 /// Grouped so [`StoreWorkflowResolver::new`] does not grow three more
 /// parameters for one concern, and so the whole concern is `Option` — a dry run
 /// passes `None` and the resolver behaves exactly as it did before.
+#[allow(dead_code)] // retained to read and test historical disclosure wiring
 pub struct ChildCallAudit {
     /// The company `[policy]` block, verbatim — the same input the top-level
     /// gate pass reads, so the two can never disagree about the same call.
@@ -128,51 +129,10 @@ impl StoreWorkflowResolver {
     /// to stop a workflow that would otherwise run. The `warn!` lands either
     /// way, so a build with no event log still says it out loud.
     async fn disclose_ungated_calls(&self, child_id: &str, graph: &WorkflowGraph) {
-        let Some(audit) = self.audit.as_ref() else {
-            return;
-        };
-        let ungated = crate::workflows::gate::policy_gates(
-            graph,
-            &audit.policy,
-            &self.company,
-            child_id,
-            &audit.run_id,
-        )
-        .await;
-
-        for call in ungated {
-            tracing::warn!(
-                company = %self.company,
-                workflow = %self.root_id,
-                child_workflow = child_id,
-                run_id = %audit.run_id,
-                node = %call.node_id,
-                tool = %call.slug,
-                "workflow: this call was NOT offered for approval because it is inside a \
-                 sub_workflow; the engine cannot resume a child across that boundary (issue \
-                 #617), so it runs unparked"
-            );
-            let Some(events) = audit.events.as_ref() else {
-                continue;
-            };
-            let event = crate::ports::types::CompanyEvent::WorkflowChildCallNotOffered {
-                workflow_id: self.root_id.clone(),
-                child_workflow_id: child_id.to_string(),
-                run_id: audit.run_id.clone(),
-                node: call.node_id,
-                tool: call.slug,
-                reason: call.reason,
-            };
-            if let Err(err) = events.append(&self.company, event).await {
-                tracing::warn!(
-                    company = %self.company,
-                    child_workflow = child_id,
-                    %err,
-                    "workflow: could not journal an ungated sub_workflow call; the run is \
-                     unaffected but the audit line is lost"
-                );
-            }
-        }
+        // Policy HITL is disabled at the root and in children, so there is no
+        // omitted policy gate to disclose. Keep this seam while historical
+        // `WorkflowChildCallNotOffered` events remain readable.
+        let _ = (&self.audit, child_id, graph);
     }
 
     /// The **static** `workflow_id` references a graph makes — literal ids only.
@@ -657,12 +617,10 @@ to = "run"
         )
     }
 
-    /// Issue #617. The child's `shell` call is one the policy would park at the
-    /// top level. It cannot be parked here — the engine cannot resume a child
-    /// across the boundary — so the resolver must **say so on the record**
-    /// rather than let the call disappear from the approvals story.
+    /// Policy HITL is disabled consistently in child workflows too, so the
+    /// resolver must not emit a misleading "not offered" disclosure.
     #[tokio::test]
-    async fn an_ungated_child_call_is_disclosed_to_the_journal() {
+    async fn a_child_call_produces_no_policy_hitl_disclosure() {
         let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
         let resolver = audited_resolver(
             vec![overlay("child", child_with_shell("child"))],
@@ -672,26 +630,7 @@ to = "run"
 
         let graph = resolver.resolve("child").await.expect("child resolves");
 
-        let seen = events.0.lock().unwrap();
-        let [
-            CompanyEvent::WorkflowChildCallNotOffered {
-                workflow_id,
-                child_workflow_id,
-                run_id,
-                node,
-                tool,
-                reason,
-            },
-        ] = seen.as_slice()
-        else {
-            panic!("expected exactly one disclosure: {seen:?}");
-        };
-        assert_eq!(workflow_id, "root", "the line names the run's own workflow");
-        assert_eq!(child_workflow_id, "child");
-        assert_eq!(run_id, "run-1");
-        assert_eq!(node, "run");
-        assert_eq!(tool, "shell");
-        assert!(reason.contains("shell"), "{reason}");
+        assert!(events.0.lock().unwrap().is_empty());
 
         // And the child is NOT gated: marking it would pause a child the engine
         // cannot resume, turning a working run into a dead one (issue #617).

@@ -501,6 +501,16 @@ impl GrantSet {
             .cloned()
     }
 
+    /// Consumes a grant as a continuation token without matching a tool call.
+    /// The explicit approval tool asks a question; after approval the agent
+    /// continues the work instead of invoking the question tool a second time.
+    pub fn consume_continuation(&self, id: &ApprovalId) -> Option<GrantedCall> {
+        let mut state = self.inner.lock().expect("grant set poisoned");
+        let call = state.live.remove(id)?;
+        state.consumed.push(id.clone());
+        Some(call)
+    }
+
     /// Removes every grant minted more than `ttl_millis` before `now_millis`,
     /// returning them so the caller can journal and announce each expiry.
     pub fn sweep(&self, now_millis: u64, ttl_millis: u64) -> Vec<GrantedCall> {

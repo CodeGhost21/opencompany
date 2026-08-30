@@ -1,13 +1,29 @@
 # Checkpoints and Approvals
 
-The trust core of the product: agents act freely inside the fence; anything
-irreversible waits for the Operator. This doc is normative.
+Approvals are deliberate questions from agents to the Operator, not a policy
+interceptor around ordinary tool calls. This doc is normative.
+
+## Current approval boundary
+
+An agent raises a general approval by calling `request_approval` with a concrete
+title, yes/no question, and optional context. Specialized tools may also state
+that calling them explicitly stages one concrete approval; that is tool
+behavior, not policy interception. Requests are journaled and shown in the
+Approvals inbox. The agent is told to stop until the decision arrives; approve
+and deny both resume it with the answer.
+
+Policy-generated HITL is disabled. `[policy].mode`, `always_approve`, spend
+thresholds, and per-call judgement do not manufacture approval cards. Hard
+stops remain hard stops: `readonly` rejects mutating/external agent tool calls,
+and the emergency stop denies native effects. Neither denial can be approved
+around. An operator-authored workflow node with `requires_approval = true`
+remains an explicit gate; it was not inferred from policy.
 
 ## Checkpoint taxonomy
 
-Effect kinds that MAY require sign-off, grouped by what they risk:
+The legacy effect taxonomy remains for audit and irreversible-effect reporting:
 
-| Group | Effect kinds (examples) | Default in `supervised` mode |
+| Group | Effect kinds (examples) | Legacy `supervised` default |
 | --- | --- | --- |
 | **Spend** | `payment.send`, `subscription.start`, x402 outbound above cap | approval above `auto_approve_under_usd` |
 | **Send** | `email.send`, `dm.external`, any first message to a new counterparty | approval for new counterparties; allowed for established threads |
@@ -16,46 +32,35 @@ Effect kinds that MAY require sign-off, grouped by what they risk:
 | **Hire** | outbound A2A engagement with a new company; firing a vendor | approval above threshold or first-time counterparty |
 | **Identity** | handle registration/renewal, key rotation, delegated signer mint/expand | always approval |
 
-`readonly` mode gates *every* effect; `full` mode auto-allows everything
-except `[policy].always_approve` entries. `auto` sits between `supervised` and
-`full`: the agent's own sandbox writes and its outward reads run unattended,
-and anything that leaves the company or spends on submit still parks — see
-[the tier line](grants.md#the-auto-tier).
+It no longer decides whether an approval card is created.
 
-Three of the four names are OpenHuman's own security tiers. `auto` is not, so
-the mapping is no longer 1:1 and `PolicyMode::security_tier()` — the accessor
-that asserted it was — has been deleted rather than made to lie. Where the two
-vocabularies still have to meet, `harness::toolbelt::autonomy_for` borrows
-`Supervised` for `auto`; the argument is on that function and matters, because
-a workflow `tool_call` node has no `ApprovalPolicy` above it.
+Three of the four names are OpenHuman's own security tiers. In the retained
+legacy policy engine, `auto` borrows OpenHuman's `Supervised` tier. Production
+policy-HITL-off construction instead hands non-readonly tools OpenHuman's
+`Full` tier so a lower advisory check cannot recreate an approval prompt.
 
 ## Approval lifecycle
 
 ```text
-effect emitted ─▶ evaluate ─▶ Allow ─▶ execute, journal
-                      │
-                      ├─▶ Deny ─▶ returned to brain as refusal (it replans)
-                      │
-                      └─▶ RequireApproval ─▶ park (ApprovalId)
-                                              │  surfaces in approvals inbox + chat
-                                              ▼
-                            operator resolves: approve │ deny │ edit
-                                              │
-                                              ▼
-                            ApprovalResolved event ─▶ follow-up cycle
+agent calls request_approval ─▶ park (ApprovalId)
+                                  │  surfaces in approvals inbox + chat
+                                  ▼
+                 operator resolves: approve │ deny
+                                  │
+                                  ▼
+                 ApprovalResolved ─▶ requesting agent continues
 ```
 
 - **Default-deny on silence**: parked approvals expire (default 7 days,
   configurable) to `deny`. Nothing irreversible ever happens because the
   Operator was on vacation.
-- **Edit** lets the Operator amend the effect payload (fix the email, lower
-  the amount) and approve the amended version; the brain sees both the
-  original and the edit.
+- The general approval API still accepts historical payload edits, but an
+  explicit question is resolved as approve or deny; changing the proposed
+  action should produce a new request.
 - Resolution requires operator auth ([runtime/api.md](../runtime/api.md));
   the resolving `Actor` is journaled.
-- Approve executes the parked effect exactly once
-  (journal-before-execute, [runtime/lifecycle.md](../runtime/lifecycle.md));
-  deny feeds the refusal back so the brain replans rather than retries.
+- Approve and deny both resume the requesting agent with the decision. The
+  request tool is never invoked a second time as the approved action.
 - **Resolution is idempotent.** Resolving an approval that is no longer parked
   — a double-submit, a retried request, two operators on the same queue —
   is a no-op with a fixed reply. It writes no journal record and runs no

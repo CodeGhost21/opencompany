@@ -234,14 +234,13 @@ the way out — success, error, steer cancel, redirect exhaustion and panic-unwi
 alike. A mid-loop redirect deletes the abandoned turn's checkout too, so a re-run
 starts from a fresh tree rather than one a discarded turn half-patched.
 
-**The exception: surviving an approval park.** A write is not one turn's work —
-`repo_checkout` → edit → `git_operations` commit → `repo_publish` are each a
-`Reach::Consequence` step that parks under `supervised`, and a park ends the
-turn. So a checkout a *task* turn parked with is held on a task-keyed retained
+**The exception: surviving an explicit approval request.** A write can span an
+agent's deliberate `request_approval`, which ends the turn while it waits. So a
+checkout a *task* turn parked with is held on a task-keyed retained
 set the janitor does not touch, keyed by the task the parked approval carries
-(`GrantedCall::origin_task`); the approval's re-issue reclaims it, so the resumed
-step commits and publishes on the same tree — and the same commit — the parked
-step left. It is deleted when the task's resumed step finishes without parking
+(`GrantedCall::origin_task`); the approval continuation reclaims it, so the resumed
+turn commits and publishes on the same tree — and the same commit — the parked
+turn left. It is deleted when the task's resumed step finishes without parking
 again, or — if the approval is denied or expired — swept the next time any turn
 claims the janitor and no live grant still names the task. This is the "deleted
 at task end" this tier always promised; a per-turn delete made it a deadlock

@@ -1,6 +1,6 @@
-//! Issues #460 and #614 — end-to-end proof that a node the company's policy
-//! stops does not execute, and leaves a card the operator can decide. Covers
-//! both gated node kinds: `tool_call` (#460) and `http_request` (#614).
+//! Policy-HITL migration coverage for authored `tool_call` and `http_request`
+//! workflow nodes. Legacy classification remains tested in `gate`; production
+//! runs do not add approval gates from policy.
 //!
 //! # Why a unit test could not have caught this
 //!
@@ -39,10 +39,7 @@ use crate::company::{CompanyManifest, parse_workflow};
 use crate::harness::HarnessPool;
 use crate::ports::WorkflowRunContext;
 use crate::ports::types::CompanyRecord;
-use crate::runtime::workflow_resume::{
-    PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TARGET, PAYLOAD_TOOL, PAYLOAD_WORKFLOW_ID,
-    WORKFLOW_APPROVE_KIND,
-};
+use crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND;
 
 /// A graph whose only working node is a `tool_call` running `shell`. The
 /// `marker` file it writes is how a test tells "the call was stopped" from "the
@@ -157,54 +154,23 @@ fn marker_written(root: &std::path::Path) -> bool {
     walk(root)
 }
 
-/// The headline. The call the operator would have been asked about on the agent
-/// path must now be asked about on the `tool_call` path — and must not have
-/// happened.
+/// Policy settings no longer turn an authored workflow tool call into HITL.
 #[tokio::test]
-async fn a_policy_gated_tool_call_node_parks_instead_of_running() {
+async fn always_approve_does_not_gate_a_workflow_tool_call() {
     let dir = tempfile::tempdir().unwrap();
-    let (journal, run, run_id) = run_tool_graph(dir.path(), "\"shell\"").await;
+    let (journal, run, _run_id) = run_tool_graph(dir.path(), "\"shell\"").await;
 
-    // 1. The engine stopped at the node rather than running it.
-    assert_eq!(
-        run.pending_approvals,
-        vec!["work".to_string()],
-        "the gated tool_call node must pause the run"
-    );
-
-    // 2. The side effect did NOT happen. This is the defect itself: before this
-    //    change the shell ran and nobody was asked.
+    assert!(run.pending_approvals.is_empty(), "{run:?}");
     assert!(
-        !marker_written(dir.path()),
-        "the gated shell call must not have executed"
-    );
-
-    // 3. There is a card, and it is decidable.
-    let pending = journal.pending();
-    let card = pending
-        .iter()
-        .find(|p| p.effect.kind == WORKFLOW_APPROVE_KIND)
-        .unwrap_or_else(|| panic!("the paused node should be on the Approvals page: {pending:?}"));
-
-    assert_eq!(card.effect.payload[PAYLOAD_WORKFLOW_ID], "gated-tool");
-    assert_eq!(card.effect.payload[PAYLOAD_NODE_ID], "work");
-    assert_eq!(
-        card.effect.run_id.as_deref(),
-        Some(run_id.as_str()),
-        "the card must name the run waiting on it"
-    );
-    // 4. Issue #460's own addition: the card says which call, and why. A bare
-    //    node id is the complaint #468 makes about this surface.
-    assert_eq!(
-        card.effect.payload[PAYLOAD_TOOL], "shell",
-        "the card must name the tool, not just the node"
+        marker_written(dir.path()),
+        "policy HITL is disabled, so the shell call should execute"
     );
     assert!(
-        card.effect.payload[PAYLOAD_REASON]
-            .as_str()
-            .is_some_and(|reason| reason.contains("shell")),
-        "the card must carry the policy's own reason: {:?}",
-        card.effect.payload[PAYLOAD_REASON]
+        journal
+            .pending()
+            .iter()
+            .all(|p| p.effect.kind != WORKFLOW_APPROVE_KIND),
+        "policy HITL must not create a workflow approval card"
     );
 }
 
@@ -285,27 +251,17 @@ async fn run_http_graph(
 /// `supervised` company with no card. It must now stop, and the card must name
 /// the destination.
 #[tokio::test]
-async fn a_policy_gated_http_request_node_parks_instead_of_requesting() {
+async fn always_approve_does_not_gate_an_http_request_node() {
     let dir = tempfile::tempdir().unwrap();
     let (journal, run) = run_http_graph(dir.path(), "\"http_request\"").await;
 
-    let run = run.expect("a gated node pauses the run, it does not error");
-    assert_eq!(
-        run.pending_approvals,
-        vec!["call".to_string()],
-        "the gated http_request node must pause the run"
-    );
-
-    let pending = journal.pending();
-    let card = pending
-        .iter()
-        .find(|p| p.effect.kind == WORKFLOW_APPROVE_KIND)
-        .unwrap_or_else(|| panic!("the paused node should be on the Approvals page: {pending:?}"));
-    assert_eq!(card.effect.payload[PAYLOAD_NODE_ID], "call");
-    assert_eq!(card.effect.payload[PAYLOAD_TOOL], "http_request");
-    assert_eq!(
-        card.effect.payload[PAYLOAD_TARGET], "POST 127.0.0.1:9",
-        "the card must name the destination the operator is deciding about"
+    let error = run.expect_err("the ungated call reaches the SSRF guard");
+    assert!(error.to_string().contains("http_request"), "{error}");
+    assert!(
+        journal
+            .pending()
+            .iter()
+            .all(|p| p.effect.kind != WORKFLOW_APPROVE_KIND)
     );
 }
 
@@ -346,23 +302,14 @@ async fn an_ungated_http_node_reaches_the_capability() {
 /// never wrote. This pins that the resume path still reads it — the integration
 /// risk a unit test of either half alone would miss.
 #[tokio::test]
-async fn the_parked_card_produces_a_continuation_that_approves_the_node() {
+async fn policy_hitl_disabled_produces_no_workflow_continuation_card() {
     let dir = tempfile::tempdir().unwrap();
     let (journal, _run, _) = run_tool_graph(dir.path(), "\"shell\"").await;
 
-    let pending = journal.pending();
-    let card = pending
-        .iter()
-        .find(|p| p.effect.kind == WORKFLOW_APPROVE_KIND)
-        .expect("a gate card");
-
-    let input = crate::runtime::workflow_resume::continuation_input(&card.effect)
-        .expect("a policy-gated card is a well-formed continuation");
-    let approvals = input["approvals"]
-        .as_array()
-        .expect("the continuation carries an approvals array");
     assert!(
-        approvals.iter().any(|id| id == "work"),
-        "the continuation must approve the node that paused: {input}"
+        journal
+            .pending()
+            .iter()
+            .all(|p| p.effect.kind != WORKFLOW_APPROVE_KIND)
     );
 }

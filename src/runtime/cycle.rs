@@ -760,6 +760,14 @@ approval.]"
         by: Actor,
         scope: GrantScope,
     ) -> Result<ResolveReceipt> {
+        // An explicit request needs a continuation on either answer. Preserve
+        // the request before resolution removes it from the live gate; a deny
+        // otherwise has no effect value to route back to the asking agent.
+        let explicit_request = self
+            .rt
+            .approval_gate
+            .parked_effect(id)
+            .filter(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND);
         // Issue #374: a broader scope is validated BEFORE the gate is touched.
         //
         // The order is the whole safety story of a bad scope request. Validating
@@ -784,9 +792,21 @@ approval.]"
         // deny nothing does, so its held checkout becomes sweepable.
         self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
-        if let ResolveOutcome::Approved(effect) = outcome {
-            self.settle_approved_effect(id, effect, by.clone(), scope)
-                .await?;
+        match outcome {
+            ResolveOutcome::Approved(effect) => {
+                self.settle_approved_effect(id, effect, by.clone(), scope)
+                    .await?;
+            }
+            ResolveOutcome::Denied => {
+                if let Some(effect) = explicit_request
+                    && let Some(agent) = effect.agent.clone()
+                {
+                    // Reuse the durable one-shot continuation transport. The
+                    // brain consumes it without re-invoking `request_approval`.
+                    self.mint_grant(id, agent, effect).await?;
+                }
+            }
+            ResolveOutcome::NotParked | ResolveOutcome::Expired => {}
         }
         // The follow-up event, so the brain learns the verdict. Returning it
         // (rather than appending it here) keeps the event logged exactly once:
@@ -3390,7 +3410,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn supervised_effect_parks_then_resolves() {
+    async fn supervised_effect_runs_without_policy_hitl() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
         let sign_effect = Effect {
@@ -3423,18 +3443,7 @@ mod test {
             }])
             .await
             .unwrap();
-        assert_eq!(report.parked.len(), 1);
-        let approval_id = report.parked[0].clone();
-        assert_eq!(rt.pending_approvals().len(), 1);
-
-        // Approving executes the effect and runs a follow-up cycle. The
-        // follow-up carries an ApprovalResolved event (not OperatorMessage), so
-        // the brain emits nothing and the queue drains.
-        let follow_up = rt
-            .resolve_approval(&approval_id, Verdict::Approve, operator())
-            .await
-            .unwrap();
-        assert!(follow_up.parked.is_empty());
+        assert!(report.parked.is_empty());
         assert!(rt.pending_approvals().is_empty());
     }
 
@@ -3469,7 +3478,7 @@ mod test {
     ) -> (Arc<CompanyRuntime>, ApprovalId) {
         let rt = Arc::new(
             RuntimeBuilder::new(home, manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain { effect }))
+                .with_brain(Arc::new(ParkingBrain { effect }))
                 .build()
                 .await
                 .unwrap(),
@@ -3619,6 +3628,39 @@ mod test {
              arguments, so executing it books a spend for work that never happened"
         );
         assert!(!rt.journal.is_executed(&format!("approval:{id}")));
+    }
+
+    #[tokio::test]
+    async fn denying_an_explicit_request_mints_a_durable_decision_continuation() {
+        let home_dir = tmp_home();
+        let args = serde_json::json!({
+            "title": "Submit the filing",
+            "question": "May I submit it?"
+        });
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                args.clone(),
+            ),
+        )
+        .await;
+
+        rt.resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+
+        let continuation = rt
+            .grants
+            .peek(&id)
+            .expect("the denial must resume its asker");
+        assert_eq!(continuation.agent, "finance");
+        assert_eq!(
+            continuation.tool,
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+        );
+        assert_eq!(continuation.args, args);
     }
 
     // --- What the card says (issue #372) ------------------------------------
@@ -3798,7 +3840,7 @@ mod test {
         let rt = Arc::new(
             RuntimeBuilder::new(home, manifest("supervised"))
                 .with_approvals(gate)
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: harness_effect("finance", "composio_execute", serde_json::json!({})),
                 }))
                 .build()
@@ -3968,7 +4010,7 @@ mod test {
         };
         let rt = Arc::new(
             RuntimeBuilder::new(home.clone(), manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: sign_effect,
                 }))
                 .build()
@@ -4107,7 +4149,7 @@ mod test {
         };
         let approval_id = {
             let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: sign_effect.clone(),
                 }))
                 .build()
@@ -4130,7 +4172,7 @@ mod test {
         // can resolve it by its original id.
         let rt2 = Arc::new(
             RuntimeBuilder::new(home.clone(), manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: sign_effect,
                 }))
                 .build()
@@ -4165,7 +4207,7 @@ mod test {
         let channels: Vec<Arc<dyn ChannelAdapter>> = vec![Arc::new(operator_channel.clone())];
         let rt = Arc::new(
             RuntimeBuilder::new(home.clone(), manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: sign_effect,
                 }))
                 .with_channels(channels)
@@ -5071,7 +5113,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn send_email_parks_for_new_recipient() {
+    async fn send_email_runs_without_policy_hitl_for_a_new_recipient() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
@@ -5095,8 +5137,8 @@ mod test {
             .send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
             .await
             .unwrap();
-        assert_eq!(res.output["status"], "pending_approval");
-        assert_eq!(sender.sent().len(), 0);
+        assert_eq!(res.output["status"], "sent");
+        assert_eq!(sender.sent().len(), 1);
     }
 
     /// Issue #333: an effect parked by a card's dispatch cycle is journaled
@@ -5122,10 +5164,13 @@ mod test {
             ApprovalConversation::default(),
         );
 
-        // A cold recipient parks — the same path a card's turn takes.
-        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
-            .await
-            .unwrap();
+        host.park_effect(harness_effect(
+            "ceo",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({ "title": "Send the message", "question": "May I send it?" }),
+        ))
+        .await
+        .unwrap();
 
         let pending = rt.pending_approvals();
         assert_eq!(pending.len(), 1);
@@ -5175,9 +5220,13 @@ mod test {
             ApprovalConversation::default(),
         );
 
-        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
-            .await
-            .unwrap();
+        host.park_effect(harness_effect(
+            "ceo",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({ "title": "Send the message", "question": "May I send it?" }),
+        ))
+        .await
+        .unwrap();
 
         let pending = rt.pending_approvals();
         assert_eq!(pending.len(), 1);
@@ -5215,9 +5264,13 @@ mod test {
             },
         );
 
-        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
-            .await
-            .unwrap();
+        host.park_effect(harness_effect(
+            "ceo",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({ "title": "Send the message", "question": "May I send it?" }),
+        ))
+        .await
+        .unwrap();
 
         let pending = rt.pending_approvals();
         assert_eq!(pending.len(), 1);
@@ -5245,7 +5298,10 @@ mod test {
             .collect();
         assert_eq!(parked.len(), 1, "exactly one park announcement: {logged:?}");
         assert_eq!(parked[0].0, pending[0].id);
-        assert_eq!(parked[0].1, "email.send");
+        assert_eq!(
+            parked[0].1,
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+        );
         assert_eq!(parked[0].2, Some("desk-finance".to_string()));
     }
 
@@ -5273,9 +5329,13 @@ mod test {
             ApprovalConversation::default(),
         );
 
-        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
-            .await
-            .unwrap();
+        host.park_effect(harness_effect(
+            "ceo",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({ "title": "Send the message", "question": "May I send it?" }),
+        ))
+        .await
+        .unwrap();
 
         let pending = rt.pending_approvals();
         assert_eq!(pending.len(), 1);

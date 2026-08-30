@@ -9,6 +9,15 @@
 //! `always_approve` effect kinds and the per-agent `budget_usd_daily` /
 //! `auto_approve_under_usd` thresholds.
 //!
+//! ## Current production mode: policy HITL disabled
+//!
+//! Roster construction applies [`ApprovalPolicy::with_policy_hitl_disabled`].
+//! In that mode this policy preserves the `readonly` hard denial and redeems
+//! grants for approvals already in flight, but returns `Allow` instead of
+//! manufacturing a new `RequireApproval`. Agents create new approvals only by
+//! calling [`request_approval`](crate::harness::approval_tool). The machinery
+//! below is retained for migration compatibility and focused policy tests.
+//!
 //! ## Where approvals actually park (issue #172)
 //!
 //! openhuman's [`ToolPolicy`] returns
@@ -707,6 +716,8 @@ impl ApprovalRequestQueue {
 /// openhuman [`ToolPolicy`] derived from a company's manifest `[policy]` and a
 /// single agent's per-agent budget.
 pub struct ApprovalPolicy {
+    /// Whether policy may manufacture HITL requests from ordinary tool calls.
+    policy_hitl_enabled: bool,
     mode: PolicyMode,
     always_approve: Vec<String>,
     auto_approve_under_usd: Option<f64>,
@@ -793,6 +804,7 @@ impl ApprovalPolicy {
     /// the same way it already chains [`with_requests`](Self::with_requests).
     pub fn new(policy: &Policy, budget_usd_daily: Option<f64>) -> Self {
         Self {
+            policy_hitl_enabled: true,
             mode: PolicyMode::parse(&policy.mode),
             always_approve: policy.always_approve.clone(),
             auto_approve_under_usd: policy.auto_approve_under_usd,
@@ -804,6 +816,13 @@ impl ApprovalPolicy {
             // The strict path by default — see `for_authored_workflow_nodes`.
             call_path: CallPath::Agent,
         }
+    }
+
+    /// Disables policy-generated approvals while preserving hard denials and
+    /// redemption of approvals that were already in flight during migration.
+    pub fn with_policy_hitl_disabled(mut self) -> Self {
+        self.policy_hitl_enabled = false;
+        self
     }
 
     /// Installs the shared queue every `RequireApproval` decision is recorded on,
@@ -854,6 +873,17 @@ impl ApprovalPolicy {
     /// The resolved tier.
     pub fn mode(&self) -> PolicyMode {
         self.mode
+    }
+
+    /// The mode handed to OpenHuman's built-in tool security. With policy HITL
+    /// disabled, non-readonly tiers use `Full` there too; otherwise an advisory
+    /// medium-risk check could recreate an approval prompt below this policy.
+    pub fn toolbelt_mode(&self) -> PolicyMode {
+        if !self.policy_hitl_enabled && self.mode != PolicyMode::Readonly {
+            PolicyMode::Full
+        } else {
+            self.mode
+        }
     }
 
     /// The per-agent daily budget, if any.
@@ -1206,6 +1236,13 @@ impl ToolPolicy for ApprovalPolicy {
     async fn check(&self, request: &ToolPolicyRequest) -> ToolPolicyDecision {
         let tool = request.tool_name.as_str();
 
+        // Asking the operator is never itself an effect to approve or deny.
+        // The tool only queues a question; the proposed action remains subject
+        // to hard denials when the continuation tries to perform it.
+        if tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL {
+            return ToolPolicyDecision::Allow;
+        }
+
         // 0. `never_do` hard-deny — RESERVED SLOT, deliberately empty.
         //
         // The manifest's `never_do` list is compiled by the delegation-rule
@@ -1293,6 +1330,13 @@ impl ToolPolicy for ApprovalPolicy {
         // `composio_execute` call whose action is a send, so a grant minted on
         // a repository read cannot admit an outgoing email (issue #441).
         if self.standing_grant_allows(tool, &request.arguments) {
+            return ToolPolicyDecision::Allow;
+        }
+
+        // New approvals come only from the explicit `request_approval` tool.
+        // Keep the readonly brake and old-grant redemption above this point,
+        // but bypass every arm below that would turn policy into HITL.
+        if !self.policy_hitl_enabled {
             return ToolPolicyDecision::Allow;
         }
 
@@ -1528,6 +1572,52 @@ mod tests {
         crate::policy::consequence_of(tool, args)
             .standing
             .is_grantable()
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_hitl_allows_calls_that_supervised_would_park() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &["payment"], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+
+        assert_eq!(
+            p.check(&request(
+                "payment.send",
+                serde_json::json!({ "amount_usd": 500.0 })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
+        assert!(
+            queue
+                .drain(MAX_APPROVAL_REQUESTS_PER_TURN)
+                .requests
+                .is_empty()
+        );
+        assert_eq!(p.toolbelt_mode(), PolicyMode::Full);
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_hitl_keeps_readonly_as_a_hard_denial() {
+        let p = policy("readonly", &[], None).with_policy_hitl_disabled();
+
+        assert!(matches!(
+            p.check(&request(
+                "payment.send",
+                serde_json::json!({ "amount_usd": 5.0 })
+            ))
+            .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        assert_eq!(
+            p.check(&request(
+                crate::harness::approval_tool::REQUEST_APPROVAL_TOOL,
+                serde_json::json!({ "title": "Ask", "question": "Proceed?" })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
     }
 
     /// Every tier is reachable from a manifest, parses to its own variant, and

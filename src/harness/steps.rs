@@ -504,6 +504,9 @@ fn humanize(tool_name: &str) -> String {
 /// [`workspace_tools`](crate::harness::workspace_tools::workspace_tools). Both
 /// are pinned mechanically by `intrinsic_tools_covers_every_oc_authored_tool`.
 const INTRINSIC_TOOLS: &[&str] = &[
+    // The exact confirmation that the explicit request was queued is useful
+    // operator-facing state, not remote content to collapse.
+    crate::harness::approval_tool::REQUEST_APPROVAL_TOOL,
     "query_company",
     "spawn_task",
     "delegate_to_desk",
@@ -899,6 +902,7 @@ mod tests {
     /// workspace family sat missing until #887).
     #[test]
     fn intrinsic_tools_covers_every_oc_authored_tool() {
+        use crate::harness::approval_tool::REQUEST_APPROVAL_TOOL;
         use crate::harness::orchestrator::{
             ADD_AGENT_TOOL, ASSIGN_TASK_TOOL, CREATE_WORKFLOW_TOOL, QUERY_COMPANY_TOOL,
             READ_RUN_OUTPUT_TOOL, REVIEW_TASK_TOOL, RUN_WORKFLOW_TOOL,
@@ -915,6 +919,7 @@ mod tests {
         };
 
         let expected = [
+            REQUEST_APPROVAL_TOOL,
             QUERY_COMPANY_TOOL,
             SPAWN_TASK_TOOL,
             DELEGATE_TO_DESK_TOOL,
