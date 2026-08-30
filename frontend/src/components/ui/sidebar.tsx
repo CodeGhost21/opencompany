@@ -431,8 +431,19 @@ function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-content"
       data-sidebar="content"
+      // The collapsed rail used to clip rather than scroll here
+      // (`overflow-hidden`), which was harmless while the rail's own chrome
+      // was short enough that the nav list always fit above the fold. Issue
+      // #1931 review: it no longer always is — the macOS traffic-light inset
+      // (`WindowControlsInset`) and the four-utility bar (`SidebarUtilityBar`)
+      // both stack vertically above the nav in collapsed mode, and at the
+      // desktop's supported minimum window height that stack plus a full nav
+      // list can exceed the rail's height, clipping the last row(s) out of
+      // reach with no way to get to them. `overflow-y-auto` keeps them
+      // reachable by scroll; `no-scrollbar` (already applied above) keeps the
+      // rail visually identical when everything already fits.
       className={cn(
-        "no-scrollbar flex min-h-0 flex-1 flex-col gap-1 overflow-auto group-data-[collapsible=icon]:overflow-hidden",
+        "no-scrollbar flex min-h-0 flex-1 flex-col gap-1 overflow-auto group-data-[collapsible=icon]:overflow-y-auto",
         className
       )}
       {...props}
