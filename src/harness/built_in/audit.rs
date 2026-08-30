@@ -179,11 +179,23 @@ impl Tool for AuditedShellTool {
         self.inner.execute_with_options(args, options).await
     }
 
+    // `Option<&dyn ToolRunContext>`, not the concrete TinyAgents
+    // `ToolExecutionContext` this used to name. The tinytools extraction turned
+    // the context into a trait so a shared tool vocabulary need not depend on
+    // tinyagents (that would be a dependency cycle — tinyagents depends on
+    // tinytools). The trait exposes the workspace, the thread id and the output
+    // budget and nothing else; the run id, event sink and cancellation token
+    // stay harness-internal on purpose.
+    //
+    // What matters here is unchanged and is the reason this method is
+    // overridden at all: the context carries the per-worker worktree the
+    // vendored tool uses as its action dir, so it is forwarded whole. Dropping
+    // it would silently move where commands run.
     async fn execute_with_context(
         &self,
         args: serde_json::Value,
         options: ToolCallOptions,
-        context: Option<&tinyagents::harness::tool::ToolExecutionContext>,
+        context: Option<&dyn oh::tools::traits::ToolRunContext>,
     ) -> anyhow::Result<ToolResult> {
         if let Some(refusal) = self.record_intent(&args) {
             return Ok(refusal);
