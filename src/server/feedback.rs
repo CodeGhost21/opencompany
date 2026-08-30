@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -39,7 +39,8 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-/// The feedback submission body: the capture input plus a `preview` flag.
+/// The feedback submission body: the capture input plus a `preview` flag and an
+/// optional `item_id` confirming a previewed item.
 #[derive(Debug, Deserialize)]
 struct FeedbackRequest {
     /// The capture fields (category, note, work_ref, template).
@@ -48,16 +49,23 @@ struct FeedbackRequest {
     /// When true, return the exact final body instead of filing.
     #[serde(default)]
     preview: bool,
+    /// When confirming (Send after Preview), the previewed item's id — finalize
+    /// that item instead of capturing a second one.
+    #[serde(default)]
+    item_id: Option<String>,
 }
 
-fn lookup(state: &AppState, id: &str) -> Result<Arc<CompanyRuntime>, ApiError> {
+/// Resolves a company runtime by id. Shared with the board routes in
+/// [`super::feedback_board`], which address companies exactly the same way.
+pub(crate) fn lookup(state: &AppState, id: &str) -> Result<Arc<CompanyRuntime>, ApiError> {
     state
         .registry()
         .get(&CompanyId::new(id))
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(id.to_string())))
 }
 
-fn sole(state: &AppState) -> Result<Arc<CompanyRuntime>, ApiError> {
+/// The sole company on a single-company host, for the `/company/...` aliases.
+pub(crate) fn sole(state: &AppState) -> Result<Arc<CompanyRuntime>, ApiError> {
     state.registry().sole().ok_or_else(|| {
         ApiError(OpenCompanyError::CompanyNotFound(
             "single-company".to_string(),
@@ -70,7 +78,9 @@ async fn run(
     body: FeedbackRequest,
 ) -> Result<Json<FeedbackResponse>, ApiError> {
     runtime.ensure_running().await?;
-    let response = runtime.submit_feedback(body.input, body.preview).await?;
+    let response = runtime
+        .submit_feedback(body.input, body.preview, body.item_id)
+        .await?;
     Ok(Json(response))
 }
 
@@ -84,15 +94,15 @@ async fn submit(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<FeedbackRequest>,
-) -> Result<Json<FeedbackResponse>, Response> {
+) -> Result<Json<FeedbackResponse>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     run(runtime, body)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// `POST /api/v1/company/feedback` (single-company alias).
@@ -100,19 +110,19 @@ async fn submit_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Json(body): Json<FeedbackRequest>,
-) -> Result<Json<FeedbackResponse>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<FeedbackResponse>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     // The sole company IS the addressed one, so the principal is checked
     // against it exactly as on the `{id}` form.
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
-        return Err(resp);
+        return Err(resp.into());
     }
     if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp);
+        return Err(resp.into());
     }
     run(runtime, body)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// `GET /api/v1/companies/{id}/feedback` — this company's reports, newest first.
@@ -123,33 +133,33 @@ async fn list(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<FeedbackSummary>>, Response> {
+) -> Result<Json<Vec<FeedbackSummary>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     runtime
         .list_feedback()
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// `GET /api/v1/company/feedback` (single-company alias).
 async fn list_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-) -> Result<Json<Vec<FeedbackSummary>>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<Vec<FeedbackSummary>>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
-        return Err(resp);
+        return Err(resp.into());
     }
     runtime
         .list_feedback()
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 #[cfg(test)]
@@ -308,37 +318,243 @@ mod test {
         // Signed with the company @handle for provenance.
         assert!(preview.contains("— filed by @acme"));
         assert!(github.created().is_empty());
+        let preview_item = value["item_id"].as_str().expect("item id");
 
-        // 3. Filing (auto consent) creates one issue. The `POST .../feedback`
-        //    route is operator-driven, so it carries the `source/operator`
-        //    label from the four-axis triage taxonomy.
-        let (status, value) = post_json(
-            &app,
-            "/api/v1/company/feedback",
-            r#"{"category":"wrong-output","note":"the invoice total was wrong"}"#,
-        )
-        .await;
+        // 3. Send confirms the PREVIEWED item by id — it must not capture a
+        //    second item and must post the exact previewed bytes. Auto consent
+        //    files one issue.
+        let confirm_body = serde_json::json!({
+            "category": "wrong-output",
+            "note": "email dana@acme.co bounced",
+            "item_id": preview_item,
+        })
+        .to_string();
+        let (status, value) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["filed"], true);
+        assert_eq!(value["item_id"], preview_item);
         assert!(value["issue_url"].is_string());
         let created = github.created();
         assert_eq!(created.len(), 1);
         assert!(created[0].labels.contains(&"source/operator".to_string()));
         assert!(created[0].labels.contains(&"sev/annoyance".to_string()));
         assert!(created[0].labels.contains(&"type/wrong-output".to_string()));
+        // The preview and the confirm are one item: the reports list shows the
+        // step-1 blocked capture plus exactly one filed report — no duplicate
+        // from previewing then sending.
+        let (_, list) = get_json(&app, "/api/v1/company/feedback").await;
+        let items = list.as_array().expect("an array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items.iter().filter(|i| i["issue_status"] == "open").count(),
+            1,
+            "exactly one filed report"
+        );
 
-        // 4. A second filing with the same title dedupes: it comments, does not
+        // 4. A fresh filing with the same title dedupes: it comments, does not
         //    create a duplicate.
         let (status, value) = post_json(
             &app,
             "/api/v1/company/feedback",
-            r#"{"category":"wrong-output","note":"the invoice total was wrong"}"#,
+            r#"{"category":"wrong-output","note":"email dana@acme.co bounced"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["deduped"], true);
         assert_eq!(github.created().len(), 1);
         assert_eq!(github.comments().len(), 1);
+    }
+
+    // A confirm-by-id of an item that was captured (the built-in feedback tool
+    // or the chat intent) but never previewed must be refused: its words are
+    // hidden from the reports list, so sending it would file a body nobody
+    // inspected.
+    #[tokio::test]
+    async fn confirm_of_unpreviewed_capture_is_blocked() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let state = state_with_company(&home, github.clone()).await;
+
+        // Capture the item the way the built-in feedback tool / chat intent
+        // does — persisted locally, never previewed, words never surfaced.
+        let runtime = lookup(&state, "acme").expect("acme runtime");
+        let captured = runtime
+            .capture_feedback(crate::feedback::FeedbackInput {
+                category: crate::feedback::FeedbackCategory::Bug,
+                note: "the run crashed".into(),
+                work_ref: None,
+                template_name: None,
+                template_version: None,
+            })
+            .await
+            .expect("captured");
+
+        let app = router(state);
+
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": captured.id,
+        })
+        .to_string();
+        let (status, value) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["blocked"], true);
+        assert_eq!(value["destination"], "local");
+        assert!(
+            github.created().is_empty(),
+            "an unpreviewed item must not be filed"
+        );
+        assert!(github.comments().is_empty());
+    }
+
+    // Re-confirming an already-filed item is idempotent: it returns the
+    // recorded result instead of filing or commenting a second time.
+    #[tokio::test]
+    async fn re_confirm_of_filed_item_returns_recorded_result() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let state = state_with_company(&home, github.clone()).await;
+        let app = router(state);
+
+        // Preview, then confirm — one issue is filed.
+        let (_, preview) = post_json(
+            &app,
+            "/api/v1/company/feedback",
+            r#"{"category":"bug","note":"the run crashed","preview":true}"#,
+        )
+        .await;
+        let item_id = preview["item_id"].as_str().expect("item id").to_string();
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": item_id,
+        })
+        .to_string();
+
+        let (status, first) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["filed"], true);
+        assert_eq!(github.created().len(), 1);
+
+        // Confirm the same item again: the recorded result returns and nothing
+        // new is filed or commented.
+        let (status, again) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(again["filed"], true);
+        assert_eq!(again["item_id"], item_id);
+        assert_eq!(again["issue_url"], first["issue_url"]);
+        assert_eq!(again["deduped"], false);
+        assert_eq!(github.created().len(), 1, "no second issue");
+        assert_eq!(github.comments().len(), 0, "no duplicate comment");
+    }
+
+    // Re-confirming an already-forwarded item returns the recorded result
+    // instead of ingesting the report into the hub a second time.
+    #[tokio::test]
+    async fn re_confirm_of_forwarded_item_does_not_ingest_twice() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let hub = Arc::new(MockTinyHumansClient::new());
+        let state = state_with_clients(&home, github, Some(hub.clone())).await;
+        let app = router(state);
+
+        let (_, preview) = post_json(
+            &app,
+            "/api/v1/company/feedback",
+            r#"{"category":"bug","note":"the run crashed","preview":true}"#,
+        )
+        .await;
+        let item_id = preview["item_id"].as_str().expect("item id").to_string();
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": item_id,
+        })
+        .to_string();
+
+        let (_, first) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(first["filed"], true);
+        assert_eq!(first["destination"], "tinyhumans");
+        assert_eq!(hub.forwarded().len(), 1);
+
+        let (_, again) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(again["filed"], true);
+        assert_eq!(again["destination"], "tinyhumans");
+        assert_eq!(again["item_id"], item_id);
+        assert_eq!(hub.forwarded().len(), 1, "no second ingest");
+    }
+
+    // Two confirms of the same item fired concurrently must file only once:
+    // the per-item confirm lock serialises them, and the loser returns the
+    // winner's recorded result instead of filing a second issue.
+    #[tokio::test]
+    async fn concurrent_confirms_file_once() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let state = state_with_company(&home, github.clone()).await;
+        let app = router(state);
+
+        let (_, preview) = post_json(
+            &app,
+            "/api/v1/company/feedback",
+            r#"{"category":"bug","note":"the run crashed","preview":true}"#,
+        )
+        .await;
+        let item_id = preview["item_id"].as_str().expect("item id").to_string();
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": item_id,
+        })
+        .to_string();
+
+        let (a, b) = tokio::join!(
+            post_json(&app, "/api/v1/company/feedback", &confirm_body),
+            post_json(&app, "/api/v1/company/feedback", &confirm_body),
+        );
+
+        assert_eq!(a.0, StatusCode::OK);
+        assert_eq!(b.0, StatusCode::OK);
+        // Both report the outcome, but only one issue was filed and no
+        // duplicate comment was added.
+        assert_eq!(a.1["filed"], true);
+        assert_eq!(b.1["filed"], true);
+        assert_eq!(github.created().len(), 1, "only one issue filed");
+        assert_eq!(github.comments().len(), 0, "no duplicate comment");
+    }
+
+    // A confirm of a nonexistent item id is a 404 and must not mint an entry
+    // in the process-wide confirm-lock registry: the id is caller-supplied and
+    // the registry is never evicted, so a bad id must fail before the lock is
+    // taken rather than growing the server heap forever.
+    #[tokio::test]
+    async fn confirm_of_nonexistent_item_does_not_mint_confirm_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let github = Arc::new(MockGitHubClient::new());
+        let state = state_with_company(&home, github.clone()).await;
+        let app = router(state);
+
+        // An id no stored item could ever carry: minted, never persisted.
+        let bogus = "no-such-item-confirm-nonexistent".to_string();
+        let confirm_body = serde_json::json!({
+            "category": "bug",
+            "note": "the run crashed",
+            "item_id": bogus,
+        })
+        .to_string();
+
+        let (status, _) = post_json(&app, "/api/v1/company/feedback", &confirm_body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            !crate::feedback::store::confirm_lock_holds(&bogus),
+            "a nonexistent item id must not mint a confirm-lock entry"
+        );
     }
 
     // A provisioned instance forwards to the hub instead of filing, and what

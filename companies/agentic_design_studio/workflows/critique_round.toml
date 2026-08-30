@@ -1,0 +1,102 @@
+# Workflow graph: critique_round
+#
+# Referenced by `[workflows].enabled` in ../company.toml. Work is critiqued
+# against the brief and the research before it leaves the studio — rather than
+# against the taste of whoever speaks first, which is what an unstructured
+# critique actually measures.
+
+id = "critique_round"
+name = "Critique round"
+description = "Work is checked against the brief, the research and the accessibility bar before it goes out."
+
+[[node]]
+id = "ready"
+kind = "trigger"
+name = "Work ready for critique"
+summary = "A direction or a revision is ready to leave the studio."
+
+[[node]]
+id = "brief"
+kind = "agent"
+name = "Check it against the brief"
+summary = "Does it do what was actually asked for? Read `approved` on the project row before anything else."
+agent = "brand_designer"
+
+[[node]]
+id = "research"
+kind = "agent"
+name = "Check it against the findings"
+summary = "A confirmed finding outranks instinct, including the creative director's."
+agent = "user_researcher"
+
+[[node]]
+id = "access"
+kind = "agent"
+name = "Accessibility pass"
+summary = "Contrast, target size, keyboard order, motion. Cheaper now than after approval."
+agent = "ui_designer"
+
+[[node]]
+id = "holds"
+kind = "condition"
+name = "Does it hold?"
+summary = "Branch on whether the work survives all three checks."
+[node.config]
+field = "=item.passes_critique"
+
+[[node]]
+id = "revise"
+kind = "agent"
+name = "Revise"
+summary = "Fix what failed, and record the constraint as a design decision so the next revision does not undo it."
+agent = "ui_designer"
+
+[[node]]
+id = "package"
+kind = "agent"
+name = "Package it"
+summary = "The work plus its reasoning — a design presented without its constraint invites a live redesign."
+agent = "brand_designer"
+
+[[node]]
+id = "signoff"
+kind = "output"
+name = "Park for direction sign-off"
+summary = "Hand it to the desk with what it is trying to be and what it rejected."
+[node.destination]
+kind = "channel"
+target = "creative_direction"
+
+[[edge]]
+from = "ready"
+to = "brief"
+
+[[edge]]
+from = "brief"
+to = "research"
+
+[[edge]]
+from = "research"
+to = "access"
+
+[[edge]]
+from = "access"
+to = "holds"
+
+[[edge]]
+from = "holds"
+to = "package"
+label = "yes"
+
+[[edge]]
+from = "holds"
+to = "revise"
+label = "no"
+
+[[edge]]
+from = "revise"
+to = "package"
+
+[[edge]]
+from = "package"
+to = "signoff"

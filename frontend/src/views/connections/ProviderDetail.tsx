@@ -22,6 +22,8 @@ import {
   probedOn,
 } from "@/lib/connection-detail";
 import { toolkitSlug } from "@/lib/connections";
+import { mcpProvenanceNote, mcpRemovalNote } from "@/lib/mcp-registry";
+import { accountSummary, tallyAccounts } from "@/lib/provider-grid";
 import type { GridProvider } from "@/lib/provider-grid";
 
 /**
@@ -269,7 +271,9 @@ function ComposioBody({
 }) {
   const { provider, noCredential, onConnectAnother, onDisconnectAccount } = subject;
   const accounts = provider.accounts ?? [];
-  const live = accounts.filter((a) => a.connected);
+  // Counted through the shared rule so this panel, the tile that opened it,
+  // and the summary line above all mean one thing by "connected" (issue #923).
+  const { live } = tallyAccounts(accounts);
 
   return (
     <>
@@ -285,13 +289,12 @@ function ComposioBody({
                 panel opened at all. */}
             Composio
           </Badge>
-          <span>
-            {live.length === 0
-              ? "not connected"
-              : live.length === 1
-                ? "1 account connected"
-                : `${live.length} accounts connected`}
-          </span>
+          {/* The same rule the tile grid states, so the panel and the tile that
+              opened it cannot describe one set of accounts two ways (issue
+              #923). This counted only live accounts already — correctly — but
+              collapsed "holds accounts, none usable" to "not connected", which
+              is the half the grid got wrong too. */}
+          <span>{accountSummary(accounts) ?? "not connected"}</span>
         </SheetDescription>
       </SheetHeader>
 
@@ -312,13 +315,13 @@ function ComposioBody({
                   provider that has never been connected is a third. The empty
                   case says which of them this is rather than "not connected",
                   which would cover all three. */}
-              No Composio account is connected for {provider.label}, so its agents have none of its
-              tools.
+              No Composio account is connected for {provider.label}, so its teammates have none of
+              its tools.
             </p>
           )}
         </section>
 
-        {live.length > 1 && (
+        {live > 1 && (
           // #819 wrote this paragraph to say the choice did not exist —
           // "`composio_execute` sends no connection id, so Composio resolves
           // it. Disconnect the one you do not want an agent to use." #820 is
@@ -327,9 +330,9 @@ function ComposioBody({
           <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
-              Holding several accounts is fine — they are the company&apos;s, and every member works
-              through them. Which one an agent acts as is set under{" "}
-              <span className="font-medium">Which account agents act as</span> on the Connections
+              Holding several accounts is fine — they are the company&apos;s, and every teammate
+              works through them. Which one a teammate acts as is set under{" "}
+              <span className="font-medium">Which account teammates act as</span> on the Connections
               page; until one is chosen, Composio resolves it for the company as it always has.
             </span>
           </p>
@@ -339,9 +342,9 @@ function ComposioBody({
           <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
-              This company also stores a self-hosted OAuth credential for {provider.label}. No agent
-              reads it (issue #396), it is not what the accounts above are, and disconnecting here
-              does not touch it.
+              This company also stores a self-hosted OAuth credential for {provider.label}. No
+              teammate reads it (issue #396), it is not what the accounts above are, and
+              disconnecting here does not touch it.
             </span>
           </p>
         )}
@@ -384,7 +387,7 @@ function ComposioBody({
               )}
               {accounts.length > 0 && (
                 <p className="text-xs text-muted-foreground">
-                  Disconnecting removes the connection at Composio, so agents lose these tools on
+                  Disconnecting removes the connection at Composio, so teammates lose these tools on
                   their next turn. It does not sign the company out of {provider.label}, and it does
                   not delete anything there.
                 </p>
@@ -449,10 +452,12 @@ function McpBody({
                 to open the panel rather than a detail to hide again. */}
             <p className="font-mono text-xs break-all">{server.endpoint}</p>
           </div>
-          <p className="text-xs text-muted-foreground">
-            {server.source === "manifest"
-              ? "Declared in this company's company.toml, so it comes back on every boot — it can be turned off here but not deleted."
-              : "Added from the console, so it lives in this company's runtime store rather than in company.toml."}
+          {/* One sentence per provenance (issue #1270). This read `manifest`
+              against everything-else, which told an operator that a directory
+              install "was added from the console and lives in this company's
+              runtime store" — true of neither half of it. */}
+          <p className="text-xs text-muted-foreground" data-testid="mcp-detail-provenance">
+            {mcpProvenanceNote(server.source)}
           </p>
           <p className="text-xs text-muted-foreground" data-testid="mcp-detail-probe">
             {standing.probe}
@@ -468,7 +473,10 @@ function McpBody({
             {/* The same answer the native path gets, for the same reason: there
                 is no connect to record. Said rather than left blank, which
                 reads as "never". */}
-            {connectedOn(undefined)} — MCP has no connect step to record one.
+            {connectedOn(undefined)} —{" "}
+            {server.source === "registry"
+              ? "this host does connect a directory install, but records no date for it."
+              : "MCP has no connect step to record one."}
           </p>
         </section>
 
@@ -500,7 +508,7 @@ function McpBody({
               <>
                 <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 <span>
-                  No agent can reach this server — no teammate&apos;s tool grants cover{" "}
+                  No teammate can reach this server — no tool grant covers{" "}
                   <code className="font-mono">mcp:{server.name}</code>. Whatever usage says below
                   happened before that was true.
                 </span>
@@ -508,7 +516,10 @@ function McpBody({
             ) : (
               <span>
                 Reachable by:{" "}
-                <span className="font-medium text-foreground">{server.reachableBy.join(", ")}</span>
+                {/* Names, not ids (issue #931) — see `McpServersSection`. */}
+                <span className="font-medium text-foreground">
+                  {server.reachableBy.map((agent) => agent.name).join(", ")}
+                </span>
               </span>
             )}
           </p>
@@ -518,7 +529,7 @@ function McpBody({
 
         <UsageSection
           usage={usage}
-          perConnection={`Successful tool calls your agents made through ${server.name}, counted under mcp:${server.name.trim().toLowerCase()} so a Composio provider of the same name cannot be read as this one.`}
+          perConnection={`Successful tool calls your teammates made through ${server.name}, counted under mcp:${server.name.trim().toLowerCase()} so a Composio provider of the same name cannot be read as this one.`}
         />
 
         <Separator />
@@ -528,9 +539,7 @@ function McpBody({
             What a disconnect reaches
           </h4>
           <p className="text-xs text-muted-foreground" data-testid="mcp-detail-disconnect-scope">
-            {server.source === "manifest"
-              ? "This server is declared in company.toml, so it cannot be removed from the console — turning it off drops it from every agent's tool belt on the next turn, and it returns on the next boot unless the manifest changes."
-              : "Removing it drops it from every agent's tool belt on the next turn and deletes the credential stored here for it."}{" "}
+            {mcpRemovalNote(server.source)}{" "}
             Nothing is revoked at the server&apos;s own end: no token it issued is invalidated and no
             session there is closed. Revoke those where they were issued.
           </p>

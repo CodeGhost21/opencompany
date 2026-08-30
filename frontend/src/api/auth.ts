@@ -32,8 +32,31 @@ export type AuthMode = "email" | "wallet" | "none";
 /** What the console must know before it can draw a sign-in screen. */
 export interface AuthConfig {
   mode: AuthMode;
+  /**
+   * What this company calls itself, so the sign-in screen can name what a
+   * credential is being handed to.
+   *
+   * It has to arrive here rather than from `status`: every route that reports
+   * the name is behind the very sign-in being drawn, and on the hosted platform
+   * each tenant is a separate company on its own URL, so "which one is this"
+   * is a real question at that moment.
+   *
+   * Optional only for a host predating the field. The console draws a heading
+   * with no name there — the same one it drew before this existed.
+   */
+  name?: string;
   /** Whether a password may be offered. Only ever true in `email` mode. */
   passwords: boolean;
+  /**
+   * Whether a magic link asked for here reaches anybody: the host has a mail
+   * transport, or it is loopback-bound and hands the code straight back.
+   *
+   * False is a routable host with no transport, and the console has to act on
+   * it — `auth/request` answers `sent: true` there exactly as it does on a host
+   * that delivered, so nothing else in the flow will ever reveal that the link
+   * went nowhere.
+   */
+  magicLink: boolean;
 }
 
 /**
@@ -46,15 +69,27 @@ export interface AuthConfig {
  *
  * Defaults to `email` if the host cannot answer, which is what every host
  * predating this route does.
+ *
+ * `magicLink` defaults to true through both kinds of rollout skew — no route,
+ * and a route that omits the field — because a host old enough not to report it
+ * either mails links or echoes them. Assuming false there would withdraw a
+ * working sign-in from every deployment that has not updated yet.
  */
 export async function fetchAuthConfig(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<AuthConfig> {
   try {
-    return await client.get<AuthConfig>(`${client.scopeFor(company)}/auth/config`);
+    const config = await client.get<AuthConfig>(`${client.scopeFor(company)}/auth/config`);
+    // A blank name is not a name. Normalised here, once, so no view has to
+    // decide whether `""` means "unnamed" or "not reported".
+    return {
+      ...config,
+      name: config.name?.trim() || undefined,
+      magicLink: config.magicLink ?? true,
+    };
   } catch {
-    return { mode: "email", passwords: true };
+    return { mode: "email", passwords: true, magicLink: true };
   }
 }
 
@@ -63,6 +98,11 @@ export interface Me {
   id: string;
   email: string;
   displayName?: string;
+  /**
+   * The face they chose (`lib/avatar.ts`), absent when they have not chosen —
+   * which the console draws as the mascot it hashes from their id.
+   */
+  avatar?: string;
   role: UserRole;
   company: string;
   /** Whether they have a password, never what it is. */
@@ -106,8 +146,16 @@ export async function requestCode(
   client: OpenCompanyClient,
   company: string | null,
   email: string,
+  redirect?: string,
 ): Promise<RequestCodeResult> {
-  return client.post<RequestCodeResult>(`${client.scopeFor(company)}/auth/request`, { email });
+  return client.post<RequestCodeResult>(`${client.scopeFor(company)}/auth/request`, {
+    email,
+    // The landing fragment a *mailed* link should carry (setup's hand-off
+    // passes `#/company?from=setup`). Absent for a normal sign-in, which lands
+    // wherever it always did. `undefined` is dropped by JSON.stringify, so the
+    // body is unchanged unless a redirect was actually asked for.
+    redirect,
+  });
 }
 
 /** Redeems a magic link for a session. */
@@ -139,13 +187,19 @@ export interface HubProvider {
  * An empty list is the normal answer on a self-hosted host and is not an
  * error — it means "no ecosystem here, show the magic-link form alone". So this
  * never throws for that case; callers only need to handle the network failing.
+ *
+ * `from`, when present, is the destination the host should put on the sign-in's
+ * return URI — the console's own fragment cannot cross the OAuth round trip, so
+ * the host carries it as a query parameter the landing reads back. Only setup's
+ * dead-link recovery asks for one today (`from=setup`).
  */
 export async function fetchHubProviders(
   client: OpenCompanyClient,
   company: string | null,
+  from?: string,
 ): Promise<HubProvider[]> {
   const result = await client.get<{ providers: HubProvider[] }>(
-    `${client.scopeFor(company)}/auth/hub`,
+    `${client.scopeFor(company)}/auth/hub${from ? `?from=${encodeURIComponent(from)}` : ""}`,
   );
   return result.providers ?? [];
 }
@@ -268,6 +322,15 @@ export interface Person {
   id: string;
   email: string;
   displayName?: string;
+  /**
+   * The face they chose, absent when they have not chosen.
+   *
+   * Readable by anyone who can read the roster, and writable **only by the
+   * person wearing it** — `updateMe`, not `updatePerson`. An admin may set
+   * somebody's `displayName` so a roster of raw addresses can be made legible;
+   * a person's own face is theirs to pick.
+   */
+  avatar?: string;
   role: UserRole;
   status: UserStatus;
   /** Whether they have a password — never what it is. */
@@ -365,6 +428,22 @@ export async function revokeInvite(
   inviteId: string,
 ): Promise<void> {
   await client.del(`${client.scopeFor(company)}/users/invites/${encodeURIComponent(inviteId)}`);
+}
+
+/**
+ * Changes your own name or face.
+ *
+ * Deliberately not `updatePerson`: that one is admin-only and takes a user id,
+ * which is right for administering somebody else and wrong for naming yourself.
+ * Both fields are three-state — omitted leaves it alone, `null` goes back to the
+ * default, a value sets it — so saving a name cannot wipe a face.
+ */
+export async function updateMe(
+  client: OpenCompanyClient,
+  company: string | null,
+  changes: { displayName?: string | null; avatar?: string | null },
+): Promise<Me> {
+  return client.patch<Me>(`${client.scopeFor(company)}/auth/me`, changes);
 }
 
 /** Changes a person's role, status, or display name. */

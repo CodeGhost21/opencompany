@@ -18,6 +18,7 @@ use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::metering::capability::{CapabilityPlan, tokens_in};
 use crate::ports::now_millis;
+use crate::server::cognition::{CognitionState, InferenceResolution, cognition_state};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -76,6 +77,15 @@ struct CapabilityStatusDto {
     composio_granted: bool,
     /// Whether the `composio` feature is compiled into this build at all.
     composio_in_build: bool,
+    /// Chargebee billing (issue #788): whether this company **explicitly** grants
+    /// the `chargebee` namespace (a `*` wildcard does NOT count). What the
+    /// Settings UI reads to say whether billing tools would reach an agent even
+    /// once credentials are saved.
+    chargebee_granted: bool,
+    /// Whether the `chargebee` feature is compiled into this build at all. The
+    /// grant and the credentials can both be in place and still wire no tools if
+    /// the running binary was not built with it.
+    chargebee_in_build: bool,
     /// Whether a non-empty per-tenant Composio **BYO override** token is stored
     /// under `composio/token` — never the token itself. Unlike media's env
     /// credential, this is a tenant secret.
@@ -119,24 +129,54 @@ struct CapabilityStatusDto {
     /// tests it rather than a real-money surface shipping untested.
     search_in_build: bool,
     /// Whether a MANAGED search credential is resolvable from the environment on
-    /// this build. Never reflects a tenant secret — search runs only on the
-    /// platform identity.
+    /// this build. Never reflects a tenant secret: it answers "can this
+    /// deployment search on the platform's account", which is a different
+    /// question from [`search_provider`](Self::search_provider) below.
     search_credential_configured: bool,
+    /// The provider this company's searches actually go to — `managed`, or the
+    /// slug it configured in Settings → Search and finished configuring.
+    ///
+    /// Reported beside the managed flag rather than folded into it because the
+    /// two can disagree in both directions: a deployment with no platform
+    /// credential still searches for a company that brought its own key, and a
+    /// company that selected Exa and pasted nothing is still on managed. Never
+    /// the key — only the slug, which is not a secret.
+    search_provider: String,
     /// The company's daily `web_search` call ceiling
     /// (`[tools].search_daily_calls`, else the built-in default). Reaching it
     /// makes the tool refuse loudly rather than return an empty result set.
     search_daily_call_cap: u32,
-    /// Bound repositories (issue #245, agent half): whether this company
-    /// **explicitly** grants the `repo` namespace (a `*` wildcard does NOT
-    /// count).
+    /// Publishing (issue #244, panel half #1192): whether this company's grants
+    /// confer `publish_artifact` — the only way a file an agent wrote becomes a
+    /// deliverable.
     ///
-    /// The grant alone is not the whole story, and the console says so: a
-    /// company can grant `repo` and bind nothing (the tools are not wired), or
-    /// bind repositories and grant nothing (nobody can read them). Both are
-    /// silent misconfigurations that look like a working setup from one page
-    /// each, which is why this flag travels beside the repositories list rather
-    /// than only inside the manifest.
-    repo_granted: bool,
+    /// **Unlike every `*_granted` field above, a bare `*` DOES confer this.**
+    /// Publishing spends nothing and reaches nothing outside the company's own
+    /// board, so it rides the ordinary namespace rule rather than the
+    /// opt-in-by-name rule the real-money surfaces use. Sourced from
+    /// [`grants_files_or_docs`](crate::company::grants_files_or_docs), which is
+    /// the same predicate `build_agent`'s `wants_files` gate calls — one
+    /// derivation, so this panel cannot report a capability the toolbelt does
+    /// not wire.
+    ///
+    /// # There is deliberately no third rung
+    ///
+    /// Media, Composio and search each carry a credential/config flag beside
+    /// their grant, because each can be granted and still wire nothing.
+    /// Publishing has neither a credential nor a store toggle: the artifact
+    /// store is non-optional on the runtime ops bundle and the single
+    /// production `HarnessDeps` literal always sets it, so a
+    /// `artifactStoreConfigured` field could only ever serialize a hardcoded
+    /// `true` for every company on every deployment — a fresh instance of
+    /// exactly the always-reassuring flag issue #886 was filed about. If the
+    /// store ever becomes genuinely optional in production, the burden is on
+    /// adding the field back with a real derivation behind it.
+    publish_granted: bool,
+    /// Whether the harness that carries `publish_artifact` is compiled into this
+    /// build. There is no `publish` Cargo feature — the tool rides the plain
+    /// `openhuman` harness feature, exactly as
+    /// [`search_in_build`](Self::search_in_build) does, so do not invent one.
+    publish_in_build: bool,
     /// Whether the agent-side MCP bridge is compiled into this build (issue
     /// #567). Unlike media/composio/search this is **not** a grant question: the
     /// `/mcp/servers` management routes ship in every build, so an operator can
@@ -149,6 +189,27 @@ struct CapabilityStatusDto {
     /// lets the MCP surfaces state that plainly instead of the operator finding
     /// out by asking an agent and watching nothing happen.
     mcp_in_build: bool,
+    /// Whether this company's teammates can actually think, and why not when
+    /// they cannot (issue #1735).
+    ///
+    /// The wire labels are [`CognitionState`]'s own — read them there rather
+    /// than from a list here. This comment carried a hand-copied list of three
+    /// and was stale within two commits of the states growing to five, which is
+    /// exactly the second copy of a fact that this field exists to avoid
+    /// (CodeRabbit review of PR #1740).
+    ///
+    /// The one capability on this response that is **not** a build fact alone.
+    /// `media_in_build` and its neighbours answer "was this compiled in";
+    /// cognition is that question *and* "is a harness actually attached" *and*
+    /// "did a model resolve at boot", and only the last is something an
+    /// operator can fix without a new binary. A fifth boolean would have
+    /// collapsed them, which is the same mistake as the echo reply it exists to
+    /// explain — an operator told "not available" goes looking for a rebuild
+    /// when a provider was one settings page away.
+    ///
+    /// Derived on every read from the brain the runtime is holding, never
+    /// stored. See [`crate::server::cognition`].
+    cognition: CognitionState,
 }
 
 /// One tier's budget row.
@@ -188,6 +249,7 @@ struct TotalDto {
 /// composio), independent of whether a `[plan]` is configured.
 struct OptInFlags {
     media_granted: bool,
+    chargebee_granted: bool,
     composio_granted: bool,
     composio_token_configured: bool,
     /// The resolved Composio credential tier (issue #886), or `None` when it
@@ -199,14 +261,33 @@ struct OptInFlags {
     composio_credential_source: Option<CredentialSource>,
     search_granted: bool,
     search_daily_call_cap: u32,
-    repo_granted: bool,
+    search_provider: String,
+    /// Issue #1192. Carried on the flags rather than derived per DTO site for
+    /// the reason the `composio_credential_source` note above already states:
+    /// the DTO is built in two places, and a field wired into one of them alone
+    /// reports honestly for a company with no plan and lies to every company
+    /// that has one.
+    publish_granted: bool,
+    /// Issue #1735. Carried here for the reason the two notes above already
+    /// give: the DTO is built in two places, and a field wired into one of them
+    /// alone reports honestly for a company with no plan and lies to every
+    /// company that has one — which for this field would mean chat rendering
+    /// the echo brain's output as a teammate's reply on exactly the companies
+    /// that have a budget configured.
+    cognition: CognitionState,
 }
 
 impl OptInFlags {
     /// All-false — used when no company record is present.
-    fn none() -> Self {
+    ///
+    /// Takes the cognition state because that one is knowable without a record:
+    /// the runtime is in hand either way, and which brain it holds does not
+    /// depend on whether its company row loaded.
+    fn none(cognition: CognitionState) -> Self {
         Self {
+            cognition,
             media_granted: false,
+            chargebee_granted: false,
             composio_granted: false,
             composio_token_configured: false,
             // `None` (undetermined), never `Some(CredentialSource::None)`:
@@ -215,7 +296,8 @@ impl OptInFlags {
             composio_credential_source: None,
             search_granted: false,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
-            repo_granted: false,
+            search_provider: crate::company::search::MANAGED_PROVIDER.to_string(),
+            publish_granted: false,
         }
     }
 }
@@ -236,14 +318,19 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         media_credential_configured: media_credential_configured(),
         composio_granted: flags.composio_granted,
         composio_in_build: cfg!(feature = "composio"),
+        chargebee_granted: flags.chargebee_granted,
+        chargebee_in_build: cfg!(feature = "chargebee"),
         composio_token_configured: flags.composio_token_configured,
         composio_credential_source: flags.composio_credential_source,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
-        repo_granted: flags.repo_granted,
+        search_provider: flags.search_provider.clone(),
+        publish_granted: flags.publish_granted,
+        publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
+        cognition: flags.cognition,
     }
 }
 
@@ -330,16 +417,55 @@ fn media_credential_configured() -> bool {
     }
 }
 
+/// Reads this company's cognition state off the runtime it actually holds.
+///
+/// The third input is only consulted on the one degraded path, and that is
+/// deliberate rather than incidental: `/capabilities` is a console read that
+/// gets polled, and `inference_resolution` costs a manifest load plus a
+/// secret-store resolve. A company that is thinking pays neither, because its
+/// brain answers the question before either is needed. The placeholder passed
+/// in the other arm is never read — `cognition_state` has already returned by
+/// then, and its ordering is asserted.
+async fn cognition_for(runtime: &CompanyRuntime) -> CognitionState {
+    let path = runtime.cognition().path;
+    let harness_reachable = crate::server::ops::inference::harness_reachable(runtime);
+    // Short-circuit: with a real brain, or with no harness at all, the config
+    // read cannot change the answer — see `cognition_state`'s own ordering.
+    let resolution = if path == crate::ports::brain::ECHO_PATH && harness_reachable {
+        crate::server::ops::inference::inference_resolution(runtime).await
+    } else {
+        InferenceResolution::Nothing
+    };
+    cognition_state(path, harness_reachable, resolution)
+}
+
 /// Resolves the capability-budget status DTO for a company.
 async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDto, ApiError> {
+    // Issue #1735. Read off the brain this runtime is actually holding, before
+    // anything else can fail: a company whose record will not load still has a
+    // brain, and "can a teammate answer me" is the one question on this
+    // response that must never degrade to a reassuring default.
+    //
+    // Reachability, not `cfg!(feature = "openhuman")`: the feature says the
+    // harness was compiled in, not that this runtime was handed a pool, and an
+    // embedder that skips `app::harness::attach` gets exactly that (the shipped
+    // desktop-shell bug that module exists to end). Reporting `unconfigured`
+    // there would point the operator at Settings → Inference, which cannot move
+    // that runtime off the echo brain — the dead end `ops::inference`'s own
+    // `restart_pending`/`runner_gap_for` already gate on this same predicate to
+    // avoid (issues #266, #514). Borrowing that function rather than re-deriving
+    // it is what keeps the two surfaces from disagreeing about one company.
+    let cognition = cognition_for(runtime).await;
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     let Some(record) = record else {
-        return Ok(unconfigured(OptInFlags::none()));
+        return Ok(unconfigured(OptInFlags::none(cognition)));
     };
     // Media + composio are opt-in per tool grant (explicit namespace, never `*`)
     // and live on the manifest regardless of whether a `[plan]` is configured.
     let flags = OptInFlags {
+        cognition,
         media_granted: crate::company::grants_media_explicit(&record.manifest.tools.allow),
+        chargebee_granted: crate::company::grants_chargebee_explicit(&record.manifest.tools.allow),
         composio_granted: crate::company::grants_composio_explicit(&record.manifest.tools.allow),
         // Degrade to "unconfigured" on a transient secret-store error rather
         // than failing the whole /capabilities response (budget/tier data is
@@ -377,10 +503,24 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
             .tools
             .search_daily_calls
             .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
+        // Which provider the company's own settings point at. Degrades to the
+        // managed answer on a transient secret-store error rather than failing
+        // the whole /capabilities response, like the Composio probe above — the
+        // panel's other cards are unrelated to search.
+        search_provider: crate::company::search::resolve_effective_provider(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+        )
+        .await
+        .unwrap_or_else(|_| crate::company::search::MANAGED_PROVIDER.to_string()),
         // Issue #245: opt-in per tool grant like the three above, and read from
         // the same manifest field, so the repositories card can tell an operator
         // which half of the setup is missing.
-        repo_granted: crate::company::grants_repo_explicit(&record.manifest.tools.allow),
+        // Issue #1192: the same predicate `build_agent`'s `wants_files` gate
+        // calls, so the panel's verdict and the wired toolbelt cannot disagree.
+        // Note the shape difference from its four neighbours above — this one is
+        // NOT `_explicit`, because a bare `*` confers publishing.
+        publish_granted: crate::company::grants_files_or_docs(&record.manifest.tools.allow),
     };
     let manifest_plan = &record.manifest.plan;
     let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
@@ -432,14 +572,19 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         media_credential_configured: media_credential_configured(),
         composio_granted: flags.composio_granted,
         composio_in_build: cfg!(feature = "composio"),
+        chargebee_granted: flags.chargebee_granted,
+        chargebee_in_build: cfg!(feature = "chargebee"),
         composio_token_configured: flags.composio_token_configured,
         composio_credential_source: flags.composio_credential_source,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
-        repo_granted: flags.repo_granted,
+        search_provider: flags.search_provider.clone(),
+        publish_granted: flags.publish_granted,
+        publish_in_build: cfg!(feature = "openhuman"),
         mcp_in_build: cfg!(feature = "mcp"),
+        cognition: flags.cognition,
     })
 }
 
@@ -490,6 +635,8 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -501,9 +648,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -534,6 +685,260 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, value)
+    }
+
+    /// Issue #1735: a build whose runtime is on the offline echo brain must
+    /// never report itself as able to think — with or without a `[plan]`, since
+    /// the DTO is built in two places.
+    ///
+    /// The runtimes `state_with_manifest` builds never call
+    /// `app::harness::attach`, so **no pool is attached in either lane** and the
+    /// honest answer is `unavailable` in both: nothing an operator saves in
+    /// Settings → Inference reaches a harness that was never wired. This read
+    /// `unconfigured` under `openhuman` while the state was derived from
+    /// `cfg!` alone — a settings link offered on a runtime it could not help
+    /// (codex review of PR #1740). The lane-independent expectation is the
+    /// point: the answer turns on what this runtime holds, not on which lane
+    /// compiled it.
+    #[tokio::test]
+    async fn a_company_on_the_echo_brain_never_reports_itself_configured() {
+        let expected = "unavailable";
+
+        // No `[plan]` — the `unconfigured()` construction site.
+        let home_a_dir = home();
+        let state = state_with_manifest(
+            home_a_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["configured"], false, "{dto}");
+        assert_eq!(
+            dto["cognition"], expected,
+            "a runtime built with no inference source runs the echo brain: {dto}"
+        );
+
+        // With a `[plan]` — the other construction site. A field wired into one
+        // of them alone reports honestly here and lies to every company that
+        // has a budget configured, which is the trap this file already warns
+        // about twice.
+        let home_b_dir = home();
+        let state_b = state_with_manifest(
+            home_b_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[plan]\nname = \"starter\"\nperiod = \"daily\"\ntotal_tokens = 1000\n",
+        )
+        .await;
+        let (status_b, dto_b) = get_capabilities(&state_b).await;
+        assert_eq!(status_b, StatusCode::OK);
+        assert_eq!(dto_b["configured"], true, "{dto_b}");
+        assert_eq!(
+            dto_b["cognition"], expected,
+            "the plan-configured construction site must carry the same answer: {dto_b}"
+        );
+    }
+
+    /// A harness pool *is* attached and the company still resolved no inference
+    /// source, so the echo brain won — the one state where Settings → Inference
+    /// is a real remedy (issue #1735).
+    ///
+    /// The counterpart to the test above, and the pair is what pins the
+    /// distinction codex's review turned on: same echo brain, same manifest,
+    /// same lane, and the answer flips on whether a pool was attached. Gated on
+    /// `openhuman` because `with_harness` — and the very idea of an attached
+    /// pool — only exists under it; `feature-lanes.txt` records that lane as
+    /// `tested`, so this runs rather than merely compiling.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_attached_harness_with_no_inference_is_a_settings_problem() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
+        // Seeds the record and a harness-less runtime, then replaces the
+        // runtime with one holding a pool over the same record — so the only
+        // difference from the test above is the attached harness.
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(crate::harness::HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        // The premise: no inference source resolved, so this is still the echo
+        // brain. Asserted rather than assumed — if a future default put a brain
+        // behind it, the `unconfigured` below would pass for the wrong reason.
+        assert_eq!(
+            runtime.cognition().path,
+            crate::ports::brain::ECHO_PATH,
+            "no inference configured, so the runtime must still be on the echo brain",
+        );
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            dto["cognition"], "unconfigured",
+            "a pool is attached, so a provider really is one settings page away: {dto}"
+        );
+    }
+
+    /// A harness is attached and the config cannot be **read** — which is not
+    /// the same as nothing being configured (codex review of PR #1740).
+    ///
+    /// `ops::inference` already refuses this promise from the other side: its
+    /// `unreadable_inference_config_is_not_restartable` regression builds this
+    /// exact runtime — reachable harness over a failing `SecretStore` — and
+    /// asserts `RunnerGap::NotWired`, "not `InferenceRequired`", because saving
+    /// cannot resolve a configuration the host cannot read. Chat pointing that
+    /// same operator at Settings → Inference would make, on the same runtime,
+    /// the promise the workflow-run route declines to make.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_unreadable_inference_config_is_not_reported_as_unconfigured() {
+        use crate::ports::types::SecretValue;
+
+        struct FailingSecrets;
+        #[async_trait::async_trait]
+        impl crate::ports::SecretStore for FailingSecrets {
+            async fn get(&self, _c: &CompanyId, _key: &str) -> crate::Result<Option<SecretValue>> {
+                Err(crate::error::OpenCompanyError::Store(
+                    "secret store unreachable".into(),
+                ))
+            }
+            async fn set(&self, _c: &CompanyId, _key: &str, _v: SecretValue) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(crate::harness::HarnessPool::new()))
+            .with_secrets(std::sync::Arc::new(FailingSecrets))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.cognition().path,
+            crate::ports::brain::ECHO_PATH,
+            "an unresolvable config leaves the runtime on the echo brain",
+        );
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            dto["cognition"], "undetermined",
+            "the host cannot read the config, so it must not name a remedy: {dto}"
+        );
+        assert_ne!(
+            dto["cognition"], "unconfigured",
+            "that would promise a settings page `runner_gap_for` refuses to promise: {dto}"
+        );
+    }
+
+    /// A provider is saved and resolves, and the company is still on the echo
+    /// brain because its runtime predates the save (codex review of PR #1740).
+    ///
+    /// The likeliest route to the echo brain in practice, and the one where
+    /// getting it wrong is rudest: the operator followed this very banner's
+    /// link, chose a provider, saved it — and `unconfigured` would send them
+    /// back to that page to redo work they did correctly. `ops::inference`
+    /// calls this same state `restartRequired` (issue #266).
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_saved_provider_awaiting_a_restart_reports_restart_required() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        // A manifest `[inference]` section resolves without a secret write, so
+        // the config is set *before* the runtime is built and the runtime still
+        // ends up on the echo brain — the same shape as a console save landing
+        // after boot, without needing to rebuild anything mid-test.
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[inference]\nprovider = \"ollama\"\n";
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        // Built with a pool but with the brain forced to echo, which is exactly
+        // what a runtime that predates the save is holding.
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(crate::harness::HarnessPool::new()))
+            .with_brain(std::sync::Arc::new(crate::brain::EchoBrain))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(runtime.cognition().path, crate::ports::brain::ECHO_PATH);
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            dto["cognition"], "restart-required",
+            "a provider resolves, so the remedy is a restart, not another choice: {dto}"
+        );
+        assert_ne!(
+            dto["cognition"], "unconfigured",
+            "that would send the operator back to the page they just came from: {dto}"
+        );
+    }
+
+    /// The other direction, so the field is not a constant: a runtime holding a
+    /// brain that is not the echo brain reports `configured`.
+    #[tokio::test]
+    async fn a_company_with_a_real_brain_reports_configured() {
+        use crate::ports::brain::{Brain, CycleHost};
+        use crate::ports::types::{CycleRequest, CycleResult};
+
+        /// A brain that does nothing but exist. It reports the default
+        /// `Cognition` (path `custom`), which is what any embedder-injected
+        /// brain reports — cognition of a kind this crate cannot name, but
+        /// cognition all the same.
+        struct InjectedBrain;
+
+        #[async_trait::async_trait]
+        impl Brain for InjectedBrain {
+            async fn run_cycle(
+                &self,
+                _req: CycleRequest,
+                _host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                Ok(CycleResult {
+                    channel_responses: Vec::new(),
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: Default::default(),
+                })
+            }
+        }
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
+        // Seeds the company record and an echo-brain runtime; the insert below
+        // replaces that runtime with one holding a real brain, over the same
+        // record — so the only thing that differs from the test above is the
+        // brain, which is the point.
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_brain(std::sync::Arc::new(InjectedBrain))
+            .build()
+            .await
+            .unwrap();
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["cognition"], "configured", "{dto}");
     }
 
     #[tokio::test]
@@ -758,6 +1163,7 @@ mod tests {
                     cost_usd: 0.0,
                     kind: SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -815,6 +1221,7 @@ mod tests {
                     cost_usd: 0.0,
                     kind: SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -1031,6 +1438,58 @@ mod tests {
         }
     }
 
+    /// Both DTO construction sites report which provider a company's searches
+    /// actually reach, and it tracks what the Search settings page stored.
+    ///
+    /// Same #567 precedent as the two tests above: a field wired into one branch
+    /// alone tells the truth to a company with no plan and lies to every company
+    /// that has one.
+    #[tokio::test]
+    async fn both_response_paths_carry_the_effective_search_provider() {
+        use crate::company::search::{API_KEY_SECRET, PROVIDER_SECRET};
+        use crate::ports::types::SecretValue;
+
+        let grants_search = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"search\"]\n";
+        for manifest in [
+            grants_search.to_string(),
+            format!("{grants_search}[plan]\nname = \"starter\"\n"),
+        ] {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let state = state_with_manifest(&home, &manifest).await;
+            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+            let (_, dto) = get_capabilities(&state).await;
+            assert_eq!(
+                dto["searchProvider"], "managed",
+                "nothing configured, so the platform's account answers: {dto}"
+            );
+
+            // A provider selected with no key is NOT a connection — the panel
+            // must not report one, because the agents are still on managed.
+            runtime
+                .secrets()
+                .set(runtime.id(), PROVIDER_SECRET, SecretValue("exa".into()))
+                .await
+                .unwrap();
+            let (_, dto) = get_capabilities(&state).await;
+            assert_eq!(dto["searchProvider"], "managed", "{dto}");
+
+            runtime
+                .secrets()
+                .set(runtime.id(), API_KEY_SECRET, SecretValue("exa_key".into()))
+                .await
+                .unwrap();
+            let (_, dto) = get_capabilities(&state).await;
+            assert_eq!(
+                dto["searchProvider"], "exa",
+                "a finished connection is what the company searches through: {dto}"
+            );
+            // And never the key itself, on either path.
+            assert!(!dto.to_string().contains("exa_key"), "{dto}");
+        }
+    }
+
     /// An unreadable secret store **omits** the field rather than reporting
     /// `none`.
     ///
@@ -1059,6 +1518,90 @@ mod tests {
         assert_eq!(
             dto["composioGranted"], true,
             "the manifest-derived flags are unaffected by the store: {dto}"
+        );
+    }
+
+    /// **Issue #1192, test 1.** Publishing is reported on **both** DTO paths.
+    ///
+    /// The DTO is built in two places — `unconfigured` and the configured tail
+    /// of `effective_status` — and a field wired into one of them alone reports
+    /// honestly for a company with no `[plan]` and is silently absent for every
+    /// company that has one. That is the failure mode the `OptInFlags` note
+    /// names, and it is worth a test rather than a convention because the two
+    /// literals are 200 lines apart.
+    #[tokio::test]
+    async fn publish_capability_is_reported_on_both_dto_paths() {
+        // No `[plan]` → the `unconfigured` literal.
+        let home_a_dir = home();
+        let state = state_with_manifest(
+            home_a_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"files\"]\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["configured"], false, "{dto}");
+        assert_eq!(dto["publishGranted"], true, "{dto}");
+        assert!(
+            dto.get("publishInBuild").is_some(),
+            "the build flag is always present so the console can render every state: {dto}"
+        );
+
+        // A `[plan]` → the configured literal, the one a field is most easily
+        // forgotten in.
+        let home_b_dir = home();
+        let state2 = state_with_manifest(
+            home_b_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"files\"]\n\
+             [plan]\nname = \"starter\"\n",
+        )
+        .await;
+        let (status2, dto2) = get_capabilities(&state2).await;
+        assert_eq!(status2, StatusCode::OK);
+        assert_eq!(dto2["configured"], true, "{dto2}");
+        assert_eq!(
+            dto2["publishGranted"], true,
+            "a company with a plan must get the same publishing verdict: {dto2}"
+        );
+        assert_eq!(
+            dto2["publishInBuild"], dto["publishInBuild"],
+            "the build flag cannot depend on whether a plan is configured: {dto2}"
+        );
+    }
+
+    /// **Issue #1192, test 2.** A company whose grants confer no file family
+    /// reads as ungranted — using the *shipped* `companies/e2e_harness` allow
+    /// list rather than an invented one, so the negative is a real manifest
+    /// somebody runs rather than a string chosen to make the assertion pass.
+    #[tokio::test]
+    async fn publish_is_ungranted_without_a_file_or_docs_grant() {
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\n\
+             allow = [\"composio\", \"mcp:*\", \"workspace\", \"workspace.*\", \"web\"]\n",
+        )
+        .await;
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            dto["publishGranted"], false,
+            "no files/docs grant means no publish_artifact on the belt: {dto}"
+        );
+
+        // …and the wildcard the majority of manifests actually ship DOES grant
+        // it. Asserted here, beside the negative, so the two shapes read
+        // against each other.
+        let wildcard_dir = home();
+        let state2 = state_with_manifest(
+            wildcard_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"*\"]\n",
+        )
+        .await;
+        let (_, dto2) = get_capabilities(&state2).await;
+        assert_eq!(
+            dto2["publishGranted"], true,
+            "a bare `*` confers publishing — this is the shape most manifests ship: {dto2}"
         );
     }
 }

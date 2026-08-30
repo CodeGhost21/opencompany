@@ -8,12 +8,7 @@ use async_graphql::SimpleObject;
 
 use crate::company::dns::DomainStatus;
 use crate::company::runtime::CompanyRuntime;
-use crate::server::ops::smtp::{SmtpCredentials, SmtpStatus};
-
-/// The reserved SecretStore key holding the JSON domain status.
-const DOMAIN_KEY: &str = "__domain";
-/// The reserved SecretStore key holding the JSON SMTP credentials.
-const SMTP_KEY: &str = "__smtp";
+use crate::server::ops::smtp::SmtpStatus;
 
 /// One third-party connection's state: manifest intent plus live OAuth status.
 #[derive(SimpleObject)]
@@ -134,29 +129,37 @@ pub(crate) async fn resolve_connections(
 }
 
 /// Resolves `Company.domain`, returning null when no domain is configured.
+///
+/// Delegates to [`ops::domain::load_domain`](crate::server::ops::domain::load_domain),
+/// the same read `GET …/domain` serves, for the reason
+/// [`resolve_connections`] documents: two copies of one decision are free to
+/// drift, and a domain that read as verified on one plane and not the other
+/// would be exactly that drift (issue #316).
 pub(crate) async fn resolve_domain(
     runtime: &Arc<CompanyRuntime>,
 ) -> async_graphql::Result<Option<DomainStatusGql>> {
-    let Some(value) = runtime.secrets().get(runtime.id(), DOMAIN_KEY).await? else {
-        return Ok(None);
-    };
-    let status: DomainStatus = serde_json::from_str(value.expose())
+    let stored = crate::server::ops::domain::load_domain(runtime.as_ref())
+        .await
         .map_err(|e| async_graphql::Error::new(format!("stored domain status is invalid: {e}")))?;
-    Ok(Some(status.into()))
+    Ok(stored.map(DomainStatusGql::from))
 }
 
 /// Resolves `Company.smtp`: the non-secret SMTP projection (never the password).
+///
+/// Reads through [`ops::smtp::load_credentials`](crate::server::ops::smtp::load_credentials)
+/// — the same load `GET …/smtp` and the test send use — and projects it here.
+/// The projection is [`SmtpStatus::from_credentials`], which is what drops the
+/// password; this resolver never sees a shape that could carry one onward.
 pub(crate) async fn resolve_smtp(
     runtime: &Arc<CompanyRuntime>,
 ) -> async_graphql::Result<SmtpStatusGql> {
-    let status = match runtime.secrets().get(runtime.id(), SMTP_KEY).await? {
-        Some(value) => {
-            let creds: SmtpCredentials = serde_json::from_str(value.expose()).map_err(|e| {
-                async_graphql::Error::new(format!("stored SMTP credentials are invalid: {e}"))
-            })?;
-            SmtpStatus::from_credentials(&creds)
-        }
-        None => SmtpStatus::unconfigured(),
-    };
+    let stored = crate::server::ops::smtp::load_credentials(runtime.as_ref())
+        .await
+        .map_err(|e| {
+            async_graphql::Error::new(format!("stored SMTP credentials are invalid: {e}"))
+        })?;
+    let status = stored
+        .as_ref()
+        .map_or_else(SmtpStatus::unconfigured, SmtpStatus::from_credentials);
     Ok(status.into())
 }

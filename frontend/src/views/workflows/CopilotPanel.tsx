@@ -33,10 +33,11 @@ import { Bot, Loader2, Send } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
-import { ApiError } from "@/api/types";
+import { ApiError, type WorkflowProblem } from "@/api/types";
 import {
   listWorkflowToolSlugs,
   updateWorkflow,
+  type UnwiredWorkflowTool,
   type WorkflowGraph,
   type WorkflowRunOutcome,
 } from "@/api/workflows";
@@ -81,6 +82,8 @@ interface Review {
   state: ProposalState;
   /** The host's refusal of an apply, when one came back. */
   error?: string;
+  /** The per-node breakdown behind {@link error}, when the host sent one (#836). */
+  errorProblems?: WorkflowProblem[];
 }
 
 export function CopilotPanel({
@@ -153,6 +156,12 @@ export function CopilotPanel({
   // `runs`: an empty list on a host that serves the route ("no tools granted")
   // must not read the same as a host that does not serve it ("cannot say").
   const [toolSlugsKnown, setToolSlugsKnown] = useState(false);
+  // Issue #874. Granted here but unwired on this deployment — named to the model
+  // as off-limits, so it can explain the gap rather than propose a node that
+  // fails at the first run.
+  const [unwiredTools, setUnwiredTools] = useState<
+    UnwiredWorkflowTool[] | undefined
+  >(undefined);
   // Issue #415. One entry per company message that carried a proposal block,
   // parsed EXACTLY ONCE, when the message first appears.
   //
@@ -174,6 +183,14 @@ export function CopilotPanel({
 
   const workflowId = graph.id;
   const sourceDefined = graph.editable === false;
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
 
   // Replay this workflow's transcript. Keyed on the workflow id, so switching
   // workflow swaps transcripts rather than appending to the previous one.
@@ -249,6 +266,13 @@ export function CopilotPanel({
     setRoster(undefined);
     setToolSlugs(undefined);
     setToolSlugsKnown(false);
+    // Cleared with the rest of the grounding, and for the same reason. Left
+    // behind, the previous company's unwired list rides along with THIS
+    // company's "the granted tools could not be listed here" for the whole
+    // in-flight window — a prompt that names tools as off-limits in the same
+    // breath as admitting it cannot name the granted ones, built from another
+    // company's wiring.
+    setUnwiredTools(undefined);
     (async () => {
       try {
         const team = await client.listTeam(company);
@@ -262,10 +286,11 @@ export function CopilotPanel({
     })();
     (async () => {
       try {
-        const slugs = await listWorkflowToolSlugs(client, company);
+        const tools = await listWorkflowToolSlugs(client, company);
         if (live) {
-          setToolSlugs(slugs);
+          setToolSlugs(tools.slugs);
           setToolSlugsKnown(true);
+          setUnwiredTools(tools.unwired);
         }
       } catch (e) {
         // The route is absent (older host): "cannot say", not "no tools".
@@ -273,6 +298,7 @@ export function CopilotPanel({
         if (live) {
           setToolSlugs(undefined);
           setToolSlugsKnown(false);
+          setUnwiredTools(undefined);
         }
       }
     })();
@@ -326,7 +352,12 @@ export function CopilotPanel({
     async (messageId: string, proposal: WorkflowProposal) => {
       setReviews((prev) => ({
         ...prev,
-        [messageId]: { ...prev[messageId], state: "applying", error: undefined },
+        [messageId]: {
+          ...prev[messageId],
+          state: "applying",
+          error: undefined,
+          errorProblems: undefined,
+        },
       }));
       try {
         const saved = await updateWorkflow(
@@ -338,7 +369,12 @@ export function CopilotPanel({
         );
         setReviews((prev) => ({
           ...prev,
-          [messageId]: { ...prev[messageId], state: "applied", error: undefined },
+          [messageId]: {
+            ...prev[messageId],
+            state: "applied",
+            error: undefined,
+            errorProblems: undefined,
+          },
         }));
         onApplied(saved);
       } catch (e) {
@@ -350,9 +386,17 @@ export function CopilotPanel({
             : "The change could not be applied.";
         // Back to `pending`, not to a dead end: the diff stays on screen and the
         // operator can dismiss it or retry after reloading.
+        // Issue #836: the host names the node and field it refused on; before
+        // this the console kept only the flattened sentence.
+        const problems = e instanceof ApiError ? e.problems : undefined;
         setReviews((prev) => ({
           ...prev,
-          [messageId]: { ...prev[messageId], state: "pending", error: message },
+          [messageId]: {
+            ...prev[messageId],
+            state: "pending",
+            error: message,
+            errorProblems: problems,
+          },
         }));
         if (conflict && e instanceof ApiError) onConflict?.(e.message);
       }
@@ -364,7 +408,12 @@ export function CopilotPanel({
   const dismiss = useCallback((messageId: string) => {
     setReviews((prev) => ({
       ...prev,
-      [messageId]: { ...prev[messageId], state: "dismissed", error: undefined },
+      [messageId]: {
+        ...prev[messageId],
+        state: "dismissed",
+        error: undefined,
+        errorProblems: undefined,
+      },
     }));
   }, []);
 
@@ -426,7 +475,15 @@ export function CopilotPanel({
         client,
         company,
         workflowId,
-        { graph, runs, runsKnown, roster, toolSlugs, toolSlugsKnown },
+        {
+          graph,
+          runs,
+          runsKnown,
+          roster,
+          toolSlugs,
+          toolSlugsKnown,
+          unwiredTools,
+        },
         question,
       );
       if (!mine()) return;
@@ -479,6 +536,7 @@ export function CopilotPanel({
     sending,
     toolSlugs,
     toolSlugsKnown,
+    unwiredTools,
     workflowId,
   ]);
 
@@ -514,8 +572,9 @@ export function CopilotPanel({
             <AlertDescription>{historyError}</AlertDescription>
           </Alert>
         )}
-        {/* What it can see and what it cannot do, stated before the first
-            question rather than discovered after it.
+        {/* Lead with the work this copilot can help with. Its boundaries still
+            need to be easy to find, but they answer a question that usually
+            comes later than the operator's first one.
 
             This block is a claim about the host, so it changes only when the
             host does. #405 had to *withdraw* a confinement claim: the thread
@@ -526,43 +585,56 @@ export function CopilotPanel({
             and a turn that says which part of a question it could not answer
             rather than reaching for the rest of the company. See the header of
             `@/api/workflow-copilot`, and `harness::confine` host-side. */}
-        <div className="rounded-lg border bg-muted/30 p-2 text-2xs leading-snug text-muted-foreground">
+        <div
+          className="rounded-lg border bg-muted/30 p-2 text-2xs leading-snug text-muted-foreground"
+          data-testid="workflow-copilot-introduction"
+        >
           <p>
-            Answers are grounded in{" "}
-            <span className="font-medium text-foreground">{graph.name}</span>: its steps and
-            its recorded runs are what gets sent with your question.
+            Ask what <span className="font-medium text-foreground">{graph.name}</span> does,
+            why a run failed, or what to change.
           </p>
-          <p className="mt-1.5">
-            That is also all the answer is drawn from. This turn runs{" "}
-            <span className="font-medium text-foreground">confined to this workflow</span>: no
-            tools, no company memory, and no reach into the board, your teammates or another
-            workflow. Ask something that needs the wider company and it will say so rather
-            than guess.
-          </p>
-          <p className="mt-1.5">
-            The conversation stays here too: it isn&apos;t in the company chat, and another
-            workflow&apos;s copilot can&apos;t see it.
-          </p>
-          <p className="mt-1.5">
-            {sourceDefined ? (
-              <>
-                It can explain and suggest, but{" "}
-                <span className="font-medium text-foreground">
-                  it can&apos;t change the workflow
-                </span>
-                . This one is defined by a file in the company source tree, so changes belong in
-                the company repository.
-              </>
-            ) : (
-              <>
-                Ask for a change and it{" "}
-                <span className="font-medium text-foreground">proposes one you review</span>: you
-                see the diff and decide. Nothing is written until you press Apply, and it goes
-                through the same save the editor uses, which refuses a workflow that moved while
-                you were reading.
-              </>
-            )}
-          </p>
+          <details className="mt-1.5">
+            <summary className="cursor-pointer font-medium text-foreground">
+              How this copilot works
+            </summary>
+            <div className="mt-1.5">
+              <p>
+                Answers are grounded in <span className="font-medium text-foreground">{graph.name}</span>
+                : its steps and its recorded runs are what gets sent with your question.
+              </p>
+              <p className="mt-1.5">
+                That is also all the answer is drawn from. This turn runs{" "}
+                <span className="font-medium text-foreground">confined to this workflow</span>:
+                no tools, no company memory, and no reach into the board, your teammates or
+                another workflow. Ask something that needs the wider company and it will say so
+                rather than guess.
+              </p>
+              <p className="mt-1.5">
+                The conversation stays here too: it isn&apos;t in the company chat, and another
+                workflow&apos;s copilot can&apos;t see it.
+              </p>
+              <p className="mt-1.5">
+                {sourceDefined ? (
+                  <>
+                    It can explain and suggest, but{" "}
+                    <span className="font-medium text-foreground">
+                      it can&apos;t change the workflow
+                    </span>
+                    . This one is defined by a file in the company source tree, so changes belong
+                    in the company repository.
+                  </>
+                ) : (
+                  <>
+                    Ask for a change and it{" "}
+                    <span className="font-medium text-foreground">proposes one you review</span>:
+                    you see the diff and decide. Nothing is written until you press Apply, and it
+                    goes through the same save the editor uses, which refuses a workflow that
+                    moved while you were reading.
+                  </>
+                )}
+              </p>
+            </div>
+          </details>
         </div>
 
         {echoing && (
@@ -617,6 +689,7 @@ export function CopilotPanel({
                     state={reviews[m.id].state}
                     blocked={blockedReason(m.id, reviews[m.id])}
                     error={reviews[m.id].error}
+                    problems={reviews[m.id].errorProblems}
                     onApply={() => void apply(m.id, reviews[m.id].proposal!)}
                     onDismiss={() => dismiss(m.id)}
                   />
@@ -676,7 +749,7 @@ export function CopilotPanel({
         />
         <Button
           size="sm"
-          className="w-full"
+          className="w-full disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100"
           onClick={() => void send()}
           disabled={sending || echoing || !ready || !draft.trim()}
           data-testid="workflow-copilot-send"

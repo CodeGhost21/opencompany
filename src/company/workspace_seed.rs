@@ -181,11 +181,11 @@ mod tests {
     fn walk_is_deterministic_and_markdown_only() {
         let dir = std::env::temp_dir().join(format!("oc-ws-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("Brand")).unwrap();
-        std::fs::create_dir_all(dir.join("Campaigns")).unwrap();
-        std::fs::write(dir.join("README.md"), "# Root\n[[Brand voice]]").unwrap();
-        std::fs::write(dir.join("Brand/Brand voice.md"), "# Voice").unwrap();
-        std::fs::write(dir.join("Campaigns/notes.txt"), "ignored").unwrap();
+        std::fs::create_dir_all(dir.join("brand")).unwrap();
+        std::fs::create_dir_all(dir.join("campaigns")).unwrap();
+        std::fs::write(dir.join("readme.md"), "# Root\n[[Brand voice]]").unwrap();
+        std::fs::write(dir.join("brand/brand-voice.md"), "# Voice").unwrap();
+        std::fs::write(dir.join("campaigns/notes.txt"), "ignored").unwrap();
         std::fs::write(dir.join("cover.png"), b"\x89PNG").unwrap();
 
         let nodes = walk_workspace(&dir).unwrap();
@@ -196,19 +196,19 @@ mod tests {
         // Sorted, folders + markdown only; the .txt and .png are skipped.
         assert_eq!(
             paths,
-            vec!["Brand", "Brand/Brand voice.md", "Campaigns", "README.md"]
+            vec!["brand", "brand/brand-voice.md", "campaigns", "readme.md"]
         );
 
         let readme = nodes
             .iter()
-            .find(|n| n.rel_path == Path::new("README.md"))
+            .find(|n| n.rel_path == Path::new("readme.md"))
             .unwrap();
         assert_eq!(readme.kind, NodeKind::Markdown);
         assert_eq!(readme.content.as_deref(), Some("# Root\n[[Brand voice]]"));
 
         let brand = nodes
             .iter()
-            .find(|n| n.rel_path == Path::new("Brand"))
+            .find(|n| n.rel_path == Path::new("brand"))
             .unwrap();
         assert_eq!(brand.kind, NodeKind::Folder);
         assert_eq!(brand.content, None);
@@ -229,6 +229,6 @@ mod tests {
         assert_eq!(err.code(), "data_invalid");
         assert!(err.to_string().contains("escapes the workspace root"));
         // A normal nested path is accepted.
-        assert!(reject_escaping(root, Path::new("Brand/Brand voice.md")).is_ok());
+        assert!(reject_escaping(root, Path::new("brand/brand-voice.md")).is_ok());
     }
 }

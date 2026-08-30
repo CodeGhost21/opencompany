@@ -5,6 +5,8 @@ import { ThemeProvider } from "next-themes";
 import { App } from "./App";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { purgeStoredSmtpPasswords } from "@/lib/domain";
+import { startScrollActivity } from "@/lib/scroll-activity";
 import "./index.css";
 
 /**
@@ -31,5 +33,19 @@ function mount(): void {
     </StrictMode>,
   );
 }
+
+// Started before the first render and never disposed: it is one capturing
+// listener for the life of the document, and every scroll container in the app
+// — including ones mounted much later — depends on it for the `data-scrolling`
+// mark the themed scrollbars in `index.css` lift on. Outside React on purpose,
+// so StrictMode's double-invoked effects cannot arm it twice.
+startScrollActivity();
+
+// Deletes SMTP passwords the pre-#1460 console wrote to localStorage, before
+// the first render and therefore before anything can read one back. At boot
+// rather than in the Settings card because the operator is not obliged to open
+// Settings again, and the credential has to be gone either way. A no-op on any
+// browser that never stored one.
+purgeStoredSmtpPasswords();
 
 mount();

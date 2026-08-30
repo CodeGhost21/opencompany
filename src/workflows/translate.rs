@@ -520,9 +520,11 @@ mod tests {
     fn agent_ref_survives_a_spoofing_config() {
         use crate::company::{WorkflowFile, WorkflowNodeDef, WorkflowNodeKind};
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![WorkflowNodeDef {
                 id: "worker".into(),
                 kind: WorkflowNodeKind::Agent,
@@ -534,6 +536,7 @@ mod tests {
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                repeatable: None,
                 destination: None,
             }],
             edges: Vec::new(),
@@ -638,9 +641,11 @@ mod tests {
     fn condition_node_with_route_sends_error_edge_to_error_port() {
         use crate::company::{WorkflowFile, WorkflowNodeDef, WorkflowNodeKind};
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "gate".into(),
@@ -653,6 +658,7 @@ mod tests {
                     on_error: Some("route".into()),
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 node_stub("yes_path"),
@@ -702,9 +708,11 @@ mod tests {
         ];
         for (oc, tf) in kinds {
             let file = WorkflowFile {
+                global: false,
                 id: "wf".into(),
                 name: "WF".into(),
                 description: None,
+                owner_desk: None,
                 nodes: vec![WorkflowNodeDef {
                     id: "n".into(),
                     kind: oc,
@@ -716,6 +724,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 }],
                 edges: Vec::new(),
@@ -730,9 +739,11 @@ mod tests {
     fn switch_labels_map_to_verbatim_ports() {
         use crate::company::{WorkflowFile, WorkflowNodeDef, WorkflowNodeKind};
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "sw".into(),
@@ -745,6 +756,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 node_stub("paid"),
@@ -851,6 +863,7 @@ to = "done"
             on_error: None,
             retry: None,
             requires_approval: None,
+            repeatable: None,
             destination: None,
         }
     }

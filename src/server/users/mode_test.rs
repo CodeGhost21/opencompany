@@ -24,8 +24,11 @@ use tower::ServiceExt;
 use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
 use crate::runtime::RuntimeBuilder;
+use crate::server::ops::ConnectionsRuntime;
+use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
+use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::server::users::token;
 use crate::server::users::wallet::{self, VerifyRequest};
@@ -54,6 +57,26 @@ async fn state_in_mode(
     mode: AuthMode,
     bootstrap: Option<&str>,
 ) -> AppState {
+    state_in_mode_on(
+        home,
+        mode,
+        bootstrap,
+        AppConfig::default(),
+        ConnectionsRuntime::new(),
+    )
+    .await
+}
+
+/// The same host, over an explicit config and connection set — for the
+/// questions whose answer is a property of the *deployment* rather than the
+/// mode: whether the bind is routable, and whether mail is wired.
+async fn state_in_mode_on(
+    home: &std::path::Path,
+    mode: AuthMode,
+    bootstrap: Option<&str>,
+    config: AppConfig,
+    connections: ConnectionsRuntime,
+) -> AppState {
     let toml_src = match (mode, bootstrap) {
         (AuthMode::Email, Some(who)) => {
             format!("[company]\nname = \"Acme\"\n[users]\nmode = \"email\"\nadmins = [\"{who}\"]\n")
@@ -79,6 +102,8 @@ async fn state_in_mode(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -90,9 +115,13 @@ async fn state_in_mode(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -101,9 +130,35 @@ async fn state_in_mode(
         .build()
         .await
         .unwrap();
-    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    let state = AppState::new(config)
+        .with_home(home.to_path_buf())
+        .with_connections(connections);
     state.registry().insert(id, Arc::new(runtime));
     state
+}
+
+/// A routable bind: nothing is echoed back to the caller here, so a magic link
+/// is only usable if it can genuinely be mailed.
+fn routable() -> AppConfig {
+    AppConfig {
+        bind: "0.0.0.0:8080".to_string(),
+        ..AppConfig::default()
+    }
+}
+
+/// A wired mail transport, so a link is actually sent.
+fn mail_connections() -> ConnectionsRuntime {
+    ConnectionsRuntime::new()
+        .with_mail(Arc::new(RecordingMailSender::new()))
+        .with_mail_credentials(MailCredentials::Smtp(SmtpCredentials {
+            host: "smtp.test".into(),
+            port: 587,
+            security: SmtpSecurity::Starttls,
+            username: "u".into(),
+            password: SecretValue("p".into()),
+            from_name: "Acme".into(),
+            from_email: "noreply@acme.test".into(),
+        }))
 }
 
 fn post(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -169,6 +224,158 @@ async fn auth_config_publishes_the_mode_to_an_anonymous_caller() {
         assert_eq!(body["mode"], mode.as_str(), "{mode}");
         assert_eq!(body["passwords"], passwords, "{mode}");
     }
+}
+
+/// The sign-in screen is the one place a person confirms *what* they are
+/// signing in to before handing over a credential, and on the hosted platform
+/// every tenant is a separate company on its own URL. The console cannot ask
+/// anything else for the name — every other route that reports it is behind the
+/// very sign-in being drawn — so it has to come back here (issue #1334).
+#[tokio::test]
+async fn auth_config_names_the_company_to_an_anonymous_caller() {
+    for mode in [AuthMode::Email, AuthMode::Wallet, AuthMode::None] {
+        let dir = home();
+        let state = state_in_mode(dir.path(), mode, None).await;
+        let response = router(state)
+            .oneshot(get("/api/v1/company/auth/config"))
+            .await
+            .unwrap();
+        let body = body_json(response).await;
+        // The manifest's display name, not the id it is stored under — the
+        // fixture spells them differently ("Acme" vs `acme`) precisely so a
+        // fallback to the id cannot pass this.
+        assert_eq!(
+            body["name"], "Acme",
+            "every mode draws a heading, so every mode needs the name: {body}"
+        );
+    }
+}
+
+/// A manifest that names the company nothing still has to produce a heading.
+/// The id is what every other surface calls it in that case — `status` makes
+/// the same substitution — and a blank `h1` is the bug this field exists to
+/// remove, so it must not be reachable by writing `name = ""`.
+#[tokio::test]
+async fn auth_config_falls_back_to_the_company_id_when_the_manifest_has_no_name() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::Email, None).await;
+    let id = CompanyId::new("acme");
+    let store = crate::store::FsCompanyStore::new(dir.path().to_path_buf());
+    let mut record = store.load(&id).await.unwrap().expect("the fixture record");
+    record.manifest.company.name = "   ".to_string();
+    store.save(&record).await.unwrap();
+
+    let response = router(state)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(
+        body["name"], "acme",
+        "a blank name is not a heading; the id is: {body}"
+    );
+}
+
+/// The record the name comes from is not there, or is not readable.
+///
+/// Both are the same statement: a heading is decoration on a route whose real
+/// payload is the mode, and a console that cannot learn the mode draws the
+/// wrong screen entirely. So neither case may fail the request — they fall back
+/// to the id, exactly as a blank name does.
+///
+/// The two are separate paths in `display_name`: a missing bundle is `Ok(None)`
+/// from the store, an unreadable one is `Err`, and the `Err` arm is the one that
+/// would take the route down if it were propagated.
+#[tokio::test]
+async fn auth_config_falls_back_to_the_company_id_when_the_record_cannot_be_read() {
+    for (case, contents) in [("gone", None), ("unreadable", Some("}} not toml {{"))] {
+        let dir = home();
+        let state = state_in_mode(dir.path(), AuthMode::Email, None).await;
+        let manifest_path =
+            crate::store::paths::Bundle::new(dir.path(), &CompanyId::new("acme")).company_toml();
+        match contents {
+            Some(garbage) => std::fs::write(&manifest_path, garbage).unwrap(),
+            None => std::fs::remove_file(&manifest_path).unwrap(),
+        }
+
+        let response = router(state)
+            .oneshot(get("/api/v1/company/auth/config"))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a missing name must not cost the console the mode ({case})"
+        );
+        let body = body_json(response).await;
+        assert_eq!(body["name"], "acme", "({case}) {body}");
+        assert_eq!(body["mode"], "email", "({case}) {body}");
+    }
+}
+
+/// A routable host with no transport cannot deliver a magic link and will not
+/// echo the code either, so the form is a dead end. The console has to be told
+/// that in the payload — from the outside a link request there answers `sent`
+/// exactly like one that worked.
+#[tokio::test]
+async fn auth_config_reports_a_magic_link_that_cannot_arrive() {
+    let dir = home();
+    let state = state_in_mode_on(
+        dir.path(),
+        AuthMode::Email,
+        None,
+        routable(),
+        ConnectionsRuntime::new(),
+    )
+    .await;
+    let response = router(state)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+
+    assert_eq!(
+        body["magicLink"], false,
+        "no transport and no echo is a dead end: {body}"
+    );
+}
+
+/// The two ways a link does reach the person: mailed, or — on a loopback host —
+/// handed straight back in the response. The second is the laptop case, and
+/// treating it as "no magic link" would take the form away from the only host
+/// where it needs no configuration at all.
+#[tokio::test]
+async fn auth_config_reports_a_magic_link_that_is_mailed_or_echoed() {
+    let dir = home();
+    let mailed = state_in_mode_on(
+        dir.path(),
+        AuthMode::Email,
+        None,
+        routable(),
+        mail_connections(),
+    )
+    .await;
+    let response = router(mailed)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(
+        body["magicLink"], true,
+        "a wired transport sends it: {body}"
+    );
+
+    let echoed = home();
+    let loopback = state_in_mode(echoed.path(), AuthMode::Email, None).await;
+    let response = router(loopback)
+        .oneshot(get("/api/v1/company/auth/config"))
+        .await
+        .unwrap();
+    let body = body_json(response).await;
+    assert_eq!(
+        body["magicLink"], true,
+        "a loopback host hands the code back: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -881,6 +1088,36 @@ async fn the_local_owner_is_the_same_person_on_every_request() {
     let second = body_json(app.oneshot(get("/api/v1/company/auth/me")).await.unwrap()).await;
     assert_eq!(first["id"], second["id"]);
     assert!(first["id"].as_str().is_some_and(|id| !id.is_empty()));
+}
+
+/// The owner of a company with no sign-in is still a person with a name and a
+/// face — and on the desktop they are the *only* person, so if the profile route
+/// did not serve `none` mode it would not serve the case it matters most in.
+#[tokio::test]
+async fn the_local_owner_can_name_themselves_and_pick_a_face() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let app = router(state);
+
+    let request = Request::builder()
+        .method("PATCH")
+        .uri("/api/v1/company/auth/me")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"displayName": "Steven", "avatar": "tiny:clay"}).to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = body_json(response).await;
+    assert_eq!(saved["displayName"], "Steven", "{saved}");
+    assert_eq!(saved["avatar"], "tiny:clay", "{saved}");
+
+    // The same durable owner record, so the choice survives the next request
+    // rather than living on a principal invented per call.
+    let reread = body_json(app.oneshot(get("/api/v1/company/auth/me")).await.unwrap()).await;
+    assert_eq!(reread["id"], saved["id"], "{reread}");
+    assert_eq!(reread["avatar"], "tiny:clay", "{reread}");
 }
 
 /// `none` cannot add users. An invite would grant an account nobody could ever

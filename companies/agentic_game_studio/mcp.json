@@ -1,0 +1,19 @@
+{
+  "$comment": "Engine and middleware documentation, plus the issue tracker a shipping game's feature and balance work is planned in.",
+  "mcpServers": {
+    "deepwiki": {
+      "url": "https://mcp.deepwiki.com/mcp",
+      "description": "Documentation and Q&A for any public GitHub repository. Public and no-auth."
+    },
+    "context7": {
+      "url": "https://mcp.context7.com/mcp",
+      "description": "Version-accurate API and library documentation, so answers match the release in use."
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "description": "Issues and cycles, when the work is tracked outside this board. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/linear/auth"
+    }
+  }
+}

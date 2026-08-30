@@ -1,0 +1,101 @@
+# Who applied, and what was decided about each.
+#
+# The admission bar is the accelerator's only real product decision, and it
+# erodes in a predictable direction: late in a round, with places unfilled, a
+# borderline company becomes a yes. A row that records the decision against the
+# bar — including for the rejections — is what makes that erosion visible while
+# it is happening rather than a cohort later.
+
+title = "Applications"
+purpose = """
+Every application: what they are building, how it was assessed against the \
+admission bar, and why each decision was made. Read it before deciding \
+anything late in a round, when the bar is under the most pressure.\
+"""
+written_by = "`record_entry` to log or advance an application, `close_entry` when it is admitted or rejected"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "applicant"
+role = "title"
+required = true
+description = "The company and what it does."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "team"
+role = "prose"
+description = "Who they are and why these people. The factor that predicts most, in an accelerator more than anywhere."
+
+[[field]]
+name = "against_the_bar"
+role = "prose"
+required = true
+description = "How they measure against each admission criterion, named. Not an overall impression."
+
+[[field]]
+name = "would_the_programme_help"
+role = "prose"
+description = "Whether this programme changes their outcome. A strong company that gains nothing is a rejection, and an honest one."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — admitted, rejected on which criterion, or withdrawn. Required when it closes."
+
+[[status]]
+name = "received"
+
+[[status]]
+name = "screening"
+aliases = ["interviewed"]
+
+[[status]]
+name = "admitted"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "rejected"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "withdrawn"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "In review"
+blurb = "Being screened or interviewed, each assessed against named criteria rather than an impression."
+statuses = ["screening"]
+order = "recent"
+
+[[section]]
+heading = "Received"
+blurb = "Arrived, not yet screened."
+statuses = ["received"]
+order = "recent"
+
+[[section]]
+heading = "Decided"
+blurb = """
+Admitted, rejected on a named criterion, or withdrawn. Comparing the late \
+decisions in a round against the early ones is how an eroding bar gets caught \
+while it is still this round.\
+"""
+statuses = ["admitted", "rejected", "withdrawn"]
+cap = 20

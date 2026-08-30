@@ -221,8 +221,17 @@ impl ConfigProvenance {
 /// A read-only source of environment values. The `std::env`-backed
 /// [`ProcessEnv`] is used at runtime; tests use a [`MapEnv`].
 pub trait EnvSource {
+    /// Returns the raw OS value for `key`, including empty and non-Unicode
+    /// values. Configuration readers that must distinguish a malformed value
+    /// from an unset one should use this rather than [`Self::get`].
+    fn get_os(&self, key: &str) -> Option<std::ffi::OsString>;
+
     /// Returns the value for `key`, or `None` when unset or empty.
-    fn get(&self, key: &str) -> Option<String>;
+    fn get(&self, key: &str) -> Option<String> {
+        self.get_os(key)
+            .and_then(|value| value.into_string().ok())
+            .filter(|value| !value.is_empty())
+    }
 }
 
 /// Reads from the real process environment.
@@ -230,11 +239,8 @@ pub trait EnvSource {
 pub struct ProcessEnv;
 
 impl EnvSource for ProcessEnv {
-    fn get(&self, key: &str) -> Option<String> {
-        match std::env::var(key) {
-            Ok(value) if !value.is_empty() => Some(value),
-            _ => None,
-        }
+    fn get_os(&self, key: &str) -> Option<std::ffi::OsString> {
+        std::env::var_os(key)
     }
 }
 
@@ -260,8 +266,8 @@ impl MapEnv {
 }
 
 impl EnvSource for MapEnv {
-    fn get(&self, key: &str) -> Option<String> {
-        self.0.get(key).filter(|value| !value.is_empty()).cloned()
+    fn get_os(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.0.get(key).cloned().map(std::ffi::OsString::from)
     }
 }
 
@@ -310,6 +316,10 @@ pub struct ConfigFile {
     pub setup_completed_at: Option<i64>,
     /// The `[workspace]` section: data-dir layout lifecycle knobs.
     pub workspace: WorkspaceSection,
+    /// The `[memory]` section: which memory engine this instance binds, when
+    /// the deployment has not named one through `OPENCOMPANY_MEMORY`
+    /// (`docs/spec/runtime/memory-engine.md`).
+    pub memory: MemorySection,
     /// `[[default_mcp_server]]` entries — MCP servers the packaged install
     /// registers and enables for every company, with no user setup (issue #527).
     ///
@@ -326,11 +336,58 @@ pub struct ConfigFile {
     pub default_mcp_servers: Vec<crate::company::McpServer>,
 }
 
+/// The `[memory]` section of `config.toml`: the memory engine an operator
+/// chose from the console, when the deployment did not inject one.
+///
+/// # Why this exists beside the env vars
+///
+/// The engine used to be selectable only through `OPENCOMPANY_MEMORY*`, which
+/// means only by whoever controls the process environment. A self-hosted
+/// operator who wants their company's memory in Supermemory or mem0 had to
+/// edit a unit file and restart. This is the same second layer the rest of the
+/// instance's configuration already has (`docs/spec/runtime/config.md`), so
+/// the console can write the choice and
+/// [`crate::server::ops::memory_engine`] can bind it live.
+///
+/// # Precedence, and why it is not "last writer wins"
+///
+/// `env ⟵ config.toml`, exactly as every other key resolves. A hosted tenant
+/// has `OPENCOMPANY_MEMORY*` injected by the control plane, and a console that
+/// accepted an edit there would write a file, report success, and change
+/// nothing at the next boot — the silently-ignored-configuration failure the
+/// setup flow refuses for the same reason. So when the env names an engine
+/// this section is inert, the console renders read-only, and the write is
+/// refused rather than accepted-and-dropped.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MemorySection {
+    /// `store` | `embedded` | `remote` | `null`, parsed by
+    /// [`MemoryBackend`](crate::store::MemoryBackend). Absent leaves the
+    /// default (`store` — the base backend's own memory).
+    pub backend: Option<String>,
+    /// The engine id for a provider-backed mode: `supermemory`, `mem0`,
+    /// `cognee`, or `namespace` for the in-pod contract store.
+    pub driver: Option<String>,
+    /// The hosted engine's endpoint.
+    pub url: Option<String>,
+    /// The hosted engine's credential.
+    ///
+    /// It lives in this file the same way `tinyhumans_api_key` and
+    /// `github_token` already do — the file is the instance's private
+    /// configuration, mode `0600` where the platform supports it — and it is
+    /// never read back out over HTTP: the engine route reports whether a key
+    /// is set, never its bytes.
+    pub api_key: Option<String>,
+}
+
 /// The `[workspace]` section of `config.toml`: lifecycle of the canonical
 /// data-dir layout (see [`DataLayout`](crate::store::DataLayout)).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceSection {
+    /// Turn each agent's private filesystem workspace into a Git repository and
+    /// checkpoint changes after tool calls. Default: false.
+    pub git_enabled: Option<bool>,
     /// Empty the ephemeral `tmp/` scratch directory on startup. Default: true.
     pub clear_tmp_on_startup: Option<bool>,
     /// Soft quota on the whole workspace, in gibibytes. Absent or `<= 0` means
@@ -361,6 +418,7 @@ impl WorkspaceSection {
     /// Resolves the section against its defaults.
     pub fn resolve(&self) -> WorkspaceConfig {
         WorkspaceConfig {
+            git_enabled: self.git_enabled.unwrap_or(false),
             clear_tmp_on_startup: self.clear_tmp_on_startup.unwrap_or(true),
             storage_quota_bytes: gib_to_bytes(self.storage_quota_gb),
             tmp_quota_bytes: gib_to_bytes(self.tmp_quota_gb),
@@ -386,6 +444,8 @@ fn gib_to_bytes(gb: Option<f64>) -> Option<u64> {
 /// Resolved `[workspace]` configuration.
 #[derive(Clone, Debug)]
 pub struct WorkspaceConfig {
+    /// Whether private agent workspaces keep automatic Git checkpoints.
+    pub git_enabled: bool,
     /// Whether the ephemeral `tmp/` scratch is cleared on startup.
     pub clear_tmp_on_startup: bool,
     /// Soft whole-workspace quota in bytes; `None` is unlimited.
@@ -399,6 +459,7 @@ pub struct WorkspaceConfig {
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
+            git_enabled: false,
             clear_tmp_on_startup: true,
             storage_quota_bytes: None,
             tmp_quota_bytes: None,
@@ -959,10 +1020,15 @@ fn default_data_dir_str(env: &dyn EnvSource) -> String {
 /// workspace root. For callers like `serve` and `doctor` that resolve the data
 /// root before (or without) the full [`resolve`] precedence pass.
 pub fn data_dir_from_env() -> PathBuf {
+    data_dir_from_source(&ProcessEnv)
+}
+
+/// Resolves the instance data directory from an injected environment source.
+pub fn data_dir_from_source(env: &dyn EnvSource) -> PathBuf {
     data_dir_from(
-        std::env::var_os("OPENCOMPANY_DATA_DIR"),
-        std::env::var_os("HOME"),
-        std::env::var_os("USERPROFILE"),
+        env.get_os("OPENCOMPANY_DATA_DIR"),
+        env.get_os("HOME"),
+        env.get_os("USERPROFILE"),
     )
 }
 
@@ -1064,6 +1130,7 @@ mod test {
         let env = MapEnv::default();
         let file = ConfigFile {
             workspace: WorkspaceSection {
+                git_enabled: Some(true),
                 clear_tmp_on_startup: Some(false),
                 ..WorkspaceSection::default()
             },
@@ -1071,10 +1138,12 @@ mod test {
         };
         let (cfg, _) = resolve(&env, Some(&file), &default_manifest()).unwrap();
         assert!(!cfg.workspace.clear_tmp_on_startup);
+        assert!(cfg.workspace.git_enabled);
 
         // An absent `[workspace]` section resolves to the default (clear on boot).
         let (cfg, _) = resolve(&env, None, &default_manifest()).unwrap();
         assert!(cfg.workspace.clear_tmp_on_startup);
+        assert!(!cfg.workspace.git_enabled);
     }
 
     #[test]
@@ -1611,12 +1680,14 @@ mod test {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join(CONFIG_FILE),
-            "[workspace]\nclear_tmp_on_startup = false\n",
+            "[workspace]\ngit_enabled = true\nclear_tmp_on_startup = false\n",
         )
         .unwrap();
         let file = ConfigFile::load(&dir).unwrap().unwrap();
         assert_eq!(file.workspace.clear_tmp_on_startup, Some(false));
+        assert_eq!(file.workspace.git_enabled, Some(true));
         assert!(!file.workspace.resolve().clear_tmp_on_startup);
+        assert!(file.workspace.resolve().git_enabled);
         std::fs::remove_dir_all(&dir).ok();
     }
 

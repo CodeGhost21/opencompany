@@ -1,6 +1,6 @@
-//! Policy-HITL migration coverage for authored `tool_call` and `http_request`
-//! workflow nodes. Legacy classification remains tested in `gate`; production
-//! runs do not add approval gates from policy.
+//! Policy-HITL migration coverage for authored `tool_call`, `http_request`, and
+//! nested workflow nodes. Legacy classification remains tested in `gate`;
+//! production runs do not add approval gates from policy.
 //!
 //! # Why a unit test could not have caught this
 //!
@@ -70,6 +70,84 @@ to = "work"
 [[edge]]
 from = "work"
 to = "done"
+"#;
+
+/// The parent for the #617 regression. Its child carries the effectful node,
+/// which means only the resolver can apply the policy gate before tinyflows
+/// runs it.
+const SUB_WORKFLOW_PARENT: &str = r#"
+id = "parent"
+name = "Parent"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Child workflow"
+[node.config]
+workflow_id = "child"
+[[edge]]
+from = "start"
+to = "sub"
+"#;
+
+const SUB_WORKFLOW_CHILD: &str = r#"
+id = "child"
+name = "Child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "work"
+kind = "tool_call"
+name = "Work"
+[node.config]
+slug = "shell"
+[node.config.args]
+command = "echo ran > marker.txt"
+[[edge]]
+from = "start"
+to = "work"
+"#;
+
+/// A child whose gate is preceded by an ungated `http_request` POST — the
+/// #617 continuation hazard: approving restarts the child, and a restart
+/// re-calls the POST. `on_error = "continue"` keeps the SSRF guard's loopback
+/// refusal from halting the child before it reaches the gated `work` node.
+const SUB_WORKFLOW_CHILD_WITH_UPSTREAM: &str = r#"
+id = "child"
+name = "Child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "http_request"
+name = "Fetch"
+# `on_error` is a first-class node field, not a `config` key; the validator
+# rejects reserved keys inside `[node.config]`.
+on_error = "continue"
+[node.config]
+method = "POST"
+url = "http://127.0.0.1:9/notify"
+[[node]]
+id = "work"
+kind = "tool_call"
+name = "Work"
+[node.config]
+slug = "shell"
+[node.config.args]
+command = "echo ran > marker.txt"
+[[edge]]
+from = "start"
+to = "fetch"
+[[edge]]
+from = "fetch"
+to = "work"
 "#;
 
 /// A company that grants `shell` and gates it — under `full` autonomy, for the
@@ -158,20 +236,90 @@ fn marker_written(root: &std::path::Path) -> bool {
 #[tokio::test]
 async fn always_approve_does_not_gate_a_workflow_tool_call() {
     let dir = tempfile::tempdir().unwrap();
-    let (journal, run, _run_id) = run_tool_graph(dir.path(), "\"shell\"").await;
+    let (journal, run, _) = run_tool_graph(dir.path(), "\"shell\"").await;
 
     assert!(run.pending_approvals.is_empty(), "{run:?}");
-    assert!(
-        marker_written(dir.path()),
-        "policy HITL is disabled, so the shell call should execute"
-    );
+    assert!(marker_written(dir.path()), "the shell call should execute");
     assert!(
         journal
             .pending()
             .iter()
-            .all(|p| p.effect.kind != WORKFLOW_APPROVE_KIND),
-        "policy HITL must not create a workflow approval card"
+            .all(|p| p.effect.kind != WORKFLOW_APPROVE_KIND)
     );
+}
+
+/// Policy HITL is disabled inside resolved child workflows too.
+#[tokio::test]
+async fn always_approve_does_not_gate_a_child_workflow_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("company");
+    let workflows = source.join("workflows");
+    std::fs::create_dir_all(&workflows).expect("create child workflow directory");
+    std::fs::write(workflows.join("child.toml"), SUB_WORKFLOW_CHILD).expect("write child workflow");
+
+    let (mut deps, journal) =
+        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
+    deps.workflow_source_dir = Some(source);
+    let record = record("\"shell\"");
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps).await.expect("roster builds");
+    let file = parse_workflow(SUB_WORKFLOW_PARENT).expect("parent parses");
+
+    let run = super::runner::run_workflow(
+        pool.clone(),
+        deps.clone(),
+        &record,
+        &file,
+        json!({}),
+        &WorkflowRunContext::new(false),
+    )
+    .await
+    .expect("the parent and child run without policy HITL");
+    assert!(run.pending_approvals.is_empty(), "{run:?}");
+    assert!(marker_written(dir.path()));
+    assert!(journal.pending().is_empty());
+}
+
+/// Issue #617, the continuation half. A child that parks namespaced gates
+/// restarts from the trigger when its gate is approved, and a restart re-runs
+/// the child's ungated outward calls — whose results were never carried up
+/// with the pause. The run must tell the operator, the same way the top-level
+/// path does for its own unreplayable calls, so approving is a decision made
+/// with that cost in view.
+#[tokio::test]
+async fn a_child_with_policy_named_calls_runs_without_approval_notices() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("company");
+    let workflows = source.join("workflows");
+    std::fs::create_dir_all(&workflows).expect("create child workflow directory");
+    std::fs::write(
+        workflows.join("child.toml"),
+        SUB_WORKFLOW_CHILD_WITH_UPSTREAM,
+    )
+    .expect("write child workflow");
+
+    let (mut deps, _journal) =
+        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
+    deps.workflow_source_dir = Some(source);
+    // `shell` gated, `http_request` not — so the child runs the POST and then
+    // parks at the shell node, exactly the shape the hazard describes.
+    let record = record("\"shell\"");
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps).await.expect("roster builds");
+    let file = parse_workflow(SUB_WORKFLOW_PARENT).expect("parent parses");
+
+    let run = super::runner::run_workflow(
+        pool,
+        deps.clone(),
+        &record,
+        &file,
+        json!({}),
+        &WorkflowRunContext::new(false),
+    )
+    .await
+    .expect("the continuing HTTP error still reaches the child shell call");
+    assert!(run.pending_approvals.is_empty(), "{run:?}");
+    assert!(marker_written(dir.path()));
 }
 
 /// The other half of the claim, and the one that keeps this change from being a

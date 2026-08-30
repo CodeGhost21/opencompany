@@ -60,16 +60,6 @@ impl EmbeddedHost {
         &self.instance_id
     }
 
-    /// The address this host will sign a person in as.
-    ///
-    /// The console has to be told, because nobody could guess it and the login
-    /// form is otherwise a blank field on a host that admits exactly one
-    /// address. Not a secret: it grants nothing without a code minted by this
-    /// host and returned over loopback.
-    pub fn operator_email(&self) -> &'static str {
-        opencompany::desktop::DESKTOP_OPERATOR_EMAIL
-    }
-
     /// The companies registered at boot, in listing order.
     pub fn companies(&self) -> &[String] {
         &self.companies
@@ -84,7 +74,45 @@ impl Drop for EmbeddedHost {
     }
 }
 
-/// Boots a host over `data_dir`.
+/// What a host does about a data root that holds no company yet.
+///
+/// The two answers to the same question, and only one may be given per host.
+/// A host that seeds is a host that is *already set up* — `AppSpec` reports
+/// `setup_complete` as `stamp || !registry.is_empty()` — so seeding does not
+/// merely add a company, it suppresses the first-run wizard the console would
+/// otherwise open (`views/setup/SetupWizard.tsx`), permanently and with no way
+/// back to it.
+///
+/// That last clause is why the packaged application now gives the same answer
+/// for **every** instance it starts, including the one at the data root, which
+/// used to seed: see `local::start_at`. What is left here is a knob for callers
+/// that want a populated host without walking a wizard — the test suites, which
+/// need a company to address, and any embedder in the same position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstRun {
+    /// Register a starter company from the default preset when the root is
+    /// empty, so the host is usable with no decisions at all
+    /// ([issue #632](https://github.com/tinyhumansai/opencompany/issues/632)).
+    ///
+    /// No longer what a launched application does — #632's requirement is now
+    /// met by the wizard being reachable rather than by the answer being
+    /// assumed. Reached through [`start`], which the test suites use.
+    SeedStarterCompany,
+    /// Register only what the root already holds, leaving an empty root empty.
+    ///
+    /// What every instance the desktop starts does. An empty root then reports
+    /// setup outstanding and the console opens the wizard against it; a root
+    /// with companies in it — every install that has been used — adopts them
+    /// and goes straight to the console, exactly as before.
+    RunSetupWizard,
+}
+
+/// Boots a host over `data_dir`, seeding a starter company on an empty root.
+///
+/// The seeding entry point, kept for callers that want a host with a company in
+/// it without completing setup first. The application itself starts its hosts
+/// through [`start_with`] with [`FirstRun::RunSetupWizard`] — see
+/// `local::start_at` for why.
 ///
 /// `data_dir` is passed explicitly rather than resolved from the environment.
 /// A desktop app knows its platform data directory and should say so — and the
@@ -92,6 +120,19 @@ impl Drop for EmbeddedHost {
 /// `USERPROFILE` is set, which for a double-clicked application is wherever the
 /// launcher happened to put it.
 pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
+    start_with(data_dir, FirstRun::SeedStarterCompany).await
+}
+
+/// Boots a host over `data_dir`, deciding what an empty root means.
+///
+/// See [`FirstRun`]. Everything else — the lock, the migration, the journal
+/// check, the loopback bind — is identical, because the two kinds of host
+/// differ in exactly one decision and must not be allowed to drift in any
+/// other.
+pub async fn start_with(
+    data_dir: PathBuf,
+    first_run: FirstRun,
+) -> opencompany::Result<EmbeddedHost> {
     // Resolve, lock, migrate, and prove the journal root is writable — the same
     // sequence `serve` runs, shared rather than copied so the two cannot drift.
     // The lock is what refuses a second instance over one data root, including
@@ -99,17 +140,101 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
     // against the same default.
     let instance = opencompany::app::prepare_instance(Some(data_dir)).await?;
 
+    // Both of these must run before any company runtime or agent harness
+    // exists, and this is the last point in the boot where that is still true.
+    //
+    // The keyring pin registers the instance root as the vendored runtime's
+    // credential directory, so an MCP server's token lands beside the journal
+    // rather than at the end of the vendored resolver's own fallback chain
+    // (`$HOME`, then `/tmp` at no log level — issue #451). `main` exports
+    // `OPENHUMAN_WORKSPACE` for the same root, but that only wins if nothing
+    // has touched the keyring yet; registering says it outright.
+    //
+    // The identity tags every request the embedded core makes to the
+    // TinyHumans backend as opencompany's rather than the vendored runtime's
+    // own `openhuman` default (issue #376). Core reads it into a client's
+    // default headers AT CONSTRUCTION, so a later call would not re-tag a
+    // client that already exists.
+    // Unconditional, not `#[cfg]`-guarded: this crate's `opencompany`
+    // dependency enables `mcp` (and so `openhuman`) outright, so a desktop
+    // build without the harness is not a shape that exists. If that dependency
+    // line ever loses the feature, these two lines stop compiling — which is
+    // the failure worth having, since the alternative is a bundle that boots
+    // fine and cannot think.
+    tracing::info!(
+        "{}",
+        opencompany::app::journal::pin_keyring(instance.journal()).summary()
+    );
+    opencompany::product::install_into_embedded_core();
+
     let config = AppConfig {
         bind: "127.0.0.1:0".to_string(),
-        // The standing local admin, and the same seam the hosted control plane
-        // fills with `OPENCOMPANY_ADMIN_EMAIL`. Without an eligible address no
-        // company on this host can be signed into, whoever created it — the
-        // seeded one names the operator in its own manifest, but a company
-        // added later by any other means would name nobody (issue #632).
-        admin_email: Some(opencompany::desktop::DESKTOP_OPERATOR_EMAIL.to_string()),
+        // The `[workspace]` section of the root's `config.toml`, resolved by
+        // `prepare_instance`. Not layout — these two are the knobs every
+        // company builder reads — but they come from the same file, and `serve`
+        // sets them from it. A desktop that skipped them ran with the
+        // compiled-in defaults and silently ignored the operator's config.
+        workspace_quota: instance.workspace().quota,
+        workspace_git_enabled: instance.workspace().git_enabled,
+        // No sign-in, for every company this host serves.
+        //
+        // A desktop install is one machine and one person: there is nobody to
+        // invite, nobody to tell apart, and no mailbox to send a link to. What
+        // the login screen actually bought was a synthetic
+        // `operator@opencompany.local` the operator was told to accept, a magic
+        // link the host echoed back into its own response because there was no
+        // transport, and a cookie the Tauri proxy then discarded — it holds no
+        // cookie store and strips `x-opencompany-session` as a reserved header.
+        // The console got through on `is_local_only` regardless. `none` deletes
+        // the ceremony and says what was already true.
+        //
+        // Set here, as a **host-wide override**, rather than as
+        // `[users].mode = "none"` in the shipped preset manifests. Two reasons,
+        // and both matter:
+        //
+        // - It reaches every company on this host — the starter preset, one the
+        //   setup wizard designed, and any already on disk from an install that
+        //   predates this. `RuntimeBuilder::with_auth_mode_override` resolves it
+        //   at build and it outranks whatever `[users].mode` a manifest names,
+        //   so an existing install migrates by relaunching.
+        // - `validate_users` flags `[users].admins` under `mode = "none"` as
+        //   granting nothing, and both seeding paths treat a flagged manifest as
+        //   a hard error. The override never rewrites `manifest.users.mode`, so
+        //   there is nothing to flag.
+        //
+        // Safe only because this host binds loopback with no `public_url`, which
+        // is what `is_local_only()` asks and what `desktop::register` refuses a
+        // `none`-mode company without.
+        //
+        // A *default*, though, not a ceiling: the root's `config.toml` wins when
+        // it names a mode, because the setup wizard writes that key and an
+        // operator who deliberately turned a sign-in on — to share their
+        // instance with somebody — must not find it off again at the next
+        // launch. This host builds its config by hand rather than through
+        // `AppConfig::load`, so that layer reaches it only here.
+        auth_mode_override: Some(
+            instance
+                .auth_mode()
+                .unwrap_or(opencompany::app::config::AuthMode::None),
+        ),
         ..AppConfig::default()
     };
-    let state = AppState::new(config).with_home(instance.home().to_path_buf());
+    let state = AppState::new(config)
+        .with_home(instance.home().to_path_buf())
+        // Issue #1245: the desktop is the one place with an
+        // `AcpAgentFactory` implementation to give — a `local` acp harness
+        // only has an engine because this line exists.
+        .with_acp_agents(std::sync::Arc::new(crate::acp::LocalAcpAgentFactory))
+        // Without this, `rebuild_company` fails on the one host that most
+        // needs it. The desktop is the only host that runs local ACP
+        // harnesses, so it is the only host where changing a teammate's
+        // harness or model must take effect without a restart — and the edit
+        // handler logs the failure and still returns 200, so the console
+        // reported success while turns kept using the old lane.
+        //
+        // Wired before any company registers, matching `serve`, so the first
+        // edit on a freshly booted host already has a rebuilder to reach for.
+        .with_rebuilder(std::sync::Arc::new(opencompany::desktop::DesktopRebuilder));
     // Read before `state` moves into `bind`. Minting here rather than on the
     // first `/spec` also means the console can be told who this host is without
     // waiting to contact it — which is the whole point, since the address it
@@ -119,12 +244,25 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
     // empty registry would render the "no companies" dead end this exists to
     // remove, and the race is winnable — the address is handed to the webview
     // the moment `start` returns.
-    let companies =
-        opencompany::desktop::bootstrap_companies(&state, opencompany::desktop::DEFAULT_PRESET_ID)
+    let companies = match first_run {
+        FirstRun::SeedStarterCompany => opencompany::desktop::bootstrap_companies(
+            &state,
+            opencompany::desktop::DEFAULT_PRESET_ID,
+        )
+        .await?
+        .into_iter()
+        .map(|id| id.as_ref().to_string())
+        .collect::<Vec<_>>(),
+        // The adopt half of the same call, and *only* that half. Adoption is
+        // not optional for either kind of host: a company the setup wizard
+        // wrote into this root is a bundle on disk, and a host that skipped
+        // adoption would come back from every restart serving nothing.
+        FirstRun::RunSetupWizard => opencompany::desktop::adopt_companies(&state)
             .await?
             .into_iter()
-            .map(|id| id.as_ref().to_string())
-            .collect::<Vec<_>>();
+            .map(|(id, _)| id.as_ref().to_string())
+            .collect::<Vec<_>>(),
+    };
 
     let (address, serving) = opencompany::server::bind("127.0.0.1:0", state).await?;
     let server = tokio::spawn(async move {
@@ -156,15 +294,33 @@ mod test {
     /// Issue #632, end to end: a packaged install must be enterable with no
     /// terminal, no mail server and no platform credential.
     ///
-    /// Over HTTP rather than against the registry, because every step here is
-    /// one the console actually takes and each has its own way to fail: the
-    /// company has to exist *and* be reachable through the sole-company alias
-    /// the console addresses before it knows any id, the operator has to be
-    /// eligible or no code is minted, and the host has to be local-only or the
-    /// code is withheld from the response. Asserting a company was registered
-    /// would prove none of it.
+    /// It used to be enterable by *signing in*: the shell asked for a magic
+    /// link at a synthetic loopback mailbox, read the code back out of the
+    /// response, and redeemed it for a cookie. That is gone. The desktop runs
+    /// [`AuthMode::None`], where the person at the machine is the principal by
+    /// configuration — so the console's very first request is already
+    /// authenticated and there is no screen in front of it.
+    ///
+    /// The change is worth stating as more than a simplification: the shell had
+    /// no working session carrier for that cookie in the first place. The proxy
+    /// client holds no cookie store, `x-opencompany-session` is stripped as a
+    /// reserved header, and `needsCarriedSession()` is false on desktop — so the
+    /// session the magic link minted was discarded the moment it arrived, and
+    /// what actually let the console through was that every request came from
+    /// loopback anyway.
+    ///
+    /// Over HTTP rather than against the registry, because the point is the
+    /// request the console makes: the company has to exist *and* be reachable
+    /// through the sole-company alias the console addresses before it knows any
+    /// id, and the principal has to resolve with nothing presented. Asserting a
+    /// company was registered would prove neither.
+    ///
+    /// Seeded explicitly through [`start`], because a launched install no longer
+    /// seeds — it opens the wizard instead (`local::start_at`). What is under
+    /// test here is the host once it *has* a company, which is where a launched
+    /// install arrives the moment setup completes.
     #[tokio::test]
-    async fn a_fresh_install_can_be_signed_into() {
+    async fn a_host_with_a_company_opens_with_no_sign_in() {
         let dir = tempfile::tempdir().unwrap();
         let host = start(dir.path().to_path_buf()).await.expect("host starts");
         let base = host.base_url();
@@ -173,63 +329,90 @@ mod test {
         assert_eq!(
             host.companies().len(),
             1,
-            "a fresh root gets exactly one starter company"
+            "the seeding entry point registers exactly one starter company"
         );
 
-        // Where the console starts, and where it used to stop: no session yet.
+        // Where the console starts, and where it used to stop with a 401.
         let listed = http
             .get(format!("{base}/api/v1/companies"))
             .send()
             .await
             .unwrap();
-        assert_eq!(listed.status(), 401);
+        assert_eq!(
+            listed.status(),
+            200,
+            "an unauthenticated loopback request is the owner's, by configuration"
+        );
+        let companies: serde_json::Value = listed.json().await.unwrap();
+        assert_eq!(
+            companies.as_array().map(Vec::len),
+            Some(1),
+            "and it sees the company: {companies}"
+        );
 
-        // The sole-company alias — what the console addresses before it has
-        // discovered any company id.
-        let requested: serde_json::Value = http
-            .post(format!("{base}/api/v1/company/auth/request"))
-            .json(&serde_json::json!({ "email": host.operator_email() }))
+        // Attributed to a real stored record rather than a principal invented
+        // per request — chat, task assignment and the audit trail all key off
+        // `UserRecord::id`. Asked through the sole-company alias, which is what
+        // the console addresses before it has discovered any id.
+        let me: serde_json::Value = http
+            .get(format!("{base}/api/v1/company/auth/me"))
             .send()
             .await
             .unwrap()
             .json()
             .await
             .unwrap();
-        let code = requested["dev_code"]
-            .as_str()
-            .unwrap_or_else(|| {
-                panic!("a loopback host with no mail transport echoes the code: {requested}")
-            })
-            .to_string();
-
-        let verified = http
-            .post(format!("{base}/api/v1/company/auth/verify"))
-            .json(&serde_json::json!({ "code": code }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(verified.status(), 200, "the code redeems into a session");
-        let session = verified
-            .headers()
-            .get(reqwest::header::SET_COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .expect("a session cookie comes back")
-            .to_string();
-
-        // And the call that was refused above now answers.
-        let listed = http
-            .get(format!("{base}/api/v1/companies"))
-            .header(reqwest::header::COOKIE, session)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(listed.status(), 200);
-        let companies: serde_json::Value = listed.json().await.unwrap();
+        assert_eq!(me["email"], "local:owner", "{me}");
         assert_eq!(
-            companies.as_array().map(Vec::len),
-            Some(1),
-            "the signed-in operator sees their company: {companies}"
+            me["role"], "admin",
+            "the write plane has to work, and there is nobody to outrank: {me}"
+        );
+
+        // And no second way in survives beside it. A host that still answered
+        // `auth/request` would be one where the mode had not actually reached
+        // the company — the seeded manifest names no mode of its own.
+        let requested = http
+            .post(format!("{base}/api/v1/company/auth/request"))
+            .json(&serde_json::json!({ "email": "someone@example.com" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            requested.status(),
+            409,
+            "a magic link is refused by mode, not answered with a silent 202"
+        );
+    }
+
+    /// A `none`-mode desktop is the **default**, not a ceiling.
+    ///
+    /// The setup wizard offers all three modes on a loopback host, and an
+    /// operator who wants to share their instance with a colleague can pick
+    /// `email` — it writes `auth_mode` to the root's `config.toml` and applies
+    /// it live. But this host builds its `AppConfig` by hand rather than through
+    /// `AppConfig::load`, so a mode forced in the literal above would be a mode
+    /// the file can never win against: the choice would hold until quit and
+    /// silently revert on the next launch, which is precisely the "configuration
+    /// ignored" failure the setup surface exists to prevent.
+    ///
+    /// So the file is read and `none` is what it falls back to.
+    #[tokio::test]
+    async fn a_configured_sign_in_survives_a_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "auth_mode = \"email\"\n").unwrap();
+
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+        let requested = reqwest::Client::new()
+            .post(format!("{}/api/v1/company/auth/request", host.base_url()))
+            .json(&serde_json::json!({ "email": "ada@example.com" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_ne!(
+            requested.status(),
+            409,
+            "409 is `auth_mode` refusing the route by mode — the file said email"
         );
     }
 

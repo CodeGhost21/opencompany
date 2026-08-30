@@ -2,9 +2,16 @@ import {
   expect,
   test,
   type APIRequestContext,
-  type Locator,
   type Page,
 } from "@playwright/test";
+
+import {
+  backToWorkflowIndex,
+  expectWorkflowIndex,
+  openWorkflow,
+  workflowCard,
+  workflowDetailName,
+} from "./workflows";
 
 /**
  * Issue #384: workflow create / update / delete events reached the console's
@@ -70,117 +77,90 @@ function graphBody(id: string, name: string) {
  * browser test can drive. The host journals `WorkflowCreated` on this path, so
  * the page under test can only learn about it through the SSE stream.
  */
-async function createWorkflow(request: APIRequestContext, id: string, name: string) {
+/** Creates a workflow over HTTP and returns its version token. */
+async function createWorkflow(
+  request: APIRequestContext,
+  id: string,
+  name: string,
+): Promise<string> {
   const res = await request.post(`${COMPANY_SCOPE}/workflows`, { data: graphBody(id, name) });
   expect(res.ok(), `create ${id}: ${res.status()} ${await res.text()}`).toBeTruthy();
+  const body = await res.json();
+  return body.version as string;
 }
 
 /**
  * Renames a saved workflow out-of-band. Journals `WorkflowUpdated`.
  *
  * The graph goes in flat — `UpdateWorkflowBody` flattens it and carries only
- * the optional `expectedVersion` alongside — and no token is sent, which is the
- * unconditional write an out-of-band caller makes.
+ * `expectedVersion` alongside. `expectedVersion` is required (issue #1013), so
+ * this needs the token the caller read the graph at — an out-of-band actor is
+ * not exempt from the same conditional-write contract the console follows.
  */
-async function renameWorkflow(request: APIRequestContext, id: string, name: string) {
-  const res = await request.put(`${COMPANY_SCOPE}/workflows/${id}`, { data: graphBody(id, name) });
+async function renameWorkflow(
+  request: APIRequestContext,
+  id: string,
+  name: string,
+  expectedVersion: string,
+) {
+  const res = await request.put(`${COMPANY_SCOPE}/workflows/${id}`, {
+    data: { ...graphBody(id, name), expectedVersion },
+  });
   expect(res.ok(), `rename ${id}: ${res.status()} ${await res.text()}`).toBeTruthy();
 }
 
-/** Best-effort teardown so a failed spec does not poison the next run. */
+/** Reads back a workflow's current version, or `null` if it is gone already. */
+async function currentVersion(request: APIRequestContext, id: string): Promise<string | null> {
+  const res = await request.get(`${COMPANY_SCOPE}/workflows/${id}`);
+  if (!res.ok()) return null;
+  const body = await res.json();
+  return (body.version as string | null) ?? null;
+}
+
+/**
+ * Best-effort teardown so a failed spec does not poison the next run.
+ * `expectedVersion` is required (issue #1013), so this reads the workflow's
+ * current token first — the caller's own copy may be stale by teardown time.
+ */
 async function removeWorkflow(request: APIRequestContext, id: string) {
-  await request.delete(`${COMPANY_SCOPE}/workflows/${id}`).catch(() => undefined);
+  const version = await currentVersion(request, id).catch(() => null);
+  const query = version ? `?expectedVersion=${encodeURIComponent(version)}` : "";
+  await request.delete(`${COMPANY_SCOPE}/workflows/${id}${query}`).catch(() => undefined);
 }
 
-/** The workflow picker's trigger. */
-function picker(page: Page) {
-  return page.getByRole("combobox").first();
-}
+/* Issue #1135: `picker`, the workflow selector's trigger, lived here. The
+ * detail toolbar no longer carries one — the workflow you are in is the
+ * heading, and switching between them is what the index is for — so the rename
+ * test below reads the open workflow's heading and then its index card, which
+ * is every surface the console names a workflow on. */
 
-/** Opens the Workflows tab and waits for the picker to settle. */
+/**
+ * Opens the Workflows tab and waits for the index to settle.
+ *
+ * Issue #1110: the tab lands on the index, so "settled" is the list being up
+ * rather than the picker being enabled — the picker is a control of an open
+ * workflow now, and there is none yet.
+ */
 async function openWorkflows(page: Page) {
   await page.goto("/#/workflows");
   await dismissTour(page);
-  await expect(picker(page)).toBeEnabled({ timeout: 30_000 });
+  await expectWorkflowIndex(page);
 }
 
-/**
- * Returned by {@link pickerOptionCount} when the popup could not be read at
- * all — it never opened, or the click could not land.
- *
- * A sentinel rather than `0`, because `0` is a legitimate answer this file
- * asserts twice ("the probe does not exist yet", "the deleted one is gone").
- * Reporting an unread popup as zero would pass both of those against a console
- * that rendered nothing whatsoever. A negative count matches no expectation:
- * a poll keeps polling, and a direct assertion fails saying `-1`.
- */
-const UNREADABLE = -1;
+/* Issue #1110: `pickerOptionCount`, its `UNREADABLE` sentinel and the `settled`
+ * helper it was built on lived here. All three existed to read the picker's
+ * popup without letting a mid-re-render transient read as "the popup held
+ * nothing" — a subtlety of counting options in a dropdown that has to be opened
+ * to be read. The index renders every workflow as an ordinary element, so the
+ * counting is now `toHaveCount`, which retries on its own, and none of that
+ * machinery has a caller. */
 
-/** `waitFor` reduced to a boolean — a timeout is an answer here, not a throw. */
-function settled(
-  locator: Locator,
-  state: "visible" | "hidden",
-  timeout: number,
-): Promise<boolean> {
-  return locator.waitFor({ state, timeout }).then(
-    () => true,
-    () => false,
-  );
-}
-
-/**
- * How many options the picker offers under `name`, from a fresh open.
- *
- * Opened and closed around the count on purpose, so the reading never depends
- * on whether a mounted popup re-renders in place when its list changes. That is
- * a detail of the Select primitive, and it is not what this file is about — the
- * property under test is that the console re-read the list at all, and opening
- * a dropdown fetches nothing (the view lists on mount, on a company switch, and
- * on an SSE frame, and that is all).
- *
- * **Nothing in here throws**, which is a requirement and not a style: one call
- * site runs inside `expect.poll`, and the two automated reviews on this PR
- * disagreed about whether Playwright retries a rejected poll callback or lets
- * the rejection end the poll. The lockfile resolves `@playwright/test` to
- * 1.61.1 rather than the `^1.49.0` in `package.json`, so the semantics anyone
- * reasons about here may not be the semantics that run. A callback that cannot
- * reject is correct under either reading, and that is cheaper than settling the
- * argument.
- *
- * The transient this protects against is real: the popup is opened while an
- * SSE frame is re-rendering the list underneath it, so "no options for a
- * moment" is an ordinary state on the way to the answer, not a failure.
- */
-async function pickerOptionCount(page: Page, name: string): Promise<number> {
-  try {
-    await picker(page).click();
-    // Not `expect(...).toBeVisible()`: that throws, and a popup that is empty
-    // for one render is exactly what this must survive.
-    if (!(await settled(page.getByRole("option").first(), "visible", 15_000))) {
-      return UNREADABLE;
-    }
-    const count = await page.getByRole("option", { name, exact: true }).count();
-    await page.keyboard.press("Escape");
-    // Best effort. The count is already read, so a popup slow to close is not
-    // worth discarding it over — and if it really is stuck, the next attempt's
-    // click fails and reports UNREADABLE rather than a wrong number.
-    await settled(page.getByRole("option").first(), "hidden", 5_000);
-    return count;
-  } catch {
-    // A click that could not land, a detached locator mid-re-render: all of it
-    // is "could not read the popup this time", never "the popup held nothing".
-    return UNREADABLE;
-  }
-}
-
-/** Selects a workflow by name and waits for the selection to settle. */
+/** Opens a workflow from the index and waits for its detail view to settle. */
 async function selectWorkflow(page: Page, name: string) {
-  await picker(page).click();
-  await page.getByRole("option", { name, exact: true }).click();
-  await expect(picker(page)).toContainText(name);
+  await openWorkflow(page, name);
 }
 
-test("a workflow authored elsewhere reaches the picker, with no reload", async ({
+test("a workflow authored elsewhere reaches the list, with no reload", async ({
   page,
   request,
 }) => {
@@ -191,25 +171,30 @@ test("a workflow authored elsewhere reaches the picker, with no reload", async (
   try {
     await openWorkflows(page);
 
+    // Issue #1110: read off the INDEX rather than the picker popup. The two are
+    // rendered from the same `workflows` array, so this pins the same property
+    // — that the console re-read the list at all — against the surface the
+    // operator is actually looking at. The picker exists only inside a workflow
+    // now, and opening one to check whether a list contains something is the
+    // step this issue was about removing.
+    //
     // The baseline the fix has to move. Without it this stays at zero for the
     // life of the tab: the `workflow_created` frame reaches the console's
     // switch, matches no arm, and is discarded.
-    expect(
-      await pickerOptionCount(page, name),
+    await expect(
+      workflowCard(page, name),
       "the probe must not exist before it is created",
-    ).toBe(0);
+    ).toHaveCount(0);
 
     await createWorkflow(request, id, name);
 
-    await expect
-      .poll(() => pickerOptionCount(page, name), { timeout: 20_000 })
-      .toBe(1);
+    await expect(workflowCard(page, name)).toHaveCount(1, { timeout: 20_000 });
   } finally {
     await removeWorkflow(request, id);
   }
 });
 
-test("a workflow renamed elsewhere renames in the picker, with no reload", async ({
+test("a workflow renamed elsewhere renames on screen, with no reload", async ({
   page,
   request,
 }) => {
@@ -217,7 +202,7 @@ test("a workflow renamed elsewhere renames in the picker, with no reload", async
   const id = `e2e-live-rename-${stamp}`;
   const before = `Live rename probe ${stamp}`;
   const after = `Live renamed probe ${stamp}`;
-  await createWorkflow(request, id, before);
+  const createdVersion = await createWorkflow(request, id, before);
 
   try {
     await openWorkflows(page);
@@ -225,29 +210,38 @@ test("a workflow renamed elsewhere renames in the picker, with no reload", async
 
     // The graph on screen is renamed under the operator — the second-session
     // edit #259 made possible, and which nothing told this tab about.
-    await renameWorkflow(request, id, after);
+    await renameWorkflow(request, id, after, createdVersion);
 
-    // Read off the trigger, which renders the *selected* workflow's name from
-    // the same list the options come from: the rename has to land on the
-    // selection, not merely somewhere in a dropdown nobody has open.
-    await expect(picker(page), "a rename elsewhere must reach the picker live").toContainText(
-      after,
-      { timeout: 20_000 },
-    );
-    await expect(picker(page)).not.toContainText(before);
+    // Read off the OPEN workflow's own heading first: the rename has to land on
+    // the workflow the operator is looking at, not merely somewhere in a list.
+    await expect(
+      workflowDetailName(page),
+      "a rename elsewhere must reach the open workflow live",
+    ).toHaveText(after, { timeout: 20_000 });
+
+    // …and then off the index, which is the other surface the same `workflows`
+    // array feeds. Issue #1135 retired the toolbar picker this used to check;
+    // the index card is where a name that failed to update would now be stale,
+    // and it is checked for the OLD name too, so a list that grew a second row
+    // rather than renaming its one row fails here.
+    await backToWorkflowIndex(page);
+    await expect(workflowCard(page, after), "…and the index card").toHaveCount(1, {
+      timeout: 20_000,
+    });
+    await expect(workflowCard(page, before)).toHaveCount(0);
   } finally {
     await removeWorkflow(request, id);
   }
 });
 
-test("deleting the workflow on screen elsewhere takes it out of the picker, not just greys it", async ({
+test("deleting the workflow on screen elsewhere returns to the list, and takes it out of the list", async ({
   page,
   request,
 }) => {
   const stamp = Date.now();
   const id = `e2e-live-delete-${stamp}`;
   const name = `Live delete probe ${stamp}`;
-  await createWorkflow(request, id, name);
+  const createdVersion = await createWorkflow(request, id, name);
 
   try {
     await openWorkflows(page);
@@ -256,22 +250,24 @@ test("deleting the workflow on screen elsewhere takes it out of the picker, not 
     // Deleted from another session while this tab has it selected and its graph
     // on the canvas. This is the worst symptom in the issue: the entry used to
     // stay put, and the next Run or Edit addressed a workflow the host had
-    // already dropped.
-    const deleted = await request.delete(`${COMPANY_SCOPE}/workflows/${id}`);
+    // already dropped. `expectedVersion` is required (issue #1013).
+    const deleted = await request.delete(
+      `${COMPANY_SCOPE}/workflows/${id}?expectedVersion=${encodeURIComponent(createdVersion)}`,
+    );
     expect(deleted.ok(), `delete ${id}: ${deleted.status()}`).toBeTruthy();
 
-    // The selection moves off it, so the canvas stops showing a graph the host
-    // no longer has.
-    await expect(picker(page), "the canvas must not stay on a deleted workflow").not.toContainText(
-      name,
-      { timeout: 20_000 },
-    );
+    // Issue #1110: the view leaves the deleted workflow for the INDEX, not for
+    // a neighbouring graph. Both halves matter — the canvas must stop showing a
+    // graph the host no longer has, and what replaces it must not be a workflow
+    // the operator never opened.
+    await expectWorkflowIndex(page);
+    await expect(workflowDetailName(page)).toHaveCount(0, { timeout: 20_000 });
 
-    // …and it is GONE from the options, not merely deselected or disabled.
-    expect(
-      await pickerOptionCount(page, name),
-      "a deleted workflow must leave the picker, not sit in it greyed out",
-    ).toBe(0);
+    // …and it is GONE from the list, not merely closed or greyed out.
+    await expect(
+      workflowCard(page, name),
+      "a deleted workflow must leave the list, not sit in it greyed out",
+    ).toHaveCount(0, { timeout: 20_000 });
   } finally {
     await removeWorkflow(request, id);
   }
@@ -295,7 +291,7 @@ test("a delete elsewhere corrects the URL in place, without pushing history", as
   const stamp = Date.now();
   const id = `e2e-live-history-${stamp}`;
   const name = `Live history probe ${stamp}`;
-  await createWorkflow(request, id, name);
+  const createdVersion = await createWorkflow(request, id, name);
 
   try {
     await openWorkflows(page);
@@ -306,7 +302,10 @@ test("a delete elsewhere corrects the URL in place, without pushing history", as
     await expect.poll(() => page.url(), { timeout: 20_000 }).toContain(id);
     const entriesBefore = await page.evaluate(() => window.history.length);
 
-    const deleted = await request.delete(`${COMPANY_SCOPE}/workflows/${id}`);
+    // `expectedVersion` is required (issue #1013).
+    const deleted = await request.delete(
+      `${COMPANY_SCOPE}/workflows/${id}?expectedVersion=${encodeURIComponent(createdVersion)}`,
+    );
     expect(deleted.ok(), `delete ${id}: ${deleted.status()}`).toBeTruthy();
 
     // The selection moves off the deleted workflow and the hash follows it.

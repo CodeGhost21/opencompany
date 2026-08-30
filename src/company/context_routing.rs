@@ -31,18 +31,33 @@ use crate::company::Agent;
 /// currently believes. Universal because a role that does not know the method
 /// cannot follow it, and unlike every other document here it asserts nothing
 /// about the work in progress, so no exclusion can apply to it.
-pub const UNIVERSAL_DOCUMENT: &str = "METHOD.md";
+pub const UNIVERSAL_DOCUMENT: &str = "method.md";
+
+/// The company's per-workspace working agreement, routed to every role
+/// alongside [`UNIVERSAL_DOCUMENT`].
+///
+/// Distinct from `method.md`: `method.md` is the company's method policy,
+/// authored per company; `AGENTS.md` is the bundle-level agreement every
+/// teammate in the roster shares — which files exist and what they are for,
+/// how work is expected to be handed off, conventions a person and every
+/// agent are both bound by. Also asserts nothing about work in progress, so it
+/// is exempt from class exclusions the same way `method.md` is.
+pub const AGENTS_DOC: &str = "agents.md";
+
+/// Every document routed to every role, whatever its tier, classes, or
+/// explicit `context` list — in the order they are placed in the prompt.
+pub const UNIVERSAL_DOCUMENTS: &[&str] = &[UNIVERSAL_DOCUMENT, AGENTS_DOC];
 
 /// The company's summarized picture: what is established, what is ruled out.
-pub const BRIEF: &str = "BRIEF.md";
+pub const BRIEF: &str = "brief.md";
 /// The evidence ledger — what already holds true, with its derivation.
-pub const CLAIMS: &str = "CLAIMS.md";
+pub const CLAIMS: &str = "claims.md";
 /// The open-question tracker the orchestrator routes work from.
-pub const THREADS: &str = "THREADS.md";
+pub const THREADS: &str = "threads.md";
 /// The assertion board: posts are asserted, not established.
-pub const BOARD: &str = "BOARD.md";
+pub const BOARD: &str = "board.md";
 /// Provisional working-out, kept out of any role that judges.
-pub const SCRATCH: &str = "SCRATCH.md";
+pub const SCRATCH: &str = "scratch.md";
 
 /// The documents a role is routed when its manifest declares no `context` key.
 ///
@@ -114,40 +129,47 @@ pub fn excluded_documents(classes: &[String]) -> Vec<&'static str> {
 ///
 /// Resolution order:
 ///
-/// 1. the universal document, always;
+/// 1. [`UNIVERSAL_DOCUMENTS`], always;
 /// 2. the agent's explicit `context` list if it declared one, else its tier's
 ///    default row;
 /// 3. minus anything its classes exclude.
 ///
 /// `Some(vec![])` (an explicit `context = []`) and `None` (an omitted key) are
-/// deliberately different: the first means "the universal document and nothing
-/// else", the second means "take the default". `Agent::context` is
-/// `Option<Vec<String>>` precisely so that distinction is representable.
+/// deliberately different: the first means "the universal documents and
+/// nothing else", the second means "take the default". `Agent::context` is
+/// `Option<Vec<ContextEntry>>` precisely so that distinction is representable.
 ///
 /// Returned in routing order with duplicates removed, so a manifest that lists
-/// the universal document explicitly does not get it twice.
+/// a universal document explicitly does not get it twice.
 pub fn routed_documents(agent: &Agent) -> Vec<String> {
     let excluded = excluded_documents(&agent.classes);
 
     let chosen: Vec<String> = match agent.context.as_deref() {
-        Some(explicit) => explicit.to_vec(),
+        Some(explicit) => explicit
+            .iter()
+            .map(|entry| entry.path().to_string())
+            .collect(),
         None => tier_defaults(agent.tier.as_deref())
             .iter()
             .map(|doc| doc.to_string())
             .collect(),
     };
 
-    let mut routed = Vec::with_capacity(chosen.len() + 1);
+    let mut routed = Vec::with_capacity(chosen.len() + UNIVERSAL_DOCUMENTS.len());
     let mut seen = std::collections::HashSet::new();
-    for document in std::iter::once(UNIVERSAL_DOCUMENT.to_string()).chain(chosen) {
+    let universal = UNIVERSAL_DOCUMENTS.iter().map(|doc| doc.to_string());
+    for document in universal.chain(chosen) {
         let document = document.trim().to_string();
         if document.is_empty() {
             continue;
         }
-        // The universal document is exempt from exclusion: it is method, not
-        // assertion, so no class has a reason to withhold it — and a role
-        // excluded from the method could not follow it.
-        if document != UNIVERSAL_DOCUMENT && excluded.contains(&document.as_str()) {
+        // The universal documents are exempt from exclusion: neither asserts
+        // anything about the work in progress, so no class has a reason to
+        // withhold either — and a role excluded from the method or the
+        // working agreement could not follow it.
+        if !UNIVERSAL_DOCUMENTS.contains(&document.as_str())
+            && excluded.contains(&document.as_str())
+        {
             continue;
         }
         if seen.insert(document.clone()) {
@@ -200,6 +222,21 @@ pub async fn resolve_routed_documents(
             continue;
         }
         if let Some(path) = super::workspace_paths::render_path(node, &by_id) {
+            // Keyed by the normalized path as well as the literal one, because
+            // the two spellings both occur in a real company: the routing names
+            // above are lowercase-dashed like everything else the runtime mints
+            // (`crate::company::workspace_names`), while a company that predates
+            // that rule holds `brief.md`, and a manifest written then still says
+            // `brief.md` in its `context` list. Routing a role its brief must
+            // not depend on which of those it is looking at.
+            //
+            // The literal insert wins a collision: `Brief.md` and `brief.md` in
+            // one tree resolve to themselves, and only the *unmatched* spelling
+            // falls through to the normalized key.
+            let canonical = super::workspace_names::kebab_path(&path);
+            if canonical != path {
+                by_path.entry(canonical).or_insert(node.id.as_str());
+            }
             by_path.insert(path, node.id.as_str());
         }
     }
@@ -207,7 +244,7 @@ pub async fn resolve_routed_documents(
     let mut resolved = Vec::with_capacity(wanted.len());
     for path in wanted {
         // Normalise the manifest's spelling the same way the agent tools do, so
-        // `/Brand/Voice.md` and `Brand/Voice.md` name the same note.
+        // `/brand/Voice.md` and `brand/Voice.md` name the same note.
         let key = match super::workspace_paths::split_logical_path(&path) {
             Ok(segments) => segments.join("/"),
             // A traversal-shaped or malformed entry resolves to nothing, exactly
@@ -215,7 +252,10 @@ pub async fn resolve_routed_documents(
             // manifest line stop a company whose other routing is fine.
             Err(_) => continue,
         };
-        let Some(id) = by_path.get(&key) else {
+        let id = by_path
+            .get(&key)
+            .or_else(|| by_path.get(&super::workspace_names::kebab_path(&key)));
+        let Some(id) = id else {
             continue;
         };
         if let Some((_, body)) = workspace.read(company, id).await? {
@@ -231,11 +271,14 @@ mod tests {
 
     fn agent(tier: Option<&str>) -> Agent {
         Agent {
+            global: false,
             id: "a".into(),
             role: "Role".into(),
+            name: None,
             description: None,
             tier: tier.map(str::to_string),
-            tools: Vec::new(),
+            harness: None,
+            tools: None,
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
@@ -243,6 +286,9 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+            model: None,
         }
     }
 
@@ -268,23 +314,23 @@ mod tests {
     fn the_per_tier_default_table_matches_the_spec() {
         assert_eq!(
             routed_documents(&agent(Some("orchestrator"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS, THREADS]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS, THREADS]
         );
         assert_eq!(
             routed_documents(&agent(Some("reasoning"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS]
         );
         assert_eq!(
             routed_documents(&agent(Some("frontend"))),
-            [UNIVERSAL_DOCUMENT, BRIEF]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
         );
         assert_eq!(
             routed_documents(&agent(Some("compress"))),
-            [UNIVERSAL_DOCUMENT]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC]
         );
         assert_eq!(
             routed_documents(&agent(Some("subconscious"))),
-            [UNIVERSAL_DOCUMENT]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC]
         );
     }
 
@@ -304,13 +350,13 @@ mod tests {
         explicit.context = Some(Vec::new());
         assert_eq!(
             routed_documents(&explicit),
-            [UNIVERSAL_DOCUMENT],
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC],
             "`context = []` means the universal document and nothing else"
         );
 
         assert_eq!(
             routed_documents(&agent(Some("orchestrator"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS, THREADS],
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS, THREADS],
             "an omitted key takes the tier default"
         );
     }
@@ -319,7 +365,10 @@ mod tests {
     fn an_explicit_context_overrides_the_tier_default() {
         let mut a = agent(Some("orchestrator"));
         a.context = Some(vec!["GOAL.md".into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, "GOAL.md"]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, "GOAL.md"]
+        );
     }
 
     #[test]
@@ -337,7 +386,7 @@ mod tests {
         let mut a = agent(Some("reasoning"));
         a.classes = vec!["judge".into()];
         a.context = Some(vec![SCRATCH.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC]);
     }
 
     #[test]
@@ -358,7 +407,10 @@ mod tests {
         let mut a = agent(None);
         a.classes = vec!["judge".into()];
         a.context = Some(vec![SCRATCH.into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     #[test]
@@ -371,7 +423,10 @@ mod tests {
             CLAIMS.into(),
             BRIEF.into(),
         ]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     /// The method policy is exempt: it is how the company works, not something
@@ -381,21 +436,27 @@ mod tests {
         let mut a = agent(None);
         a.classes = vec!["judge".into(), "evidence".into(), "directive".into()];
         a.context = Some(Vec::new());
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC]);
     }
 
     #[test]
     fn a_document_listed_twice_is_routed_once() {
         let mut a = agent(None);
         a.context = Some(vec![UNIVERSAL_DOCUMENT.into(), BRIEF.into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     #[test]
     fn blank_context_entries_are_ignored() {
         let mut a = agent(None);
         a.context = Some(vec!["".into(), "  ".into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     /// An unknown class imposes no exclusion. Manifest validation refuses one
@@ -446,6 +507,7 @@ mod tests {
                     mime: None,
                     size: None,
                     sha256: None,
+                    adopted: false,
                 },
                 Some(body),
             )
@@ -483,6 +545,39 @@ mod tests {
             );
         }
 
+        /// A company created before the lowercase-dashed rule holds `BRIEF.md`,
+        /// and a manifest written then asks for `BRIEF.md`. Both still route.
+        ///
+        /// This is the compatibility seam the rule needs most: routing is what
+        /// a role reasons *from*, so an unmatched name is not a missing file
+        /// message — it is an agent quietly answering without the company's
+        /// brief, and nothing anywhere says so.
+        #[tokio::test]
+        async fn a_legacy_uppercase_document_still_routes() {
+            let (_dir, ws, company) = store().await;
+            file(&ws, &company, None, "BRIEF.md", "What we established.").await;
+
+            let mut a = agent(Some("frontend"));
+            a.context = Some(vec!["BRIEF.md".into()]);
+            let by_old_name = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            assert_eq!(by_old_name.len(), 1, "{by_old_name:?}");
+
+            // And the same node answers the canonical spelling, which is what
+            // the default routing table now asks for.
+            let mut b = agent(Some("frontend"));
+            b.context = Some(vec![BRIEF.into()]);
+            let by_new_name = resolve_routed_documents(ws.as_ref(), &company, &b)
+                .await
+                .expect("resolves");
+            assert_eq!(
+                by_new_name,
+                vec![(BRIEF.to_string(), "What we established.".to_string())],
+                "the routed name is the one asked for, resolved against what exists"
+            );
+        }
+
         /// The rule that differs from `prompt_files`: a live workspace note that
         /// does not exist yet is skipped, not an error. Failing the roster build
         /// here would take a whole company down over a file anybody could create.
@@ -515,7 +610,7 @@ mod tests {
             .await;
 
             let mut a = agent(None);
-            a.context = Some(vec!["Brand/Voice.md".into()]);
+            a.context = Some(vec!["brand/Voice.md".into()]);
 
             let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
                 .await
@@ -523,7 +618,7 @@ mod tests {
             assert_eq!(
                 resolved,
                 vec![(
-                    "Brand/Voice.md".to_string(),
+                    "brand/Voice.md".to_string(),
                     "Plain, never loud.".to_string()
                 )]
             );
@@ -537,13 +632,13 @@ mod tests {
             file(&ws, &company, Some(&brand), "Voice.md", "body").await;
 
             let mut a = agent(None);
-            a.context = Some(vec!["/Brand/Voice.md".into()]);
+            a.context = Some(vec!["/brand/Voice.md".into()]);
 
             let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
                 .await
                 .expect("resolves");
             assert_eq!(resolved.len(), 1, "{resolved:?}");
-            assert_eq!(resolved[0].0, "Brand/Voice.md");
+            assert_eq!(resolved[0].0, "brand/Voice.md");
         }
 
         /// A traversal-shaped entry resolves to nothing rather than erroring, so

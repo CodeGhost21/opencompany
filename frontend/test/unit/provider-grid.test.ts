@@ -11,7 +11,15 @@ import { describe, expect, it } from "vitest";
 
 import type { ComposioConnectedAccount, ComposioToolkitEntry } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
-import { buildGridProviders, disconnectRouteFor } from "@/lib/provider-grid";
+import {
+  accountSummary,
+  buildGridProviders,
+  connectedProviderCount,
+  disconnectRouteFor,
+  grantStanding,
+  tallyAccounts,
+  tileDelivers,
+} from "@/lib/provider-grid";
 import { CONNECTION_PROVIDERS, type ComposioReach } from "@/lib/connections";
 
 /** A host where Composio is live and everything is reachable (open mode). */
@@ -99,8 +107,8 @@ describe("buildGridProviders", () => {
     const tile = bySlug(providers, "googlecalendar");
     expect(tile.connected).toBe(true);
     // The host id stays distinct from the Composio slug: one is what
-    // `startConnection`/`disconnectConnection` take, the other is what
-    // `composio/authorize` takes, and sending either to the other's route fails.
+    // `disconnectConnection` takes for a historical credential, the other is
+    // what `composio/authorize` takes, and sending either to the other's route fails.
     expect(tile.providerId).toBe("google-calendar");
   });
 
@@ -419,5 +427,153 @@ describe("disconnect routing", () => {
     const tile = bySlug(providers, "gmail");
     expect(tile.account).toBeUndefined();
     expect(tile.accounts).toHaveLength(2);
+  });
+});
+
+// The one rule for counting accounts (issue #923).
+//
+// The bug these pin is #582's shape one level down. #582 removed a second
+// *grid*; this is two rules meeting inside the surviving one. The tile printed
+// `accounts.length` — every account, whatever its state — under a badge gated
+// on `connected`, which the host sets when at least one account is `ACTIVE`.
+// The two reads disagreed in both directions on one screen, and the account
+// list two inches below the grid showed the operator that they did.
+//
+// The counts below are the three rows the issue reported, verbatim.
+describe("accountSummary", () => {
+  function acct(id: string, connected: boolean): ComposioConnectedAccount {
+    return { id, status: connected ? "ACTIVE" : "INITIATED", connected };
+  }
+
+  it("counts only the accounts an agent can act as", () => {
+    // Gmail as reported: one ACTIVE, five INITIATED. The grid said "6 accounts
+    // connected" — it counted the five that no agent can use.
+    const gmail = [
+      acct("g1", true),
+      acct("g2", false),
+      acct("g3", false),
+      acct("g4", false),
+      acct("g5", false),
+      acct("g6", false),
+    ];
+    expect(tallyAccounts(gmail)).toEqual({ live: 1, pending: 5 });
+    expect(accountSummary(gmail)).toBe("1 account connected");
+
+    // GitHub as reported: three ACTIVE, two INITIATED. The grid said five.
+    const github = [
+      acct("h1", true),
+      acct("h2", true),
+      acct("h3", true),
+      acct("h4", false),
+      acct("h5", false),
+    ];
+    expect(tallyAccounts(github)).toEqual({ live: 3, pending: 2 });
+    expect(accountSummary(github)).toBe("3 accounts connected");
+  });
+
+  it("says a provider holds accounts even when none of them is usable", () => {
+    // Notion as reported: three INITIATED, none ACTIVE. The grid collapsed this
+    // to "not connected" — directly above the three accounts it listed. An
+    // account mid-handshake is not the absence of an account, which is the
+    // distinction the issue's Expected asks the grid to keep.
+    const notion = [acct("n1", false), acct("n2", false), acct("n3", false)];
+    expect(tallyAccounts(notion)).toEqual({ live: 0, pending: 3 });
+    expect(accountSummary(notion)).toBe("3 accounts, none connected");
+    expect(accountSummary(notion)).not.toBe("not connected");
+  });
+
+  it("leaves the wording to the caller when the host sent no accounts", () => {
+    // A host predating #404 answers without `accounts` while still reporting
+    // the toolkit connected. `null` is what lets the tile keep saying
+    // "connected via composio" rather than inventing a count of zero.
+    expect(accountSummary(undefined)).toBeNull();
+    expect(accountSummary([])).toBeNull();
+    expect(tallyAccounts(undefined)).toEqual({ live: 0, pending: 0 });
+  });
+
+  it("uses the singular for one of each", () => {
+    expect(accountSummary([acct("a", true)])).toBe("1 account connected");
+    expect(accountSummary([acct("a", false)])).toBe("1 account, not connected");
+  });
+});
+
+/**
+ * The composio-grant tri-state (issue #1478).
+ *
+ * The bug this pins: `granted` arrives from an unvalidated cast, so `undefined`
+ * is reachable, and two surfaces defaulted it in OPPOSITE directions — one to
+ * "not granted", one to "granted" — so a single render showed both. Routing
+ * every surface through `grantStanding` makes `undefined` read as `"unknown"`
+ * everywhere, so they cannot disagree on the same field.
+ */
+describe("grantStanding", () => {
+  it("maps an explicit boolean to its standing", () => {
+    expect(grantStanding(true)).toBe("granted");
+    expect(grantStanding(false)).toBe("not-granted");
+  });
+
+  it("reads a missing grant as unknown — never as a definite negative", () => {
+    expect(grantStanding(undefined)).toBe("unknown");
+  });
+});
+
+describe("connectedProviderCount", () => {
+  it("counts the connected tiles, so the header and heading share one number", () => {
+    const providers = buildGridProviders(
+      [entry("gmail"), entry("slack"), entry("notion")],
+      [],
+      states(
+        { provider: "gmail", connected: true, via: ["composio"] },
+        { provider: "slack", connected: true, via: ["composio"] },
+      ),
+      OPEN,
+      false,
+    );
+    expect(connectedProviderCount(providers)).toBe(2);
+  });
+});
+
+/**
+ * Whether a connected tile actually delivers its tools (issue #1407).
+ *
+ * A connection is real whether or not the `composio` namespace is granted, but a
+ * green "connected" tile under a banner saying the tools reach nobody is the
+ * contradiction. A not-granted Composio tile is connected-but-not-delivering; an
+ * unchecked grant is NOT demoted (that would render unknown as a definite no).
+ */
+describe("tileDelivers", () => {
+  function gmail(reach: ComposioReach) {
+    return bySlug(
+      buildGridProviders(
+        [entry("gmail")],
+        [],
+        states({ provider: "gmail", connected: true, via: ["composio"] }),
+        reach,
+        false,
+      ),
+      "gmail",
+    );
+  }
+
+  it("delivers when a connected composio tile's grant is present", () => {
+    expect(tileDelivers(gmail(OPEN), true)).toBe(true);
+  });
+
+  it("does NOT deliver when the composio grant is explicitly absent", () => {
+    // The #1407 case: real connection, no grant — connected-but-not-delivering,
+    // so the tile must drop the success colour.
+    expect(tileDelivers(gmail({ ...OPEN, granted: false }), false)).toBe(false);
+  });
+
+  it("keeps delivering when the grant is unknown — unknown is not a denial", () => {
+    expect(tileDelivers(gmail(OPEN), undefined)).toBe(true);
+  });
+
+  it("a disconnected tile never delivers", () => {
+    const disconnected = bySlug(
+      buildGridProviders([entry("slack")], [], states(), OPEN, false),
+      "slack",
+    );
+    expect(tileDelivers(disconnected, true)).toBe(false);
   });
 });

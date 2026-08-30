@@ -43,6 +43,7 @@ type Subs = import("@/hooks/use-events").Subscribers;
 const GRAPH: WorkflowGraph = {
   id: "greet",
   name: "Greet",
+  version: null,
   nodes: [
     { id: "start", kind: "trigger", name: "Start" },
     { id: "ceo", kind: "agent", name: "CEO", agent: "ceo" },
@@ -61,6 +62,7 @@ const start = (runId: string): Ev => ({
   workflowId: "greet",
   runId,
   scheduled: false,
+  startedBy: "operator",
 });
 const nodeStarted = (runId: string, nodeId: string): Ev => ({
   type: "workflow_node_started",
@@ -271,5 +273,91 @@ describe("workflow_node_started routing", () => {
     expect(subs.onTaskEvent).not.toHaveBeenCalled();
     expect(subs.onWorkflowChanged).not.toHaveBeenCalled();
     expect(subs.onWorkspaceEvent).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Issue #921: a finished run still reads as running.
+ *
+ * The fold clears `active` on one signal only — a `workflow_run_finished` frame
+ * for the run it is following. When the stream dies mid-run that frame never
+ * arrives, so the canvas keeps a node pulsing and the header keeps saying
+ * "running" long after the host is done; three QA reports were filed as engine
+ * hangs on the strength of it, and only a reload ever corrected the view.
+ *
+ * The host's run history is the authority that survives a dead stream: a run it
+ * no longer lists as `running` IS settled, whatever the frame window shows. The
+ * console polls that list, so this is reachable without the broken stream.
+ */
+describe("a run settles from the host's history when its stream dies", () => {
+  /** The window a dropped stream leaves behind: the run started, the agent node
+   * started, and then nothing — no finish for the node, none for the run. */
+  const truncated: Ev[] = [start("r1"), nodeStarted("r1", "ceo")];
+
+  it("stays active on the frames alone — the state the bug reports", () => {
+    const live = foldLiveRun(truncated, "greet", GRAPH);
+    expect(live?.active).toBe(true);
+    expect(live?.states.ceo).toBe("running");
+  });
+
+  it("settles once the host lists the run as no longer running", () => {
+    const live = foldLiveRun(truncated, "greet", GRAPH, null, new Set(["r1"]));
+    expect(live?.active).toBe(false);
+  });
+
+  it("clears the orphaned running mark but keeps what was reported", () => {
+    const window: Ev[] = [
+      start("r1"),
+      nodeStarted("r1", "ceo"),
+      nodeFinished("r1", "ceo", "ok"),
+      nodeStarted("r1", "done"),
+    ];
+    const live = foldLiveRun(window, "greet", GRAPH, null, new Set(["r1"]));
+    expect(live?.active).toBe(false);
+    // The node the run died on stops pulsing…
+    expect(live?.states.done).toBeUndefined();
+    // …and the honest "how far did it get?" answer survives.
+    expect(live?.states.ceo).toBe("ok");
+  });
+
+  it("a run the host still lists as running is left alone", () => {
+    const live = foldLiveRun(truncated, "greet", GRAPH, null, new Set(["other"]));
+    expect(live?.active).toBe(true);
+    expect(live?.states.ceo).toBe("running");
+  });
+
+  // The dispatch's other half: a fix that repairs "finished" but not "failed"
+  // is half a fix. The host settles a run the same way whatever became of it —
+  // failed, cancelled or denied all stop being `running` — so the reconciliation
+  // must not be keyed on a successful outcome.
+  it("settles a run that ended badly, not only a clean one", () => {
+    const failed: Ev[] = [
+      start("r1"),
+      nodeStarted("r1", "ceo"),
+      nodeFinished("r1", "ceo", "error"),
+      nodeStarted("r1", "done"),
+    ];
+    const live = foldLiveRun(failed, "greet", GRAPH, null, new Set(["r1"]));
+    expect(live?.active).toBe(false);
+    expect(live?.states.ceo).toBe("error");
+    expect(live?.states.done).toBeUndefined();
+  });
+
+  it("settles a run adopted from history rather than from a start frame", () => {
+    // No start frame in the window at all (issue #863's path) — a console that
+    // joined mid-run and then lost the stream is the worst case, because it has
+    // neither a start frame nor a finish one.
+    const seed = {
+      runId: "r1",
+      states: { ceo: "ok" as const },
+      elapsed: { ceo: 5 },
+      scheduled: false,
+    };
+    const stillRunning = foldLiveRun([], "greet", GRAPH, seed);
+    expect(stillRunning?.active).toBe(true);
+
+    const live = foldLiveRun([], "greet", GRAPH, seed, new Set(["r1"]));
+    expect(live?.active).toBe(false);
+    expect(live?.states.ceo).toBe("ok");
   });
 });

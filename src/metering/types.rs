@@ -45,13 +45,15 @@ pub struct UsagePoint {
 }
 
 /// Tokens attributed to one teammate over the window.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTokens {
     /// The teammate's display name (prosumer language), resolved from the roster.
     pub name: String,
     /// Total input + output tokens attributed to the teammate.
     pub tokens: u64,
+    /// Source-currency USD attributed to the teammate in the same window.
+    pub cost_usd: f64,
 }
 
 /// OAuth-connected tool calls counted per provider over the window.
@@ -148,8 +150,9 @@ pub struct Transaction {
 pub struct Finances {
     /// The wallet balance (economy wallet when present, else bookkeeping net).
     pub balance_usd: f64,
-    /// The monthly budget cap from `[budget].monthly_usd` (0 when uncapped).
-    pub budget_usd: f64,
+    /// The monthly budget cap from `[budget].monthly_usd`; `None` when the
+    /// manifest sets no cap, `Some(0.0)` when it is capped at zero.
+    pub budget_usd: Option<f64>,
     /// Current-month outgoing spend (positive magnitude).
     pub spent_usd: f64,
     /// Current-month incoming revenue (positive magnitude).

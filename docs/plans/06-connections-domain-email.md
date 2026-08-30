@@ -16,24 +16,23 @@ Routes (dual-scoped like all WS3 ops routes, except the callback):
 
 | Method | Path | Behavior |
 |---|---|---|
-| POST | `…/connections/{provider}/start` | → `{url}`: provider authorize URL with a signed `state` nonce (company+provider+expiry), redirect URI from config |
-| GET | `/api/v1/oauth/callback` (unscoped) | verifies `state`, exchanges `code` server-side, stores tokens at `SecretStore["oauth/{provider}"]`, captures the account label, redirects back to the console |
+| POST | `…/connections/{provider}/start` | retirement bridge: `410 native_oauth_retired` through 2026-09-30; it no longer starts a handshake (#838, removal #1023) |
+| GET | `/api/v1/oauth/callback` (unscoped) | retirement browser landing page: `410 Gone` explaining an in-flight authorization was not saved; it does not inspect `state` or exchange `code` |
 | POST | `…/connections/{provider}/disconnect` | best-effort revoke, delete the secret |
 
-- **Callback hosting:** this crate hosts it. In managed deployments the
-  manager may front the same path; `OPENCOMPANY_OAUTH_REDIRECT_BASE`
-  overrides the redirect URI so the authorize URL points wherever the
-  operator's browser can reach (README open question resolution).
-- **Provider app credentials** (client_id/client_secret) are host-level
-  configuration (`OPENCOMPANY_OAUTH_<PROVIDER>_ID/_SECRET`), never
-  per-company; per-company state is tokens only.
+- **Callback hosting:** this crate keeps the unscoped callback through
+  2026-09-30 solely as the explanatory landing page for a browser redirected
+  after deployment. It does not need a redirect base or process callback
+  parameters.
+- **Provider app credentials** (client_id/client_secret) remain host-level
+  configuration only for best-effort revocation of historical credentials;
+  they no longer enable per-company native connections.
 - Read side (GraphQL `connections`): catalog priorities from `[[connection]]`
   manifest intent ∪ connected state from the secret store — `{provider,
   connected, account?, reason?}`. **Account label and connected flag only;
   token material never appears in any response** (feature-tested).
-- Token exchange needs `reqwest` → gate the write routes behind a small
-  `oauth` feature; without it they 404 and the console shows the read-only
-  catalog (existing seam behavior).
+- The `oauth` feature keeps the compatibility and cleanup routes available;
+  `reqwest` is now used only for best-effort revocation, never token exchange.
 
 ### Domain & DNS
 
@@ -44,8 +43,9 @@ Routes (dual-scoped like all WS3 ops routes, except the callback):
 
 - `src/company/dns.rs`: pure record generation — verification TXT
   (deterministic token derived per company+domain), mail CNAME, two DKIM
-  CNAMEs, SPF TXT — mirroring `frontend/src/lib/domain.ts::dnsRecords` so the
-  console renders identically.
+  CNAMEs, SPF TXT. This is the only generator: the console's own
+  `frontend/src/lib/domain.ts::dnsRecords` was deleted by issue #1460, and the
+  card now renders the `records` off `DomainStatus` verbatim.
 - Verification via a mockable trait:
 
 ```rust
@@ -115,7 +115,7 @@ WS3 (`InboxStore`, ops scaffolding, SecretStore keys). Feeds WS7
 
 Unit: DNS record generation determinism; mock-resolver verify outcomes.
 Feature: the four-case suite per route plus — no token/password material in
-any serialized response; callback with tampered `state` → 401; inbound hook
+any serialized response; callback with any `state` → dated `410` and no credential write; inbound hook
 with bad HMAC → 401 and no event; smtp test with mock sender. Default build
 compiles with no network crates. Exit per
 [09-verification.md](09-verification.md) WS6 row.

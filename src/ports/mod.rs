@@ -8,16 +8,19 @@
 
 mod ids;
 
+pub mod acp;
 pub mod approvals;
 pub mod artifacts;
 pub mod brain;
 pub mod channel;
 pub mod context;
+pub mod deep_trace;
 pub mod economy;
 pub mod events;
 pub mod facts;
 pub mod inbox;
 pub mod journal;
+pub mod ledgers;
 pub mod login_codes;
 pub mod memory;
 pub mod notifications;
@@ -36,8 +39,10 @@ pub mod usage;
 pub mod users;
 pub mod workflow_revisions;
 pub mod workflow_runner;
+pub mod workflow_verdict;
 pub mod workspace;
 
+pub use acp::{AcpAgent, AcpAgentFactory, AcpTurn, AcpUpdate};
 pub use approvals::ApprovalGate;
 pub use artifacts::{
     ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactStore, ArtifactVersion,
@@ -46,12 +51,20 @@ pub use artifacts::{
 pub use brain::{Brain, Cognition, CycleHost, UsageMetering};
 pub use channel::ChannelAdapter;
 pub use context::ContextStore;
+pub use deep_trace::{
+    DEEP_ARGUMENTS_CHAR_CAP, DEEP_OUTPUT_CHAR_CAP, DEEP_REASONING_CHAR_CAP, DeepTraceStore,
+    MAX_DEEP_RUNS_PER_COMPANY, MAX_DEEP_STEPS_PER_RUN, RunStepDetailRecord, TurnStepDetail,
+    bound_detail,
+};
 pub use economy::AgentEconomy;
 pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
-pub use ids::{AGENT_SLUG_FALLBACK, agent_slug, generate_id, now_millis};
+pub use ids::{
+    AGENT_SLUG_FALLBACK, CONFINED_AGENT_ID, SYSTEM_AUTHOR, agent_slug, generate_id, now_millis,
+};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
 pub use journal::{Durability, JournalStore};
+pub use ledgers::LedgerStore;
 pub use login_codes::{LoginCodeRecord, LoginCodeStore};
 pub use memory::MemoryStore;
 pub use notifications::{Notification, NotificationStore, NotificationView, Subject, SubjectKind};
@@ -74,7 +87,7 @@ pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
 pub use users::{
     InviteRecord, LoginIdentity, UserRecord, UserRole, UserStatus, UserStore,
-    decode_wallet_address, normalize_email, normalize_wallet,
+    decode_wallet_address, derive_display_name, normalize_email, normalize_wallet,
 };
 pub use workflow_revisions::{
     MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
@@ -83,6 +96,9 @@ pub use workflow_runner::{
     DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowApprovalOutcome,
     WorkflowBlockedNode, WorkflowBoardAction, WorkflowRun, WorkflowRunApprovalRow,
     WorkflowRunBoardRow, WorkflowRunContext, WorkflowRunNodeRow, WorkflowRunner,
+};
+pub use workflow_verdict::{
+    RunVerdictFacts, WorkflowRunVerdict, awaiting_count, is_undelivered, undelivered_count,
 };
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
@@ -125,6 +141,7 @@ mod test {
         _run_output: &dyn crate::ports::run_output::WorkflowRunOutputStore,
         _workflow_runner: &dyn crate::ports::workflow_runner::WorkflowRunner,
         _journal: &dyn crate::ports::journal::JournalStore,
+        _ledgers: &dyn crate::ports::ledgers::LedgerStore,
     ) {
     }
 

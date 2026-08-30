@@ -137,7 +137,7 @@ pub enum WorkspaceOrigin {
 /// claim on `(parent, name)` (issue #759).
 ///
 /// The caller almost always wants the node and not the verb — a publish walking
-/// `Agents/<agent>/<task>/` does the same thing either way. The distinction is
+/// `agents/<agent>/<task>/` does the same thing either way. The distinction is
 /// carried anyway because exactly one consumer must be able to tell: the
 /// workspace announcer emits a node-created frame, and a frame for a folder that
 /// was already standing would tell an open console that something appeared when
@@ -196,6 +196,7 @@ pub fn new_folder(name: &str, parent_id: Option<&str>, origin: WorkspaceOrigin) 
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     }
 }
 
@@ -248,6 +249,37 @@ pub fn folder_claim_ambiguous_refusal(name: &str, count: usize) -> String {
     format!("{count} nodes under this folder are named `{name}`, so the path is ambiguous")
 }
 
+/// Whether a **file** already occupies `(parent, name)` (issue #894).
+///
+/// The sibling-uniqueness predicate every backend's [`WorkspaceStore::create`]
+/// applies, shared so the three cannot drift on what "taken" means.
+///
+/// # Files only, and that is the rule rather than an omission
+///
+/// A folder is not consulted and does not block, so a folder and a file may
+/// still share a name in one parent exactly as they always could. Folder-vs-
+/// folder claims are [`adopt_or_create_folder`]'s job (issue #759), which
+/// adopts rather than refuses. Widening this to every kind would be a **new
+/// tree rule** rather than the race fix issue #894 asks for, and it would break
+/// MongoDB, whose guard is a partial index over file documents alone.
+///
+/// [`adopt_or_create_folder`]: WorkspaceStore::adopt_or_create_folder
+pub fn file_name_taken<'a>(
+    nodes: impl Iterator<Item = &'a WorkspaceNode>,
+    parent: Option<&str>,
+    name: &str,
+) -> bool {
+    nodes.into_iter().any(|node| {
+        node.kind == NodeKind::File && node.parent_id.as_deref() == parent && node.name == name
+    })
+}
+
+/// The refusal every backend gives when a file already carries the name a
+/// [`create`](WorkspaceStore::create) asked for.
+pub fn duplicate_file_refusal(name: &str) -> String {
+    format!("workspace already contains a note named `{name}` in that folder")
+}
+
 /// One node in the workspace tree. `id` is a stable ULID; `parent_id` is `None`
 /// at the workspace root.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -292,6 +324,34 @@ pub struct WorkspaceNode {
     /// [`blob_metadata`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Whether a second caller has *adopted* this folder through
+    /// [`WorkspaceStore::adopt_or_create_folder`] and now has a legitimate
+    /// reason to write beneath it (issue #1839).
+    ///
+    /// # Why a folder needs a lease flag
+    ///
+    /// The empty-folder rollback issue #1801 added
+    /// ([`rollback_empty_minted_folders`](crate::company::workspace_scaffold::rollback_empty_minted_folders))
+    /// undoes a *minted* folder whose write then failed. But a folder one caller
+    /// minted, a second caller can adopt — `adopt_or_create_folder` hands the
+    /// loser [`FolderClaim::Adopted`] and, by design, does **not** add it to that
+    /// caller's own `minted` set. Nothing then recorded that the folder has a
+    /// second writer, so the minter's later rollback could sweep the folder the
+    /// adopter was about to write into. This flag is that record: an adoption
+    /// stamps it `true`, and [`delete_if_empty`](WorkspaceStore::delete_if_empty)
+    /// refuses a folder carrying it. See the guard on `delete_if_empty`.
+    ///
+    /// # Sticky, and conservative on the migration
+    ///
+    /// `#[serde(default)]` **is** the migration: every node written before this
+    /// field existed loads as `false` on all three backends, no rewrite — and
+    /// `false` is the conservative reading, because it leaves a pre-#1839 empty
+    /// folder exactly as rollback-eligible as it is today. The flag only ever
+    /// *adds* a folder to the set of things a delete refuses; it never shrinks
+    /// it. It is never cleared: an adopted-then-emptied folder waits for
+    /// Tidy/Repair, whose job empty-folder cleanup already is.
+    #[serde(default)]
+    pub adopted: bool,
 }
 
 impl WorkspaceNode {
@@ -337,6 +397,7 @@ pub fn stamped_binary(node: &WorkspaceNode, bytes: &[u8]) -> Result<WorkspaceNod
         mime: Some(mime),
         size: Some(size),
         sha256: Some(sha256),
+        adopted: false,
         ..node.clone()
     })
 }
@@ -461,6 +522,28 @@ pub trait WorkspaceStore: Send + Sync {
     /// `parent_id`, when set, must name an existing folder. `content` seeds a
     /// file body.
     ///
+    /// # A file's name must be free among its siblings (issue #894)
+    ///
+    /// Creating a **file** whose `(parent_id, name)` a file already occupies is
+    /// an [`OpenCompanyError::Conflict`](crate::error::OpenCompanyError). The
+    /// predicate is [`file_name_taken`] and the refusal is
+    /// [`duplicate_file_refusal`], shared so the backends cannot disagree about
+    /// either.
+    ///
+    /// **This is a store guarantee, not a caller convention, and the difference
+    /// is the whole of issue #894.** `workspace_create` checks the path index
+    /// and then calls this — check-then-act, which two concurrent callers both
+    /// pass. Only the store can decide the loser: fs under the index lock,
+    /// SQLite inside an `IMMEDIATE` transaction, MongoDB against a partial
+    /// unique index. A caller-side check is a narrowing of the window, never a
+    /// closing of it, so nothing above this line may be trusted to enforce it.
+    ///
+    /// Folders are deliberately exempt — see [`file_name_taken`]. A tree that
+    /// *already* holds duplicates keeps them: this refuses new collisions and
+    /// repairs no history, so a store carrying pre-existing duplicates opens
+    /// and serves exactly as before (`read` still answers that path
+    /// `Ambiguous`, `list` still shows both).
+    ///
     /// No `author` argument: the node arrives fully formed, so the caller sets
     /// [`WorkspaceNode::created_by`] and [`WorkspaceNode::updated_by`] on it
     /// directly.
@@ -477,7 +560,7 @@ pub trait WorkspaceStore: Send + Sync {
     /// **The contract**: when this returns `Ok`, exactly one folder answers to
     /// `(parent, name)` among the nodes this primitive governs, and the returned
     /// node is it. `parent` of `None` is the workspace root, which is why it is
-    /// an `Option` rather than a `&str` — the `Agents/` and `Desks/` roots are
+    /// an `Option` rather than a `&str` — the `agents/` and `desks/` roots are
     /// claimed by the same call as everything beneath them.
     ///
     /// Adoption **preserves the original authorship stamp**: `origin` is used
@@ -496,7 +579,7 @@ pub trait WorkspaceStore: Send + Sync {
     /// `swap_files` stages a payload and makes the loser **fail**, which is
     /// right for a file: its bytes are a content claim with one legitimate
     /// winner. A folder is a payload-free **container** claim — two publishers
-    /// that both want `Agents/cmo/task-42/` want the same thing, so the loser
+    /// that both want `agents/cmo/task-42/` want the same thing, so the loser
     /// must adopt and carry on rather than report a publish failure the operator
     /// can do nothing about. Forcing folders through that CAS would need a
     /// re-read-and-adopt retry loop wrapped around it, and `swap_files` rejects
@@ -646,6 +729,52 @@ pub trait WorkspaceStore: Send + Sync {
     /// The conformance suite checks this by asking [`read_bytes`](Self::read_bytes)
     /// afterwards rather than by trusting the delete's return value.
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
+    /// Deletes `id` only if it is currently childless, checked and removed as
+    /// close to one operation as the backend can manage — never a caller's
+    /// earlier [`tree`](Self::tree) snapshot handed back to [`delete`](Self::delete).
+    ///
+    /// Exists for callers like [`rollback_empty_minted_folders`
+    /// (`workspace_scaffold`)](crate::company::workspace_scaffold::rollback_empty_minted_folders)
+    /// that decide a folder is safe to remove from a tree read taken earlier
+    /// in the same request. [`delete`](Self::delete) recurses unconditionally,
+    /// so re-using it against that stale read races a concurrent adopter: a
+    /// child can land in the window between the read and the call, and
+    /// `delete` sweeps it away with the folder it was supposed to save (found
+    /// in review on issue #1801's PR).
+    ///
+    /// Returns `Ok(false)`, and deletes nothing, when `id` does not exist or
+    /// currently has a child — a caller must not read a `false` as "gone".
+    ///
+    /// The default re-derives this from [`tree`](Self::tree) and
+    /// [`delete`](Self::delete), which only narrows the window a caller
+    /// already has rather than closing it — adequate for a decorator that has
+    /// no tighter primitive of its own, but a decorator MUST still forward to
+    /// its inner store's override rather than rely on this default, or an
+    /// inner backend's real fix never gets called. [`FsOps`](crate::store::FsOps)
+    /// overrides this under the same per-company index lock every other
+    /// writer takes, closing the window entirely; MongoDB has no equivalent
+    /// lock, so its override only re-checks immediately before deleting.
+    async fn delete_if_empty(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        let nodes = self.tree(company).await?;
+        let Some(node) = nodes.iter().find(|node| node.id == id) else {
+            return Ok(false);
+        };
+        // A folder a second caller has adopted has a legitimate writer, even
+        // while it is still childless (issue #1839). The adopter's write has
+        // not landed yet, so an emptiness check alone would let the minter's
+        // rollback sweep the folder out from under it. The lease flag is the
+        // record that says "someone else is about to write here"; refuse.
+        if node.adopted {
+            return Ok(false);
+        }
+        if nodes
+            .iter()
+            .any(|node| node.parent_id.as_deref() == Some(id))
+        {
+            return Ok(false);
+        }
+        self.delete(company, id).await
+    }
     /// Whether the workspace has no nodes — the gate the seeder checks so a
     /// seeded-then-emptied workspace is never re-seeded.
     async fn is_empty(&self, company: &CompanyId) -> Result<bool>;
@@ -674,6 +803,14 @@ mod tests {
         let node: WorkspaceNode = serde_json::from_str(legacy).expect("legacy node must load");
         assert_eq!(node.created_by, WorkspaceOrigin::Operator);
         assert_eq!(node.updated_by, WorkspaceOrigin::Operator);
+        // Issue #1839: the adoption lease is `#[serde(default)]`, so a node
+        // written before it existed loads as `false` — the conservative reading
+        // that leaves a pre-#1839 empty folder exactly as rollback-eligible as it
+        // is today. That default IS the whole migration: no rewrite, no backfill.
+        assert!(
+            !node.adopted,
+            "a legacy node without the field must load unadopted"
+        );
     }
 
     /// The internally-tagged wire shape, pinned.
@@ -724,6 +861,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         let json = serde_json::to_string(&node).unwrap();
         assert_eq!(serde_json::from_str::<WorkspaceNode>(&json).unwrap(), node);
@@ -750,6 +888,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         };
         let json = serde_json::to_string(&node).unwrap();
         assert!(!json.contains("mime"), "{json}");
@@ -773,6 +912,7 @@ mod tests {
             mime: Some("image/png".to_string()),
             size: Some(1234),
             sha256: Some("abc123".to_string()),
+            adopted: false,
         };
         let json = serde_json::to_string(&node).unwrap();
         assert_eq!(serde_json::from_str::<WorkspaceNode>(&json).unwrap(), node);

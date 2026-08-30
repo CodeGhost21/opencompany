@@ -4,6 +4,7 @@
 // are user-definable here.
 
 import type { AgentDeskDto, TeamMemberDto } from "@/api/types";
+import { avatarRef, hashedFlavour } from "@/lib/avatar";
 
 /** A desk a teammate sits on, as the roster read reports it. */
 export type TeamMemberDesk = AgentDeskDto;
@@ -16,11 +17,22 @@ export interface TeamMember {
   /** Avatar tone key; derived from the id so colors stay stable. */
   tone: string;
   /**
+   * The face to draw: the avatar reference this teammate **chose**, or the
+   * mascot hashed from its id when nobody has (`lib/avatar.ts`). Always a
+   * resolvable reference, never absent — every teammate has a face.
+   */
+  avatar: string;
+  /**
    * Whether this teammate has an inbox on the host. Read from `GET …/team` and
    * written by `PUT …/team/{id}/inbox` — never guessed client-side, so the Inbox
    * page and this toggle agree on the same `InboxStore` state (issue #173).
    */
   inboxEnabled: boolean;
+  /**
+   * Whether this teammate comes from the global baseline every company gets.
+   * Undefined means an older host did not report provenance.
+   */
+  global?: boolean;
   /**
    * The teammate's daily spend cap in USD, as the host will enforce it — an
    * admin's console override when one is set, otherwise the company's own
@@ -87,6 +99,18 @@ export function toneFor(seed: string): string {
   return TONE_KEYS[Math.abs(hash) % TONE_KEYS.length];
 }
 
+/**
+ * The face to draw for a teammate nobody has chosen one for — the mascot hashed
+ * from its id, as a full avatar reference.
+ *
+ * A thin wrapper over [`hashedFlavour`] so the many callers that only have a
+ * seed keep one import; the hashing rule, the flavour list and the reference
+ * grammar all live in `lib/avatar.ts` beside the host module they mirror.
+ */
+export function avatarFor(seed: string): string {
+  return `tiny:${hashedFlavour(seed)}`;
+}
+
 export function initials(name: string): string {
   return (
     name
@@ -98,6 +122,33 @@ export function initials(name: string): string {
   );
 }
 
+/**
+ * The muted line that sits under a teammate's name, or `null` when there is
+ * nothing left to say (issue #1208).
+ *
+ * A roster row carries a `name` and a `role`, and the console's own fallback
+ * makes them the same string whenever the host sends no display name:
+ * `fromDto` below resolves `name` as `dto.name?.trim() || dto.role`, and a
+ * manifest-declared agent has no `name` at all — `GET {scope}/team` answers
+ * `{"id":"backend_engineer","role":"Backend Engineer",…}`. Every surface that
+ * drew the title and then the role drew the same words twice.
+ *
+ * Answering `null` rather than an empty string is deliberate: a caller has to
+ * skip the element, not render an empty one, or the layout keeps the gap the
+ * repeat used to fill.
+ *
+ * Compared case-insensitively and whitespace-trimmed, because the two strings
+ * come from different places — one may have been typed by an operator into the
+ * add-teammate dialog while the other came out of a manifest — and "Backend
+ * engineer" under "Backend Engineer" is the same repeat wearing a different
+ * capital.
+ */
+export function roleSubtitle(name: string, role: string): string | null {
+  const trimmed = role.trim();
+  if (!trimmed) return null;
+  return trimmed.toLowerCase() === name.trim().toLowerCase() ? null : trimmed;
+}
+
 /** Map a host roster entry into the console's team model. */
 export function fromDto(dto: TeamMemberDto): TeamMember {
   const name = dto.name?.trim() || dto.role;
@@ -107,7 +158,13 @@ export function fromDto(dto: TeamMemberDto): TeamMember {
     role: dto.role,
     description: dto.description ?? "",
     tone: toneFor(dto.id || name),
+    // What this teammate chose, else the hashed default. Resolved to one
+    // reference here, because a roster row is only ever *drawn* — the picker
+    // needs "chosen" and "default" kept apart and reads the detail DTO, which
+    // carries the raw field.
+    avatar: avatarRef(dto.avatar, dto.id || name),
     inboxEnabled: dto.inboxEnabled ?? false,
+    global: dto.global,
     // Carried through as-is: `undefined` means uncapped and must stay
     // `undefined`, never coalesced to `0`.
     budgetUsdDaily: dto.budgetUsdDaily,
@@ -156,21 +213,6 @@ function roleHash(role: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function member(name: string, role: string, description: string): TeamMember {
-  return {
-    id: localMemberId(role),
-    name,
-    role,
-    description,
-    tone: toneFor(name),
-    inboxEnabled: false,
-    // A console-invented teammate exists on no host, so it holds no grant and
-    // sits on no desk. Stated, not guessed.
-    effectiveTools: [],
-    desks: [],
-  };
-}
-
 /**
  * A generic starter team that fits any company; the operator edits from here.
  *
@@ -179,22 +221,18 @@ function member(name: string, role: string, description: string): TeamMember {
  * roles, so a company that has not defined its own roster still reads as an org
  * rather than a list.
  */
-export function starterTeam(): TeamMember[] {
-  return [
-    member("Ops Lead", "Operations Lead", "Keeps work moving and unblocks the team."),
-    member("Front Desk", "Front Desk", "Scheduling, inbox, and everyday errands."),
-    member("Product Lead", "Product Manager", "Decides what gets built, and in what order."),
-    member("Researcher", "User Researcher", "Gathers facts, sources, and context."),
-    member("Analyst", "Data Analyst", "Measures performance and reports back."),
-    member("Engineer", "Software Engineer", "Builds and ships the product."),
-    member("Reviewer", "QA Engineer", "Tests changes before they reach anyone."),
-    member("Ops Engineer", "DevOps Engineer", "Runs the infrastructure and keeps it up."),
-    member("Designer", "Product Designer", "Creates visuals and holds the brand."),
-    member("Writer", "Content Writer", "Drafts copy, docs, and outbound messages."),
-    member("Marketer", "Growth Marketer", "Finds the audience and brings them in."),
-    member("Support", "Support Specialist", "Answers customers and closes the loop."),
-  ];
-}
+// `starterTeam()` used to live here: twelve invented agents ("Ops Lead", "Front
+// Desk", "Product Lead", …) rendered whenever the host's roster came back empty
+// or unreadable. It is deleted rather than deprecated.
+//
+// It was there to keep the console from looking bare, and the cost was that
+// every surface lied. The Team page offered budgets and inboxes for teammates
+// the host had never heard of; Chat offered DMs whose first message went
+// nowhere; the Overview graph drew a full org chart for a company with nobody in
+// it. First-run setup replaces the reason it existed — an unstaffed company now
+// gets offered a real team it can create — so the honest empty state is what
+// remains. See `docs/spec/runtime/company-setup.md`.
+
 
 /**
  * Create a member from operator-entered fields, for a host with no team write
@@ -213,9 +251,11 @@ export function newMember(fields: { name: string; role: string; description: str
     role: fields.role.trim(),
     description: fields.description.trim(),
     tone: toneFor(memberId),
+    // Nobody has chosen a face for a teammate that was created a moment ago.
+    avatar: avatarFor(memberId),
     inboxEnabled: false,
-    // Same as `member` above: nothing on a host has granted this teammate
-    // anything or seated it anywhere yet.
+    // Nothing on a host has granted this teammate anything or seated it
+    // anywhere yet, so both are stated empty rather than guessed.
     effectiveTools: [],
     desks: [],
   };

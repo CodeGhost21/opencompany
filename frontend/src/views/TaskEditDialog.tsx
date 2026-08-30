@@ -1,7 +1,8 @@
 // The task edit form, extracted from the board (#184) so both the Kanban board
 // and the Task Detail screen open the same dialog without a circular import.
 // This is an *edit* form — title / note / column / priority / assignee plus a
-// delete — unchanged from its original home in `TasksView`.
+// delete — unchanged from its original home on the board screen (retired in
+// issue #1140; the board is the `tasks` ledger's columns now).
 
 import { useEffect, useState } from "react";
 import { Loader2, Trash2 } from "lucide-react";
@@ -45,7 +46,8 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { computeTaskPatch } from "@/lib/task-edit";
-import { TASK_COLUMNS } from "@/lib/tasks-sample";
+import { labelFor } from "@/lib/board-columns";
+import { useBoardColumns } from "@/hooks/use-board-columns";
 import { toast } from "sonner";
 import { AssigneeSelect } from "./AssigneeSelect";
 
@@ -60,8 +62,8 @@ const DELIVERABLES: { value: TaskDeliverable; label: string }[] = [
 /**
  * The columns where the deliverable can still be flipped (issue #580).
  *
- * Once a card leaves To-do/Planning the choice is settled: the builder pass
- * fires on the drag into In Progress, so changing once-vs-workflow afterwards
+ * Once a card leaves Pending (or the Planning stage) the choice is settled: the
+ * builder pass fires on the drag into Working, so changing once-vs-workflow afterwards
  * cannot rebuild what already ran. The control is disabled there rather than
  * hidden — an honest "locked" reads better than a field that silently vanishes —
  * but this is a **UI-honesty** guard, not enforcement: the host is the authority
@@ -69,6 +71,19 @@ const DELIVERABLES: { value: TaskDeliverable; label: string }[] = [
  * a save that does not touch the deliverable never sends it anyway.
  */
 const DELIVERABLE_EDITABLE = new Set(["todo", "planning"]);
+
+/**
+ * Whether the once-vs-workflow choice is still open on this card.
+ *
+ * Matches on the **stage** and falls back to the phase, because since issue
+ * #1512 `column` is `pending`/`working`/`done`: a pending card is editable, a
+ * working one only while it is still `planning`, and matching on the column
+ * alone would either lock every working card or unlock all four stages.
+ */
+function deliverableEditable(task: Task): boolean {
+  const stage = task.stage ?? task.column;
+  return stage === "pending" || DELIVERABLE_EDITABLE.has(stage);
+}
 
 /**
  * Edit a card (or delete it). Open when `task` is non-null; `onClose` fires on
@@ -90,6 +105,9 @@ export function TaskEditDialog({
   client: OpenCompanyClient;
   company: string | null;
 }) {
+  // From the `tasks` ledger, so this select can never offer a column the host's
+  // write boundary would refuse — which is what a second, local list allowed.
+  const columns = useBoardColumns(client, company);
   const [draft, setDraft] = useState<PatchTask>({});
   const [busy, setBusy] = useState(false);
 
@@ -151,7 +169,7 @@ export function TaskEditDialog({
 
   return (
     <Dialog open={!!task} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Edit task</DialogTitle>
           <DialogDescription>
@@ -199,12 +217,12 @@ export function TaskEditDialog({
                       progress"). */}
                   <SelectValue>
                     {(selected) =>
-                      TASK_COLUMNS.find((c) => c.id === selected)?.label ?? String(selected ?? "")
+                      selected ? labelFor(columns, String(selected)) : ""
                     }
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  {TASK_COLUMNS.map((c) => (
+                  {columns.map((c) => (
                     <SelectItem key={c.id} value={c.id}>
                       {c.label}
                     </SelectItem>
@@ -257,7 +275,7 @@ export function TaskEditDialog({
               onValueChange={(v) =>
                 setDraft((d) => ({ ...d, deliverable: (v as TaskDeliverable) ?? undefined }))
               }
-              disabled={!DELIVERABLE_EDITABLE.has(task.column)}
+              disabled={!deliverableEditable(task)}
             >
               <SelectTrigger id="task-deliverable" data-testid="edit-deliverable">
                 <SelectValue />
@@ -270,7 +288,7 @@ export function TaskEditDialog({
                 ))}
               </SelectContent>
             </Select>
-            {!DELIVERABLE_EDITABLE.has(task.column) && (
+            {!deliverableEditable(task) && (
               <p className="text-2xs text-muted-foreground">
                 Locked once work starts — the workflow is built when a card enters In progress, so
                 this can only be changed while it&apos;s still in To-do or Planning.

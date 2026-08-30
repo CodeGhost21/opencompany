@@ -21,7 +21,7 @@ impl RuntimeModuleStatus {
                 name: "tinyagents",
                 enabled: cfg!(feature = "tinyagents"),
                 role: "agent harness, graphs, registry, and RLM runtime",
-                path: "vendor/tinyagents",
+                path: "vendor/openhuman/vendor/tinyagents",
             },
             Self {
                 name: "openhuman",
@@ -39,11 +39,10 @@ mod tests {
 
     #[test]
     fn all_known_modules_are_reported() {
-        let names: Vec<_> = RuntimeModuleStatus::all()
-            .into_iter()
-            .map(|module| module.name)
-            .collect();
+        let modules = RuntimeModuleStatus::all();
+        let names: Vec<_> = modules.iter().map(|module| module.name).collect();
 
         assert_eq!(names, vec!["tinyagents", "openhuman"]);
+        assert_eq!(modules[0].path, "vendor/openhuman/vendor/tinyagents");
     }
 }

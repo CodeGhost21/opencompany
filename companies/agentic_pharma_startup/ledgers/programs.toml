@@ -1,0 +1,108 @@
+# Drug discovery programs: the target, the hypothesis, and where each program
+# stands.
+#
+# A program outlives every task in it by years and is killed for reasons a board
+# cannot express: the target turned out not to be druggable, a competitor
+# published first, the tox signal did not go away. The most valuable thing a
+# discovery organization owns is an honest record of why programs stopped, and it
+# is the record most reliably lost when people move on.
+
+title = "Programs"
+purpose = """
+Every discovery program: the target, the therapeutic hypothesis, the stage, and \
+why the stopped ones stopped. Read it before proposing a target — this \
+organization has probably looked at it, and the reason it was dropped is the \
+cheapest result available.\
+"""
+written_by = "`record_entry` to open or advance a program, `close_entry` when it is advanced out or stopped"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "program"
+role = "title"
+required = true
+description = "The target and the indication."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "hypothesis"
+role = "prose"
+required = true
+description = "Why modulating this target should help this disease, stated so it could fail."
+
+[[field]]
+name = "evidence"
+role = "prose"
+description = "What supports the hypothesis — genetic, pharmacological, clinical. Genetic evidence is not the same as a paper."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "kill_criteria"
+role = "prose"
+description = "What would stop this program, agreed in advance. Written afterwards, they are always met."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — advanced, or stopped and on what. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "hypothesis"
+label = "Hypothesis"
+
+[[status]]
+name = "discovery"
+label = "Discovery"
+aliases = ["hit_finding", "lead_optimization"]
+
+[[status]]
+name = "preclinical"
+
+[[status]]
+name = "advanced"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "stopped"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Active"
+blurb = "In progress. Each should carry kill criteria agreed before they are needed."
+statuses = ["discovery", "preclinical"]
+order = "recent"
+
+[[section]]
+heading = "Hypothesis stage"
+blurb = "Proposed, with the evidence behind the target."
+statuses = ["hypothesis"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Advanced or stopped, each with the reason. The stopped rows are the most \
+valuable thing here: a target that failed for a specific reason is a result, \
+and re-running it because nobody wrote the reason down is the most expensive \
+mistake this organization can make.\
+"""
+statuses = ["advanced", "stopped"]
+cap = 20

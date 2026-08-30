@@ -10,12 +10,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
-use crate::ports::tasks::{
-    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
+use crate::ports::types::{
+    Actor, ActorKind, Attachment, CompanyEvent, CompanyRecord, EventSeq, Mention, MentionTarget,
+    StoredEvent, TurnStep,
 };
-use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq, StoredEvent, TurnStep};
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
 /// The console's default/orchestrator thread id
@@ -149,23 +151,20 @@ pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
 /// `harness::lifecycle::relay_text` takes — a newer host naming a column this
 /// build has not heard of should read a little raw, never render blank.
 ///
+/// The label is [`crate::ledger::board`]'s, not a fourth copy of it. This
+/// function used to carry its own `match` from id to label — one of three on
+/// the host and a fourth in the console — and each was a place a renamed column
+/// could half-land.
+///
 /// Pinned by tests on both sides of the wire: the console has its own
 /// `dispatchMarkerText` (`frontend/src/lib/chat.ts`), because the live SSE
-/// frame carries the raw column id rather than prose. Two spellings of one
-/// sentence can only *reword* a marker across a reload — never double it, since
-/// the dedupe is on identity — but the tests couple them anyway, on the same
-/// terms `BOARD_COLUMNS` and the console's `TASK_COLUMNS` are coupled.
+/// frame carries the raw column id rather than prose and a marker renders
+/// synchronously from it, with no ledger read to await. That copy is the one
+/// remaining exception, and it is the safe one: two spellings of a sentence can
+/// only *reword* a marker across a reload — never double it, since the dedupe
+/// is on identity, and never lose a card.
 pub fn dispatch_marker_text(column: &str) -> String {
-    let landing = match column {
-        COLUMN_TODO => "To-do",
-        COLUMN_PLANNING => "Planning",
-        COLUMN_IN_PROGRESS => "In progress",
-        COLUMN_PAUSED => "Paused",
-        COLUMN_IN_REVIEW => "In review",
-        COLUMN_DONE => "Done",
-        other => other,
-    };
-    format!("finished → {landing}")
+    format!("finished → {}", crate::ports::tasks::column_label(column))
 }
 
 /// Who is reading a desk history. `mine` is relative to this.
@@ -200,6 +199,26 @@ pub struct MessageView {
     pub at_millis: f64,
     /// Whether it is the operator's own message.
     pub mine: bool,
+    /// Whether a **person** wrote this line, as opposed to the runtime.
+    ///
+    /// Not derivable downstream, which is why it is projected here (issue
+    /// #1734). [`Self::mine`] answers "did *you* write it" and is per-viewer, so
+    /// a colleague's message reads `mine: false` and reaches the console on the
+    /// company side of the transcript — indistinguishable there from an agent
+    /// reply. [`Self::channel`] cannot separate them either: the offline echo
+    /// brain names its own outbound channel `operator`, exactly as the
+    /// `OperatorMessage` arm does, so a journaled echo reply and a human's
+    /// message carry the same label.
+    ///
+    /// The host is the only layer that still knows the difference — it is
+    /// reading the event variant. Anything downstream is guessing, and the guess
+    /// this exists to stop is chat marking a colleague's own words as the echo
+    /// brain's, which fabricates an attribution rather than merely missing one.
+    ///
+    /// `true` for [`CompanyEvent::OperatorMessage`] and nothing else. A
+    /// dispatch marker and an agent reply are both `false`: neither was typed by
+    /// a person.
+    pub by_person: bool,
     /// The scrubbed processing steps behind a company reply, so a rehydrated
     /// transcript renders the same tool-call timeline the live turn showed.
     /// Empty for operator messages and tool-less replies.
@@ -212,6 +231,12 @@ pub struct MessageView {
     /// REST and GraphQL cannot disagree about which messages carry a card
     /// (issue #65's whole point). `None` on operator messages and on every
     /// reply journaled before the field existed.
+    ///
+    /// Also `None` once the card itself is gone, whoever deleted it — see
+    /// [`drop_dead_cards`]. The journal still records that the turn opened a
+    /// card, because it did; this field answers the narrower question the
+    /// renderer actually asks, which is whether there is still a card to link
+    /// to (issue #984).
     pub task_id: Option<String>,
     /// The message this one replies to (issue #364), by that message's own id —
     /// what makes a thread survive a reload rather than living in one browser.
@@ -228,6 +253,54 @@ pub struct MessageView {
     /// ever-increasing counter. Grouping rows into a count is the renderer's
     /// job; deriving names from a count is impossible.
     pub reactions: Vec<ReactionView>,
+    /// Who this message names, in reading order.
+    ///
+    /// Spans plus a **label**, never a target id: this is the surface a member
+    /// reads other members' messages through, and handing every reader the raw
+    /// user id of everyone ever mentioned would widen who-sees-what for no gain
+    /// the renderer can use. Same discipline as [`ReactionView::by_label`], and
+    /// the same reason.
+    ///
+    /// Empty for a message that mentions nobody, which is every message
+    /// journaled before mentions existed.
+    pub mentions: Vec<MentionView>,
+    /// Files attached to this message (issue #1682), each a durable reference
+    /// into the company workspace with the store-computed name / mime / size.
+    ///
+    /// Projected straight from the stored [`Attachment`] rows — the name and
+    /// mime are already the store's, resolved server-side at send time, so this
+    /// surface adds no viewer-scoping the way [`MentionView`] does: an
+    /// attachment names a file the operator themself put in this company's own
+    /// workspace, reachable by the same person through the blob route.
+    ///
+    /// Empty on an [`AgentReply`](CompanyEvent::AgentReply), a system pill, and
+    /// every operator message journaled before this field existed — the shared
+    /// [`MessageView`], so REST and GraphQL carry the same rows (issue #65).
+    pub attachments: Vec<Attachment>,
+}
+
+/// One mention inside one message, as a reader sees it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MentionView {
+    /// The literal span the author typed, so the renderer highlights what is
+    /// actually in the text rather than what the target is called now.
+    pub text: String,
+    /// Byte offset of [`Self::text`] in the message body.
+    pub offset: usize,
+    /// Who was named, as a display label — a teammate's id, a person's label, a
+    /// desk's name, or `everyone`. Never a raw user id.
+    pub label: String,
+    /// Whether this mention is the viewer's own — what the console renders as a
+    /// highlighted chip and counts as "this message is for me". Relative to the
+    /// [`Viewer`], on the same terms [`MessageView::mine`] is.
+    ///
+    /// True for a direct mention of the viewer **and** for `@everyone`, because
+    /// a broadcast is addressed to them too.
+    pub mine: bool,
+    /// Whether this mention renders but does not ping — a duplicate, a mention
+    /// past the cap, or a target that has since left the company.
+    pub quiet: bool,
 }
 
 /// One person's reaction to one message, as a reader sees it.
@@ -367,6 +440,7 @@ impl MessageView {
                 steps,
                 task_id,
                 parent,
+                mentions,
                 ..
             } => MessageView {
                 id,
@@ -375,13 +449,24 @@ impl MessageView {
                 text,
                 at_millis,
                 mine: false,
+                // The runtime wrote this, whichever brain produced it.
+                by_person: false,
                 steps,
                 task_id,
                 parent_id: parent.map(|seq| seq.value().to_string()),
                 reactions: Vec::new(),
+                mentions: project_mentions(&mentions, authors, viewer),
+                // A reply is the company's own voice and carries no operator
+                // upload (issue #1682).
+                attachments: Vec::new(),
             },
             CompanyEvent::OperatorMessage {
-                text, by, parent, ..
+                text,
+                by,
+                parent,
+                mentions,
+                attachments,
+                ..
             } => {
                 let (author, mine) = match &by {
                     // Sent by a signed-in human.
@@ -404,10 +489,17 @@ impl MessageView {
                     text,
                     at_millis,
                     mine,
+                    // A person typed this — the one arm where that is true.
+                    by_person: true,
                     steps: Vec::new(),
                     task_id: None,
                     parent_id: parent.map(|seq| seq.value().to_string()),
                     reactions: Vec::new(),
+                    mentions: project_mentions(&mentions, authors, viewer),
+                    // Issue #1682: the operator's attached files, carried
+                    // through so a reload renders the same chips the live send
+                    // showed.
+                    attachments,
                 }
             }
             // The dispatch terminal (issue #377), as the channel marker a
@@ -434,38 +526,229 @@ impl MessageView {
                 task_id, column, ..
             } => MessageView {
                 id,
-                channel: "system".to_string(),
-                author: "system".to_string(),
+                channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: dispatch_marker_text(&column),
                 at_millis,
                 mine: false,
+                by_person: false,
                 steps: Vec::new(),
                 task_id: Some(task_id),
                 parent_id: None,
                 reactions: Vec::new(),
+                mentions: Vec::new(),
+                attachments: Vec::new(),
             },
             // `owns` never admits other variants into a history.
             other => MessageView {
                 id,
-                channel: "system".to_string(),
-                author: "system".to_string(),
+                channel: crate::ports::SYSTEM_AUTHOR.to_string(),
+                author: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: format!("{other:?}"),
                 at_millis,
                 mine: false,
+                by_person: false,
                 steps: Vec::new(),
                 task_id: None,
                 parent_id: None,
                 reactions: Vec::new(),
+                mentions: Vec::new(),
+                attachments: Vec::new(),
             },
         }
     }
 }
 
+/// Turns stored mentions into what a particular reader should see.
+///
+/// Two things happen here and nowhere else:
+///
+/// * **Ids become labels.** A [`MentionTarget::User`] carries a user id, which
+///   no member-facing surface hands out; it is resolved through the same
+///   `authors` map the byline above the message uses, so a chip and the author
+///   line can never disagree about what somebody is called. A target that
+///   resolves to nothing falls back to the literal text the author typed, minus
+///   its `@` — which is exactly what a reader would have seen anyway.
+/// * **`mine` is decided.** Per viewer, and `true` for `@everyone` as well as
+///   for a direct mention, because a broadcast is addressed to this reader too.
+pub(crate) fn project_mentions(
+    mentions: &[Mention],
+    authors: &HashMap<String, String>,
+    viewer: &Viewer,
+) -> Vec<MentionView> {
+    mentions
+        .iter()
+        .map(|mention| {
+            let fallback = || mention.text.trim_start_matches('@').to_string();
+            let (label, mine) = match &mention.target {
+                MentionTarget::Agent { id } => (id.clone(), false),
+                MentionTarget::Desk { id } => (id.clone(), false),
+                MentionTarget::User { id } => (
+                    authors.get(id).cloned().unwrap_or_else(fallback),
+                    *viewer == Viewer::User(id.clone()),
+                ),
+                // Addressed to the room, so it is addressed to whoever is
+                // reading — including the operator credential, which is a
+                // reader even though it is not a person.
+                MentionTarget::Everyone => ("everyone".to_string(), true),
+            };
+            MentionView {
+                text: mention.text.clone(),
+                offset: mention.offset,
+                label,
+                mine,
+                quiet: mention.quiet,
+            }
+        })
+        .collect()
+}
+
+/// The blast radius of issue #885, for one company.
+///
+/// Reported rather than repaired. See [`channel_attributed_replies`] for why a
+/// repair is not available.
+///
+/// # The figure is not comparable across the #966 cutover
+///
+/// Host-authored notices — the approval-overflow line, the `"Acknowledged."`
+/// fallback, the failed-continuation report — used to journal under the
+/// operator channel, so every one already on disk is counted here as damage.
+/// Since #966 they journal under [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR)
+/// and are not counted, because they are correct rows and inflating this number
+/// with them would make the one figure that has to be trustworthy the least
+/// trustworthy one.
+///
+/// The consequence is a step in the series that nothing on the wire labels: a
+/// company's `affected` can fall without a single row being repaired, purely
+/// because it stopped minting new false positives. Read a decline across that
+/// boundary as "the bleeding stopped", never as "history got better" — no row
+/// counted here has ever become attributable, and none can.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AttributionAudit {
+    /// Every `AgentReply` inspected.
+    pub replies: usize,
+    /// Those whose stored `agent_id` names no roster teammate.
+    pub affected: usize,
+    /// The distinct bad `agent_id` values, with a count each — so an operator
+    /// can see at a glance whether they are all `operator` (the #885 shape) or
+    /// whether something else is also writing a non-agent into the field.
+    pub by_agent_id: std::collections::BTreeMap<String, usize>,
+}
+
+impl AttributionAudit {
+    /// Folds one page of journal events in.
+    ///
+    /// Split out from the paging so the rule itself is testable without a
+    /// `CompanyRuntime` — the classification is the part that can be silently
+    /// wrong, and a store fixture would only obscure it.
+    pub fn fold(&mut self, page: &[StoredEvent], is_roster_agent: impl Fn(&str) -> bool) {
+        for stored in page {
+            let CompanyEvent::AgentReply { agent_id, .. } = &stored.event else {
+                continue;
+            };
+            self.replies += 1;
+            if !is_roster_agent(agent_id) {
+                self.affected += 1;
+                *self.by_agent_id.entry(agent_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+}
+
+/// Counts desk replies whose author was overwritten with a destination (#885).
+///
+/// # The rule
+///
+/// [`CompanyEvent::AgentReply`]'s `agent_id` is documented as *"the agent that
+/// produced the reply"*, so a value naming no roster teammate is by definition
+/// not an author. That is the whole test, and it is deliberately not `== "operator"`:
+/// the same defect on any other channel — a Telegram chat id, a desk slug —
+/// produces a different wrong string and has to be counted too.
+///
+/// # Why this only counts, and never repairs
+///
+/// **The true author is not recoverable from what is on disk.** `agent_id` was
+/// the only field that carried it and it was overwritten in place. Nothing else
+/// on the event, and nothing beside it, records who spoke:
+///
+/// * `steps` — [`TurnStep`] has no agent field;
+/// * `task_id` — `None` on exactly these rows (it is set on the dispatch path,
+///   which is the one writer that was already correct);
+/// * `parent` — names the question, never the answerer;
+/// * `chat_id` — the desk, which yields *today's* desk lead. Desk membership is
+///   mutable (manifest members unioned with operator-added overlay members), so
+///   that is a re-derivation against current state, not a recovery — and it is
+///   silently wrong for any desk whose lead has changed since.
+/// * the metering store — bucketed per calendar **day** with per-agent
+///   aggregates, so it cannot name the author of one message.
+///
+/// So a backfill would synthesise an author rather than restore one, and a
+/// confident wrong name in a transcript is worse than an admitted gap. These
+/// rows are ambiguous, permanently, and this reports how many there are.
+///
+/// # One deliberate false positive
+///
+/// `CompanyRuntime::announce_continuation_failure` journals a **system** notice
+/// as `agent_id: "operator"` on purpose — it is the runtime telling the operator
+/// a continuation failed, not an agent speaking. It is indistinguishable from a
+/// #885 row on disk, so it is counted here. The count is therefore an upper
+/// bound; in practice that notice is rare enough not to move it.
+/// Whether a stored `agent_id` names an author we can actually resolve.
+///
+/// The roster, **plus two ids that are truthful authors without being teammates**.
+///
+/// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) (issue #966) is the runtime
+/// speaking for itself — an approval-overflow notice, the `"Acknowledged."`
+/// fallback, a failed-continuation report. Those rows are *correct*, so counting
+/// them as damage would inflate the one figure in #965 that has to be
+/// trustworthy, and would caption a legitimate system message as unattributable.
+///
+/// `CONFINED_AGENT_ID`
+/// is deliberately not a roster id — it names no teammate, carries no manifest
+/// grants and cannot be addressed — but a copilot turn genuinely authored its
+/// reply, so the id is a truthful author rather than a destination that leaked
+/// into the field. Counting it would swap one wrong answer for a permanent
+/// false positive, and would make the audit's number drift upward on a company
+/// doing nothing wrong.
+///
+/// This is the single predicate the audit and any presentation of its result
+/// must share; two copies would let the count and the rendering disagree about
+/// which rows are unknown.
+pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
+    agent_id == crate::ports::CONFINED_AGENT_ID
+        || agent_id == crate::ports::SYSTEM_AUTHOR
+        || record.resolve_roster_agent_id(agent_id).is_some()
+}
+
+pub async fn channel_attributed_replies(
+    runtime: &CompanyRuntime,
+    record: &CompanyRecord,
+) -> Result<AttributionAudit, OpenCompanyError> {
+    const PAGE: usize = 512;
+    let mut audit = AttributionAudit::default();
+    let mut cursor = EventSeq::new(0);
+    loop {
+        let page = runtime
+            .events()
+            .read_from(runtime.id(), cursor, PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        let last = page[page.len() - 1].seq;
+        audit.fold(&page, |agent_id| is_known_author(agent_id, record));
+        cursor = EventSeq::new(last.value() + 1);
+    }
+    Ok(audit)
+}
+
 /// Loads roster display labels for a company: user id → label.
 ///
-/// Prefers a display name, and falls back to the email's *local part* rather
-/// than the whole address: a desk history is read by every member, and it
-/// should not hand each of them everyone else's email.
+/// Prefers a display name, and falls back to one derived from the email's
+/// local part rather than the whole address: a desk history is read by every
+/// member, and it should not hand each of them everyone else's email. The
+/// ladder is [`UserRecord::display_label`] — the same one the profile pane and
+/// the mention picker use, so the same person reads the same way everywhere.
 pub async fn author_labels(
     runtime: &CompanyRuntime,
 ) -> Result<HashMap<String, String>, OpenCompanyError> {
@@ -473,13 +756,9 @@ pub async fn author_labels(
     Ok(users
         .into_iter()
         .map(|user| {
-            let label = user.display_name.unwrap_or_else(|| {
-                user.email
-                    .split('@')
-                    .next()
-                    .unwrap_or("someone")
-                    .to_string()
-            });
+            let label = user
+                .display_label()
+                .unwrap_or_else(|| "someone".to_string());
             (user.id, label)
         })
         .collect())
@@ -581,7 +860,71 @@ pub async fn history_for_desk(
             message.reactions = reactions.remove(&message.id).unwrap_or_default();
         }
     }
+
+    drop_dead_cards(runtime, &mut messages).await?;
     Ok(messages)
+}
+
+/// Blanks `task_id` on any row naming a card the board no longer has
+/// (issue #984).
+///
+/// # Why this is a projection concern and not a write
+///
+/// The obvious fix — clear `task_id` on the journaled rows when the card is
+/// deleted — is not available, and it is worth saying why so nobody reaches for
+/// it later. `task_id` is not a column on a mutable chat row: it is a field of
+/// the [`CompanyEvent::AgentReply`] that *happened*, and the journal is
+/// append-only. Rewriting it would be editing history to record that a turn
+/// never opened a card, when it did.
+///
+/// So the id stays in the journal and the **projection** stops reporting it once
+/// the card is gone. That is also strictly more correct than a write would have
+/// been:
+///
+/// - It covers a card deleted by **any** path, not just the chat chip — the
+///   board's own `TaskEditDialog` delete leaves exactly the same stale chip, and
+///   always did.
+/// - It covers cards deleted **before** this change, which no write-time fix
+///   could reach.
+/// - It cannot drift: there is one board, read at render time, rather than a
+///   denormalised copy that a missed call site leaves stale.
+///
+/// Without this a dismissal survives only until the next full reload:
+/// `transcripts` is React state and is never serialised, but the console
+/// rehydrates from this projection (`lib/chat.ts`'s `fromHistory`) and merges by
+/// message id, so an empty transcript takes every row back — chip included. The
+/// chip would return pointing at a `404`, which reads as the delete having
+/// failed.
+///
+/// One board read per history, and only when the window actually carries a
+/// card — the same shape as the single roster read above, not a read per
+/// message.
+async fn drop_dead_cards(
+    runtime: &CompanyRuntime,
+    messages: &mut [MessageView],
+) -> Result<(), OpenCompanyError> {
+    if !messages.iter().any(|message| message.task_id.is_some()) {
+        return Ok(());
+    }
+
+    let live: HashSet<String> = runtime
+        .tasks()
+        .list(runtime.id())
+        .await?
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+
+    for message in messages {
+        if message
+            .task_id
+            .as_deref()
+            .is_some_and(|id| !live.contains(id))
+        {
+            message.task_id = None;
+        }
+    }
+    Ok(())
 }
 
 /// Counts a desk's messages before a cursor without materialising them.
@@ -631,10 +974,16 @@ pub async fn history_total_for_desk(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::{
+        COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING,
+        COLUMN_TODO,
+    };
     use crate::ports::types::Actor;
 
     fn agent_reply(chat_id: &str) -> CompanyEvent {
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: chat_id.to_string(),
@@ -647,11 +996,13 @@ mod test {
     /// `None` is the shape the chat route stores for an unaddressed post.
     fn operator_message(chat: Option<&str>) -> CompanyEvent {
         CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: None,
             chat: chat.map(str::to_string),
             deliverable: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -731,6 +1082,7 @@ mod test {
     #[test]
     fn general_desk_owns_every_operator_message() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: Some(Actor {
@@ -739,6 +1091,7 @@ mod test {
             }),
             chat: Some(MAIN_THREAD_ID.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));
@@ -749,11 +1102,13 @@ mod test {
     #[test]
     fn main_thread_owns_operator_messages_it_stored() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: None,
             chat: Some(MAIN_THREAD_ID.to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         // The console queries the main thread with desk = ("main", "main").
         assert!(owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
@@ -766,11 +1121,13 @@ mod test {
     #[test]
     fn desk_addressed_operator_message_belongs_to_that_desk() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: None,
             chat: Some("strategy".to_string()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(owns("strategy", "Strategy desk", &event));
         assert!(!owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
@@ -877,6 +1234,252 @@ mod test {
         assert!(!folded["4"][0].mine);
     }
 
+    fn mention(target: MentionTarget, text: &str, offset: usize) -> Mention {
+        Mention {
+            target,
+            text: text.to_string(),
+            offset,
+            quiet: false,
+        }
+    }
+
+    fn message_mentioning(mentions: Vec<Mention>) -> CompanyEvent {
+        CompanyEvent::OperatorMessage {
+            mentions,
+            parent: None,
+            text: "ping".to_string(),
+            by: None,
+            chat: Some("studio".to_string()),
+            deliverable: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Who *typed* a line is a fact only the host still holds (issue #1734).
+    ///
+    /// Every downstream shortcut for it is wrong, and the two obvious ones are
+    /// wrong in ways that look right:
+    ///
+    /// * `mine` is per-viewer, so a colleague's own message is `mine: false`
+    ///   and lands on the company side of their reader's transcript, beside the
+    ///   agent replies.
+    /// * `channel == "operator"` collides head-on. The offline echo brain names
+    ///   its own outbound channel `operator` (`brain::echo`), exactly as this
+    ///   arm does, so a journaled echo reply and a human's message carry the
+    ///   same label. A console that split on it marked neither, which suppressed
+    ///   the marker on precisely the replies it exists for — caught in a browser
+    ///   against a live host, not by a unit test.
+    ///
+    /// So the projection says it, and this test pins both directions with the
+    /// echo brain's own channel label in play, because that is the collision.
+    #[test]
+    fn only_a_persons_message_is_projected_as_by_person() {
+        let typed = MessageView::project(
+            at(
+                1,
+                CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: "on it".to_string(),
+                    by: Some(Actor {
+                        kind: ActorKind::User,
+                        id: "u1".to_string(),
+                    }),
+                    chat: Some("studio".to_string()),
+                    deliverable: None,
+                    attachments: Vec::new(),
+                },
+            ),
+            // Projected for *another* reader, which is the case that matters:
+            // for them this is `mine: false` and nothing else distinguishes it.
+            &Viewer::User("u2".to_string()),
+            &labels(),
+        );
+        assert!(typed.by_person, "a person typed this");
+        assert!(!typed.mine, "and it is not this reader's own line");
+
+        // The echo brain's reply as the runtime journals it: an `AgentReply`
+        // whose agent id is the outbound channel the brain named — `operator`,
+        // the very label the arm above hardcodes.
+        let echoed = MessageView::project(
+            at(
+                2,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: "studio".to_string(),
+                    agent_id: "operator".to_string(),
+                    text: "You said: on it".to_string(),
+                    steps: Vec::new(),
+                },
+            ),
+            &Viewer::User("u2".to_string()),
+            &labels(),
+        );
+        assert!(!echoed.by_person, "no person typed the echo brain's reply");
+        assert_eq!(
+            echoed.channel, typed.channel,
+            "the collision is real: the channel label cannot tell these apart",
+        );
+    }
+
+    /// A person's mention reaches a reader as a **label**, never as the user id
+    /// it is stored under — the same rule `by_label` follows for reactions.
+    #[test]
+    fn project_resolves_a_person_to_a_label_and_never_to_an_id() {
+        let view = MessageView::project(
+            at(
+                7,
+                message_mentioning(vec![mention(
+                    MentionTarget::User {
+                        id: "u1".to_string(),
+                    },
+                    "@Ada",
+                    0,
+                )]),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(view.mentions.len(), 1);
+        assert_eq!(view.mentions[0].label, "Ada");
+        assert_eq!(view.mentions[0].text, "@Ada");
+        assert_eq!(view.mentions[0].offset, 0);
+        assert!(
+            !view.mentions[0].label.contains("u1"),
+            "the stored id must not reach a reader"
+        );
+    }
+
+    /// `mine` is per viewer: the same stored row is the reader's own mention
+    /// for one person and somebody else's for everyone else.
+    #[test]
+    fn project_decides_mine_per_viewer() {
+        let event = at(
+            8,
+            message_mentioning(vec![mention(
+                MentionTarget::User {
+                    id: "u1".to_string(),
+                },
+                "@Ada",
+                0,
+            )]),
+        );
+        let ada = MessageView::project(event.clone(), &Viewer::User("u1".to_string()), &labels());
+        assert!(ada.mentions[0].mine);
+
+        let grace = MessageView::project(event, &Viewer::User("u2".to_string()), &labels());
+        assert!(!grace.mentions[0].mine);
+    }
+
+    /// A broadcast is addressed to whoever is reading, so it is everybody's own
+    /// mention — that is what makes it badge every recipient.
+    #[test]
+    fn everyone_is_mine_for_every_reader() {
+        let event = at(
+            9,
+            message_mentioning(vec![mention(MentionTarget::Everyone, "@everyone", 0)]),
+        );
+        for viewer in [
+            Viewer::Operator,
+            Viewer::User("u1".to_string()),
+            Viewer::User("u2".to_string()),
+        ] {
+            let view = MessageView::project(event.clone(), &viewer, &labels());
+            assert!(view.mentions[0].mine, "viewer: {viewer:?}");
+            assert_eq!(view.mentions[0].label, "everyone");
+        }
+    }
+
+    /// A person who has since been removed has no label to resolve to. The
+    /// literal text the author typed is the honest fallback — it is what a
+    /// reader would have seen anyway — and it must not be the raw id.
+    #[test]
+    fn a_mention_of_a_departed_person_falls_back_to_the_typed_text() {
+        let view = MessageView::project(
+            at(
+                10,
+                message_mentioning(vec![mention(
+                    MentionTarget::User {
+                        id: "gone".to_string(),
+                    },
+                    "@Bob",
+                    0,
+                )]),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(view.mentions[0].label, "Bob");
+    }
+
+    #[test]
+    fn a_teammate_and_a_desk_project_their_ids_as_labels() {
+        let view = MessageView::project(
+            at(
+                11,
+                message_mentioning(vec![
+                    mention(
+                        MentionTarget::Agent {
+                            id: "engineer".to_string(),
+                        },
+                        "@engineer",
+                        0,
+                    ),
+                    mention(
+                        MentionTarget::Desk {
+                            id: "engineering".to_string(),
+                        },
+                        "@engineering",
+                        10,
+                    ),
+                ]),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        let labels: Vec<&str> = view.mentions.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, vec!["engineer", "engineering"]);
+        assert!(
+            view.mentions.iter().all(|m| !m.mine),
+            "a teammate or a desk is never the human reader"
+        );
+    }
+
+    #[test]
+    fn a_quiet_mention_projects_as_quiet() {
+        let view = MessageView::project(
+            at(
+                12,
+                message_mentioning(vec![Mention {
+                    quiet: true,
+                    ..mention(
+                        MentionTarget::User {
+                            id: "u1".to_string(),
+                        },
+                        "@Ada",
+                        0,
+                    )
+                }]),
+            ),
+            &Viewer::User("u1".to_string()),
+            &labels(),
+        );
+        assert!(view.mentions[0].quiet);
+    }
+
+    #[test]
+    fn a_message_that_mentions_nobody_projects_an_empty_list() {
+        let view = MessageView::project(
+            at(13, message_mentioning(Vec::new())),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert!(view.mentions.is_empty());
+    }
+
     /// A thread parent survives projection on both halves of an exchange, as
     /// the message id a reader can resolve rather than a raw sequence number.
     #[test]
@@ -885,11 +1488,13 @@ mod test {
             at(
                 12,
                 CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
                     parent: Some(EventSeq::new(4)),
                     text: "a follow-up".to_string(),
                     by: None,
                     chat: Some("studio".to_string()),
                     deliverable: None,
+                    attachments: Vec::new(),
                 },
             ),
             &Viewer::Operator,
@@ -901,6 +1506,8 @@ mod test {
             at(
                 13,
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: Some(EventSeq::new(4)),
                     task_id: None,
                     chat_id: "studio".to_string(),
@@ -924,11 +1531,13 @@ mod test {
     #[test]
     fn legacy_operator_message_without_chat_stays_on_general() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".to_string(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));
@@ -1084,5 +1693,438 @@ mod test {
         );
         assert!(!view.text.contains("the run's prose"), "{}", view.text);
         assert_eq!(view.text, "finished → Paused");
+    }
+
+    /// Issue #885: the audit's classification rule.
+    ///
+    /// The rule is "an `agent_id` naming no roster teammate", not
+    /// `== "operator"`, so these pin both the shape actually observed and the
+    /// generalisation — the same writer bug on another channel produces a
+    /// different wrong string and still has to be counted.
+    mod attribution_audit {
+        use super::*;
+
+        fn reply(seq: u64, agent_id: &str) -> StoredEvent {
+            at(
+                seq,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    chat_id: "engineering".to_string(),
+                    agent_id: agent_id.to_string(),
+                    text: "…".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                },
+            )
+        }
+
+        /// The roster for these: two real teammates and nothing else.
+        ///
+        /// Deliberately *excludes* the confined copilot, because that is the
+        /// point of `is_known_author` — the copilot is a real author that no
+        /// roster will ever resolve.
+        fn on_roster(agent_id: &str) -> bool {
+            matches!(agent_id, "engineer" | "product_manager")
+        }
+
+        /// A record whose roster is exactly `on_roster`'s two teammates.
+        ///
+        /// Built so the tests below call the **real** `is_known_author` rather
+        /// than a local restatement of it. The first version of these tests
+        /// re-implemented the predicate in the test module, which meant
+        /// reverting the production function changed nothing and the tests
+        /// passed either way — proving only that the test agreed with itself.
+        fn record() -> CompanyRecord {
+            let src = "[company]\nname = \"Acme\"\n\n[policy]\nmode = \"full\"\n\
+                       \n[[agent]]\nid = \"engineer\"\nrole = \"Worker\"\ntier = \"orchestrator\"\n\
+                       \n[[agent]]\nid = \"product_manager\"\nrole = \"Worker\"\ntier = \"orchestrator\"\n";
+            let manifest: crate::company::CompanyManifest =
+                toml::from_str(src).expect("manifest parses");
+            CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: crate::ports::types::CompanyId::new("acme"),
+                manifest,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            }
+        }
+
+        /// Issue #966. The runtime speaking for itself is a *correct* row, not
+        /// damage. Counting it would inflate the blast-radius figure on a company
+        /// doing nothing wrong, and would caption a legitimate system message as
+        /// something nobody can attribute.
+        #[test]
+        fn a_host_authored_notice_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, crate::ports::SYSTEM_AUTHOR), reply(2, "engineer")],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
+        /// Issue #966. The console reaches the centred system pill by comparing
+        /// the projected author against a literal `"system"`
+        /// (`frontend/src/lib/chat.ts`), and `MessageView` projects an
+        /// `AgentReply`'s `agent_id` straight into that field. So the *value* is
+        /// the contract with the console, not merely the constant's identity.
+        ///
+        /// Redefining `SYSTEM_AUTHOR` to anything else keeps every other test
+        /// here green and silently returns these three notices to rendering as
+        /// company bubbles — the exact appearance this change exists to end.
+        /// Two copies of one literal is the same coupling
+        /// `dispatch_marker_text` already carries with that file, and it is
+        /// deliberate for the same reason.
+        #[test]
+        fn the_notice_author_is_the_literal_the_console_keys_on() {
+            assert_eq!(
+                crate::ports::SYSTEM_AUTHOR,
+                "system",
+                "frontend/src/lib/chat.ts renders `author === \"system\"` as the centred pill"
+            );
+        }
+
+        /// The whole point of the reserved id: a notice and a damaged reply used
+        /// to be the same bytes. This pins that they are now different ones, so
+        /// the distinction a marker would rely on actually exists in the data.
+        #[test]
+        fn a_notice_and_an_overwritten_reply_are_no_longer_the_same_author() {
+            let record = record();
+            assert_ne!(
+                crate::ports::SYSTEM_AUTHOR,
+                "operator",
+                "a notice must not share the author a destination-overwrite produces"
+            );
+            assert!(is_known_author(crate::ports::SYSTEM_AUTHOR, &record));
+            assert!(!is_known_author("operator", &record));
+        }
+
+        /// Issue #966. A copilot turn genuinely authored its reply, so the id it
+        /// stores is a truthful author — not a destination that leaked into the
+        /// field. Counting it would swap one wrong answer for a permanent false
+        /// positive that climbs on a company doing nothing wrong.
+        #[test]
+        fn the_confined_copilot_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, crate::ports::CONFINED_AGENT_ID),
+                    reply(2, "engineer"),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
+        /// …and it is still not on the roster, which is what makes the widening
+        /// necessary rather than incidental. If `resolve_roster_agent_id` ever
+        /// started answering for it, this says so before the extra arm quietly
+        /// becomes dead code.
+        #[test]
+        fn the_confined_copilot_is_not_reachable_through_the_roster_alone() {
+            let record = record();
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::ports::CONFINED_AGENT_ID)
+                    .is_none(),
+                "the confined id resolved on the roster; `is_known_author`'s extra arm is now \
+                 unnecessary and this test should be deleted deliberately, not left passing"
+            );
+            assert!(is_known_author(crate::ports::CONFINED_AGENT_ID, &record));
+            assert!(is_known_author("engineer", &record));
+            assert!(!is_known_author("operator", &record));
+        }
+
+        #[test]
+        fn a_reply_authored_by_a_real_teammate_is_not_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, "engineer"), reply(2, "product_manager")],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+            assert!(audit.by_agent_id.is_empty());
+        }
+
+        /// The observed #885 shape: the operator channel copied into the author.
+        #[test]
+        fn a_reply_authored_by_the_operator_channel_is_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, "operator"),
+                    reply(2, "engineer"),
+                    reply(3, "operator"),
+                ],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 3);
+            assert_eq!(audit.affected, 2);
+            assert_eq!(audit.by_agent_id.get("operator"), Some(&2));
+        }
+
+        /// The generalisation. A Telegram chat id or a desk slug in the author
+        /// field is the same defect, and a rule keyed on the literal
+        /// `"operator"` would report a clean company.
+        #[test]
+        fn any_non_roster_author_is_counted_not_just_the_operator_channel() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, "operator"), reply(2, "-100123456789")],
+                on_roster,
+            );
+            assert_eq!(audit.affected, 2);
+            assert_eq!(audit.by_agent_id.get("-100123456789"), Some(&1));
+        }
+
+        /// Only replies. An operator's own message is not an `AgentReply` and
+        /// has no `agent_id` to be wrong, so counting it would inflate the
+        /// blast radius of a data-integrity bug — the one number that has to be
+        /// trustworthy here.
+        #[test]
+        fn a_non_reply_event_is_neither_scanned_nor_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    at(
+                        1,
+                        CompanyEvent::OperatorMessage {
+                            mentions: Vec::new(),
+                            text: "hello".to_string(),
+                            by: None,
+                            chat: None,
+                            parent: None,
+                            deliverable: None,
+                            attachments: Vec::new(),
+                        },
+                    ),
+                    reply(2, "operator"),
+                ],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 1);
+            assert_eq!(audit.affected, 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod dead_card_test {
+    use super::*;
+    use crate::company::CompanyManifest;
+    use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
+    use crate::ports::types::CompanyId;
+    use crate::runtime::RuntimeBuilder;
+    use std::sync::Arc;
+
+    fn manifest() -> CompanyManifest {
+        toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+            .expect("parse manifest")
+    }
+
+    fn card(id: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: "Draft the launch note".to_string(),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        }
+    }
+
+    /// A reply that opened a card, exactly as the dispatch path journals it.
+    fn reply_naming(task_id: &str) -> CompanyEvent {
+        CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: Some(task_id.to_string()),
+            chat_id: MAIN_THREAD_ID.to_string(),
+            agent_id: "ceo".to_string(),
+            text: "Opened a card for that.".to_string(),
+            steps: Vec::new(),
+        }
+    }
+
+    async fn runtime(home: &std::path::Path) -> Arc<CompanyRuntime> {
+        Arc::new(
+            RuntimeBuilder::new(home.to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("build a runtime"),
+        )
+    }
+
+    /// The chip survives a reload while the card is still on the board — the
+    /// behaviour issue #246 added and `chat-to-card.spec.ts` pins.
+    ///
+    /// Asserted first so the test below cannot pass by the projection simply
+    /// dropping every `task_id` it sees.
+    #[tokio::test]
+    async fn a_reply_keeps_its_card_while_the_card_exists() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .tasks()
+            .upsert(&id, &card("card-1"))
+            .await
+            .expect("seed the board");
+        runtime
+            .events()
+            .append(&id, reply_naming("card-1"))
+            .await
+            .expect("journal the reply");
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(
+            history.iter().filter_map(|m| m.task_id.as_deref()).count(),
+            1,
+            "the chip is projected while the card is on the board: {history:?}"
+        );
+    }
+
+    /// **The reload half of the dismissal (issue #984).**
+    ///
+    /// The journal still records that the turn opened a card — it did, and that
+    /// event is not rewritten. What must not happen is the *projection* handing
+    /// the console an id it can only render as a link to a `404`, which is how a
+    /// completed delete comes back looking like a failed one.
+    ///
+    /// Deleting the card is the only difference from the test above.
+    #[tokio::test]
+    async fn a_reply_loses_its_card_once_the_card_is_deleted() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .tasks()
+            .upsert(&id, &card("card-1"))
+            .await
+            .expect("seed the board");
+        runtime
+            .events()
+            .append(&id, reply_naming("card-1"))
+            .await
+            .expect("journal the reply");
+        assert!(
+            runtime
+                .tasks()
+                .delete(&id, "card-1")
+                .await
+                .expect("delete the card"),
+            "the card was there to delete"
+        );
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert!(
+            !history.is_empty(),
+            "the reply itself still belongs in the transcript — only its card is gone"
+        );
+        assert!(
+            history.iter().all(|m| m.task_id.is_none()),
+            "a rehydrated chip for a deleted card is a link to a 404, which reads \
+             as the delete having failed: {history:?}"
+        );
+    }
+
+    /// The board is read once per history, and not at all when no row carries a
+    /// card — the cost argument for doing this in the projection.
+    ///
+    /// Asserted through behaviour rather than a call count: a transcript with no
+    /// cards comes back unchanged.
+    #[tokio::test]
+    async fn a_transcript_with_no_cards_is_untouched() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: MAIN_THREAD_ID.to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "just talking".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal the reply");
+
+        let history = history_for_desk(
+            &runtime,
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &Viewer::Operator,
+            None,
+            50,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert!(history[0].task_id.is_none(), "{history:?}");
     }
 }

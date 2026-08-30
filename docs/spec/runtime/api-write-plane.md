@@ -15,8 +15,9 @@ REST because it ships no GraphQL client: the two inbox `GET`s and the three
 workspace `GET`s (tree, file, `search`), the task export
 (`GET …/tasks/{taskId}/export`), the skill-registry browse
 (`GET …/skills/registry`), the agent detail (`GET …/team/{agentId}`), the policy
-read (`GET …/policy`), and the credential status `GET` — every one detailed
-below or in the credential section. Every other console read goes through
+read (`GET …/policy`), the activation read (`GET …/activation`, issue #1843),
+and the credential status `GET` — every one detailed below or in the
+credential section. Every other console read goes through
 GraphQL (see the [read plane](api-graphql.md)). Anything a build doesn't serve
 `404`s — the console treats that as "not wired yet".
 
@@ -35,7 +36,7 @@ POST   …/workspace                          create a folder/file (or upload)
 PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
 DELETE …/workspace/{nodeId}                  delete a node
-POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays (#700)
+POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `agents/` strays (#700)
 POST   …/workspace/merge-duplicate-folders?dry_run=    repair a raced tree (#759)
 POST   …/skills                             add a custom skill
 GET    …/skills/registry                     browse the shared skill library
@@ -45,14 +46,23 @@ PUT    …/skills/{slug}                       enable / disable a skill
 POST   …/team                               add an operator-overlay teammate
 GET    …/tools/catalog                       everything this company can grant
 GET    …/team/{agentId}                      one agent in full (tier, tools, desks)
-PATCH  …/team/{agentId}                      edit an overlay teammate
-DELETE …/team/{agentId}                      remove an overlay teammate
+PATCH  …/team/{agentId}                      edit a teammate
+DELETE …/team/{agentId}                      remove a teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
-GET    …/policy                              the autonomy tier + always-ask list
-PUT    …/policy                              set the tier and/or the always-ask list
+POST   …/team/{agentId}/draft                one copilot turn on this teammate's mandate or persona (writes nothing)
+POST   …/team/draft                          the same, for a teammate being added
+POST   …/avatars                            upload an image → an avatar reference (avatars.md)
+POST   …/setup/roster                       propose a starting team from three answers (company-setup/overview.md)
+GET    …/policy                              the autonomy tier + spend cap + deadline + always-ask list
+PUT    …/policy                              set the tier, spend cap, deadline, and/or always-ask list
 DELETE …/policy                              reset the policy to the manifest's
+GET    …/activation                          the account-activation funnel (issue #1843)
+PATCH  {scope}                               set/confirm the company's display name (issue #1844)  [admin]
+GET    …/tools/grants                        the `[tools].allow` in force + what a connect page may grant (#1796)
+PUT    …/tools/grants                        grant one namespace from a connect page  [admin]
+DELETE …/tools/grants                        withdraw one console grant (`?namespace=`) or all of them  [admin]
 POST   …/inboxes/{key}/read                  mark inbox messages read
 POST   …/inboxes/ingest                     HMAC-signed inbound email → inbox
 GET    …/inboxes                            list inboxes + unread counts
@@ -102,14 +112,14 @@ only: a text read of a payload is empty by the port's definition, and its bytes
 are never scanned or excerpted.
 
 `POST …/workspace/sweep-empty-agent-folders` (#700) removes the empty
-`Agents/<id>/` folders a pre-#570 company still carries. Operator-triggered
+`agents/<id>/` folders a pre-#570 company still carries. Operator-triggered
 rather than automatic — the affected tenants are hosted, so a subcommand would
 be unreachable for the operators who need it, and a boot sweep would change a
 tree on an upgrade nobody asked for. `?dry_run=true` answers
 `{"wouldRemove":[{id,name}…]}` and touches nothing, so the console can name
 every folder on a confirm dialog; the real call answers `{"removed":[…]}`, and
 which field carries the list is what actually happened. A node qualifies only
-when it is a direct child of the `Agents` root **by id**, is a folder, and has
+when it is a direct child of the `agents` root **by id**, is a folder, and has
 **no children counted structurally** — over every node in the tree, before any
 path is rendered, because a folder whose only child carries a path separator
 reads as empty to anything path-shaped while the recursive delete would still
@@ -162,16 +172,16 @@ stamps `operator`; agent writes stamp `agent{id}` from the agent's roster id,
 which is fixed at agent-build time and never taken from tool arguments. Agents
 reach the same tree through `workspace_list` / `workspace_search` /
 `workspace_read` / `workspace_create` / `workspace_write`, and a created note has its default home
-in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
+in the reserved `agents/<agent-id>/` folder (#551) — a convention the persona
 brief steers toward, not a boundary the routes enforce. `workspace_rename` and
 `workspace_delete` (#671) are the exception: those two *are* bounded to
-`Agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
+`agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
 exactly as its path would. Neither restamps authorship; a delete leaves any
 artifact version that pointed at the node with a dangling `workspaceNodeId`,
 which is the same state the `DELETE` route above produces and is read-guarded
 before reuse. Boot scaffolds the
-`Agents/` root empty; an individual `Agents/<agent-id>/` is minted the first
-time that agent writes into it, and the `Desks/` root is minted whole the first
+`agents/` root empty; an individual `agents/<agent-id>/` is minted the first
+time that agent writes into it, and the `desks/` root is minted whole the first
 time a desk produces something (#645) — so a tree read on a fresh company shows
 exactly one root and no member folders.
 
@@ -187,11 +197,11 @@ id from the display name** (issue #686): "Dana Designer" becomes
 on a hand-authored `[[agent]].id`. They used to mint an opaque
 `{millis}-{counter}` id, which #570/#552/#607 render as a workspace folder and
 in search-hit paths — so half a company's tree read as
-`Agents/019fad5ada20-000000000003/` beside `Agents/backend_engineer/`.
+`agents/019fad5ada20-000000000003/` beside `agents/backend_engineer/`.
 
 - **Collisions suffix, they do not refuse.** A slug already held by a manifest
   agent, another teammate, a desk id or name, or a reserved word (`operator`,
-  `Agents`, `Desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
+  `agents`, `desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
   always been accepted here, and an unsuffixed collision with a *manifest* id is
   worse than a refusal: the roster build skips it, so the teammate would persist
   and never materialise.
@@ -199,7 +209,7 @@ in search-hit paths — so half a company's tree read as
   and leaves the id alone; a name-keyed id would orphan its workspace folder,
   budget row, desk memberships and inbox on every correction.
 - **Removal frees the slug**, so re-adding the same name takes the id back and
-  **adopts the old `Agents/<slug>/` folder** — the intended remedy for a typo'd
+  **adopts the old `agents/<slug>/` folder** — the intended remedy for a typo'd
   name, and not a way to get a clean slate.
 
 Teammates carrying generated ids are **not migrated**: rewriting them would
@@ -221,7 +231,8 @@ lists, because only the last is the answer:
 |---|---|
 | `requested` | the agent's own `tools` globs. **Empty means the company's standard grant**, not "no tools" |
 | `companyAllow` | the `[tools].allow` ceiling |
-| `deskAllow` | the union of the `tools` ceilings of the desks this agent sits on, already narrowed by `companyAllow`. **Empty means no desk narrows anything** |
+| `deskAllow` | the union of the `tools` ceilings of the desks this agent sits on, already narrowed by `companyAllow`. **Empty means the narrowed ceiling grants nothing** — which is *not* "no desk narrows anything"; `deskCeilingActive` tells those apart |
+| `deskCeilingActive` | whether any desk this agent sits on states a `tools` ceiling. Distinct from `deskAllow`, which can resolve to an empty list while a ceiling is still in play — a console keying on `deskAllow`'s emptiness would substitute `companyAllow` and promise grants the host drops |
 | `effective` | what the agent actually holds, after all three levels |
 
 The three ceilings shrink monotonically, so a console can render them as a
@@ -245,18 +256,68 @@ write. See [runtime/tools.md](tools.md).
 "orchestrator"` agent, else the first declared) rather than read off `tier`, so
 a company that tags nobody still names its orchestrator.
 
-`PATCH …/team/{agentId}` edits an **overlay** teammate's `name`, `role` and
-`description`. It is a patch: an omitted key is left alone, and `"description":
-null` clears it — the two must stay apart or every partial save would erase an
-agent's instructions. A blank `name`/`role` is `400`, an unknown teammate `404`,
-and a **manifest** teammate is `409`: its fields live in the version-controlled
-`company.toml`, and the console does not rewrite the blueprint. The one thing
-that *is* changeable on such a teammate is its daily budget, and that works
-because #343 modelled it as an override rather than as a rewrite. Every detail
-response carries an `editable` list naming the fields this route will accept, so
-a client renders read-only from the host's answer instead of re-deriving the
-rule. `tier` and `tools` are read-only for both kinds: there is no override
-layer for either, and adding one is a policy decision rather than a form field.
+`global` marks the teammates the [global baseline](globals.md) merged in — the
+ones every company has whichever vertical it started from. It is sent on every
+row because a client
+cannot otherwise tell a company somebody staffed from one nobody has: the
+baseline is on every roster, so `length === 0` is a question with one answer.
+The console's first-run gate turns on it
+([company-setup/overview.md](company-setup/overview.md)); before the field existed that gate could
+never open.
+
+`PATCH …/team/{agentId}` edits a teammate's `name`, `role`, `description` and
+`tools`. It is a patch: an omitted key is left alone, and `"description": null`
+clears it — the two must stay apart or every partial save would erase an agent's
+instructions. A blank `name`/`role` is `400` and an unknown teammate `404`.
+
+A **manifest** teammate is edited here too, and this is the one thing the route
+does differently: instead of rewriting `company.toml`, the host stores the change
+as an `overlay_agent_edits` entry on the company record and resolves it through
+`CompanyRecord::effective_agent`, the same call `build_roster` makes. So the
+blueprint keeps stating what the company launched with, the overlay states what
+the operator has since decided, and the console card and the running teammate
+cannot disagree. The merge is per field, so a field nobody edited still tracks
+the blueprint across a rebuild. This is what makes a *deployed* company's roster
+— including the global-baseline agents every company gets — changeable at all: a
+hosted tenant has no `company.toml` to edit and no redeploy to make. The edit
+reaches the next turn rather than the next restart, because it moves the pool's
+overlay fingerprint (`overlay_fingerprint`, see
+[ports-state.md](ports-state.md)).
+
+Every detail response carries an `editable` list naming the fields this route
+will accept, so a client renders read-only from the host's answer instead of
+re-deriving the rule. `tools` is admin-only for both kinds and three-state since
+#1804 — `null` resets to the company's standard grant (a potential *widening*),
+an **explicit empty list** (`[]`) is a deliberate deny-all, and a non-empty list
+narrows — and `tier` is read-only for both: it has no override layer, and adding
+one is a policy decision rather than a form field.
+
+### Drafting a mandate or a persona
+
+`POST …/team/{agentId}/draft` and `POST …/team/draft` run one turn of a
+conversation about a teammate's `description` or `instructions`. **Neither
+writes**: the answer is text beside the field, and it becomes a persona only
+through the ordinary `PATCH` a Save performs. The conversation shape, the
+host-side grounding, the four refusal reasons and the argument for why the
+first-run design pass's rule still stands are in
+[api-team-drafting.md](api-team-drafting.md).
+
+`DELETE …/team/{agentId}` removes a teammate. An overlay teammate is deleted
+outright — the record is the only thing that declares it. A **manifest**
+teammate is removed by recording a tombstone in `overlay_retired_agents`, for
+the reason an edit is an overlay: `company.toml` and the baseline merged into it
+are re-read on every rebuild, so a teammate deleted by rewriting the roster
+would simply come back. `CompanyRecord::effective_agents` filters the tombstoned
+ids out, which is what takes the teammate off the roster, off its desks, out of
+the delegation targets and out of the harness build — rather than merely off the
+Team page. If it was the orchestrator, the role moves to the next teammate that
+is actually there.
+
+Either way the teammate's operator-added desk seats, its edit overlay and its
+budget override go with it; a blueprint desk seat is left in the manifest and
+filtered at read time. The **one refusal** is the company's last teammate
+(`409`): an empty roster has no orchestrator, nobody to answer a message and no
+way back from the console.
 
 The two **budget** routes (issue #343) are how a teammate's `budget_usd_daily`
 becomes changeable without a redeploy. Both are **admin-only** — a member gets
@@ -289,75 +350,151 @@ nothing in the console read or wrote it, so an operator drowning in approval
 cards could change it only by redeploying an edited `company.toml` — or, on a
 hosted tenant with a read-only manifest snapshot, not at all.
 
-`GET` returns the tier and always-ask list **in force**, what the manifest would
-restore, whether an override is set and by whom, and the selectable tiers with
-the host's own description of each (`POLICY_MODES` narrowed to tiers the console
-has text for, so it never offers one the host would downgrade). `PUT` takes `mode`
-and `alwaysApprove`, both optional and independent — `{"mode": "auto"}`
-leaves the list alone, `{"alwaysApprove": []}` clears it (a real state, not a
-reset), `{"mode": null}` stops overriding the tier, and `{}` is a **`422`**
-because a body that sets nothing is never stored. An unknown `mode` is `422`
+`GET` returns the tier, spend cap, approval deadline, and always-ask list **in force**, what the manifest would restore, whether an override is set and by whom, and the selectable tiers with the host's own description of each (`POLICY_MODES` narrowed to tiers the console has text for, so it never offers one the host would downgrade). `PUT` takes `mode`, `alwaysApprove`, `autoApproveUnderUsd`, and `approvalTtlHours`, all optional and independent — `{"mode": "auto"}` leaves the other fields alone, `{"alwaysApprove": []}` clears the list (a real state, not a reset), `{"autoApproveUnderUsd": 25}` permits qualifying spends strictly below $25 without asking, `{"autoApproveUnderUsd": null}` stores an explicit no-cap override so every spend remains subject to approval, and `{"approvalTtlHours": 48}` changes the approval deadline. `{"mode": null}` and `{"approvalTtlHours": null}` stop overriding those individual fields, while `{}` is a **`422`** because a body that sets nothing is never stored. An unknown `mode` is `422`
 too, not accepted-and-downgraded, or the console would show a tier the gate was
 not running. Both writes are admin-only and attributed. `DELETE` restores the
 manifest's `[policy]` — its own verb, since a `PUT` of the manifest's current
-values would pin them. The change takes effect on the company's **next turn**
-(`ApprovalPolicy` is built per roster build, and this override is fingerprinted
-alongside the other freshness axes). It survives a rebuild unless the seed's
-`[policy]` itself changed: version control wins when it speaks, so tightening
-`company.toml` clears a looser tier set here, and a redeploy that changed
-nothing does not.
+values would pin them. Tier, cap, and always-ask changes take effect on the
+company's **next turn** (`ApprovalPolicy` is built per roster build, and these
+overrides are fingerprinted alongside the other freshness axes). A deadline
+change is enforced **immediately** by the live approval gate, including when
+parked approvals are swept against their new deadline. The daily budget and
+always-ask list still outrank a spend cap, and the strict cap comparison means
+a spend exactly equal to the cap still parks. The override survives a rebuild
+unless the seed's `[policy]` itself changed: version control wins when it
+speaks, so tightening `company.toml` clears a looser setting here, and a
+redeploy that changed nothing does not.
+
+`GET …/activation` (issue #1843) answers the account-activation funnel: three
+booleans (`nameConfirmed`, `integrationConnected`, `workflowRunSucceeded`), the
+overall `isActivated` verdict, and `activationCompletedAtMillis` — omitted from
+the body entirely (not `null`) until the funnel has latched. `nameConfirmed`
+mirrors the record's own field; `workflowRunSucceeded` is true once the
+journal shows one real (non-dry) run reach the `Ok` verdict, the same ladder
+the console's Steps panel uses; `integrationConnected` requires a live Composio
+connection **and** an explicit `composio` grant in `[tools].allow` — except in
+two cases, where the step is waived rather than permanently blocking
+activation. First, when the manifest can never grant that namespace at all
+(several bundled companies drop `composio` on purpose, e.g. `agentic_math_lab`,
+`agentic_product_team`). Second, when the running binary was built without the
+`composio` feature — including the documented default `cargo run --bin
+opencompany -- serve` — because that build has no client with which to hold a
+connection, so no company running under it could ever satisfy the step. In
+that build the step reads true even for a manifest that does grant `composio`
+and holds no connection; a build that compiles the feature still requires a
+live one. Once every step has read
+true simultaneously, the answer **latches**: `isActivated` stays `true`
+forever after even if a live signal later regresses (a connection gets
+disconnected), because the question is "did this operator ever clear
+onboarding", not "is onboarding state currently intact". This GET is not a
+pure read — the first call where every step is true durably **persists** the
+latch before answering, which is why it is a console read exception here
+rather than a GraphQL resolver. It then appends the terminal
+`OnboardingCompleted` event on a **best-effort** basis: the latch has already
+landed by that point, so a journal failure is logged and ignored rather than
+un-activating the company, and the response can report activation with the
+audit entry missing. Every call after the latch is set short-circuits before any
+Composio round trip or journal scan, so polling an already-activated company
+stays cheap. Any member may call it — it decides nothing on the company's
+behalf, only answers a question.
+
+`PATCH {scope}` (issue #1844) is the funnel's naming step: it sets
+`[company].name` and stamps `CompanyRecord::name_confirmed`, the field
+`nameConfirmed` above mirrors. Admin-only, body is `{"name": "…"}`, `422` on a
+blank name. Unlike every other console write it lands directly on the
+manifest field rather than an overlay — see the route's own doc comment
+(`src/server/ops/company_profile.rs`) for why that survives a rebuild.
+Idempotent and re-callable after confirmation (an ordinary rename), but the
+`OnboardingStepCompleted` audit event fires only on the first call. A company
+saved by build code that predates the funnel is told apart from a fresh
+company's own interrupted first boot by the store-level
+`CompanyStore::activation_gate_seen` marker — see that method's doc comment.
+
+### Tool grants
+
+The three **tool-grant** routes (issue #1796) are the same shape again, applied
+to the field next door — connecting an integration stores a credential, it
+does not grant the tool namespace. Full detail, including the grantable-list
+rationale and the three-answer "when does it take effect" table, is in
+[api-tool-grants.md](api-tool-grants.md).
 
 ### Credential-bearing surfaces (feature-gated)
 
 These write secrets to the `SecretStore` and expose only non-secret status.
-The networked half of each (DNS lookup, SMTP send, OAuth token exchange) is
-dependency-inverted behind a trait; when the relevant seam is absent the write
-route `404`s with `{"code":"not_wired"}`.
+The native OAuth compatibility routes below deliberately **do not** write a
+credential: the old credential was unreachable by agents.
 
 ```text
 GET    …/credential                         whether the company has its own key + which tier it presents
 PUT    …/credential                         set / rotate / clear the company's TinyHumans key  [admin]
-PUT    …/domain                             set the custom domain
+GET    …/domain                             the stored domain + records + last verify result, or `null`
+PUT    …/domain                             set the custom domain  [admin]
 POST   …/domain/verify                       server-side DNS check
-PUT    …/smtp                               store SMTP credentials (secret store)
-POST   …/smtp/test                           send a test email
-POST   …/connections/{provider}/start        begin OAuth (returns authorize URL)   [feature: oauth]
-POST   …/connections/{provider}/disconnect   drop stored OAuth tokens               [feature: oauth]
-GET    /api/v1/oauth/callback                OAuth redirect target (unscoped; state carries the company)  [feature: oauth]
+GET    …/smtp                               non-secret SMTP status (`configured: false` when unset)
+PUT    …/smtp                               store SMTP credentials (secret store)  [admin]
+POST   …/smtp/test                           send a test email  [admin]
+POST   …/connections/{provider}/start        retired native OAuth bridge → 410 JSON until 2026-09-30  [feature: oauth]
+POST   …/connections/{provider}/disconnect   drop a legacy stored OAuth token  [feature: oauth]
+GET    /api/v1/oauth/callback                retired browser landing page → 410 HTML until 2026-09-30  [feature: oauth]
 ```
+
+The two `GET`s are the REST siblings of the GraphQL `Company.domain` /
+`Company.smtp` reads and share their loaders, so the planes cannot disagree
+about the fields they both carry. They can still differ in *detail*: REST
+answers the full `DomainStatus` and `SmtpStatus`, while `DomainStatusGql` omits
+the per-record `checks` from the last verify pass and `SmtpStatusGql` omits
+`security`, `from_name` and `from_email`. Both are open to any member (the
+`[admin]` line guards the company's outward identity, not the reading of it) and
+neither carries credential material: the SMTP password is absent from
+`SmtpStatus` by construction.
+
+`PUT …/smtp` treats the password as a **patch** — a body that omits it keeps the
+stored one, so a form can offer "stored — leave blank to keep" instead of
+charging a credential re-entry for a from-name fix. A body carrying one behaves
+exactly as before, and one that supplies neither with nothing stored is `400`.
+A supplied password is stored **byte for byte** — leading and trailing
+whitespace is preserved, because it can be significant to the remote server.
+Trimming decides only *whether* one was supplied: a value that is empty or
+entirely whitespace counts as omitted and keeps the stored password, so an
+all-whitespace password cannot be set through this route. Any value with a
+non-whitespace character in it is stored exactly as sent.
+
+Keeping the stored password costs no read-modify-write. The configuration and
+the password live under separate secret keys, so a passwordless save rewrites
+the configuration and never touches the secret — a rotation arriving at the same
+moment survives instead of being reverted, however many processes are writing.
+
+Credentials written before that split still carry the password inside the
+configuration blob; reads fall back to it, and the first passwordless save after
+the split migrates it to its own key. It is **read-only**: the configuration
+blob is rewritten on every save without it, guaranteed by
+`#[serde(skip_serializing)]` on the field rather than by every construction site
+remembering to pass `None` (issue #1770). Writing it back would not only put a
+credential in the blob, it would overwrite the pre-split password that the
+legacy read path still depends on. That migration is the one path that must
+read and then write, so `PUT …/smtp` serializes per company for the duration of
+the handler. The lock is in-process, which covers the deployed topology (a
+tenant is a single container); two replicas of one company would reopen the
+window on the legacy path alone, and closing it there would need a conditional
+write that `SecretStore` cannot express today.
 
 `…/credential` is the company's **one** TinyHumans key, presented by every
 surface wired to it (**Composio today**) — see
 [`credentials.md`](credentials.md) for the resolution order, the rotation
 guarantee, and which surfaces are deliberately outside it.
 
-### The OAuth callback always redirects
+### Retired native OAuth callback
 
-`/api/v1/oauth/callback` is reached by a **browser navigation**, so anything it
-returns as a body becomes the page the operator is left on. It therefore never
-answers with JSON. Every outcome redirects to the console's Connections view:
+`/api/v1/oauth/callback` stays reachable for a browser that began consent
+immediately before a deploy. It returns a non-caching `410 Gone` HTML page that
+says the authorization was not saved, why native OAuth cannot make agents able
+to use the provider, and to use Composio instead. It ignores the provider's
+`code` and `state` rather than exchanging or storing them.
 
-- success → `…/connections?connected=<provider>`
-- failure → `…/connections?connect_error=<code>[&provider=<provider>]`
-
-`<code>` is one of a closed set — `denied`, `invalid_request`, `invalid_state`,
-`unknown_company`, `provider_disabled`, `exchange_failed`, `store_failed` — that
-the console maps to operator-facing copy. The provider's own error text is
-logged host-side but never forwarded: it is attacker-influenced and must not
-ride in a URL that lands in browser history and access logs. `provider` is
-appended only when a signature-verified `state` supplies it, so the arms that
-fire before verification omit it.
-
-### Provider catalog vs. configured providers
-
-The console's Connections view offers 11 provider tiles; `well_known()` in
-`server::ops::connections` carries built-in authorize/token URLs for three
-families only (`slack`, `google`/`gmail`, `github`). Every other tile needs
-`OPENCOMPANY_OAUTH_<P>_AUTHORIZE_URL` / `_TOKEN_URL` alongside its `_ID` /
-`_SECRET`, or it is simply not enabled on that host.
-
-This gap is **known and safe**: an unconfigured tile fails at `start` with a
-`400 provider '<p>' is not enabled on this host`, the console shows a toast, and
-the browser never navigates — so there is no broken redirect to come back from.
-Closing the gap (shipping more well-known URLs, or hiding unconfigured tiles) is
-separate work.
+`POST …/connections/{provider}/start` is likewise a `410 Gone` JSON response
+with stable code `native_oauth_retired`, an explanatory message, and
+`removalAfter: "2026-09-30"`. Both temporary endpoints send `Deprecation:
+true` and a `Sunset: Wed, 30 Sep 2026 00:00:00 GMT` header. #1023 removes the
+bridge after the cache compatibility window established by #979; it keeps
+Disconnect and the read projection so tenants can release credentials written
+before #828.

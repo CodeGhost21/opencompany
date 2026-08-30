@@ -43,6 +43,17 @@
 //! all (or a read-only one), so every graph it owns is an overlay body — which
 //! is why these routes never require a source directory to answer.
 //!
+//! ## Pre-flight validation (issue #1074)
+//!
+//! `POST /workflows/validate` answers whether Create would accept a draft, and
+//! persists nothing. It exists because two of Create's rules — node reachability
+//! and the condition branch-label rule — cannot be pre-empted by a client
+//! without re-implementing them, and a client-side copy of a host rule drifts.
+//! It runs [`courtesy_validate_draft`](crate::company::courtesy_validate_draft),
+//! the same sequence Create runs before its save, so the two cannot disagree.
+//! Unlike the cron preview above it answers `400` on a bad draft — the identical
+//! body Create would answer with, `problems` array and all.
+//!
 //! Creation (issues #69, #112, #168) delegates to
 //! [`create_company_workflow`](crate::company::create_company_workflow), the
 //! single validated-persist core the orchestrator's `create_workflow` tool also
@@ -84,14 +95,16 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
-    WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, delete_company_workflow,
-    list_workflows_union, load_workflow_union, rollback_company_workflow, seed_file_exists,
-    set_company_workflow_enabled, update_company_workflow, workflow_version,
+    WorkflowNodeDef, WorkflowRetryDef, courtesy_validate_draft, create_company_workflow,
+    delete_company_workflow, list_workflows_with_globals, load_workflow_with_globals,
+    rollback_company_workflow, seed_file_exists, set_company_workflow_enabled,
+    update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
-    CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow, WorkflowNodeStatus,
+    CompanyEvent, CompanyRecord, EventSeq, OverlayWorkflow, StoredEvent, WorkflowNodeStatus,
 };
+use crate::ports::workflow_verdict::{RunVerdictFacts, WorkflowRunVerdict};
 use crate::runtime::cron::{CivilTime, CronExpr};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
@@ -114,6 +127,12 @@ pub fn router() -> Router<AppState> {
         // Same static-before-dynamic ordering as `/workflows/runs` above, for
         // the same reason: `cron` is a syntactically valid `wid`.
         .merge(scoped("/workflows/cron/preview", post(preview_cron)))
+        // Issue #1074: the author-time verdict, without the save. Runs the SAME
+        // validation `POST …/workflows` runs and persists nothing, so the create
+        // dialog can pre-empt a refusal instead of discovering it on submit. A
+        // static prefix registered here with the others and BEFORE the dynamic
+        // `/workflows/{wid}`: `validate` is a syntactically valid `wid`.
+        .merge(scoped("/workflows/validate", post(validate_workflow)))
         // Issue #753: the create-time copilot. Drafts a graph from a free-text
         // description and hands it back for the New-workflow dialog to hydrate —
         // it never persists (Create still does). A static prefix registered here
@@ -124,12 +143,13 @@ pub fn router() -> Router<AppState> {
             "/workflows/draft-from-description",
             post(draft_from_description),
         ))
-        // Issue #783: the wired, granted `tool_call` slugs this company can reach
-        // from a workflow, so the per-workflow copilot can ground a proposal on
-        // real tools instead of guessing (`github_integration` and the like).
-        // Reads the SAME `workflow_callable_tool_slugs` the create-time copilot
-        // grounds on (issue #753), so the two cannot drift. A static prefix
-        // registered here with the others and BEFORE the dynamic
+        // Issue #783: the `tool_call` slugs this company can reach from a
+        // workflow, so the per-workflow copilot can ground a proposal on real
+        // tools instead of guessing (`github_integration` and the like). Reads
+        // the SAME `workflow_effective_tool_slugs` the create-time copilot
+        // grounds on (issues #753, #874), so the two cannot drift — and, since
+        // #874, so neither offers a tool this deployment has not wired. A static
+        // prefix registered here with the others and BEFORE the dynamic
         // `/workflows/{wid}` below — `tool-slugs` is a syntactically valid `wid`.
         .merge(scoped("/workflows/tool-slugs", get(workflow_tool_slugs)))
         // Issue #813: the chat channels actually wired for this running company,
@@ -161,6 +181,20 @@ pub fn router() -> Router<AppState> {
         // fold is already expensive, and an inspector only ever opens one run at
         // a time (the make.com pattern).
         .merge(scoped("/workflows/runs/{rid}/output", get(get_run_output)))
+        // Issue #1684: read the files ONE past run produced, for the run
+        // inspector's "Files associated" section. Same static-before-dynamic
+        // family as the output route above and, like it, four segments deep so
+        // it cannot collide with the two/three-segment dynamic routes — but
+        // registered here to keep the ordering uniform. Deliberately a lazy
+        // per-run fetch, NOT folded into `list_runs`: that fold is already
+        // expensive, and an inspector only ever opens one run at a time. The
+        // join it runs — `run_id → cards where origin_run_id == run_id → each
+        // card's artifacts` — is the authoritative provenance path (see
+        // `run_artifacts`).
+        .merge(scoped(
+            "/workflows/runs/{rid}/artifacts",
+            get(run_artifacts),
+        ))
         // Issue #259: read, replace, remove — all on the same id. `PUT` is a
         // full replace rather than a `PATCH` merge because a workflow *is* its
         // graph: a partial node/edge merge has no well-defined meaning (which
@@ -216,6 +250,12 @@ struct WorkflowSummary {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// The trigger node's 5-field UTC cron, or explicit `null` for a manual
+    /// workflow. Kept present when `None` so a current host can distinguish
+    /// "manual" from an older host that predates this field.
+    schedule: Option<String>,
+    /// Number of nodes in the graph. A body-less manifest entry reports zero.
+    node_count: usize,
     /// Whether `PUT`/`DELETE` on this id will be accepted (issue #259) — see
     /// [`is_editable`]. The console disables its Edit/Delete affordances on a
     /// `false`, so an operator is told *before* clicking rather than by a 409
@@ -234,10 +274,14 @@ struct WorkflowSummary {
 
 impl WorkflowSummary {
     fn new(f: WorkflowFile, editable: bool, enabled: bool) -> Self {
+        let schedule = f.trigger_schedule().map(str::to_owned);
+        let node_count = f.nodes.len();
         Self {
             id: f.id,
             name: f.name,
             description: f.description,
+            schedule,
+            node_count,
             editable,
             enabled,
         }
@@ -252,20 +296,34 @@ struct WorkflowGraph {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// The owning desk (issue #1862 prerequisite) — see
+    /// [`WorkflowFile::owner_desk`]. Round-tripped verbatim, for the same
+    /// reason `repeatable` on [`WorkflowNode`] is: a `PUT` replaces the whole
+    /// graph, so an editor that builds its save from what this route just
+    /// returned has to have the field in order to carry it forward. Omitting
+    /// it here was the actual bug (issue #1882 review) — `ownerDesk` was
+    /// accepted on the create/update body but never appeared on a read, so
+    /// the very next edit that round-tripped a read into a write silently
+    /// cleared whatever desk an operator had set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_desk: Option<String>,
     nodes: Vec<WorkflowNode>,
     edges: Vec<WorkflowEdge>,
     /// Whether this graph can be replaced or removed through the API — see
     /// [`is_editable`].
     editable: bool,
-    /// The opaque optimistic-concurrency token for this graph (issue #259),
-    /// present only when `editable` (a source-defined graph has nothing to
-    /// version, and a token for an overlay body the read path does not even
-    /// serve would be actively misleading).
+    /// The opaque optimistic-concurrency token for this graph (issue #259).
+    /// Always serialized: a string when the graph is `editable`, and explicit
+    /// `null` when it is not (a source-defined or body-less graph has nothing to
+    /// version). It is deliberately NOT omitted — a client that read `version`
+    /// off a graph whose key was absent got `undefined` and sent nothing,
+    /// silently overwriting a concurrent save (issue #1013). An explicit `null`
+    /// says "no token here" instead of hiding the field.
     ///
     /// The contract is **echo it back**: hand it to `PUT` in the body or to
     /// `DELETE` as `?expectedVersion=`, and the write is refused with a `409` if
-    /// the graph moved in between. Never parse or derive it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// the graph moved in between — and refused with a `400` if you omit it
+    /// entirely (issue #1013). Never parse or derive it.
     version: Option<String>,
     /// Whether this workflow's schedule is armed (issue #276) — see
     /// [`WorkflowSummary::enabled`]. Carried on the graph read as well as the
@@ -281,6 +339,7 @@ impl WorkflowGraph {
             id: f.id,
             name: f.name,
             description: f.description,
+            owner_desk: f.owner_desk,
             nodes: f.nodes.into_iter().map(WorkflowNode::from).collect(),
             edges: f.edges.into_iter().map(WorkflowEdge::from).collect(),
             editable,
@@ -316,6 +375,14 @@ struct WorkflowNode {
     retry: Option<WorkflowRetryOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requires_approval: Option<bool>,
+    /// When `false`, a continuation must not repeat this node's call — see
+    /// [`WorkflowNodeDef::repeatable`] (issue #850). Round-tripped verbatim so
+    /// the console's edit form does not lose the declaration on an unrelated
+    /// save: the create/update body reads this same field back, so omitting it
+    /// here would have `repeatable: false` silently disappear on the first
+    /// re-submit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeatable: Option<bool>,
     /// Where an `output` node's report is routed once the run finishes (issue
     /// #170). The model shape is reused verbatim in both directions: its two
     /// fields (`kind` / `target`) are single words, so there is no snake_case →
@@ -361,6 +428,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             on_error: n.on_error,
             retry: n.retry.map(WorkflowRetryOut::from),
             requires_approval: n.requires_approval,
+            repeatable: n.repeatable,
             destination: n.destination,
         }
     }
@@ -416,8 +484,13 @@ fn overlay_toml<'a>(overlays: &'a [OverlayWorkflow], wid: &str) -> Option<&'a st
         .map(|w| w.toml.as_str())
 }
 
-async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflow>, ApiError> {
-    Ok(workflow_state(company).await?.0)
+/// This company's overlay graph bodies and its `[globals].disable`, read
+/// together — the pair every union read needs.
+async fn overlay_workflows_and_globals(
+    company: &ScopedCompany,
+) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ApiError> {
+    let (overlays, _, globals_disable) = workflow_state(company).await?;
+    Ok((overlays, globals_disable))
 }
 
 /// The company's runtime-authored graph bodies **and** the ids the operator has
@@ -429,15 +502,24 @@ async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflo
 /// an operator has just toggled it.
 async fn workflow_state(
     company: &ScopedCompany,
-) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ApiError> {
+) -> Result<(Vec<OverlayWorkflow>, Vec<String>, Vec<String>), ApiError> {
     let record: Option<CompanyRecord> = company
         .runtime
         .store()
         .load(company.id())
         .await
         .map_err(ApiError)?;
+    // The company's `[globals].disable` rides along for the same reason the
+    // other two do: a route that resolved a global graph without it would serve
+    // one this company opted out of.
     Ok(record
-        .map(|r| (r.overlay_workflows, r.disabled_workflows))
+        .map(|r| {
+            (
+                r.overlay_workflows,
+                r.disabled_workflows,
+                r.manifest.globals.disable,
+            )
+        })
         .unwrap_or_default())
 }
 
@@ -452,9 +534,9 @@ async fn workflow_state(
 /// does this return `200 []`, so the console renders "no workflows yet" rather
 /// than a failure.
 async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSummary>>, ApiError> {
-    let (overlays, disabled) = workflow_state(&company).await?;
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
     let source_dir = company.runtime.source_dir();
-    let files = list_workflows_union(source_dir, &overlays);
+    let files = list_workflows_with_globals(source_dir, &overlays, &globals_disable);
     let mut seen: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
     let mut summaries: Vec<WorkflowSummary> = files
         .into_iter()
@@ -480,6 +562,8 @@ async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSumma
             id: id.clone(),
             name: id,
             description: None,
+            schedule: None,
+            node_count: 0,
             // A manifest-`enabled` id with no body in either source: there is
             // nothing to replace or remove, and the write core says so with a
             // 409. Never editable.
@@ -511,10 +595,10 @@ async fn get_workflow(
         ))));
     }
     let source_dir = company.runtime.source_dir();
-    let (overlays, disabled) = workflow_state(&company).await?;
-    let file = load_workflow_union(source_dir, &overlays, &wid)
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
+    let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
-        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
+        .ok_or_else(|| ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))))?;
     // Issue #259: the version token rides out with the graph, so the console
     // gets it for free on the same read it renders from — there is no second
     // round trip for a caller to skip and thereby lose the concurrency guard.
@@ -527,8 +611,8 @@ async fn get_workflow(
 }
 
 /// The create-workflow body — the same camelCase graph shape the GET routes
-/// return (`id`/`name`/`description?`/`nodes`/`edges`), so the console's
-/// creator can post exactly what it would otherwise read back.
+/// return (`id`/`name`/`description?`/`ownerDesk?`/`nodes`/`edges`), so the
+/// console's creator can post exactly what it would otherwise read back.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateWorkflowBody {
@@ -536,6 +620,12 @@ struct CreateWorkflowBody {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    /// The owning desk (issue #1862 prerequisite), so the console's creator
+    /// can post it exactly like every other field — see
+    /// [`WorkflowFile::owner_desk`] and [`WorkflowGraph::owner_desk`] (the
+    /// symmetric read-side field an edit round-trips it through).
+    #[serde(default)]
+    owner_desk: Option<String>,
     #[serde(default)]
     nodes: Vec<CreateNode>,
     #[serde(default)]
@@ -574,6 +664,11 @@ struct CreateNode {
     /// When `true`, the node pauses awaiting operator approval before it runs.
     #[serde(default)]
     requires_approval: Option<bool>,
+    /// When `false`, a continuation must not repeat this node's call — it
+    /// replays the result the earlier run recorded (issue #850). Only valid on
+    /// `tool_call` and `http_request`, the two kinds that make a call.
+    #[serde(default)]
+    repeatable: Option<bool>,
     /// Where an `output` node's report goes once the run finishes:
     /// `{"kind": "owner"|"email"|"channel", "target"?: "…"}`. Rejected on any
     /// other node kind, and each kind's target contract is enforced by
@@ -643,6 +738,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 on_error: n.on_error,
                 retry: n.retry.map(WorkflowRetryDef::from),
                 requires_approval: n.requires_approval,
+                repeatable: n.repeatable,
                 destination: n.destination,
             });
         }
@@ -650,6 +746,11 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
             id: body.id,
             name: body.name,
             description: body.description,
+            // Blank/whitespace is treated as absent, not as a real desk name
+            // — the same rule `validate_draft_against_record` already applies
+            // at author time, applied here too so the persisted TOML never
+            // stores a blank string in the first place.
+            owner_desk: RawWorkflow::normalize_owner_desk(body.owner_desk),
             nodes,
             edges: body
                 .edges
@@ -689,6 +790,11 @@ async fn create_workflow(
         company.runtime.store(),
         Some(company.runtime.events()),
         draft,
+        Some(&company.runtime.deliverable_channel_ids()),
+        // Issue #1843: the signed-in human behind this write, when there is
+        // one — the REST create path is real user activation, unlike the
+        // orchestrator's own `create_workflow` tool.
+        company.actor.clone(),
     )
     .await
     .map_err(ApiError)?;
@@ -698,6 +804,80 @@ async fn create_workflow(
     // hold a valid token from the moment it creates a workflow, without a
     // follow-up GET.
     Ok(Json(graph_with_version(&company, file).await?))
+}
+
+/// The `POST …/workflows/validate` response for a draft the host accepts.
+///
+/// A bare `{"valid": true}` rather than an echo of the graph. The caller already
+/// holds the draft — it just sent it — and echoing a *normalized* copy back
+/// would invite a console to adopt it, which is a persist-shaped side effect on
+/// a route whose whole contract is that nothing happens.
+#[derive(Debug, Serialize)]
+struct ValidateWorkflowResponse {
+    valid: bool,
+}
+
+/// `POST …/workflows/validate` — the host's author-time verdict on a draft
+/// graph, with nothing persisted (issue #1074).
+///
+/// Two of the rules `POST …/workflows` enforces cannot be pre-empted by a client
+/// without re-implementing them: **node reachability** (every node must be
+/// reachable from the trigger — `crate::company::parse_workflow`) and the
+/// **condition branch-label** rule (an edge leaving a `condition` node must read
+/// `yes`/`no`, or `error` when that node is also `on_error = "route"`). A console
+/// that mirrored either would own a second copy of a rule it does not define,
+/// and the copy would drift — the failure mode issue #168 already cost this
+/// codebase once. So the console asks the host instead.
+///
+/// The verdict comes from [`courtesy_validate_draft`], the same
+/// shape → render → byte-cap → [`parse_workflow`] → roster/tool/label sequence
+/// `create_company_workflow` runs before its save. **This route reimplements no
+/// rule**, which is the point: the two surfaces cannot disagree because there is
+/// only one of them. A refusal is returned as the error itself, so the body is
+/// byte-for-byte the `400` Create would have answered with — including the
+/// structured `problems` array from issue #1016 — and a console can render one
+/// code path for both.
+///
+/// # What it deliberately does not answer
+///
+/// **Id and display-name uniqueness.** `courtesy_validate_draft` omits it on
+/// purpose: uniqueness is a function of the live record at *save* time, and
+/// `create_company_workflow` decides it under the per-company write lock. An
+/// unlocked pre-flight could only answer for an instant, and answering "the id
+/// is free" a moment before it is taken is worse than not answering — so a `200`
+/// here still permits the `409` there. The console already holds the workflow
+/// list and can pre-empt that one itself.
+///
+/// Statuses: `200` (the draft would be accepted), `400` (it would not).
+async fn validate_workflow(
+    company: ScopedCompany,
+    Json(body): Json<CreateWorkflowBody>,
+) -> Result<Json<ValidateWorkflowResponse>, ApiError> {
+    let draft = RawWorkflow::try_from(body)?;
+    let record = company
+        .runtime
+        .store()
+        .load(company.id())
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())))?;
+    // The SAME source directory create passes (`create_company_workflow` at the
+    // top of this module). It feeds only the `sub_workflow` existence probe, and
+    // withholding it here made this refuse a child workflow that lives as a seed
+    // file — which create accepts. Review of #1074.
+    courtesy_validate_draft(
+        &draft,
+        &record,
+        company.runtime.source_dir(),
+        Some(&company.runtime.deliverable_channel_ids()),
+        // This route pre-flights a body, not a specific saved workflow: it is
+        // reached for a create and for an edit alike and has no stored owner to
+        // grandfather against (issue #1882 review). It keeps the documented
+        // false-negative direction described above `validate_workflow`.
+        None,
+    )
+    .map_err(ApiError)?;
+    Ok(Json(ValidateWorkflowResponse { valid: true }))
 }
 
 /// Re-reads the just-written overlay body to attach the current `editable` flag
@@ -713,7 +893,7 @@ async fn graph_with_version(
     file: WorkflowFile,
 ) -> Result<WorkflowGraph, ApiError> {
     let source_dir = company.runtime.source_dir();
-    let (overlays, disabled) = workflow_state(company).await?;
+    let (overlays, disabled, _) = workflow_state(company).await?;
     let editable = is_editable(source_dir, &overlays, &file.id);
     let version = editable
         .then(|| overlay_toml(&overlays, &file.id).map(workflow_version))
@@ -733,8 +913,11 @@ async fn graph_with_version(
 struct UpdateWorkflowBody {
     #[serde(flatten)]
     graph: CreateWorkflowBody,
-    /// The token from the `GET`/`PUT` this edit was based on. Omit for an
-    /// unconditional write (the `curl` path); the console always sends it.
+    /// The token from the `GET`/`PUT` this edit was based on. **Required** (issue
+    /// #1013): a missing token is a `400`, not an unconditional write, so a stale
+    /// editor can't silently clobber a concurrent save. Kept `Option` +
+    /// `serde(default)` so an omitted field is a clean handler-level `400` with a
+    /// recovery message, rather than an opaque serde `422`.
     #[serde(default)]
     expected_version: Option<String>,
 }
@@ -752,8 +935,17 @@ struct UpdateWorkflowBody {
 /// journalled run in the history — a rename would silently orphan all three. A
 /// rename is a create plus a delete, and the operator should say so.
 ///
-/// Statuses: `400` (bad graph, or `id` ≠ `wid`), `404` (unknown id), `409`
-/// (source-defined, body-less, name taken, or a stale `expectedVersion`).
+/// `expectedVersion` is **required** (issue #1013): omitting it used to mean an
+/// unconditional write, so a console holding a stale graph — or one that read
+/// `version` as `undefined` and sent nothing — silently clobbered a concurrent
+/// save. A missing token is now a `400`, matching the agent `update_workflow`
+/// tool, which has always demanded it. A caller re-reads the workflow and echoes
+/// back its `version`; the conditional write then refuses with a `409` if the
+/// graph moved in between.
+///
+/// Statuses: `400` (bad graph, `id` ≠ `wid`, or a missing `expectedVersion`),
+/// `404` (unknown id), `409` (source-defined, body-less, name taken, or a stale
+/// `expectedVersion`).
 async fn update_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
@@ -773,7 +965,18 @@ async fn update_workflow(
         ))));
     }
 
-    let expected = body.expected_version.clone();
+    // `expectedVersion` is required (issue #1013). An absent token used to mean
+    // an unconditional write; that let a stale editor overwrite a concurrent save
+    // without ever seeing a 409. Refuse the write with a 400 instead, mirroring
+    // the agent `update_workflow` tool, and tell the caller how to recover.
+    let Some(expected) = body.expected_version.clone() else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "`expectedVersion` is required: re-read this workflow and send back the `version` it \
+             returns. A `PUT` replaces the whole graph, so saving without the version you read \
+             from could silently overwrite a change made since."
+                .to_string(),
+        )));
+    };
     let draft = RawWorkflow::try_from(body.graph)?;
     let file = update_company_workflow(
         company.id(),
@@ -782,7 +985,8 @@ async fn update_workflow(
         company.runtime.workflow_revisions(),
         Some(company.runtime.events()),
         draft,
-        expected.as_deref(),
+        Some(expected.as_str()),
+        Some(&company.runtime.deliverable_channel_ids()),
     )
     .await
     .map_err(ApiError)?;
@@ -799,6 +1003,9 @@ async fn update_workflow(
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeleteWorkflowQuery {
+    /// The token of the graph being removed. **Required** (issue #1013): an
+    /// absent `?expectedVersion=` is a `400`, not an unconditional delete, so a
+    /// stale editor can't drop a workflow that changed since they last looked.
     #[serde(default)]
     expected_version: Option<String>,
 }
@@ -813,8 +1020,13 @@ struct DeleteWorkflowQuery {
 /// the workflow did, and that stays true after it is gone — `GET
 /// …/workflows/runs` keeps serving them. See the module doc.
 ///
-/// `204` on success. `404` for an unknown id; `409` for a source-defined or
-/// body-less id, or a stale `expectedVersion`.
+/// `expectedVersion` is **required** (issue #1013), for the same reason it is on
+/// `PUT`: an absent token used to mean an unconditional delete, so a console
+/// holding a stale graph could remove a workflow that changed underneath it. A
+/// missing `?expectedVersion=` is now a `400`.
+///
+/// `204` on success. `400` for a missing `expectedVersion`; `404` for an unknown
+/// id; `409` for a source-defined or body-less id, or a stale `expectedVersion`.
 async fn delete_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
@@ -825,6 +1037,17 @@ async fn delete_workflow(
             "workflow {wid}"
         ))));
     }
+    // `expectedVersion` is required (issue #1013) — a tokenless delete is refused
+    // rather than run unconditionally, so a stale editor can't drop a workflow
+    // that moved since they loaded it.
+    let Some(expected) = query.expected_version.as_deref() else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "`expectedVersion` is required: read this workflow and pass its `version` as \
+             `?expectedVersion=`. Deleting without the version you read from could remove a \
+             workflow that changed since you last looked."
+                .to_string(),
+        )));
+    };
     delete_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -833,7 +1056,7 @@ async fn delete_workflow(
         Some(company.runtime.schedule_fires()),
         Some(company.runtime.events()),
         &wid,
-        query.expected_version.as_deref(),
+        Some(expected),
     )
     .await
     .map_err(ApiError)?;
@@ -879,6 +1102,14 @@ async fn set_workflow_enabled(
             "workflow {wid}"
         ))));
     }
+    // Issue #1046: the arm-time delivery check needs the deployment's delivery
+    // capability, which lives on the runtime and the arm path cannot otherwise
+    // see: whether a mailbox is wired (so `owner`/`email` outputs can land) and
+    // which channels are deliverable (`deliverable_channel_ids` already excludes
+    // the operator channel, and is the console destination picker's own source
+    // of truth, #813).
+    let mail_configured = company.runtime.mail().is_some();
+    let wired_channels = company.runtime.deliverable_channel_ids();
     set_company_workflow_enabled(
         company.id(),
         company.runtime.source_dir(),
@@ -886,6 +1117,8 @@ async fn set_workflow_enabled(
         Some(company.runtime.events()),
         &wid,
         body.enabled,
+        mail_configured,
+        &wired_channels,
     )
     .await
     .map_err(ApiError)?;
@@ -893,11 +1126,11 @@ async fn set_workflow_enabled(
     // Answer with the graph, re-read, rather than a bare 204: the console
     // renders the row from this shape, and reading it back means the `enabled`
     // it shows is what the store holds rather than what the request asked for.
-    let (overlays, disabled) = workflow_state(&company).await?;
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
     let source_dir = company.runtime.source_dir();
-    let file = load_workflow_union(source_dir, &overlays, &wid)
+    let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
-        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
+        .ok_or_else(|| ApiError(OpenCompanyError::NotFound(format!("workflow {wid}"))))?;
     let editable = is_editable(source_dir, &overlays, &wid);
     let version = editable
         .then(|| overlay_toml(&overlays, &wid).map(workflow_version))
@@ -984,8 +1217,10 @@ struct RevisionPath {
 #[serde(rename_all = "camelCase")]
 struct RestoreRevisionBody {
     /// The token from the `GET`/`PUT` the operator was looking at when they hit
-    /// Restore. Omit for an unconditional restore; the console always sends it,
-    /// and on a `409` should reload rather than retry — the graph moved under it.
+    /// Restore. **Required** (issue #1013): an absent token — or an absent body —
+    /// is a `400`, not an unconditional restore, so a stale editor can't overwrite
+    /// a concurrent save. On a `409` reload rather than retry — the graph moved
+    /// under it.
     #[serde(default)]
     expected_version: Option<String>,
 }
@@ -1001,10 +1236,15 @@ struct RestoreRevisionBody {
 /// itself undoable), the optimistic-concurrency token, and the #276 disarm of a
 /// restored schedule.
 ///
-/// Statuses: `200` (restored), `400` (the revision is invalid against the
-/// current record — e.g. it names a since-removed teammate), `404` (unknown
-/// `wid` or unknown `rev`), `409` (seed-backed / body-less `wid`, a stale
-/// `expectedVersion`, or a name collision).
+/// `expectedVersion` is **required** (issue #1013), aligning restore with `PUT`:
+/// an absent token — or an omitted body — used to mean an unconditional restore,
+/// so a stale editor could overwrite a concurrent save. A missing token is now a
+/// `400`.
+///
+/// Statuses: `200` (restored), `400` (a missing `expectedVersion`, or the
+/// revision is invalid against the current record — e.g. it names a since-removed
+/// teammate), `404` (unknown `wid` or unknown `rev`), `409` (seed-backed /
+/// body-less `wid`, a stale `expectedVersion`, or a name collision).
 async fn restore_workflow_revision(
     company: ScopedCompany,
     Path(RevisionPath { wid, rev }): Path<RevisionPath>,
@@ -1015,7 +1255,17 @@ async fn restore_workflow_revision(
             "workflow {wid}"
         ))));
     }
-    let expected = body.and_then(|Json(b)| b.expected_version);
+    // `expectedVersion` is required (issue #1013). Resolve it from the optional
+    // body; an absent token or an absent body alike is a 400, not an
+    // unconditional restore, so a stale editor can't clobber a concurrent save.
+    let Some(expected) = body.and_then(|Json(b)| b.expected_version) else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "`expectedVersion` is required: read this workflow and send back its `version`. A \
+             restore replaces the current graph, so doing it without the version you read from \
+             could silently overwrite a change made since."
+                .to_string(),
+        )));
+    };
     let file = rollback_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -1024,7 +1274,7 @@ async fn restore_workflow_revision(
         Some(company.runtime.events()),
         &wid,
         &rev,
-        expected.as_deref(),
+        Some(expected.as_str()),
     )
     .await
     .map_err(ApiError)?;
@@ -1119,6 +1369,19 @@ struct RunWorkflowResponse {
     /// caller's body is byte-unchanged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     cancelled: bool,
+    /// What this run adds up to, in one word (issue #981).
+    ///
+    /// **Always serialized**, unlike every optional field around it, because
+    /// its whole purpose is to be the field a client reads instead of
+    /// re-deriving the reading from the rows. An omitted verdict would push
+    /// every reader straight back into the six-field ladder this replaces.
+    ///
+    /// It is the *only* place this response says a report did not go out. A
+    /// delivery failure never fails the run and never touches `nodes[].status`
+    /// (see [`WorkflowRunVerdict`]), so a console or an API client folding node
+    /// statuses scores a dropped report green — which is exactly what issue
+    /// #981 caught in the field.
+    verdict: WorkflowRunVerdict,
     /// Per-node progress for this run, in the order the nodes finished (issue
     /// #542). Carried for **every** synchronous run, not only a dry one — it is
     /// the same structural per-node timeline `GET …/workflows/runs` returns, so
@@ -1260,7 +1523,7 @@ async fn run_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     body: Option<Json<RunWorkflowBody>>,
-) -> Result<RunWorkflowOk, Response> {
+) -> Result<RunWorkflowOk, crate::server::Rejection> {
     // No runner wired. THREE very different causes look identical from here —
     // `workflow_runner() == None` — and each points the operator at a different
     // next step (issues #266, #514):
@@ -1279,30 +1542,30 @@ async fn run_workflow(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("workflow execution"),
-                RunnerGap::InferenceRequired => super::inference_required("workflow execution"),
-                RunnerGap::NotWired => super::not_wired("workflow execution"),
+                RunnerGap::RestartPending => super::restart_required("workflow execution").into(),
+                RunnerGap::InferenceRequired => {
+                    super::inference_required("workflow execution").into()
+                }
+                RunnerGap::NotWired => super::not_wired("workflow execution").into(),
             },
         );
     };
 
     // `wid` becomes a filename — reject anything that could escape `workflows/`.
     if !safe_wid(&wid) {
-        return Err(
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response(),
-        );
+        return Err(OpenCompanyError::NotFound(format!("workflow {wid}")).into());
     }
 
     // Load the saved graph from the seed ∪ overlay union, so a graph created on
     // a hosted tenant (no source directory) runs the same as a committed one.
-    let overlays = overlay_workflows(&company)
-        .await
-        .map_err(IntoResponse::into_response)?;
-    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
-        })?;
+    let (overlays, globals_disable) = overlay_workflows_and_globals(&company).await?;
+    let file = load_workflow_with_globals(
+        company.runtime.source_dir(),
+        &overlays,
+        &globals_disable,
+        &wid,
+    )?
+    .ok_or_else(|| OpenCompanyError::NotFound(format!("workflow {wid}")))?;
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let detach = body.detach;
@@ -1327,8 +1590,7 @@ async fn run_workflow(
         file,
         body.input,
         dry_run,
-    )
-    .map_err(|e| ApiError(e).into_response())?;
+    )?;
 
     if detach {
         // Returned before the engine has walked a node. From here the client
@@ -1350,30 +1612,58 @@ async fn run_workflow(
     // aborted — the run's outcome was never journaled, so there is nothing
     // truthful to hand back and this is a genuine 500 rather than a run result.
     match handle.await {
-        Ok(Ok(run)) => Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
-            output: run.output,
-            pending_approvals: run.pending_approvals,
-            deliveries: run.deliveries,
-            run_id,
-            cancelled: run.cancelled,
-            // Issue #542: the runner collects this per-node trail on every run;
-            // map the port rows onto the wire shape the history route already
-            // uses. `dry_run` is the request's, echoed back as the presence
-            // discriminator a console pointed at an old host would never see.
-            nodes: run.nodes.into_iter().map(WorkflowRunNode::from).collect(),
-            dry_run,
-            // Issue #661 (M5): carried on the synchronous path too, so a console
-            // that pressed Run learns what the run did to the board without a
-            // second read of the history.
-            board: run.board,
-            // Issues #881 / #880: likewise. An operator who pressed Run and
-            // watched eight green nodes come back is exactly the reader these
-            // two exist for — the run drawer is where they first learn the
-            // pipeline delivered nothing and why.
-            blocked_nodes: run.blocked_nodes,
-            approvals: run.approvals,
-        }))),
-        Ok(Err(err)) => Err(ApiError(err).into_response()),
+        Ok(Ok(run)) => {
+            // Issue #981: read the verdict off the settled run BEFORE its fields
+            // are moved onto the wire shape below.
+            //
+            // `running` and `error` are constants rather than fields, and both
+            // are facts about this arm: a body is written only for a run that
+            // settled, and a run that failed leaves through `Ok(Err(err))` one
+            // arm down as an `ApiError` with no body at all. So the readings
+            // this response can carry are `stopped`, `blocked`, `undelivered`,
+            // `awaiting-approval` and `ok` — never `running`, never `failed`.
+            let verdict = WorkflowRunVerdict::of(RunVerdictFacts {
+                running: false,
+                error: None,
+                cancelled: run.cancelled,
+                blocked_nodes: run.blocked_nodes.len(),
+                deliveries: &run.deliveries,
+                pending_approvals: run.pending_approvals.len(),
+                // Issue #1189: deliberately not reconciled here, and a literal
+                // rather than a lookup. This body is written microseconds after
+                // `park_pending_gates` minted the cards, so joining against the
+                // queue would be a guaranteed-zero query on the hot path — the
+                // reconciliation is a fact about a run somebody comes back to,
+                // which is what the history route is for.
+                stranded_approvals: 0,
+            });
+            Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
+                output: run.output,
+                pending_approvals: run.pending_approvals,
+                deliveries: run.deliveries,
+                run_id,
+                cancelled: run.cancelled,
+                verdict,
+                // Issue #542: the runner collects this per-node trail on every
+                // run; map the port rows onto the wire shape the history route
+                // already uses. `dry_run` is the request's, echoed back as the
+                // presence discriminator a console pointed at an old host would
+                // never see.
+                nodes: run.nodes.into_iter().map(WorkflowRunNode::from).collect(),
+                dry_run,
+                // Issue #661 (M5): carried on the synchronous path too, so a
+                // console that pressed Run learns what the run did to the board
+                // without a second read of the history.
+                board: run.board,
+                // Issues #881 / #880: likewise. An operator who pressed Run and
+                // watched eight green nodes come back is exactly the reader
+                // these two exist for — the run drawer is where they first
+                // learn the pipeline delivered nothing and why.
+                blocked_nodes: run.blocked_nodes,
+                approvals: run.approvals,
+            })))
+        }
+        Ok(Err(err)) => Err(ApiError(err).into_response().into()),
         Err(join) => {
             tracing::error!(
                 company = %company.id(),
@@ -1389,7 +1679,8 @@ async fn run_workflow(
             Err(ApiError(OpenCompanyError::BackgroundTask(
                 "the workflow run task did not complete".to_string(),
             ))
-            .into_response())
+            .into_response()
+            .into())
         }
     }
 }
@@ -1485,6 +1776,164 @@ async fn get_run_output(
             "no output captured for workflow run {rid}"
         )))),
     }
+}
+
+/// The row cap on [`run_artifacts`]: a defensive ceiling on how many files one
+/// run's response carries, in the spirit of [`MAX_RUN_LIMIT`] on the history
+/// read. A run that opened an unusually large number of cards — or a card with
+/// a long publish history — cannot turn one lazy expand into an unbounded
+/// payload; the newest rows survive the truncation, matching the newest-first
+/// sort the handler applies just before it.
+const MAX_RUN_ARTIFACTS: usize = 500;
+
+/// One file a workflow run produced, projected for the run inspector's "Files
+/// associated" section (issue #1684).
+///
+/// **Metadata only** — never the artifact body, the same discipline
+/// [`WorkflowRunNode`] keeps. The console deep-links each row into the
+/// producing card's Artifacts tab (`artifactHref` → `taskId` + `artifactId` +
+/// `latestVersion`) and, when the file was mirrored into the workspace tree,
+/// offers a second link to that node. Both are addresses; neither needs bytes.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunArtifactRow {
+    /// The card that produced the file — scopes both `artifactHref` and the
+    /// Artifacts tab the link opens.
+    task_id: String,
+    /// The artifact's stable id → the tab's `openArtifactId`.
+    artifact_id: String,
+    /// The artifact's display title.
+    title: String,
+    /// What the file holds; drives the console's icon/renderer choice.
+    kind: crate::ports::ArtifactKind,
+    /// The workspace-relative path the agent published (e.g. `specs/launch.md`).
+    /// `None` for a legacy record captured before issue #244 — the console
+    /// labels it, it does not drop it, so the history stays honest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    /// The newest revision number → the tab's `openVersion` pin. `0` only for a
+    /// hand-written or truncated record with no versions, which the accessors
+    /// tolerate rather than panic on.
+    latest_version: u32,
+    /// Epoch-millis of the newest revision — the sort key and the display time.
+    updated_at_millis: u64,
+    /// The workspace node the newest revision was mirrored into, when one was
+    /// (issue #552) → an optional `#/workspace/<id>` link. `None` when nothing
+    /// mirrored it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_node_id: Option<String>,
+    /// The producing card's title, for grouping rows by card in the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_title: Option<String>,
+}
+
+/// `GET …/workflows/runs/{rid}/artifacts` response. A wrapper rather than a
+/// bare array so a run whose file count exceeds [`MAX_RUN_ARTIFACTS`] can say
+/// so — the same `truncated` contract [`get_run_output`] uses for its per-node
+/// snapshot — instead of silently dropping the older rows and letting the
+/// console present the list as exhaustive.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunArtifactsResponse {
+    /// The run's files, newest first (the sort `run_artifacts` applies).
+    files: Vec<RunArtifactRow>,
+    /// Whether older rows were cut by [`MAX_RUN_ARTIFACTS`]. `false` for every
+    /// run in practice — the cap is a defensive ceiling, not a page size — but
+    /// a caller that sees `true` knows the list is not the whole story.
+    truncated: bool,
+}
+
+/// `GET …/workflows/runs/{rid}/artifacts` (both scope forms) — the files one
+/// past run produced, for the run inspector's "Files associated" section
+/// (issue #1684).
+///
+/// # The join, and why it reads two ports in memory
+///
+/// There is no direct "artifacts by run" index: [`ArtifactVersion::run_id`] is
+/// the task **attempt** id, not the workflow run id. The authoritative link is
+/// the card's [`origin_run_id`](crate::ports::TaskRecord::origin_run_id) — the
+/// run that OPENED the card — so the read is `run_id → cards where
+/// origin_run_id == run_id → each card's artifacts`. Both halves reuse the
+/// broad list primitives ([`TaskStore::list`] once, then
+/// [`ArtifactStore::list`] narrowed to each matched card) and filter in memory
+/// rather than adding an origin-run query to the three storage backends — the
+/// same choice `list_runs` makes for the same reason, and correct here because
+/// this is a lazy per-run read, not a per-history-GET cost.
+///
+/// # `200 { files, truncated }`, never `404`
+///
+/// The one contract difference from [`get_run_output`]: a run that opened no
+/// cards, or whose cards published no files, is the common case, not an error —
+/// it answers `200` with `files: []`, mirroring [`ArtifactStore::list`]
+/// returning `[]` for a card with no artifacts. An unknown run id is
+/// indistinguishable from a run that produced nothing, and means the same thing
+/// to the operator: no files.
+///
+/// `truncated` is `true` only when [`MAX_RUN_ARTIFACTS`] cut older rows — a
+/// defensive ceiling for a run that opened an unusually large number of files,
+/// not a page size. The console reads it and labels the list "newest 500
+/// shown" rather than presenting an incomplete list as exhaustive.
+///
+/// # Provenance is the OPENING run
+///
+/// `origin_run_id` is stamped once, when the card is created; a later run that
+/// re-owns the card does not overwrite it, so a card's files list under the run
+/// that opened it, not a re-owner. A `sub_workflow` child stamps its parent
+/// run, so sub-workflow cards roll up to the parent. This is the intended,
+/// defensible reading of "the files this run produced".
+async fn run_artifacts(
+    company: ScopedCompany,
+    Path(RunPath { rid }): Path<RunPath>,
+) -> Result<Json<RunArtifactsResponse>, ApiError> {
+    // One broad read of the board; the run's cards are the ones this run
+    // opened. `TaskStore::list` also carries each card's title, so grouping the
+    // files by card below needs no second read.
+    let cards = company
+        .runtime
+        .tasks()
+        .list(company.id())
+        .await
+        .map_err(ApiError)?;
+
+    let mut rows: Vec<RunArtifactRow> = Vec::new();
+    for card in cards {
+        if card.origin_run_id.as_deref() != Some(rid.as_str()) {
+            continue;
+        }
+        let artifacts = company
+            .runtime
+            .artifacts()
+            .list(company.id(), Some(&card.id))
+            .await
+            .map_err(ApiError)?;
+        for record in artifacts {
+            // The two latest-derived fields, read before the record's own
+            // fields move into the row below (the accessor borrows `record`).
+            let latest_version = record.latest().map(|v| v.version).unwrap_or(0);
+            let workspace_node_id = record.latest().and_then(|v| v.workspace_node_id.clone());
+            rows.push(RunArtifactRow {
+                task_id: record.task_id,
+                artifact_id: record.id,
+                title: record.title,
+                kind: record.kind,
+                source: record.source,
+                latest_version,
+                updated_at_millis: record.updated_at_millis,
+                workspace_node_id,
+                task_title: Some(card.title.clone()),
+            });
+        }
+    }
+
+    // Newest first, then cap defensively — the newest rows are the ones an
+    // operator opening a run reaches for, so they are the ones the cap keeps.
+    rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at_millis));
+    let truncated = rows.len() > MAX_RUN_ARTIFACTS;
+    rows.truncate(MAX_RUN_ARTIFACTS);
+    Ok(Json(RunArtifactsResponse {
+        files: rows,
+        truncated,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1647,13 +2096,14 @@ enum DraftFromDescriptionResponse {
 async fn draft_from_description(
     company: ScopedCompany,
     Json(body): Json<DraftFromDescriptionBody>,
-) -> Result<Json<DraftFromDescriptionResponse>, Response> {
+) -> Result<Json<DraftFromDescriptionResponse>, crate::server::Rejection> {
     let description = body.description.trim();
     if description.is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "describe the workflow you want in a sentence or two.".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     }
     // Char-safe cap on the request body before it reaches the metered path.
     let description: String = description
@@ -1668,9 +2118,11 @@ async fn draft_from_description(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("the workflow copilot"),
-                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot"),
-                RunnerGap::NotWired => super::not_wired("the workflow copilot"),
+                RunnerGap::RestartPending => super::restart_required("the workflow copilot").into(),
+                RunnerGap::InferenceRequired => {
+                    super::inference_required("the workflow copilot").into()
+                }
+                RunnerGap::NotWired => super::not_wired("the workflow copilot").into(),
             },
         );
     }
@@ -1697,7 +2149,7 @@ async fn draft_from_description(
         }
         // A read the drafter could not proceed without (the company record) — a
         // genuine 500, not a model answer.
-        Err(err) => Err(ApiError(err).into_response()),
+        Err(err) => Err(ApiError(err).into_response().into()),
     }
 }
 
@@ -1709,15 +2161,16 @@ async fn draft_from_description(
 async fn draft_from_description(
     company: ScopedCompany,
     Json(body): Json<DraftFromDescriptionBody>,
-) -> Result<Json<DraftFromDescriptionResponse>, Response> {
+) -> Result<Json<DraftFromDescriptionResponse>, crate::server::Rejection> {
     let _ = &company;
     if body.description.trim().is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "describe the workflow you want in a sentence or two.".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     }
-    Err(super::not_wired("the workflow copilot"))
+    Err(super::not_wired("the workflow copilot").into())
 }
 
 // ---------------------------------------------------------------------------
@@ -1868,13 +2321,11 @@ async fn fix_from_run(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Json(body): Json<FixFromRunBody>,
-) -> Result<Json<FixFromRunResponse>, Response> {
+) -> Result<Json<FixFromRunResponse>, crate::server::Rejection> {
     // `wid` becomes a filename on the read below — reject anything that could
     // escape `workflows/`.
     if !safe_wid(&wid) {
-        return Err(
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response(),
-        );
+        return Err(OpenCompanyError::NotFound(format!("workflow {wid}")).into());
     }
 
     // No builder wired: classify WHY exactly as the draft + run routes do (issues
@@ -1883,18 +2334,18 @@ async fn fix_from_run(
         use super::inference::RunnerGap;
         return Err(
             match super::inference::runner_gap_for(company.runtime.as_ref()).await {
-                RunnerGap::RestartPending => super::restart_required("the workflow copilot"),
-                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot"),
-                RunnerGap::NotWired => super::not_wired("the workflow copilot"),
+                RunnerGap::RestartPending => super::restart_required("the workflow copilot").into(),
+                RunnerGap::InferenceRequired => {
+                    super::inference_required("the workflow copilot").into()
+                }
+                RunnerGap::NotWired => super::not_wired("the workflow copilot").into(),
             },
         );
     }
 
     // Load the saved graph for `wid` (seed ∪ overlay) and convert it to the spec
     // the copilot corrects and pins its identity to.
-    let overlays = overlay_workflows(&company)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    let (overlays, globals_disable) = overlay_workflows_and_globals(&company).await?;
     // A source-defined workflow (seed-backed, or seed-shadowed) can never take
     // the correction: `PUT …/workflows/{wid}` refuses it with the same 409 this
     // mirrors (`locate_editable_overlay`). Catching it here — before the copilot
@@ -1906,33 +2357,37 @@ async fn fix_from_run(
             "workflow `{wid}` is defined by a file in the company source tree, so a copilot fix \
              can't be saved for it. Edit `workflows/{wid}.toml` in the company repository instead."
         )))
-        .into_response());
+        .into_response()
+        .into());
     }
-    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
-        })?;
-    // `workflow_spec_from_graph` below has no `on_error`/`retry` field on
-    // `WorkflowNodeSpec` (the builder never authors them — see its own doc
-    // comment), so a node that had either set loses it silently once the
-    // operator saves the correction. Correlating retry/error policy across a
-    // copilot rewrite that may rename or drop nodes is the harder problem this
-    // PR does not take on; naming it in a note at least makes the loss visible
-    // instead of silent.
-    let dropped_error_policy_nodes: Vec<String> = file
+    let file = load_workflow_with_globals(
+        company.runtime.source_dir(),
+        &overlays,
+        &globals_disable,
+        &wid,
+    )?
+    .ok_or_else(|| OpenCompanyError::NotFound(format!("workflow {wid}")))?;
+    // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
+    // field on `WorkflowNodeSpec` (the builder never authors them — see its
+    // own doc comment), so a node that had any of the three set loses it
+    // silently once the operator saves the correction. `repeatable` is the
+    // safety declaration issue #850 exists to protect — a correction that
+    // drops it with no warning can leave a continuation free to replay a call
+    // its author explicitly marked non-repeatable. Correlating this policy
+    // across a copilot rewrite that may rename or drop nodes is the harder
+    // problem this PR does not take on; naming it in a note at least makes the
+    // loss visible instead of silent.
+    let dropped_policy_nodes: Vec<String> = file
         .nodes
         .iter()
-        .filter(|n| n.on_error.is_some() || n.retry.is_some())
+        .filter(|n| n.on_error.is_some() || n.retry.is_some() || n.repeatable.is_some())
         .map(|n| n.name.clone())
         .collect();
     let spec = crate::company::workflow_spec_from_graph(file);
 
     // The failure to correct from: prefer what the run journaled, fall back to the
     // caller's hint. Neither → there is nothing to fix from.
-    let journaled = journaled_run_failure(&company, &body.run_id)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    let journaled = journaled_run_failure(&company, &body.run_id).await?;
     let hint = body
         .error_hint
         .as_deref()
@@ -1944,7 +2399,8 @@ async fn fix_from_run(
             "this run recorded no error to fix from — reopen the run, or pass its error as a hint."
                 .to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     };
     // The journal names a node id; the human-readable name comes from the saved
     // graph the id belongs to.
@@ -1969,11 +2425,12 @@ async fn fix_from_run(
             mut notes,
         }) => {
             let (ok, advisories) = workflow_readiness(&spec);
-            if !dropped_error_policy_nodes.is_empty() {
+            if !dropped_policy_nodes.is_empty() {
                 notes.push(format!(
-                    "on_error/retry on {} — this correction does not carry per-node error \
-                     policy through; reapply it after reviewing if the node is still there.",
-                    dropped_error_policy_nodes.join(", ")
+                    "on_error/retry/repeatable on {} — this correction does not carry these \
+                     per-node policies through; reapply them after reviewing if the node is \
+                     still there.",
+                    dropped_policy_nodes.join(", ")
                 ));
             }
             Ok(Json(FixFromRunResponse::Fixed {
@@ -1991,7 +2448,7 @@ async fn fix_from_run(
             }))
         }
         // A read the drafter could not proceed without — a genuine 500.
-        Err(err) => Err(ApiError(err).into_response()),
+        Err(err) => Err(ApiError(err).into_response().into()),
     }
 }
 
@@ -2003,45 +2460,129 @@ async fn fix_from_run(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Json(body): Json<FixFromRunBody>,
-) -> Result<Json<FixFromRunResponse>, Response> {
+) -> Result<Json<FixFromRunResponse>, crate::server::Rejection> {
     let _ = (&company, &wid, &body.run_id, &body.error_hint);
-    Err(super::not_wired("the workflow copilot"))
+    Err(super::not_wired("the workflow copilot").into())
 }
 
-/// The `GET …/workflows/tool-slugs` answer (issue #783): the wired, granted
-/// `tool_call` slugs the per-workflow copilot may ground a proposal on.
+/// The `GET …/workflows/tool-slugs` answer (issues #783, #874): the tools the
+/// per-workflow copilot may ground a proposal on, and — separately — the ones
+/// this company holds a grant for that cannot run on this deployment.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkflowToolSlugsResponse {
-    /// The slugs a proposed `tool_call` node may name — every one of them will
-    /// clear the same grant gate `update_workflow` applies on write.
+    /// The **effective** slugs: granted by `[tools].allow` *and* wired here, so
+    /// a proposed `tool_call` naming one has a chance of running. This is the
+    /// only list a prompt should be grounded on.
     slugs: Vec<String>,
+    /// Granted, but not wired on this deployment (issue #874). Reported rather
+    /// than silently dropped so a reader can tell "this company is not allowed
+    /// that tool" (absent from both lists) from "allowed, nobody has configured
+    /// the provider yet" (here) — and so authoring ahead of wiring, which
+    /// create validation still permits, remains a visible option.
+    ///
+    /// Empty when the wiring is not knowable (no harness deps attached): the
+    /// honest answer to "which of these are unwired" is then "cannot say", and
+    /// `slugs` degrades to the grant-only set rather than emptying out.
+    unwired: Vec<UnwiredWorkflowTool>,
+}
+
+/// One granted-but-unwired tool, with the reason it cannot run here (issue
+/// #874) — the same distinction
+/// [`refusal_for`](crate::workflows::caps) draws at run time, moved forward to
+/// the moment the console asks, instead of arriving as a failed run.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnwiredWorkflowTool {
+    slug: String,
+    /// A stable machine token for a client that wants to branch:
+    /// `searchBackendNotConfigured`, `capabilityTierFiltered`, or the
+    /// cause-less `unwired`. Treat it as open — a new deployment-wiring cause
+    /// adds a token here, so match the ones you handle and fall back to
+    /// [`detail`](Self::detail) rather than assuming the set is closed.
+    reason: &'static str,
+    /// The same sentence in prose, for a client that just wants to show it.
+    detail: &'static str,
 }
 
 /// `GET …/workflows/tool-slugs` (both scope forms) — the per-workflow copilot's
-/// tool grounding (issue #783). Answers the exact slug set
-/// [`workflow_callable_tool_slugs`](crate::company::workflow_callable_tool_slugs)
-/// computes for the create-time copilot (issue #753), so the two grounding
-/// surfaces cannot drift and a slug shown here is one a proposed `tool_call`
-/// clears at courtesy validation.
+/// tool grounding (issue #783), narrowed to the **effective** set by issue #874.
+///
+/// Answers what
+/// [`workflow_effective_tool_slugs`](crate::company::workflow_effective_tool_slugs)
+/// computes — catalogue, company grant and deployment wiring all agreeing — so
+/// this route and the in-process create/fix copilot
+/// (`crate::harness::workflow_build`) ground on one set and cannot drift.
+///
+/// It deliberately does **not** answer the wider *grant-only* set that
+/// create/save validation accepts. That gate stays permissive on purpose so an
+/// operator may author now and wire the provider later, and this route does not
+/// change it. Serving the grant-only set here was issue #874 — a
+/// granted-but-unwired `web_search` was offered to the copilot, which authored a
+/// node that failed at the first run.
 #[cfg(feature = "openhuman")]
 async fn workflow_tool_slugs(
     company: ScopedCompany,
-) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+) -> Result<Json<WorkflowToolSlugsResponse>, crate::server::Rejection> {
     let record = company
         .runtime
         .store()
         .load(company.runtime.id())
         .await
         .map_err(|err| ApiError(err).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(
-                company.runtime.id().to_string(),
-            ))
-            .into_response()
-        })?;
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.runtime.id().to_string()))?;
+    // `None` — no harness deps on this runtime — means the wiring is unknowable,
+    // not that nothing is wired. Both helpers below read it that way: `slugs`
+    // falls back to the grant-only set and `unwired` stays empty, which is the
+    // pre-#874 answer. That keeps a harness-less host honest instead of telling
+    // the copilot every granted tool is broken.
+    let wiring = company.runtime.workflow_tool_wiring(&record).await;
+    let wired = wiring.as_ref().map(|w| &w.wired_namespaces);
+    let unwired = crate::company::workflow_granted_but_unwired_tool_slugs(&record, wired)
+        .into_iter()
+        .map(|slug| {
+            // Every slug here came out of `WORKFLOW_TOOL_CATALOG`, whose entries
+            // are pinned to `namespace_of`, and it is unwired precisely because
+            // its namespace is in `missing` — so both lookups resolve and `None`
+            // is unreachable in practice.
+            //
+            // Matched EXHAUSTIVELY rather than with a catch-all: the whole point
+            // of this field is letting an operator tell one cause from another,
+            // so a third `MissingReason` must break the build here instead of
+            // compiling into "raise your capability tier" — advice that would be
+            // actively wrong for a cause that is not tier filtering. It also
+            // keeps the defensive `None` from being conflated with the tier case.
+            let missing = crate::workflows::caps::workflow_tool_info(&slug)
+                .map(|info| info.namespace)
+                .and_then(|ns| wiring.as_ref().and_then(|w| w.missing.get(ns)).copied());
+            let (reason, detail) = match missing {
+                Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured) => (
+                    "searchBackendNotConfigured",
+                    "granted, but no managed search backend is configured on this deployment; \
+                     ask the platform operator to configure search",
+                ),
+                Some(crate::workflows::caps::MissingReason::CapabilityTierFiltered) => (
+                    "capabilityTierFiltered",
+                    "granted, but the deployment's capability tier filtered it; ask the platform \
+                     operator to raise the capability tier",
+                ),
+                // Unreachable given the pairing above; answered honestly rather
+                // than guessing a cause we do not have.
+                None => (
+                    "unwired",
+                    "granted, but not wired on this deployment; ask the platform operator why",
+                ),
+            };
+            UnwiredWorkflowTool {
+                slug,
+                reason,
+                detail,
+            }
+        })
+        .collect();
     Ok(Json(WorkflowToolSlugsResponse {
-        slugs: crate::company::workflow_callable_tool_slugs(&record),
+        slugs: crate::company::workflow_effective_tool_slugs(&record, wired),
+        unwired,
     }))
 }
 
@@ -2052,28 +2593,38 @@ async fn workflow_tool_slugs(
 #[cfg(not(feature = "openhuman"))]
 async fn workflow_tool_slugs(
     company: ScopedCompany,
-) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+) -> Result<Json<WorkflowToolSlugsResponse>, crate::server::Rejection> {
     let _ = &company;
-    Ok(Json(WorkflowToolSlugsResponse { slugs: Vec::new() }))
+    Ok(Json(WorkflowToolSlugsResponse {
+        slugs: Vec::new(),
+        unwired: Vec::new(),
+    }))
 }
 
 /// The `GET …/workflows/wired-channels` answer (issue #813): the chat channel
-/// ids this running company can deliver to, so the output-node destination
-/// editor offers a picker of real targets. `operator` is always present. Not
-/// feature-gated — the wired-channel set exists on every build.
+/// ids this running company can actually deliver to, so the output-node
+/// destination editor offers a picker of real targets. Not feature-gated — the
+/// channel set exists on every build.
+///
+/// **`operator` is not among them** (issue #981). This used to say the opposite
+/// and serve the unfiltered adapter list, which offered authors the one target
+/// workflow delivery refuses by name. An empty list is a truthful answer for a
+/// company with no desks and no provider channels: there is nowhere to deliver.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WiredChannelsResponse {
-    /// The channel ids an `output` node's `channel` destination may target;
-    /// anything else fails at delivery with `ChannelNotWired`.
+    /// The channel ids an `output` node's `channel` destination may target.
+    /// Anything else is rejected when the workflow is saved, and — for a graph
+    /// saved before the desk went away — fails at delivery with
+    /// `ChannelNotWired`.
     channels: Vec<String>,
 }
 
 /// `GET …/workflows/wired-channels` (both scope forms). Reads the running
-/// company's wired channels directly — infallible, no record load needed.
+/// company's deliverable channels directly — infallible, no record load needed.
 async fn workflow_wired_channels(company: ScopedCompany) -> Json<WiredChannelsResponse> {
     Json(WiredChannelsResponse {
-        channels: company.runtime.wired_channel_ids(),
+        channels: company.runtime.deliverable_channel_ids(),
     })
 }
 
@@ -2088,7 +2639,15 @@ async fn workflow_wired_channels(company: ScopedCompany) -> Json<WiredChannelsRe
 const DEFAULT_RUN_LIMIT: usize = 20;
 const MAX_RUN_LIMIT: usize = 200;
 
-/// The `?workflow=` / `?limit=` selectors on the run-history read.
+/// The journal page size [`list_runs`] walks backward in (issue #1012). Same
+/// magnitude and rationale as `EVENT_PAGE` in
+/// [`history_for_desk`](crate::server::chat_history::history_for_desk):
+/// walking backward in fixed-size pages keeps the newest `limit` runs without
+/// ever materialising the unrelated journal beyond them.
+const RUN_EVENT_PAGE: usize = 512;
+
+/// The `?workflow=` / `?limit=` / `?before_seq=` selectors on the run-history
+/// read.
 #[derive(Debug, Deserialize)]
 struct RunsQuery {
     /// Return only runs of this workflow id. Absent = every workflow.
@@ -2097,6 +2656,29 @@ struct RunsQuery {
     /// default rather than returning an empty page, which is never what a
     /// caller means.
     limit: Option<usize>,
+    /// Opaque pagination cursor (issue #1012): only runs whose displayed
+    /// `seq` is strictly less than this are considered. Absent reads the
+    /// newest page. Same `before_seq` shape
+    /// [`chat_history`](crate::server::chat_history)'s `?before=` and
+    /// `TaskDetailQuery`'s `?discussionBefore=` already use for the same
+    /// problem.
+    ///
+    /// **What to pass is the boundary the previous response issued** —
+    /// [`WorkflowRunsResponse::next_before_seq`] — not "the `seq` of the oldest
+    /// run you hold". Those two coincided while the page was cut in display
+    /// order; they no longer do, because the cut is keyed on `seq` and the
+    /// display is keyed on `(at_millis, seq)`. Deriving the cursor from the
+    /// last displayed row re-opens the hole this parameter's own page cut
+    /// closes: see [`select_run_page`].
+    before_seq: Option<u64>,
+}
+
+/// `skip_serializing_if` predicate for a count that is almost always zero —
+/// the same one `crate::ports::workflow_runner` uses for the per-node
+/// `unparkable` / `stranded` pair, so the two counts are omitted on identical
+/// terms.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// One finished run as the console's history panel renders it (camelCase).
@@ -2126,6 +2708,27 @@ struct WorkflowRunOutcome {
     /// "the run did nothing".
     #[serde(skip_serializing_if = "Vec::is_empty")]
     nodes: Vec<WorkflowRunNode>,
+    /// The nodes this run has *begun* executing, in start order (issue #1010),
+    /// folded from `WorkflowNodeStarted` (issue #382).
+    ///
+    /// The half of the trail the fold never carried. `nodes` is written by the
+    /// *finish* bracket, so a run in flight came back listing only what was
+    /// already over — and a console joining mid-run (a reload, a cron fire, an
+    /// `EventSource` reconnect, or simply switching workflow and back) could
+    /// render the graph's past but never the node executing right now. The
+    /// engine has reported the opening bracket since #382; nothing read it.
+    ///
+    /// A **receipt of what started**, kept once the run settles rather than
+    /// cleared: an id here with no matching `nodes` row on a settled run is the
+    /// node the run was standing on when it was cancelled or lost, which is the
+    /// one thing neither list says on its own. Consumers must therefore pair it
+    /// with [`running`](Self::running) before painting anything as in-flight —
+    /// see `statesFromRun` in the console.
+    ///
+    /// Omitted when empty, like `nodes` — which is every run journaled before
+    /// #382 and every run whose nodes all failed to journal a start.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    started_nodes: Vec<String>,
     /// When the run *started*, from its `WorkflowRunStarted` row (issue #371).
     /// Absent on a pre-#371 row, whose only timestamp is the finish.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2191,6 +2794,59 @@ struct WorkflowRunOutcome {
     /// count becomes a fresh lie the moment somebody approves one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// How many of [`pending_approvals`](Self::pending_approvals) have **no
+    /// live card left in the queue** (issue #1189).
+    ///
+    /// The gate-shaped sibling of `blockedNodes[].stranded`, and the number the
+    /// console needs to stop telling an operator to go and decide something
+    /// that is not there. #1143's per-node count is keyed on approval ids, and
+    /// a gate parked by `park_pending_gates` records none — no approval-row
+    /// receipt and no blocked-node row, only its node id here — so that count
+    /// structurally cannot describe this shape. On the marketing tenant it is
+    /// the shape of 34 of 60 runs.
+    ///
+    /// **Computed on the read, never journaled**, on exactly the terms
+    /// `WorkflowBlockedNode::stranded` is: the journal records what happened and
+    /// is not edited to reflect what is true now, and a stored "still waiting"
+    /// count is a fresh lie the moment the queue moves. Skipped when zero, which
+    /// is every healthy run, so an unaffected row's wire shape is unchanged.
+    #[serde(skip_serializing_if = "is_zero")]
+    stranded_approvals: usize,
+    /// What this run adds up to, in one word (issue #981).
+    ///
+    /// **Always serialized**, and **derived in a single pass** once the fold
+    /// and the issue-#1009 settle below have finished — see
+    /// [`WorkflowRunOutcome::derive_verdict`]. The value the two construction
+    /// sites give it is overwritten there, which is deliberate: the settle arm
+    /// rewrites `running`, `error` and the blocked relabelling *after* a row is
+    /// pushed, so a verdict computed at construction would be a stale reading
+    /// of a row that has since changed underneath it.
+    ///
+    /// Derived, never journaled. Runs already in a company's history therefore
+    /// re-score on deploy with no migration — and, as issue #981 notes, anyone
+    /// counting successful runs off this endpoint will see their rate drop with
+    /// no change in behaviour, because the dropped reports were always there.
+    verdict: WorkflowRunVerdict,
+}
+
+impl WorkflowRunOutcome {
+    /// Reads this row's verdict off the fields it already carries (issue #981).
+    ///
+    /// Called once per row, in a pass over the whole page, after everything
+    /// that can still change its inputs has run. See [`Self::verdict`].
+    fn derive_verdict(&self) -> WorkflowRunVerdict {
+        WorkflowRunVerdict::of(RunVerdictFacts {
+            running: self.running,
+            error: self.error.as_deref(),
+            cancelled: self.cancelled,
+            blocked_nodes: self.blocked_nodes.len(),
+            deliveries: &self.deliveries,
+            pending_approvals: self.pending_approvals.len(),
+            // Issue #1189: filled in by the join below, which is why the verdict
+            // pass now runs AFTER it. See `list_runs`.
+            stranded_approvals: self.stranded_approvals,
+        })
+    }
 }
 
 /// One node's outcome inside a run (issue #371).
@@ -2204,6 +2860,15 @@ struct WorkflowRunNode {
     node_id: String,
     status: WorkflowNodeStatus,
     elapsed_ms: u64,
+    /// The node's null-resolved config paths (issue #1014) — the engine's own
+    /// broken-wiring list, projected verbatim from the port row. Paths only, no
+    /// payload: a null resolution has no value, so the console renders *where*
+    /// the wiring came up empty and never *what* a node produced.
+    ///
+    /// `skip_serializing_if` keeps a clean node's row byte-identical to the
+    /// pre-#1014 shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<String>,
 }
 
 impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
@@ -2217,70 +2882,68 @@ impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
             node_id: row.node_id,
             status: row.status,
             elapsed_ms: row.elapsed_ms,
+            // Issue #1014: carry the null-resolved config paths through to the
+            // wire shape, like the three structural scalars above.
+            diagnostics: row.diagnostics,
         }
     }
 }
 
-/// `GET …/workflows/runs?workflow=&limit=` — the company's finished workflow
-/// runs, **newest first** (issue #228).
+/// Folds a chronologically-ordered slice of journal rows into per-run outcomes
+/// (issue #371's group-by-run fold). Extracted out of [`list_runs`] by issue
+/// #1012 so the caller can run it repeatedly over a growing, backward-paged
+/// buffer instead of once over an unbounded forward read — see the read loop
+/// there.
 ///
-/// This is the durable half of the issue: a manual run's delivery rows used to
-/// live only in the console drawer until it was dismissed, and a scheduled run's
-/// only on host stdout. Folding
-/// [`CompanyEvent::WorkflowRunFinished`](crate::ports::types::CompanyEvent) out
-/// of the journal makes both survive a console reload, which is the whole point.
+/// Issue #371 turned this from a filter into a **group-by-run fold**: a run
+/// now contributes up to N+2 rows (a start, one per node, a finish) instead of
+/// one, and they have to come back as a single history entry.
 ///
-/// The fold reads the company's whole event log
-/// (`read_from(0, MAX)`) — the same thing
-/// [`chat_history`](crate::server::chat_history) already does on every history
-/// GET. Following that precedent keeps this route from inventing an index the
-/// rest of the read plane doesn't have; if the journal scan ever becomes the
-/// bottleneck it should be fixed for both surfaces at once, not just here.
-async fn list_runs(
-    company: ScopedCompany,
-    Query(query): Query<RunsQuery>,
-) -> Result<Json<Vec<WorkflowRunOutcome>>, ApiError> {
-    let limit = match query.limit {
-        Some(0) | None => DEFAULT_RUN_LIMIT,
-        Some(n) => n.min(MAX_RUN_LIMIT),
-    };
-
-    let stored = company
-        .runtime
-        .events()
-        .read_from(company.id(), EventSeq::new(0), usize::MAX)
-        .await
-        .map_err(ApiError)?;
-
-    // Issue #371 turned this from a filter into a **group-by-run fold**: a run
-    // now contributes up to N+2 rows (a start, one per node, a finish) instead
-    // of one, and they have to come back as a single history entry.
-    //
-    // The invariant that keeps it simple: the journal is append-only and
-    // single-writer, so a run's rows are ordered `Started < Node… < Finished` —
-    // the runner drains and joins its progress collector before returning, which
-    // is what makes the last part true rather than a race. Rows of *different*
-    // runs may interleave (two workflows can run at once), so the grouping is
-    // keyed on run id rather than on adjacency.
-    //
-    // A pre-#371 finished row has no run id and no start, so it simply folds to
-    // itself — one row in, one entry out, exactly as before.
+/// The invariant that keeps it simple: the journal is append-only and
+/// single-writer, so a run's rows are ordered `Started < Node… < Finished` —
+/// the runner drains and joins its progress collector before returning, which
+/// is what makes the last part true rather than a race. Rows of *different*
+/// runs may interleave (two workflows can run at once), so the grouping is
+/// keyed on run id rather than on adjacency. **`rows` must be chronologically
+/// ordered (ascending `seq`)** for this invariant to hold — a caller reading
+/// backward via [`EventLog::read_before`](crate::ports::EventLog::read_before)
+/// (which comes back newest-first) must reverse each page before it is folded
+/// in.
+///
+/// A pre-#371 finished row has no run id and no start, so it simply folds to
+/// itself — one row in, one entry out, exactly as before. The same shape
+/// results for a post-#371 row whose start fell outside `rows` — whether
+/// because the caller's window does not reach that far back yet, or because a
+/// retention pass pruned the `WorkflowRunStarted` row while keeping its
+/// `WorkflowRunFinished` (the two are independently prunable; see
+/// `CompanyEvent::retention_class`). Both are "legitimate" in the sense the
+/// original comment on this fold already drew: nothing here tells them apart,
+/// and nothing needs to — a caller paging backward for more history is exactly
+/// how the first case resolves itself into the second, or into a real match.
+///
+/// Returns the folded runs, in fold/push order (not sorted or truncated — the
+/// caller does that), and the highest `seq` seen among EVERY row, matched or
+/// not — the `read_through` high-water mark [`list_runs`]'s #1009 cross-check
+/// resumes reading from.
+fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<WorkflowRunOutcome>, u64) {
     let mut runs: Vec<WorkflowRunOutcome> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    // The `?workflow=` filter is applied per event rather than after the `limit`
-    // cut, so asking for one workflow returns that workflow's most recent N —
-    // not "whichever of the last N happen to match".
-    let wanted = query.workflow.as_deref();
     let matches = |workflow_id: &str| wanted.is_none_or(|w| w == workflow_id);
+    // The high-water mark over EVERY row rather than only the matched ones.
+    let mut read_through = 0u64;
 
-    for stored in stored {
+    for stored in rows {
         let seq = stored.seq.value();
         let at_millis = stored.at_millis;
+        read_through = read_through.max(seq);
         match stored.event {
             CompanyEvent::WorkflowRunStarted {
                 workflow_id,
                 run_id,
                 scheduled,
+                // The run history fold does not surface who started a run
+                // (issue #1862 prerequisite is data-only for now).
+                started_by: _,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -2300,6 +2963,9 @@ async fn list_runs(
                     pending_approvals: Vec::new(),
                     error: None,
                     nodes: Vec::new(),
+                    // Issue #1010: filled by the `WorkflowNodeStarted` arm
+                    // below, as the engine walks the graph.
+                    started_nodes: Vec::new(),
                     started_at_millis: Some(at_millis),
                     // Flipped off by the finish. A start that never gets one is
                     // a run in flight — or one the boot sweep has yet to settle.
@@ -2319,7 +2985,42 @@ async fn list_runs(
                     // approval it has already parked is listed once it settles.
                     blocked_nodes: Vec::new(),
                     approvals: Vec::new(),
+                    // True of a row that has only a start — and re-derived
+                    // anyway by the single pass below, which is what makes it
+                    // right for a row the finish or the settle changes.
+                    // Issue #1189: filled by the join in the tail, on the rows
+                    // actually being returned. Zero here is the honest default —
+                    // this row has not been reconciled against the queue yet.
+                    stranded_approvals: 0,
+                    verdict: WorkflowRunVerdict::Running,
                 });
+            }
+            // Issue #1010: the opening bracket, folded at last. The engine has
+            // emitted this since #382 and this fold ignored it, so the only
+            // per-node fact the history carried was "finished" — and a console
+            // that had to read the history to learn about a run (every console
+            // that joined mid-run) could not paint the node executing right
+            // now, because nothing on the wire said which one it was.
+            //
+            // Recorded in start order, and deliberately NOT paired against the
+            // finishes here: the subtraction belongs to the reader, which is
+            // the only side that knows whether it is drawing a live canvas or a
+            // settled run's overlay. See `started_nodes`.
+            CompanyEvent::WorkflowNodeStarted {
+                workflow_id,
+                run_id,
+                node_id,
+            } => {
+                if !matches(&workflow_id) {
+                    continue;
+                }
+                // Same rule the finish arm follows one arm down: a node whose
+                // run has no entry — a journal truncated below the start, or a
+                // `?workflow=` filter that cannot match — is dropped rather
+                // than synthesising a headless run.
+                if let Some(entry) = index.get(&run_id).and_then(|i| runs.get_mut(*i)) {
+                    entry.started_nodes.push(node_id);
+                }
             }
             CompanyEvent::WorkflowNodeFinished {
                 workflow_id,
@@ -2327,6 +3028,11 @@ async fn list_runs(
                 node_id,
                 status,
                 elapsed_ms,
+                diagnostics,
+                // Folded but not yet surfaced on the row: the run-history shape
+                // is a stable console contract, so the join rides the SSE frame and
+                // `GET {scope}/runs?workflow_run=` until a reader needs it here.
+                agent_run_id: _,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -2339,6 +3045,10 @@ async fn list_runs(
                         node_id,
                         status,
                         elapsed_ms,
+                        // Issue #1014: the broken-wiring paths, folded straight
+                        // out of the journal so a re-read run shows the same
+                        // diagnostics the live run response carried.
+                        diagnostics,
                     });
                 }
             }
@@ -2402,6 +3112,9 @@ async fn list_runs(
                     pending_approvals,
                     error,
                     nodes: Vec::new(),
+                    // No start row means no node rows either — of either
+                    // bracket (issue #1010).
+                    started_nodes: Vec::new(),
                     started_at_millis: None,
                     running: false,
                     cancelled,
@@ -2413,18 +3126,564 @@ async fn list_runs(
                     // orphaned row apart from a clean finish.
                     blocked_nodes,
                     approvals,
+                    // Re-derived by the single pass below, like the start arm's.
+                    // Issue #1189: filled by the join in the tail, on the rows
+                    // actually being returned. Zero here is the honest default —
+                    // this row has not been reconciled against the queue yet.
+                    stranded_approvals: 0,
+                    verdict: WorkflowRunVerdict::Running,
                 });
             }
             _ => {}
         }
     }
 
-    // Newest first: a history panel leads with the run that just happened. The
-    // `limit` now cuts *runs* rather than journal rows, which is the number the
-    // caller was asking about all along.
-    runs.reverse();
+    (runs, read_through)
+}
+
+/// Cuts one page out of the folded run set and issues the cursor the *next*
+/// page must be asked for (issue #1012).
+///
+/// Three quantities the page needs, kept apart because they are not the same
+/// number:
+///
+/// * the **cut** — which `limit` runs this page carries,
+/// * the **display order** — how those runs are listed,
+/// * the **cursor** — the boundary the next request pages before.
+///
+/// # Why the cut is keyed on `seq` and the display is not
+///
+/// The page is cut by `seq` descending, and only then sorted for display by
+/// `(at_millis, seq)` descending — issue #228's ordering, kept verbatim, just
+/// applied *after* the cut rather than as the cut.
+///
+/// `seq` is the journal's own append position: monotonic, and the only key
+/// [`EventLog::read_before`](crate::ports::EventLog::read_before) can bound a
+/// read by. `at_millis` is wall-clock and is **not** monotonic in storage
+/// order — a clock step backwards (NTP correction, a VM resume, an operator
+/// setting the date) writes a row whose time is older than the row before it.
+///
+/// Cutting on `(at_millis, seq)` and then paging off the cut's boundary loses
+/// runs outright. Take a run `R` appended after this page's boundary run `B`
+/// under a regressed clock, so `R.seq > B.seq` but `R.at_millis < B.at_millis`.
+/// `R` sorts *below* `B`, so the truncate drops it from this page; the next
+/// request asks `before_seq = B.seq`, which excludes every row at or above
+/// `B.seq` — `R` among them. `R` is on neither page, and because the boundary
+/// only ever descends, on no later page either. It is permanently unreachable,
+/// and `has_more` may well be `true` *because* of it — a page the caller can
+/// see exists and can never fetch.
+///
+/// Cutting on `seq` closes that by construction rather than by any argument
+/// about how large a clock step can be: the set served here is exactly
+/// `{ seq >= next_before_seq }` of the candidates, and the next request asks
+/// for `{ seq < next_before_seq }`. The two partition the run set on the same
+/// key the read is bounded by, so nothing can fall between them.
+///
+/// The accepted cost, stated plainly: under a clock regression a run is served
+/// on the page its `seq` puts it on — correctly ordered *within* that page, but
+/// possibly out of order against the adjacent one. Under a monotonic clock
+/// `seq` and `at_millis` order identically and this is indistinguishable from
+/// cutting on the tuple. So the degradation fires only on the exact anomaly
+/// that previously caused permanent loss, and it degrades to "wrong order at
+/// one seam", never to "the run is gone".
+///
+/// Returns the page, whether an older page exists, and the cursor to ask for it
+/// with — `None` when there is no older page, so a caller is never handed a
+/// cursor for a page that does not exist.
+fn select_run_page(
+    mut runs: Vec<WorkflowRunOutcome>,
+    limit: usize,
+) -> (Vec<WorkflowRunOutcome>, bool, Option<u64>) {
+    // The backward-paged read stopped once it had settled at least `limit + 1`
+    // runs (or ran out of journal), precisely so this count is known here — one
+    // more than fits on the page means there is a page after this one.
+    let has_more = runs.len() > limit;
+    // The cut: the `limit` highest-`seq` runs.
+    runs.sort_by_key(|run| std::cmp::Reverse(run.seq));
     runs.truncate(limit);
-    Ok(Json(runs))
+    // The cursor: this page's low-water `seq`, which under the cut above is its
+    // minimum and NOT the last row in display order — which is why the client
+    // can no longer derive it and the host has to say it. Issued only when
+    // something is actually behind it.
+    let next_before_seq = if has_more {
+        runs.iter().map(|run| run.seq).min()
+    } else {
+        None
+    };
+    // The display order (issue #228 / #1012): newest FINISH first, on the very
+    // pair every row shows. Preserved exactly as merged; it only moves below
+    // the cut, and neither the cut nor this sort touches a single field of a
+    // row.
+    runs.sort_by_key(|run| std::cmp::Reverse((run.at_millis, run.seq)));
+    (runs, has_more, next_before_seq)
+}
+
+/// `GET …/workflows/runs?workflow=&limit=&before_seq=` — the company's
+/// finished workflow runs, **newest first** (issue #228), a page at a time
+/// (issue #1012).
+///
+/// This is the durable half of the issue: a manual run's delivery rows used to
+/// live only in the console drawer until it was dismissed, and a scheduled run's
+/// only on host stdout. Folding
+/// [`CompanyEvent::WorkflowRunFinished`](crate::ports::types::CompanyEvent) out
+/// of the journal makes both survive a console reload, which is the whole point.
+///
+/// The fold walks the journal **backward**, in bounded
+/// [`RUN_EVENT_PAGE`]-sized pages via
+/// [`EventLog::read_before`](crate::ports::EventLog::read_before) — the same
+/// pattern [`history_for_desk`](crate::server::chat_history::history_for_desk)
+/// already uses for a desk transcript, which has the same
+/// unbounded-forever-growing-journal problem and answers it the same way.
+/// Before #1012 this read all of `read_from(0, MAX)` on every call (a company's
+/// *entire* event history, not just its workflow runs — the same call
+/// `chat_history` used to make too), which got slower as the journal grew and
+/// never stopped growing; the backward-paged walk instead reads only as much
+/// of the journal as it takes to answer this page's `limit`, plus one extra run
+/// to know whether there is more (`hasMore`).
+///
+/// A run is a *group* of events (`Started`, N × node events, `Finished`), not
+/// one — so a page of raw events is not a page of runs. See the loop below and
+/// [`fold_run_events`]'s doc for how a bracket split across a page boundary is
+/// handled.
+async fn list_runs(
+    company: ScopedCompany,
+    Query(query): Query<RunsQuery>,
+) -> Result<Json<WorkflowRunsResponse>, ApiError> {
+    let limit = match query.limit {
+        Some(0) | None => DEFAULT_RUN_LIMIT,
+        Some(n) => n.min(MAX_RUN_LIMIT),
+    };
+    // The `?workflow=` filter is applied per event rather than after the `limit`
+    // cut, so asking for one workflow returns that workflow's most recent N —
+    // not "whichever of the last N happen to match".
+    let wanted = query.workflow.as_deref();
+
+    // A run counts as ready to answer with once its `Started` row has been
+    // found (full data — `startedNodes`, `nodes`, `startedAtMillis` — is then
+    // known), or it has no run id at all (a pre-#371/gapped orphan finish,
+    // complete by definition — nothing more to wait for). A run whose
+    // `Finished`/node row has been seen but whose `Started` has not (yet) is
+    // still open: walking backward means its `Started` row, if it exists, is
+    // further back than what has been read so far.
+    let is_settled =
+        |run: &WorkflowRunOutcome| run.run_id.is_none() || run.started_at_millis.is_some();
+
+    let mut cursor = query.before_seq.map(EventSeq::new);
+    let mut buffer: Vec<StoredEvent> = Vec::new();
+    let mut runs: Vec<WorkflowRunOutcome> = Vec::new();
+    let mut read_through = 0u64;
+    // Whether the walk reached the true beginning of the journal — the only
+    // condition under which an open (not-yet-settled) run can be trusted as
+    // permanently orphaned rather than merely not-yet-resolved. See the
+    // `retain` below. No placeholder initial value: every path out of the loop
+    // assigns it before breaking, so the compiler can already prove it is set
+    // by the time it is read after the loop. `mut` because the loop can
+    // reassign it once per page before the page that finally breaks out.
+    let mut exhausted;
+    loop {
+        let page = company
+            .runtime
+            .events()
+            .read_before(company.id(), cursor, RUN_EVENT_PAGE)
+            .await
+            .map_err(ApiError)?;
+        if page.is_empty() {
+            exhausted = true;
+            break;
+        }
+        // A page shorter than asked-for proves there is nothing older left to
+        // read, without waiting for one more round trip that would only
+        // confirm it empty.
+        exhausted = page.len() < RUN_EVENT_PAGE;
+        // `read_before` returns newest-first; its own last element is this
+        // page's oldest row, and the correct cursor to resume strictly before.
+        cursor = page.last().map(|event| event.seq);
+        let mut chrono_page = page;
+        chrono_page.reverse();
+        buffer.splice(0..0, chrono_page);
+
+        let (folded, through) = fold_run_events(buffer.clone(), wanted);
+        // `read_through`'s meaning — the high-water mark of a "now" snapshot,
+        // which the #1009 cross-check below resumes reading from — is fixed
+        // by the FIRST page: `fold_run_events` computes it as the buffer's max
+        // `seq`, and the buffer only grows *older* on every later page, so
+        // this value cannot change after the first assignment. Reassigning it
+        // unconditionally is simplest and gives the identical answer.
+        read_through = through;
+        let settled = folded.iter().filter(|run| is_settled(run)).count();
+        runs = folded;
+        if exhausted || settled > limit {
+            break;
+        }
+    }
+    if !exhausted {
+        // Drop any run still open: walking further back might yet resolve it
+        // (find its `Started` row) or might not, and returning it now, in the
+        // fold's orphan placeholder shape, would risk showing a real run's
+        // history as gapped when the only reason it looks that way is that
+        // this page chose not to read far enough. Once the journal actually IS
+        // exhausted, every remaining open row is a genuine orphan — see
+        // `fold_run_events`'s doc — and is kept exactly as the fold shaped it.
+        runs.retain(is_settled);
+    }
+
+    // Issue #1012: this cross-check only makes sense against "now" — an
+    // older page (a `before_seq` cursor was given) is not the newest state,
+    // so a `running: true` row on it is out of scope here: either it was
+    // already resolved by an earlier newest-page read (whose synthetic
+    // finish will surface naturally once an older page's window reaches
+    // that seq), or it is a genuinely long-lived run outside what
+    // pagination is meant to answer.
+    if query.before_seq.is_none() {
+        // Issue #1009: cross-check the still-`running` rows against the live run set
+        // and settle the ones nobody is running.
+        //
+        // The fold above marks a start with no finish `running: true`, which is only
+        // ever settled by the boot sweep ([`sweep_interrupted_runs`]). Three ways a
+        // finish never lands — a task that panicked, an append that failed, a host
+        // that died — therefore all read as an eternal spinner *until the next host
+        // restart*, with a Stop button that cannot help and a 2s console poll that
+        // never stops. This closes the gap between restarts: any run the fold thinks
+        // is in flight whose id is **absent** from the supervisor's live set has no
+        // task behind it here and now, so it is journaled a synthetic finish (the
+        // same `INTERRUPTED_BY_RESTART` the boot sweep uses) and flipped in the
+        // in-memory row, so this very response is already self-consistent.
+        //
+        // Keyed strictly on `live()` membership. A run the current process is
+        // genuinely running is registered there and is left untouched — the watchdog
+        // (issue #1009, path A) is what guarantees a *panicking* run never reaches
+        // this predicate, because it journals its own finish before its guard drops.
+        //
+        // The one accepted false positive: a run that survived a live
+        // `rebuild_company` swap is registered on the *old* supervisor and so is
+        // absent from the successor's `live()`, so this could settle a run that is
+        // still walking its graph. Accepted because (i) the watchdog keeps panics out
+        // of this path entirely, (ii) that run's real finish lands later in journal
+        // order and wins the read's last-writer-wins display, and (iii) it is the
+        // same class the boot sweep already accepts — which is why that sweep gates
+        // on the handover being absent (see the runtime builder call site). It never
+        // corrupts the journal: that run's second, truthful finish lands *after* the
+        // synthetic one and so supersedes it.
+        //
+        // That last argument turns on ORDER, and it does not carry to a run which
+        // settles inside this request — there the truthful finish lands first and
+        // loses. See the window handled below; it is closed rather than accepted.
+        let live_ids: HashSet<String> = company
+            .runtime
+            .run_supervisor()
+            .live()
+            .into_iter()
+            .map(|(run_id, _workflow_id)| run_id)
+            .collect();
+        let mut dead: Vec<usize> = Vec::new();
+        for (index, entry) in runs.iter().enumerate() {
+            if !entry.running {
+                continue;
+            }
+            let Some(run_id) = entry.run_id.as_ref() else {
+                continue;
+            };
+            if live_ids.contains(run_id) {
+                continue;
+            }
+            dead.push(index);
+        }
+
+        // ── The window between the snapshot and `live()` ────────────────────────
+        //
+        // `live()` is consulted AFTER the journal snapshot was taken, and a run can
+        // settle in between: it appends its finish (too late for the snapshot) and
+        // then drops its guard (in time to be missing from `live()`). Such a run is
+        // indistinguishable, on the two facts above, from one that died — but it is
+        // the opposite, and settling it is worse than the hang this repairs.
+        //
+        // The ordering is what makes it worse rather than merely wrong. The rebuild
+        // false positive this block already accepts is self-correcting because the
+        // run's real finish lands *after* the synthetic one, and the fold settles an
+        // entry from the last finish it sees. Here the real finish lands *first*, so
+        // the synthetic one wins for good: a successful run reads
+        // `INTERRUPTED_BY_RESTART` permanently, and because the fold overwrites
+        // `deliveries` from whichever finish settles last, the record of what it
+        // sent is replaced by an empty list.
+        //
+        // So before writing anything, read the journal on from where the snapshot
+        // stopped and drop any candidate whose finish turns up there. That is
+        // exact rather than a heuristic: a run whose start was in the snapshot was
+        // registered before it (`begin` precedes both the spawn and the runner's
+        // `WorkflowRunStarted`), so a candidate missing from `live()` has already
+        // been deregistered — and a deregistered run journaled its finish first, if
+        // it was ever going to. Anything appended before that point is at a higher
+        // sequence than the whole snapshot, so this second read cannot miss it.
+        //
+        // Cheap where it matters: it runs only when there are candidates at all,
+        // which after the first settle is nothing, and it reads only the tail.
+        if !dead.is_empty() {
+            match company
+                .runtime
+                .events()
+                .read_from(
+                    company.id(),
+                    EventSeq::new(read_through.saturating_add(1)),
+                    usize::MAX,
+                )
+                .await
+            {
+                Ok(tail) => {
+                    let settled_since: HashSet<String> = tail
+                        .into_iter()
+                        .filter_map(|stored| match stored.event {
+                            CompanyEvent::WorkflowRunFinished {
+                                run_id: Some(run_id),
+                                ..
+                            } => Some(run_id),
+                            _ => None,
+                        })
+                        .collect();
+                    dead.retain(|index| {
+                        runs[*index]
+                            .run_id
+                            .as_ref()
+                            .is_none_or(|run_id| !settled_since.contains(run_id))
+                    });
+                }
+                Err(err) => {
+                    // Unprovable, so nothing is settled. The row keeps reporting
+                    // `running` and a later poll retries — strictly better than
+                    // stamping "interrupted" on a run that may well be finishing.
+                    tracing::warn!(
+                        company = %company.id(),
+                        %err,
+                        "could not re-read the journal to confirm a workflow run is dead; \
+                         leaving it as running"
+                    );
+                    dead.clear();
+                }
+            }
+        }
+
+        for index in &dead {
+            let entry = &mut runs[*index];
+            let Some(run_id) = entry.run_id.clone() else {
+                continue;
+            };
+            // Durable half: append the finish so it survives this response, folds
+            // settled on the next `GET …/workflows/runs`, and stops the boot sweep
+            // from having to. Best-effort by construction — a failed append leaves
+            // the row as the in-memory flip below still makes it, and the next read
+            // simply retries.
+            crate::runtime::record_run_finished(
+                company.runtime.events(),
+                company.id(),
+                &entry.workflow_id,
+                entry.scheduled,
+                &run_id,
+                Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.into()),
+            )
+            .await;
+            // In-memory half: flip the row this response returns, so the console does
+            // not have to wait for the next poll to stop the spinner.
+            entry.running = false;
+            entry.error =
+                Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
+        }
+
+        // ── Serve the row the NEXT read will fold, identically ──────────────────
+        //
+        // The fold keys a settled entry on its **finish**, taking `seq` and
+        // `at_millis` from that row. So flipping `running` while leaving the
+        // start's values in place means this response and the one 2s later carry
+        // *different* `seq` for the same run — and the console keys its history
+        // rows on exactly that field (`RunHistoryPanel`: `key={run.seq}`, with
+        // `selectedRunSeq` / `fixingRunSeq` / `fixReason.seq` compared against it).
+        // The row remounts and any selection on it is dropped, in the one window
+        // where an operator is most likely to be looking: the 2s recovery poll runs
+        // precisely because someone is watching this run.
+        //
+        // So the appended rows are read back and their real `seq` / `at_millis`
+        // stamped on. Read back rather than returned from `record_run_finished`,
+        // which reports only whether the append happened — the values served are
+        // then the durable ones rather than a second construction of them.
+        if !dead.is_empty() {
+            match company
+                .runtime
+                .events()
+                .read_from(
+                    company.id(),
+                    EventSeq::new(read_through.saturating_add(1)),
+                    usize::MAX,
+                )
+                .await
+            {
+                Ok(appended) => {
+                    let stamped: std::collections::HashMap<String, (u64, u64)> = appended
+                        .into_iter()
+                        .filter_map(|stored| match stored.event {
+                            CompanyEvent::WorkflowRunFinished {
+                                run_id: Some(run_id),
+                                ..
+                            } => Some((run_id, (stored.seq.value(), stored.at_millis))),
+                            _ => None,
+                        })
+                        .collect();
+                    for index in &dead {
+                        let entry = &mut runs[*index];
+                        let Some((seq, at_millis)) =
+                            entry.run_id.as_ref().and_then(|id| stamped.get(id))
+                        else {
+                            continue;
+                        };
+                        entry.seq = *seq;
+                        entry.at_millis = *at_millis;
+                    }
+                }
+                Err(err) => {
+                    // The settle itself stands — it is already durable. Only the
+                    // row's identity is left at the start's, which the next read
+                    // corrects.
+                    tracing::warn!(
+                        company = %company.id(),
+                        %err,
+                        "settled a dead workflow run but could not read back its finish row; \
+                         this response carries the start's seq and time"
+                    );
+                }
+            }
+        }
+    }
+
+    // Newest first: a history panel leads with the run that just happened.
+    //
+    // Issue #1012: sorted explicitly by `(at_millis, seq)` descending — the
+    // very pair every row *displays* — rather than `reverse()`d. `reverse()`
+    // only flips the fold's push order, which is the order runs *started* (an
+    // entry is pushed once, at its `WorkflowRunStarted` row, and only mutated
+    // in place — never re-pushed — when its `WorkflowRunFinished` row later
+    // overwrites `seq`/`at_millis` to the finish's own). Two runs that
+    // interleave (B starts after A, but finishes first) therefore used to come
+    // back in *start* order while every row read as if it were ordered by
+    // *finish* — the row for A would lead even though B's `seq`/`atMillis` say
+    // B is newer. Sorting on the same field the row displays makes the two
+    // agree by construction, for a run still in flight (which sorts on its own
+    // start) exactly as for one already settled.
+    //
+    // The `limit` now cuts *runs* rather than journal rows, which is the
+    // number the caller was asking about all along.
+    //
+    // Issue #1189: this stays ABOVE the verdict pass (moved to the very end,
+    // below the reconciliation join). Neither the sort nor `truncate` touches
+    // a single field of a row — they reorder and drop whole rows — so the
+    // invariant the verdict pass is placed on ("derive after everything that
+    // can still change its inputs") is not weakened by running them first.
+    //
+    // Issue #1012 follow-up: the sort above and the `limit` cut are no longer
+    // the same operation. The cut is keyed on `seq` alone and the sort — which
+    // is exactly the one described above — runs after it, because a cursor
+    // derived from a non-monotonic key cannot partition the run set and
+    // silently loses runs under a clock regression. The whole argument lives on
+    // [`select_run_page`], which now owns both steps plus the cursor this page
+    // hands back.
+    let (mut runs, has_more, next_before_seq) = select_run_page(runs, limit);
+
+    // Issues #1143 + #1189. A run's record of what it stopped for is a receipt
+    // and cannot go stale — but the *question* it points at can. `ApprovalParked`
+    // is journaled at `Durability::Process` on the stated reasoning that losing
+    // it is harmless because "the agent parks it again on its next attempt".
+    // That holds for a chat turn, which retries; it is false for a workflow run,
+    // which halted at the gate and never re-enters it. So a run that outlived
+    // its own approvals goes on reporting that it waits on cards the queue does
+    // not have. #1145 carries the durability decision; this reconciliation
+    // deliberately does not pre-empt it.
+    //
+    // TWO joins, because a run has two ways to stop for a person and they leave
+    // different traces:
+    //
+    // * `blockedNodes[].approvalIds` — the ids an agent node's gated calls
+    //   parked. Those cards are tool-call effects and carry no node id, so the
+    //   only key is the id (issue #1143).
+    // * `pendingApprovals` — the gate nodes the engine paused at. Their cards
+    //   are `workflow.approve` effects that record no receipt and no
+    //   blocked-node row at all, so #1143's id-keyed join structurally could not
+    //   reach them; they are joined on `(run_id, node_id)` instead (issue
+    //   #1189). This is the bigger half: 34 of the marketing tenant's 60 runs.
+    //
+    // Done HERE, on the read, for the same reason `relabel_blocked` above
+    // relabels rather than rewriting the durable node rows: the journal records
+    // what happened and is not edited to reflect what is true now. After the
+    // truncate, so the join costs one journal snapshot and covers only the rows
+    // actually being returned — and skipped entirely when no returned run
+    // stopped for anybody, which is nearly every read.
+    if runs.iter().any(|r| {
+        !r.pending_approvals.is_empty()
+            || r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty())
+    }) {
+        let live = company.runtime.live_approvals();
+        for run in &mut runs {
+            for blocked in &mut run.blocked_nodes {
+                blocked.stranded = blocked
+                    .approval_ids
+                    .iter()
+                    .filter(|id| !live.holds_id(id))
+                    .count();
+            }
+            run.stranded_approvals = crate::ports::workflow_verdict::stranded_approvals(
+                run.run_id.as_deref(),
+                &run.pending_approvals,
+                &run.blocked_nodes,
+                &live,
+            );
+        }
+    }
+
+    // Issue #981: the run verdicts, read in ONE pass, here — after the fold has
+    // settled every open row, after the #1009 cross-check has flipped the dead
+    // ones to `error: INTERRUPTED_BY_RESTART`, and (issue #1189) after the
+    // reconciliation above.
+    //
+    // Position is the correctness argument. Every input the verdict reads is
+    // written by the settle arm *after* its row was pushed (`running`, `error`,
+    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), two of
+    // them are written again by the cross-check, and `strandedApprovals` is
+    // written by the join. Deriving at construction — or, as it was until
+    // #1189, before the join — scores the row against inputs that have since
+    // moved underneath it: the exact staleness a *stored* verdict would have,
+    // reintroduced by placement.
+    for run in &mut runs {
+        run.verdict = run.derive_verdict();
+    }
+
+    Ok(Json(WorkflowRunsResponse {
+        runs,
+        has_more,
+        next_before_seq,
+    }))
+}
+
+/// The `GET …/workflows/runs` response body (issue #1012).
+///
+/// Wrapped rather than a bare array — as this route answered before — because
+/// `hasMore` has nowhere else to ride: the console's history drawer cannot
+/// otherwise tell "this is the whole history" from "this page was truncated at
+/// `limit`", which is exactly the silent-truncation half of the issue.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRunsResponse {
+    runs: Vec<WorkflowRunOutcome>,
+    /// Whether a further, older page exists behind [`next_before_seq`](Self::next_before_seq).
+    has_more: bool,
+    /// The cursor to pass as `?before_seq=` to fetch the page behind this one —
+    /// this page's **lowest** `seq`, which is not in general the last row in
+    /// display order (see [`select_run_page`]).
+    ///
+    /// Server-issued rather than client-derived. The console used to take
+    /// `runs.at(-1)?.seq`, which was the same number only while the cut and the
+    /// display order shared a key; they no longer do, and the page cut is the
+    /// only place the boundary is known. Absent exactly when `has_more` is
+    /// `false` — nothing older to ask for.
+    ///
+    /// A console predating this field falls back to its old derivation, which
+    /// is why the field is omitted rather than sent as `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_before_seq: Option<u64>,
 }
 
 /// Relabels a run's node rows for the nodes it blocked on a human (issue #881).
@@ -2450,6 +3709,33 @@ fn relabel_blocked(nodes: &mut [WorkflowRunNode], blocked: &[crate::ports::Workf
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The globals-unaware readers: these tests assert the company's own two
+    // sources, so they call the form that resolves no baseline.
+    use crate::company::{list_workflows_union, load_workflow_union};
+
+    /// The listed rows this company itself has, with the global baseline
+    /// filtered out. Every company lists the baseline graphs; these tests are
+    /// about what this one created, deleted, or declared.
+    ///
+    /// This is an **id heuristic**, not provenance: `WorkflowSummary` carries
+    /// no `global` flag, so a row is classified as "the baseline's" purely by
+    /// id membership in `crate::globals::workflows()`. A company definition of
+    /// the *same* id supersedes the global one and would be wrongly excluded
+    /// here — none of the fixtures below give a company workflow a colliding
+    /// id, so the gap does not fire in this suite; see
+    /// `write_test::workflow_create_of_an_id_matching_a_global_wins_by_content`
+    /// for that case asserted directly, without this helper.
+    fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
+        listed
+            .as_array()
+            .expect("array response")
+            .iter()
+            .filter(|row| {
+                let id = row["id"].as_str().unwrap_or_default();
+                !crate::globals::workflows().iter().any(|w| w.id == id)
+            })
+            .collect()
+    }
 
     const DEMO: &str = r#"
         id = "demo"
@@ -2534,6 +3820,25 @@ mod tests {
             summaries[0].description.as_deref(),
             Some("A tiny trigger → agent → output graph.")
         );
+        assert_eq!(summaries[0].schedule, None);
+        assert_eq!(summaries[0].node_count, 3);
+
+        let json = serde_json::to_value(&summaries[0]).unwrap();
+        assert_eq!(json["schedule"], serde_json::Value::Null);
+        assert_eq!(json["nodeCount"], 3);
+    }
+
+    #[test]
+    fn scheduled_summary_carries_the_trigger_cron_and_node_count() {
+        let scheduled = DEMO.replace(
+            "name = \"Start\"\n        summary",
+            "name = \"Start\"\n        schedule = \"0 9 * * MON\"\n        summary",
+        );
+        let file = crate::company::parse_workflow(&scheduled).expect("scheduled fixture parses");
+        let json = serde_json::to_value(WorkflowSummary::new(file, false, true)).unwrap();
+
+        assert_eq!(json["schedule"], "0 9 * * MON");
+        assert_eq!(json["nodeCount"], 3);
     }
 
     #[test]
@@ -2592,14 +3897,37 @@ mod tests {
         assert_eq!(done["kind"], "output");
     }
 
+    /// A non-editable graph serializes `version` as an explicit `null` rather
+    /// than omitting the key (issue #1013). Omitting it made a client read
+    /// `version` as `undefined` and send nothing, silently overwriting a
+    /// concurrent save; an explicit `null` is the honest "no token here".
+    #[test]
+    fn a_non_editable_graph_serializes_version_as_null() {
+        let dir = seed_demo();
+        let file = load_workflow_union(Some(dir.path()), &[], "demo")
+            .unwrap()
+            .unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, false)).unwrap();
+        assert!(
+            json.get("version").is_some(),
+            "version key must be present, not omitted: {json}"
+        );
+        assert!(
+            json["version"].is_null(),
+            "no token serializes as null: {json}"
+        );
+    }
+
     #[test]
     fn json_serializes_p1_node_fields_in_camelcase() {
         use crate::company::{WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef};
 
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![WorkflowNodeDef {
                 id: "call".into(),
                 kind: WorkflowNodeKind::ToolCall,
@@ -2615,6 +3943,7 @@ mod tests {
                     backoff: Some("exponential".into()),
                 }),
                 requires_approval: Some(true),
+                repeatable: None,
                 destination: None,
             }],
             edges: Vec::new(),
@@ -2627,6 +3956,68 @@ mod tests {
         assert_eq!(node["retry"]["backoffMs"], 250);
         assert_eq!(node["retry"]["backoff"], "exponential");
         assert_eq!(node["requiresApproval"], true);
+    }
+
+    /// `repeatable: false` round-trips through the read model (issue #850).
+    ///
+    /// `WorkflowNode` previously omitted the field entirely, so a console edit
+    /// that read a node back from `GET`/create/update and resubmitted it would
+    /// silently drop the author's `repeatable = false` declaration on the next
+    /// save — the exact safety declaration issue #850 exists to protect.
+    #[test]
+    fn json_serializes_repeatable_field() {
+        use crate::company::{WorkflowNodeDef, WorkflowNodeKind};
+
+        let file = WorkflowFile {
+            global: false,
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            owner_desk: None,
+            nodes: vec![
+                WorkflowNodeDef {
+                    id: "publish".into(),
+                    kind: WorkflowNodeKind::ToolCall,
+                    name: "Publish".into(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: Some(serde_json::json!({ "slug": "shell" })),
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: Some(false),
+                    destination: None,
+                },
+                WorkflowNodeDef {
+                    id: "read".into(),
+                    kind: WorkflowNodeKind::ToolCall,
+                    name: "Read".into(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: Some(serde_json::json!({ "slug": "web_fetch" })),
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: None,
+                    destination: None,
+                },
+            ],
+            edges: Vec::new(),
+        };
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
+        let nodes = json["nodes"].as_array().unwrap();
+        let publish = nodes.iter().find(|n| n["id"] == "publish").unwrap();
+        assert_eq!(
+            publish["repeatable"], false,
+            "declared repeatable:false must survive the read model: {publish}"
+        );
+        let read = nodes.iter().find(|n| n["id"] == "read").unwrap();
+        assert!(
+            read.get("repeatable").is_none(),
+            "an undeclared node omits the key rather than serializing null: {read}"
+        );
     }
 
     // --- P2: create body maps the new node fields (config/error/retry/approval)
@@ -2787,9 +4178,11 @@ mod tests {
         use crate::company::{WorkflowNodeDef, WorkflowNodeKind};
 
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "start".into(),
@@ -2802,6 +4195,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 WorkflowNodeDef {
@@ -2815,6 +4209,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
             ],
@@ -2974,6 +4369,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: vec![crate::ports::WorkflowRunBoardRow {
@@ -3000,6 +4396,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-2".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3033,10 +4430,12 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Blocked,
             nodes: vec![WorkflowRunNode {
                 node_id: "spec".into(),
                 status: WorkflowNodeStatus::Blocked,
                 elapsed_ms: 42,
+                diagnostics: Vec::new(),
             }],
             dry_run: false,
             board: Vec::new(),
@@ -3045,6 +4444,7 @@ mod tests {
                 tools: vec!["publish_artifact".into()],
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -3071,6 +4471,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-2".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3096,6 +4497,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-3".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Blocked,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3104,6 +4506,7 @@ mod tests {
                 tools: vec!["publish_artifact".into()],
                 approval_ids: Vec::new(),
                 unparkable: 2,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -3141,6 +4544,7 @@ mod tests {
             }],
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3176,6 +4580,7 @@ mod tests {
             }],
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3196,6 +4601,7 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-1".into(),
             cancelled: false,
+            verdict: WorkflowRunVerdict::Ok,
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
@@ -3239,11 +4645,15 @@ mod tests {
     // HTTP-level: a hosted tenant has no source directory to scan, so these
     // exercise the manifest-enabled union path end to end via the router.
     mod hosted_mode {
+        use super::own_rows;
         use axum::body::{Body, to_bytes};
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        use super::super::{CompanyEvent, DEFAULT_RUN_LIMIT, WorkflowNodeStatus};
+        use super::super::{
+            CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
+            WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
+        };
         use crate::company::CompanyManifest;
         use crate::ports::CompanyStore;
         use crate::ports::types::{CompanyId, CompanyRecord};
@@ -3278,6 +4688,8 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
                     id: id.clone(),
                     manifest: manifest_with_enabled(),
                     ledger: Vec::new(),
@@ -3289,9 +4701,13 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
+                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -3334,7 +4750,7 @@ mod tests {
             // Regression for #70: the REST list used to scan the filesystem
             // only, so a hosted tenant with no source dir always got `[]`
             // here even though its manifest declared an enabled workflow.
-            let items = body.as_array().expect("array response");
+            let items = own_rows(&body);
             assert_eq!(items.len(), 1, "body: {body}");
             assert_eq!(items[0]["id"], "demo");
             // No file to load a real name from, so the id is the fallback
@@ -3356,6 +4772,8 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
                     id: id.clone(),
                     manifest: empty_manifest(),
                     ledger: Vec::new(),
@@ -3367,9 +4785,13 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
+                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -3436,6 +4858,397 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
         }
 
+        // ------------------------------------------------------------------
+        // `POST …/workflows/validate` — the author-time verdict, no save (#1074)
+        // ------------------------------------------------------------------
+
+        async fn post_validate(
+            state: &AppState,
+            body: serde_json::Value,
+        ) -> axum::response::Response {
+            router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/validate",
+                    Some(body),
+                ))
+                .await
+                .unwrap()
+        }
+
+        async fn post_create_on(
+            state: &AppState,
+            body: serde_json::Value,
+        ) -> axum::response::Response {
+            router(state.clone())
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap()
+        }
+
+        /// `create_body` with an extra node nothing points at — the reachability
+        /// rule (`crate::company::workflow_file`), which is one of the two a
+        /// client cannot pre-empt without re-implementing it.
+        fn body_with_an_unreachable_node() -> serde_json::Value {
+            let mut body = create_body();
+            body["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(
+                    { "id": "orphan", "kind": "output", "name": "Orphan" }
+                ));
+            body
+        }
+
+        /// `create_body` with a `condition` node whose branch carries `label`,
+        /// and `onError` set on the condition when `on_error` is given.
+        fn body_with_condition(label: &str, on_error: Option<&str>) -> serde_json::Value {
+            let mut gate = serde_json::json!({
+                "id": "gate",
+                "kind": "condition",
+                "name": "Gate",
+                "config": { "field": "=item.approved" }
+            });
+            if let Some(on_error) = on_error {
+                gate["onError"] = serde_json::Value::String(on_error.to_string());
+            }
+            serde_json::json!({
+                "id": "greeter",
+                "name": "Greeter",
+                "description": "Say hi.",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    gate,
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "gate" },
+                    { "from": "gate", "to": "done", "label": label }
+                ]
+            })
+        }
+
+        /// **The point of the route.** A draft validate accepts is one create
+        /// accepts, and nothing is persisted in between — so the console can ask
+        /// before it submits and get the answer the submit would give.
+        #[tokio::test]
+        async fn a_draft_validate_accepts_is_one_create_accepts_and_validate_saves_nothing() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            let validated = post_validate(&state, create_body()).await;
+            assert_eq!(validated.status(), StatusCode::OK);
+            assert_eq!(json_body(validated).await["valid"], serde_json::json!(true));
+
+            // Nothing was written: the graph is not in the list yet.
+            let listed = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let rows = json_body(listed).await;
+            assert!(
+                own_rows(&rows).is_empty(),
+                "validate must persist nothing, but the list shows {rows}"
+            );
+
+            // And the very same body is accepted by create.
+            let created = post_create_on(&state, create_body()).await;
+            assert_eq!(created.status(), StatusCode::OK, "create must agree");
+        }
+
+        /// An unreachable node is refused by validate in **exactly** the words
+        /// and status create refuses it with — the same error value, so a console
+        /// renders one code path for both. This is the rule a client-side BFS
+        /// would have had to mirror.
+        #[tokio::test]
+        async fn validate_refuses_an_unreachable_node_exactly_as_create_does() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            let validated = post_validate(&state, body_with_an_unreachable_node()).await;
+            let created = post_create_on(&state, body_with_an_unreachable_node()).await;
+
+            assert_eq!(validated.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(created.status(), validated.status());
+            let from_validate = json_body(validated).await;
+            let from_create = json_body(created).await;
+            assert_eq!(
+                from_validate, from_create,
+                "the pre-flight must answer with the submit's own body"
+            );
+            assert!(
+                from_validate["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("cannot be reached from any `trigger`"),
+                "{from_validate}"
+            );
+        }
+
+        /// The condition branch-label rule, the other one a client cannot
+        /// pre-empt without owning a copy of it. Same status, same body.
+        #[tokio::test]
+        async fn validate_refuses_an_illegal_condition_label_exactly_as_create_does() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            let body = body_with_condition("maybe", None);
+            let validated = post_validate(&state, body.clone()).await;
+            let created = post_create_on(&state, body).await;
+
+            assert_eq!(validated.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(created.status(), validated.status());
+            let from_validate = json_body(validated).await;
+            assert_eq!(
+                from_validate,
+                json_body(created).await,
+                "the pre-flight must answer with the submit's own body"
+            );
+            assert!(
+                from_validate["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("must be labeled `yes` or `no`"),
+                "{from_validate}"
+            );
+        }
+
+        /// `yes` passes, and so does the `error` branch of a condition that is
+        /// also `on_error = "route"` — the narrow exception. Pinned here because
+        /// it is the part of the rule a hand-written client check gets wrong, and
+        /// the route is what makes a client not need one.
+        #[tokio::test]
+        async fn validate_accepts_yes_and_the_error_branch_of_a_route_condition() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            for (label, on_error) in [("yes", None), ("error", Some("route"))] {
+                let response = post_validate(&state, body_with_condition(label, on_error)).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "label `{label}` with onError {on_error:?} must be accepted: {}",
+                    json_body(response).await
+                );
+            }
+
+            // `error` WITHOUT `on_error = "route"` is the case the exception does
+            // not cover, and it must still be refused.
+            let response = post_validate(&state, body_with_condition("error", None)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        /// A draft that breaks a **record** rule and a **graph** rule at once
+        /// must be refused by validate for the same one create refuses it for.
+        ///
+        /// `courtesy_validate_draft` used to run `parse_workflow` before
+        /// `validate_draft_against_record`, the reverse of
+        /// `create_company_workflow`, so this graph was refused here for the
+        /// unreachable node and there for the condition label — the same verdict
+        /// in a different sentence. Harmless while the only caller was the
+        /// builder pass; not harmless once a pre-flight route quotes it to an
+        /// author, because they would fix the problem they were shown and be
+        /// refused again for the other one.
+        #[tokio::test]
+        async fn a_doubly_invalid_draft_is_refused_for_the_same_reason_on_both_routes() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            // Illegal condition label (a record-side rule) AND a node nothing
+            // points at (a graph-side rule).
+            let mut body = body_with_condition("maybe", None);
+            body["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(
+                    { "id": "orphan", "kind": "output", "name": "Orphan" }
+                ));
+
+            let validated = post_validate(&state, body.clone()).await;
+            let created = post_create_on(&state, body).await;
+
+            assert_eq!(validated.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(created.status(), validated.status());
+            assert_eq!(
+                json_body(validated).await,
+                json_body(created).await,
+                "a pre-flight that names a different problem than the submit is worse than none"
+            );
+        }
+
+        /// A company whose runtime HAS a source directory holding one seed
+        /// workflow at `workflows/child.toml` — the self-hosted / local `serve`
+        /// shape. `hosted_state` deliberately has none, so the seed-file half of
+        /// the `sub_workflow` existence probe is unreachable from it.
+        async fn seeded_state(home: &std::path::Path) -> (AppState, tempfile::TempDir) {
+            let source = tempfile::Builder::new()
+                .prefix("oc-workflows-source-")
+                .tempdir()
+                .expect("tempdir");
+            let workflows = source.path().join("workflows");
+            std::fs::create_dir_all(&workflows).unwrap();
+            std::fs::write(
+                workflows.join("child.toml"),
+                "id = \"child\"\nname = \"Child\"\n[[node]]\nid = \"start\"\n\
+                 kind = \"trigger\"\nname = \"Start\"\n",
+            )
+            .unwrap();
+
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: empty_manifest(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    overlay_retired_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: Default::default(),
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                })
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), empty_manifest())
+                .with_id(id.clone())
+                .with_seed_dir(source.path())
+                .build()
+                .await
+                .unwrap();
+            assert!(
+                runtime.source_dir().is_some(),
+                "this fixture only proves anything with a source directory"
+            );
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            (state, source)
+        }
+
+        /// A graph whose `sub_workflow` node runs `child` — which exists ONLY as
+        /// a seed file, so the probe can only see it with a source directory.
+        fn body_with_sub_workflow() -> serde_json::Value {
+            serde_json::json!({
+                "id": "parent",
+                "name": "Parent",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "child_run",
+                        "kind": "sub_workflow",
+                        "name": "Run the child",
+                        "config": { "workflow_id": "child" }
+                    }
+                ],
+                "edges": [ { "from": "start", "to": "child_run" } ]
+            })
+        }
+
+        /// **The review finding on #1074.** `courtesy_validate_draft` passed
+        /// `None` for `source_dir` while create passes
+        /// `company.runtime.source_dir()`. That argument feeds exactly one rule —
+        /// `workflow_id_exists` → `seed_file_exists` — so a draft naming a
+        /// seed-file child was refused 400 by the pre-flight and accepted 200 by
+        /// the submit.
+        ///
+        /// A different **verdict**, not a different sentence: strictly worse than
+        /// the divergence the reorder fixed, and the exact failure a pre-flight
+        /// exists to prevent. Hosted tenants (`source_dir == None`) never saw it;
+        /// self-hosted and local `serve` from a company repo did.
+        #[tokio::test]
+        async fn validate_accepts_a_seed_file_sub_workflow_because_create_does() {
+            let home_dir = home();
+            let (state, _source) = seeded_state(home_dir.path()).await;
+
+            let validated = post_validate(&state, body_with_sub_workflow()).await;
+            let status = validated.status();
+            let body = json_body(validated).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "the pre-flight refused a child create accepts: {body}"
+            );
+
+            let created = post_create_on(&state, body_with_sub_workflow()).await;
+            assert_eq!(
+                created.status(),
+                StatusCode::OK,
+                "create must accept it, or this test proves nothing"
+            );
+        }
+
+        /// The other half: a `sub_workflow` naming nothing at all is still
+        /// refused, and by both routes. Threading the source directory must widen
+        /// what the probe can see, not switch it off.
+        #[tokio::test]
+        async fn validate_still_refuses_a_sub_workflow_that_names_nothing() {
+            let home_dir = home();
+            let (state, _source) = seeded_state(home_dir.path()).await;
+
+            let mut body = body_with_sub_workflow();
+            body["nodes"][1]["config"]["workflow_id"] = serde_json::json!("ghost");
+
+            let validated = post_validate(&state, body.clone()).await;
+            let created = post_create_on(&state, body).await;
+            assert_eq!(validated.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(created.status(), validated.status());
+            assert_eq!(
+                json_body(validated).await,
+                json_body(created).await,
+                "the pre-flight must answer with the submit's own body"
+            );
+        }
+
+        /// The over-cap refusal, which the two routes used to word differently
+        /// ("the proposed workflow is N bytes" here, "the rendered workflow is N
+        /// bytes" there). Same status and verdict, different sentence — the drift
+        /// this PR set out to remove, and its own body claims the bodies are
+        /// identical. One constructor now, and this is what holds it.
+        #[tokio::test]
+        async fn validate_and_create_refuse_an_over_cap_draft_in_the_same_words() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            // Well past the 64 KiB TOML cap once rendered, and structurally fine
+            // otherwise, so the cap is the only thing either route can complain
+            // about.
+            let mut body = create_body();
+            body["description"] = serde_json::json!("x".repeat(70_000));
+
+            let validated = post_validate(&state, body.clone()).await;
+            let created = post_create_on(&state, body).await;
+
+            assert_eq!(validated.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(created.status(), validated.status());
+            let from_validate = json_body(validated).await;
+            assert_eq!(
+                from_validate,
+                json_body(created).await,
+                "the pre-flight must answer with the submit's own body"
+            );
+            assert!(
+                from_validate["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("over the"),
+                "{from_validate}"
+            );
+        }
+
         /// **The #168 regression test.** Creating a workflow on a tenant with no
         /// (writable) source directory used to fail with
         /// `Read-only file system (os error 30)` — the handler wrote the graph
@@ -3469,7 +5282,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let listed = json_body(response).await;
-            let items = listed.as_array().expect("array");
+            let items = own_rows(&listed);
             assert_eq!(items.len(), 1, "body: {listed}");
             assert_eq!(items[0]["id"], "greeter");
             assert_eq!(items[0]["name"], "Greeter");
@@ -3484,6 +5297,322 @@ mod tests {
             let graph = json_body(response).await;
             assert_eq!(graph["id"], "greeter");
             assert_eq!(graph["edges"][0]["label"], "ok");
+        }
+
+        // --- Save-time channel-destination guard (issue #981) ---------------
+
+        /// A hosted tenant WITH a desk, so it has one real delivery channel.
+        /// `hosted_state`'s manifest declares none, which makes its deliverable
+        /// set empty — fine for the nowhere-to-deliver case below, useless for
+        /// telling an accepted target from a refused one.
+        fn desk_manifest() -> CompanyManifest {
+            toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n",
+            )
+            .unwrap()
+        }
+
+        /// `hosted_state` over [`desk_manifest`] — a running company whose
+        /// deliverable set is exactly `["engineering"]`.
+        async fn desk_state(home: &std::path::Path) -> AppState {
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            store
+                .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    id: id.clone(),
+                    manifest: desk_manifest(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                })
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), desk_manifest())
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime.deliverable_channel_ids(),
+                vec!["engineering".to_string()],
+                "the fixture must have exactly one delivery channel, or these tests prove nothing"
+            );
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            state
+        }
+
+        /// [`create_body`] with the output node routing its report to `target`
+        /// on `kind`.
+        fn body_with_destination(kind: &str, target: Option<&str>) -> serde_json::Value {
+            let mut destination = serde_json::json!({ "kind": kind });
+            if let Some(target) = target {
+                destination["target"] = serde_json::Value::String(target.to_string());
+            }
+            let mut body = create_body();
+            body["nodes"][1]["destination"] = destination;
+            body
+        }
+
+        async fn post_create(state: AppState, body: serde_json::Value) -> axum::response::Response {
+            router(state)
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap()
+        }
+
+        /// **The #981 regression.** `operator` was in the picker the console
+        /// showed the author, and delivery refuses it by name on every runtime —
+        /// so the graph saved, ran green, and dropped its report. It is now
+        /// refused at save, naming the channels that would work.
+        #[tokio::test]
+        async fn a_report_routed_to_operator_is_refused_at_save() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response =
+                post_create(state, body_with_destination("channel", Some("operator"))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+            // The live set, so the fix is legible from the refusal alone.
+            assert!(message.contains("engineering"), "{message}");
+            assert!(
+                message.contains("done"),
+                "the refusal must name the node: {message}"
+            );
+        }
+
+        /// A channel nobody wired is refused the same way. The author's typo and
+        /// the author's `operator` are the same mistake — a destination this
+        /// company cannot deliver to — and get one answer.
+        #[tokio::test]
+        async fn a_report_routed_to_an_unwired_channel_is_refused_at_save() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response =
+                post_create(state, body_with_destination("channel", Some("enginering"))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+            assert!(message.contains("engineering"), "{message}");
+        }
+
+        /// Issue #1191: the refusal is the SAME envelope every sibling node-config
+        /// rule answers with — `workflow_invalid` plus a `problems` array whose
+        /// entry names the node and the field.
+        ///
+        /// It used to be `invalid_request` with no array at all, because the rule
+        /// sat outside the `problems` accumulator on the write route. So the
+        /// console, which reads `problems` to highlight the offending node
+        /// (#1123), got a flat banner for exactly the class of error #836 was
+        /// filed about. Asserting the envelope rather than the sentence is the
+        /// point: the sentence never changed.
+        #[tokio::test]
+        async fn an_undeliverable_channel_answers_with_a_located_problem() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response = post_create(
+                state,
+                body_with_destination("channel", Some("engineering-desk")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "workflow_invalid", "{body}");
+            assert_eq!(body["problems"][0]["node_id"], "done", "{body}");
+            assert_eq!(body["problems"][0]["field"], "destination.target", "{body}");
+            assert!(
+                body["problems"][0]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("is not a workflow delivery channel"),
+                "{body}"
+            );
+        }
+
+        /// The sibling rule on the same field: a `channel` destination with no
+        /// `target` is located too (issue #1191). It was always a
+        /// `workflow_invalid`, but the entry carried `node_id: null` and
+        /// `field: null` because the load path mints it as a flat string.
+        #[tokio::test]
+        async fn a_channel_destination_with_no_target_is_located_too() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response = post_create(state, body_with_destination("channel", None)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "workflow_invalid", "{body}");
+            assert_eq!(body["problems"][0]["node_id"], "done", "{body}");
+            assert_eq!(body["problems"][0]["field"], "destination.target", "{body}");
+            assert!(
+                body["problems"][0]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("name the channel to post the report to"),
+                "{body}"
+            );
+        }
+
+        /// The guard refuses what delivery would refuse and nothing more: a real
+        /// desk saves, and reads back with its destination intact.
+        #[tokio::test]
+        async fn a_report_routed_to_a_real_desk_saves() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response = post_create(
+                state.clone(),
+                body_with_destination("channel", Some("engineering")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph = json_body(response).await;
+            assert_eq!(graph["nodes"][1]["destination"]["kind"], "channel");
+            assert_eq!(graph["nodes"][1]["destination"]["target"], "engineering");
+        }
+
+        /// An edit is a save too. The create route was never the only way in —
+        /// `PUT` replaces the graph wholesale, so a destination refused on
+        /// create must not be reachable by saving a clean graph and then
+        /// editing it.
+        #[tokio::test]
+        async fn an_edit_cannot_introduce_an_undeliverable_destination() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let created = post_create(state.clone(), create_body()).await;
+            assert_eq!(created.status(), StatusCode::OK);
+            // Carry the created graph's token (required since #1013) so the 400
+            // comes from the destination guard, not the missing-token guard.
+            let version = json_body(created).await["version"]
+                .as_str()
+                .expect("create returns a version")
+                .to_string();
+
+            let mut body = body_with_destination("channel", Some("operator"));
+            body["expectedVersion"] = serde_json::json!(version);
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+        }
+
+        /// A company with no desks and no provider channels has nowhere to
+        /// deliver (#963), and says so in its own words rather than trailing off
+        /// after `has: `. The destinations that do NOT depend on a channel still
+        /// save — the guard is about channels, and a company with no desks can
+        /// still mail its owner.
+        #[tokio::test]
+        async fn a_company_with_no_delivery_channel_says_so_and_still_saves_an_owner_report() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = post_create(
+                state.clone(),
+                body_with_destination("channel", Some("engineering")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(message.contains("no durable channels"), "{message}");
+
+            // …and the picker it was offered is empty, not `["operator"]`.
+            let response = router(state.clone())
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/wired-channels",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(json_body(response).await["channels"], serde_json::json!([]));
+
+            let response = post_create(state, body_with_destination("owner", None)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "an `owner` report needs no channel"
+            );
+        }
+
+        /// The guard stays out of everything that is not a channel destination
+        /// on an `output` node: a graph that routes nowhere saves, and a
+        /// `destination` on a non-`output` node is still `parse_workflow`'s
+        /// refusal to report — reporting the wrong problem first would send an
+        /// author looking for a channel that was never their mistake (#947).
+        #[tokio::test]
+        async fn the_guard_leaves_non_channel_graphs_alone() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            // No destination at all: unchanged, saves.
+            assert_eq!(
+                post_create(state.clone(), create_body()).await.status(),
+                StatusCode::OK
+            );
+
+            // A channel destination on the TRIGGER node, on a company with no
+            // delivery channels at all: still rejected for being on the wrong
+            // kind of node, not for the channel.
+            let mut body = create_body();
+            body["id"] = serde_json::Value::String("second".into());
+            body["name"] = serde_json::Value::String("Second".into());
+            body["nodes"][0]["destination"] =
+                serde_json::json!({ "kind": "channel", "target": "engineering" });
+            let response = post_create(state, body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("only `output` nodes route a report"),
+                "the structural problem must be the one reported: {message}"
+            );
         }
 
         /// A duplicate id is a clean 409, not a 500 — the id-uniqueness check
@@ -3737,7 +5866,7 @@ mod tests {
         /// names for production hosts. Every other agent-turn test in this module
         /// (and `workflow_build::test`) is plain `#[tokio::test]` and relies on
         /// CI setting `RUST_MIN_STACK=16777216` for this job
-        /// (`.github/workflows/ci.yml`'s `Rust (openhuman, tinycortex)` lane) —
+        /// (`.github/workflows/ci.yml`'s `Rust (openhuman, tinymemory)` lane) —
         /// this one follows the same convention rather than wrapping itself in a
         /// custom-stack thread, which no sibling test does. Run locally with
         /// `RUST_MIN_STACK=16777216 cargo test …` if it overflows outside CI.
@@ -3832,12 +5961,121 @@ mod tests {
             assert!(body["readiness"]["ok"].is_boolean(), "body: {body}");
         }
 
+        /// A node declared `repeatable = false` is named in the correction's
+        /// notes, alongside `on_error`/`retry` (issue #850).
+        ///
+        /// `WorkflowNodeSpec` — what the copilot's builder actually authors —
+        /// has no `repeatable` field, so a corrected graph silently drops the
+        /// declaration unless `fix_from_run` names it in `notes`. Without this,
+        /// an operator who saves a copilot correction over a workflow with a
+        /// `repeatable: false` node loses that guard with no warning at all.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn fix_from_run_notes_a_dropped_repeatable_declaration() {
+            use crate::harness::provider::HarnessModel;
+            use crate::harness::workflow_build::WorkflowBuilder;
+            use crate::harness::workflow_build::test::{
+                NativeCopilotModel, NativeStep, agent_deps, propose_step,
+            };
+
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            let model = NativeCopilotModel::scripting(vec![
+                propose_step(
+                    "dropped the unwired step",
+                    serde_json::json!({
+                        "name": "Greeter",
+                        "nodes": [
+                            { "id": "start", "kind": "trigger", "name": "Start" },
+                            { "id": "done", "kind": "output", "name": "Report" }
+                        ],
+                        "edges": [ { "from": "start", "to": "done" } ]
+                    }),
+                ),
+                NativeStep::done("Corrected the workflow."),
+            ]);
+            {
+                let mut runtime =
+                    std::sync::Arc::into_inner(state.registry().remove(&id).expect("registered"))
+                        .expect("uniquely held in this test");
+                let deps = agent_deps(&runtime, model.clone() as std::sync::Arc<dyn HarnessModel>);
+                runtime.set_builder(std::sync::Arc::new(WorkflowBuilder::new(
+                    model as std::sync::Arc<dyn HarnessModel>,
+                    "test-model",
+                )));
+                runtime.set_workflow_harness_deps(deps);
+                state
+                    .registry()
+                    .insert(id.clone(), std::sync::Arc::new(runtime));
+            }
+
+            // Seed a workflow whose middle node declares `repeatable: false` —
+            // the exact declaration `fix_from_run`'s correction cannot carry
+            // through the builder's `WorkflowNodeSpec`.
+            let mut body = create_body();
+            body["nodes"].as_array_mut().unwrap().insert(
+                1,
+                serde_json::json!({
+                    "id": "publish",
+                    "kind": "tool_call",
+                    "name": "Publish",
+                    "config": { "slug": "shell", "args": { "command": "./bin/announce" } },
+                    "repeatable": false
+                }),
+            );
+            body["edges"] = serde_json::json!([
+                { "from": "start", "to": "publish" },
+                { "from": "publish", "to": "done" }
+            ]);
+            let created = router(state.clone())
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+
+            journal_run_with_id(
+                &state,
+                &id,
+                "greeter",
+                "run-1",
+                "the tool `web_search` is not wired on this deployment",
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/greeter/fix-from-run",
+                    Some(serde_json::json!({ "runId": "run-1" })),
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+            let notes = body["notes"].as_array().cloned().unwrap_or_default();
+            assert!(
+                notes.iter().any(|n| n
+                    .as_str()
+                    .is_some_and(|s| s.contains("repeatable") && s.contains("Publish"))),
+                "notes must name the dropped repeatable declaration on `Publish`: {body}"
+            );
+        }
+
         /// Issue #783: the per-workflow copilot's tool-grounding read answers
-        /// `200 {"slugs":[…]}` on **both** scope forms — which also proves the
-        /// static prefix is wired ahead of the dynamic `/workflows/{wid}` (a
-        /// route-miss, or a `tool-slugs` swallowed as a `wid`, would not be this
-        /// shape). The blank tenant grants no tools, so the list is empty here;
-        /// the point pinned is the contract shape and that the route exists.
+        /// `200 {"slugs":[…],"unwired":[…]}` on **both** scope forms — which also
+        /// proves the static prefix is wired ahead of the dynamic
+        /// `/workflows/{wid}` (a route-miss, or a `tool-slugs` swallowed as a
+        /// `wid`, would not be this shape). The blank tenant grants no tools, so
+        /// both lists are empty here; the point pinned is the contract shape and
+        /// that the route exists.
+        ///
+        /// Issue #874 added `unwired` and it is pinned here as **always present**,
+        /// because the console reads it unconditionally: a body that omitted the
+        /// key on a wired host would read as "nothing is unwired" and silently
+        /// restore the bug this route was narrowed to fix.
         #[tokio::test]
         async fn tool_slugs_answers_a_slug_array_on_both_scope_forms() {
             let home_dir = home();
@@ -3858,7 +6096,118 @@ mod tests {
                     body["slugs"].is_array(),
                     "tool-slugs answers a `slugs` array on {uri}, got: {body}"
                 );
+                assert!(
+                    body["unwired"].is_array(),
+                    "tool-slugs answers an `unwired` array on {uri}, got: {body}"
+                );
             }
+        }
+
+        /// Issue #874, the staging repro through the route itself: a company that
+        /// explicitly grants `search`, on a deployment with no managed search
+        /// backend, must NOT be handed `web_search` to ground a proposal on.
+        ///
+        /// This is the regression that shipped. The route answered the
+        /// **grant-only** set, so `web_search` was advertised, the copilot
+        /// authored a `tool_call` on it, and the run died at the first node with
+        /// `tool_call 'web_search' is not available in company workflows`. What
+        /// pins the fix is the pair of assertions: the slug is gone from `slugs`
+        /// **and** present in `unwired` with a reason — dropping it silently would
+        /// leave an operator unable to tell "not allowed" from "not configured".
+        ///
+        /// A granted-and-wired tool (`shell`) stays offered in the same answer, so
+        /// this cannot pass by narrowing the list to nothing.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn tool_slugs_omits_a_granted_but_unwired_tool_and_says_why() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let id = CompanyId::new("acme");
+            let mut manifest = empty_manifest();
+            manifest.tools.allow = vec!["search".to_string(), "shell".to_string()];
+
+            let store = FsCompanyStore::new(home.clone());
+            store
+                .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                })
+                .await
+                .unwrap();
+
+            let mut runtime = RuntimeBuilder::new(home.clone(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            // `workflow_wiring_deps` pins `search: None` — the deployment half of
+            // the repro. Everything else is allowed, so `shell` stays wired.
+            runtime.set_workflow_harness_deps(crate::harness::workflow_wiring_deps(
+                &runtime,
+                None,
+                crate::harness::toolbelt::CapabilityFilter::AllowAll,
+                None,
+            ));
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id, std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/tool-slugs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+
+            let slugs: Vec<&str> = body["slugs"]
+                .as_array()
+                .expect("slugs")
+                .iter()
+                .map(|v| v.as_str().expect("slug"))
+                .collect();
+            assert!(
+                !slugs.contains(&"web_search"),
+                "a granted-but-unwired tool is not offered for grounding: {body}"
+            );
+            assert!(
+                slugs.contains(&"shell"),
+                "a granted AND wired tool is still offered: {body}"
+            );
+
+            let unwired = body["unwired"].as_array().expect("unwired");
+            let entry = unwired
+                .iter()
+                .find(|e| e["slug"] == "web_search")
+                .unwrap_or_else(|| panic!("web_search is reported as unwired: {body}"));
+            assert_eq!(
+                entry["reason"], "searchBackendNotConfigured",
+                "the reason distinguishes an unconfigured provider from a filtered \
+                 capability tier: {body}"
+            );
+            assert!(
+                entry["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("search backend")),
+                "the prose reason is servable as-is: {body}"
+            );
         }
 
         /// A create body whose trigger carries a cron.
@@ -3918,6 +6267,8 @@ mod tests {
                 .find(|w| w["id"] == "greeter")
                 .expect("listed");
             assert_eq!(row["enabled"], serde_json::json!(false));
+            assert_eq!(row["schedule"], serde_json::Value::Null);
+            assert_eq!(row["nodeCount"], 2);
             assert_eq!(
                 row["editable"],
                 serde_json::json!(true),
@@ -3963,6 +6314,20 @@ mod tests {
 
             // And the graph read agrees, so it is the store's answer rather than
             // something the write path made up on the way out.
+            let listed = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let body = json_body(listed).await;
+            let row = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|workflow| workflow["id"] == "digest")
+                .expect("scheduled workflow is listed");
+            assert_eq!(row["schedule"], "0 9 * * *");
+            assert_eq!(row["nodeCount"], 2);
+
             let read = router(state)
                 .oneshot(request("GET", "/api/v1/company/workflows/digest", None))
                 .await
@@ -3983,6 +6348,153 @@ mod tests {
                 .oneshot(request(
                     "PUT",
                     "/api/v1/company/workflows/nowhere/enabled",
+                    Some(serde_json::json!({ "enabled": false })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// A missing workflow is a missing nested resource, not a missing
+        /// company. Both variants are 404, so the envelope code pins the
+        /// distinction that operators and clients actually consume.
+        #[tokio::test]
+        async fn reading_an_unknown_workflow_reports_resource_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/ghost", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "not_found", "{body}");
+            assert_eq!(body["error"], "not found: workflow ghost", "{body}");
+        }
+
+        /// A **global-only** workflow — no seed file, no overlay body, just the
+        /// baseline every company gets — must still be toggleable: it has a
+        /// schedule to pause exactly like a company-authored one, and
+        /// `disabled_workflows` (what this route writes) is a separate
+        /// mechanism from `[globals].disable` (what drops the global outright).
+        /// Before this, `set_company_workflow_enabled`'s "does this company
+        /// have a body for `wid`" check only looked at seed files and overlays,
+        /// so a global-only id read as a bodiless manifest-`enabled` id and the
+        /// route answered 409 for a graph that plainly exists and runs.
+        #[tokio::test]
+        async fn the_enabled_route_toggles_a_global_only_workflow() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            let global_id = crate::globals::workflows()[0].id.clone();
+
+            let paused = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
+                    Some(serde_json::json!({ "enabled": false })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(paused.status(), StatusCode::OK);
+            assert_eq!(json_body(paused).await["enabled"], serde_json::json!(false));
+
+            let list = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let body = json_body(list).await;
+            let row = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["id"] == global_id.as_str())
+                .expect("still listed");
+            assert_eq!(row["enabled"], serde_json::json!(false));
+
+            // Back on, and still resolvable through `GET …/workflows/{wid}`
+            // throughout — pausing a global must not make it unreadable.
+            let armed = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
+                    Some(serde_json::json!({ "enabled": true })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(armed.status(), StatusCode::OK);
+            assert_eq!(json_body(armed).await["enabled"], serde_json::json!(true));
+
+            let read = router(state)
+                .oneshot(request(
+                    "GET",
+                    &format!("/api/v1/company/workflows/{global_id}"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(read.status(), StatusCode::OK);
+        }
+
+        /// A workflow this company has explicitly dropped via
+        /// `[globals].disable` no longer exists as far as this company is
+        /// concerned, so toggling it is the same 404 an unknown id gets — the
+        /// global-only arm above must not treat a disabled global as having a
+        /// body.
+        #[tokio::test]
+        async fn toggling_a_company_disabled_global_is_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            let global_id = crate::globals::workflows()[0].id.clone();
+            let manifest: CompanyManifest = toml::from_str(&format!(
+                "[company]\nname = \"Acme\"\n\n[globals]\ndisable = [\"workflow:{global_id}\"]\n"
+            ))
+            .unwrap();
+            store
+                .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                })
+                .await
+                .unwrap();
+            // Not `state_over`: it always builds with `empty_manifest()`, which
+            // would overwrite this test's `[globals].disable` and silently pass
+            // for the wrong reason.
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id, std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
                     Some(serde_json::json!({ "enabled": false })),
                 ))
                 .await
@@ -4017,7 +6529,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let listed = json_body(response).await;
-            let items = listed.as_array().expect("array");
+            let items = own_rows(&listed);
             assert_eq!(items.len(), 1, "body: {listed}");
             assert_eq!(items[0]["id"], "greeter");
             assert_eq!(items[0]["name"], "Greeter");
@@ -4058,6 +6570,18 @@ mod tests {
                 .expect("append");
         }
 
+        /// A report that reached its destination.
+        fn sent_row(node: &str) -> crate::ports::DeliveryReport {
+            crate::ports::DeliveryReport {
+                node: node.to_string(),
+                kind: "owner".to_string(),
+                target: Some("ada@example.com".to_string()),
+                status: crate::ports::DeliveryStatus::Sent,
+                detail: "emailed the company's admin".to_string(),
+                reason: crate::ports::DeliveryReason::OwnerEmailed,
+            }
+        }
+
         fn undelivered_row(node: &str) -> crate::ports::DeliveryReport {
             crate::ports::DeliveryReport {
                 node: node.to_string(),
@@ -4095,7 +6619,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "body: {body}");
 
             // Newest first: the history panel leads with the run that just ran.
@@ -4122,6 +6646,113 @@ mod tests {
             assert!(rows[0].get("error").is_none(), "{body}");
         }
 
+        /// **Issue #981, part 2, at the HTTP boundary.** The history's own
+        /// reading of the three runs the issue distinguishes.
+        ///
+        /// Journaled, then read back through the real fold — so this also pins
+        /// that the verdict is derived on the read. None of these rows was
+        /// written with one, which is exactly the situation every run already in
+        /// a company's history is in.
+        #[tokio::test]
+        async fn the_history_scores_a_dropped_report_without_calling_the_run_a_failure() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // Oldest first — the fold reverses, so the assertions below read
+            // newest first.
+            journal_run(
+                &state,
+                &id,
+                "dropped",
+                true,
+                vec![undelivered_row("owner")],
+                None,
+            )
+            .await;
+            journal_run(&state, &id, "clean", false, vec![sent_row("owner")], None).await;
+            journal_run(
+                &state,
+                &id,
+                "broke_and_dropped",
+                false,
+                vec![undelivered_row("owner")],
+                Some("node `draft` errored"),
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().expect("array");
+            assert_eq!(rows.len(), 3, "body: {body}");
+
+            // The more serious fact first: a run that broke mid-graph AND did
+            // not deliver reports the break, not the drop. Reversing these two
+            // arms would hide a real failure behind a delivery problem.
+            assert_eq!(rows[0]["workflowId"], "broke_and_dropped", "{body}");
+            assert_eq!(rows[0]["verdict"], "failed", "{body}");
+
+            // A run that delivered fine is unchanged.
+            assert_eq!(rows[1]["workflowId"], "clean", "{body}");
+            assert_eq!(rows[1]["verdict"], "ok", "{body}");
+
+            // The defect: every node `ok`, no error — and the report is gone.
+            assert_eq!(rows[2]["workflowId"], "dropped", "{body}");
+            assert_eq!(rows[2]["verdict"], "undelivered", "{body}");
+            // Not promoted to a failure, and nothing else on the row moved.
+            assert!(rows[2].get("error").is_none(), "{body}");
+            assert!(rows[2].get("cancelled").is_none(), "{body}");
+        }
+
+        /// Every row carries a verdict, including one still in flight — the
+        /// field is unconditional precisely so no reader has to fall back to
+        /// re-deriving it from the six fields around it.
+        #[tokio::test]
+        async fn a_run_still_in_flight_is_scored_running_not_ok() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // A start with no finish, and a run id the supervisor knows nothing
+            // about would be settled by the #1009 cross-check — so this test
+            // registers it, which is what a genuinely live run looks like.
+            let runtime = state.registry().get(&id).expect("registered");
+            // `_guard` must outlive the read: dropping it deregisters the run,
+            // and the #1009 cross-check would then settle it as interrupted.
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", false)
+                .expect("register the run");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunStarted {
+                        workflow_id: "digest".to_string(),
+                        run_id: ctx.run_id.clone(),
+                        scheduled: false,
+                        started_by: None,
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().expect("array");
+            assert_eq!(rows.len(), 1, "body: {body}");
+            assert_eq!(rows[0]["running"], true, "{body}");
+            assert_eq!(rows[0]["verdict"], "running", "{body}");
+        }
+
         /// Issue #596: the run-output route serves a stored snapshot (200) and
         /// 404s a run with none. Runs in the DEFAULT lane, which also proves the
         /// route + store are present with the openhuman-gated *writer* compiled
@@ -4142,6 +6773,7 @@ mod tests {
                     "writer": { "items": [{ "json": { "text": "the draft" } }] }
                 }),
                 truncated: false,
+                partial: false,
             };
             runtime
                 .workflow_run_outputs()
@@ -4180,6 +6812,444 @@ mod tests {
             assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         }
 
+        // ------------------------------------------------------------------
+        // `GET …/workflows/runs/{rid}/artifacts` — the files one run produced,
+        // joined through `origin_run_id` (issue #1684).
+        // ------------------------------------------------------------------
+
+        /// Builds a board card, optionally stamped with the run that opened it
+        /// (`origin_run_id`) — the field [`run_artifacts`] joins on (issue
+        /// #1684). Everything else is the neutral shape the board's own tests
+        /// use.
+        fn run_card(
+            id: &str,
+            title: &str,
+            origin_run_id: Option<&str>,
+        ) -> crate::ports::TaskRecord {
+            crate::ports::TaskRecord {
+                id: id.into(),
+                title: title.into(),
+                note: None,
+                column: "in_review".into(),
+                priority: "medium".into(),
+                assignee: "ceo".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                planning_attempts: Vec::new(),
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+                origin_run_id: origin_run_id.map(str::to_string),
+                origin_workflow_id: None,
+            }
+        }
+
+        /// A published artifact on `task_id`: one agent version, a `source`
+        /// path, stamped `updated_at_millis` so the newest-first sort is
+        /// testable.
+        fn published(
+            id: &str,
+            task_id: &str,
+            title: &str,
+            source: &str,
+            at_millis: u64,
+        ) -> crate::ports::ArtifactRecord {
+            let mut rec = crate::ports::ArtifactRecord::new(
+                id,
+                task_id,
+                title,
+                crate::ports::ArtifactKind::Markdown,
+                "the agent's draft",
+                "ceo",
+                at_millis,
+            )
+            .with_source(source);
+            rec.updated_at_millis = at_millis;
+            rec
+        }
+
+        /// The join: a run's files are the artifacts of every card it opened,
+        /// and only those. Two cards stamped with the run (one carrying two
+        /// files, one carrying one) contribute three rows; a card of a
+        /// *different* run and a chat card with no `origin_run_id` contribute
+        /// none. Newest-`updatedAtMillis` first.
+        #[tokio::test]
+        async fn run_artifacts_joins_cards_by_origin_run_id() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            for card in [
+                run_card("t-a", "Launch spec", Some("run-1")),
+                run_card("t-b", "Press kit", Some("run-1")),
+                run_card("t-c", "Someone else", Some("run-2")),
+                run_card("t-chat", "A chat card", None),
+            ] {
+                runtime.tasks().upsert(&id, &card).await.expect("seed card");
+            }
+            for art in [
+                published("art-a1", "t-a", "Spec v1", "specs/launch.md", 30),
+                published("art-a2", "t-a", "Spec appendix", "specs/appendix.md", 10),
+                published("art-b1", "t-b", "Press release", "press/release.md", 20),
+                // Belongs to run-2's card — must NOT appear under run-1.
+                published("art-c1", "t-c", "Other run's file", "other.md", 99),
+                // Belongs to a chat card with no origin run — must NOT appear.
+                published("art-chat", "t-chat", "Chat reply", "chat.md", 99),
+            ] {
+                crate::ports::ArtifactStore::upsert(runtime.artifacts().as_ref(), &id, &art)
+                    .await
+                    .expect("seed artifact");
+            }
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let rows = body["files"].as_array().expect("files array");
+            assert_eq!(rows.len(), 3, "only run-1's cards' files: {body}");
+
+            // Newest-first: art-a1 (30), art-b1 (20), art-a2 (10).
+            assert_eq!(rows[0]["artifactId"], "art-a1", "{body}");
+            assert_eq!(rows[0]["taskId"], "t-a");
+            assert_eq!(rows[0]["taskTitle"], "Launch spec");
+            assert_eq!(rows[0]["title"], "Spec v1");
+            assert_eq!(rows[0]["kind"], "markdown");
+            assert_eq!(rows[0]["source"], "specs/launch.md");
+            assert_eq!(rows[0]["latestVersion"], 1);
+            assert_eq!(rows[1]["artifactId"], "art-b1", "{body}");
+            assert_eq!(rows[2]["artifactId"], "art-a2", "{body}");
+
+            let ids: Vec<&str> = rows
+                .iter()
+                .map(|r| r["artifactId"].as_str().unwrap())
+                .collect();
+            assert!(
+                !ids.contains(&"art-c1") && !ids.contains(&"art-chat"),
+                "another run's and a chat card's files must not appear: {body}"
+            );
+        }
+
+        /// The contract difference from `output`'s 404: a run that opened no
+        /// cards (or whose cards published nothing) answers `200 { files: [] }`,
+        /// not a 404. A fileless run is normal, not an error.
+        #[tokio::test]
+        async fn run_artifacts_empty_run_returns_200_empty() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-nothing/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "a run with no files is 200, never 404"
+            );
+            let body = json_body(response).await;
+            assert_eq!(
+                body["files"].as_array().expect("files array").len(),
+                0,
+                "{body}"
+            );
+        }
+
+        /// `latestVersion` pins the newest revision, so the deep-link opens the
+        /// version an operator edit produced, not v1. A v1(agent)+v2(operator)
+        /// artifact reports `latestVersion == 2`.
+        #[tokio::test]
+        async fn run_artifacts_latest_version_is_pinned() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            let mut art = published("art-a1", "t-a", "Spec", "specs/launch.md", 5);
+            art.push_version(
+                "the operator's rewrite",
+                crate::ports::artifacts::ArtifactAuthor::Operator,
+                "ceo",
+                6,
+                Some("operator edit before approval".to_string()),
+            );
+            crate::ports::ArtifactStore::upsert(runtime.artifacts().as_ref(), &id, &art)
+                .await
+                .expect("seed artifact");
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body["files"][0]["latestVersion"], 2, "{body}");
+            assert_eq!(body["files"][0]["updatedAtMillis"], 6, "{body}");
+        }
+
+        /// `workspaceNodeId` rides through from the newest revision when the
+        /// file was mirrored into the tree (issue #552), so the console can
+        /// offer the `#/workspace/<id>` link — and is absent otherwise.
+        #[tokio::test]
+        async fn run_artifacts_carries_workspace_node_when_mirrored() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            let mut mirrored = published("art-a1", "t-a", "Spec", "specs/launch.md", 30);
+            mirrored.stamp_workspace_node("node-9");
+            let bare = published("art-a2", "t-a", "Note", "specs/note.md", 10);
+            for art in [&mirrored, &bare] {
+                crate::ports::ArtifactStore::upsert(runtime.artifacts().as_ref(), &id, art)
+                    .await
+                    .expect("seed artifact");
+            }
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body["files"][0]["artifactId"], "art-a1", "{body}");
+            assert_eq!(body["files"][0]["workspaceNodeId"], "node-9", "{body}");
+            assert!(
+                body["files"][1]["workspaceNodeId"].is_null(),
+                "an unmirrored file omits the workspace link: {body}"
+            );
+        }
+
+        /// A card opened by run A and re-owned by run B keeps `origin_run_id ==
+        /// A` (the field is stamped once, at creation), so its files list under
+        /// A — the OPENING run — and not under B. Documents the deliberate
+        /// provenance choice.
+        #[tokio::test]
+        async fn run_artifacts_reowned_card_lists_under_opening_run() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            // Card was opened by run-A; a later run-B re-owned it but the field
+            // still records the opener.
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-A")))
+                .await
+                .expect("seed card");
+            crate::ports::ArtifactStore::upsert(
+                runtime.artifacts().as_ref(),
+                &id,
+                &published("art-a1", "t-a", "Spec", "specs/launch.md", 30),
+            )
+            .await
+            .expect("seed artifact");
+
+            // Under the opener: present.
+            let under_a = json_body(
+                router(state.clone())
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/runs/run-A/artifacts",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(under_a["files"].as_array().unwrap().len(), 1, "{under_a}");
+            assert_eq!(under_a["files"][0]["artifactId"], "art-a1");
+
+            // Under the re-owner: nothing — provenance is the opening run.
+            let under_b = json_body(
+                router(state)
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/runs/run-B/artifacts",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                under_b["files"].as_array().unwrap().len(),
+                0,
+                "a re-owner does not inherit the file: {under_b}"
+            );
+        }
+
+        /// A legacy record with `source == None` (a pre-#244 auto-captured chat
+        /// reply) is still returned — with `source` absent — so the console can
+        /// label it rather than the history silently dropping it.
+        #[tokio::test]
+        async fn run_artifacts_includes_legacy_source_none_labeled() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            // No `.with_source(..)` — a legacy record.
+            let legacy = crate::ports::ArtifactRecord::new(
+                "art-legacy",
+                "t-a",
+                "Auto-captured reply",
+                crate::ports::ArtifactKind::Text,
+                "an old chat reply",
+                "assistant",
+                12,
+            );
+            crate::ports::ArtifactStore::upsert(runtime.artifacts().as_ref(), &id, &legacy)
+                .await
+                .expect("seed artifact");
+
+            let body = json_body(
+                router(state)
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/runs/run-1/artifacts",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(body["files"].as_array().unwrap().len(), 1, "{body}");
+            assert_eq!(body["files"][0]["artifactId"], "art-legacy");
+            assert!(
+                body["files"][0]["source"].is_null(),
+                "a legacy record's absent source stays absent on the wire: {body}"
+            );
+        }
+
+        /// The route resolves to `run_artifacts`, not the dynamic
+        /// `/workflows/{wid}` graph read — the static-before-dynamic slot holds
+        /// (mirrors `run_history_is_not_shadowed_by_the_graph_read`).
+        #[tokio::test]
+        async fn run_artifacts_route_is_not_shadowed() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            crate::ports::ArtifactStore::upsert(
+                runtime.artifacts().as_ref(),
+                &id,
+                &published("art-a1", "t-a", "Spec", "specs/launch.md", 30),
+            )
+            .await
+            .expect("seed artifact");
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            // A graph read would 404 an unknown `wid`; this returns the files
+            // array, proving the four-segment static route won.
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(body["files"][0]["artifactId"], "art-a1", "{body}");
+        }
+
+        /// A run whose file count passes [`MAX_RUN_ARTIFACTS`] reports
+        /// `truncated: true` instead of silently dropping the older rows — so
+        /// the console can label the list "newest 500 shown" rather than
+        /// presenting it as exhaustive. The newest rows survive the cut.
+        #[tokio::test]
+        async fn run_artifacts_exposes_truncation_at_the_cap() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .tasks()
+                .upsert(&id, &run_card("t-a", "Launch spec", Some("run-1")))
+                .await
+                .expect("seed card");
+            // One past the cap: 501 files, `at_millis` increasing with the id
+            // so the newest (art-500) is what the cut must keep.
+            for i in 0..=MAX_RUN_ARTIFACTS {
+                crate::ports::ArtifactStore::upsert(
+                    runtime.artifacts().as_ref(),
+                    &id,
+                    &published(
+                        &format!("art-{i:03}"),
+                        "t-a",
+                        &format!("File {i}"),
+                        &format!("files/{i}.md"),
+                        i as u64,
+                    ),
+                )
+                .await
+                .expect("seed artifact");
+            }
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-1/artifacts",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let files = body["files"].as_array().expect("files array");
+            assert_eq!(files.len(), MAX_RUN_ARTIFACTS, "{body}");
+            assert_eq!(body["truncated"], true, "{body}");
+            assert_eq!(
+                files[0]["artifactId"], "art-500",
+                "the newest file survives the cut: {body}"
+            );
+            assert!(
+                files.iter().all(|f| f["artifactId"] != "art-000"),
+                "the oldest file is what the cap drops: {body}"
+            );
+        }
+
         /// A run that died outright reads back with its reason. This is the
         /// outcome that previously left nothing behind but a host-stdout warning.
         #[tokio::test]
@@ -4204,10 +7274,10 @@ mod tests {
                 .unwrap();
             let body = json_body(response).await;
             assert_eq!(
-                body[0]["error"],
+                body["runs"][0]["error"],
                 "no inference source for agent node `worker`"
             );
-            assert_eq!(body[0]["deliveries"].as_array().unwrap().len(), 0);
+            assert_eq!(body["runs"][0]["deliveries"].as_array().unwrap().len(), 0);
         }
 
         // ── Issue #371: the per-node progress fold ─────────────────────────
@@ -4230,6 +7300,7 @@ mod tests {
                         workflow_id: workflow_id.to_string(),
                         run_id: run_id.to_string(),
                         scheduled,
+                        started_by: None,
                     },
                 )
                 .await
@@ -4256,6 +7327,32 @@ mod tests {
                         node_id: node_id.to_string(),
                         status,
                         elapsed_ms: 42,
+                        diagnostics: Vec::new(),
+                        agent_run_id: None,
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
+        /// Journals one `WorkflowNodeStarted`, the way the run observer does
+        /// immediately before a node's first attempt (issue #382).
+        async fn journal_node_started(
+            state: &AppState,
+            id: &CompanyId,
+            workflow_id: &str,
+            run_id: &str,
+            node_id: &str,
+        ) {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    id,
+                    CompanyEvent::WorkflowNodeStarted {
+                        workflow_id: workflow_id.to_string(),
+                        run_id: run_id.to_string(),
+                        node_id: node_id.to_string(),
                     },
                 )
                 .await
@@ -4331,7 +7428,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "four journal rows fold to one run: {body}");
 
             assert_eq!(rows[0]["runId"], "run-1");
@@ -4347,6 +7444,176 @@ mod tests {
             assert_eq!(nodes[0]["elapsedMs"], 42);
             assert_eq!(nodes[1]["nodeId"], "send");
             assert_eq!(nodes[1]["status"], "error");
+        }
+
+        // ── Issue #1010: the node executing RIGHT NOW ──────────────────────
+
+        /// **The issue.** A run still in flight comes back naming the node it
+        /// is standing on, not just the ones it is done with.
+        ///
+        /// Before this the fold read `WorkflowNodeStarted` nowhere, so an
+        /// in-flight run's only per-node facts were its finishes — and every
+        /// console that learned about a run from the history rather than from a
+        /// start frame (a reload, a cron fire, a reconnect, a workflow switch
+        /// and back) painted a graph with a gap where the working node was.
+        #[tokio::test]
+        async fn run_history_names_the_node_a_running_run_is_executing() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // Registered on the supervisor, and the guard held across the read:
+            // since #1009 a start with no finish whose id is NOT live is settled
+            // by the read itself, so a genuinely in-flight run is the only way
+            // to see `running: true` — and it is the case under test.
+            let runtime = state.registry().get(&id).expect("registered");
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", true)
+                .expect("under the default cap");
+            let run = ctx.run_id.clone();
+            journal_start(&state, &id, "digest", &run, true).await;
+            journal_node_started(&state, &id, "digest", &run, "ceo").await;
+            journal_node(&state, &id, "digest", &run, "ceo", WorkflowNodeStatus::Ok).await;
+            // Started and NOT finished — the node the run is on. No finish is
+            // journaled for it, which is the whole shape under test.
+            journal_node_started(&state, &id, "digest", &run, "draft").await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().expect("array");
+            assert_eq!(rows.len(), 1, "one run: {body}");
+            assert_eq!(rows[0]["running"], true, "still in flight: {body}");
+            assert_eq!(rows[0]["runId"], run, "{body}");
+
+            // In start order, both brackets — the reader subtracts.
+            let started = rows[0]["startedNodes"].as_array().expect("startedNodes");
+            assert_eq!(
+                started.len(),
+                2,
+                "both starts are recorded, finished or not: {body}"
+            );
+            assert_eq!(started[0], "ceo");
+            assert_eq!(started[1], "draft");
+
+            // Only the finished one has a node row, so "started minus finished"
+            // is exactly the node executing now.
+            let nodes = rows[0]["nodes"].as_array().expect("nodes");
+            assert_eq!(nodes.len(), 1, "one node has finished: {body}");
+            assert_eq!(nodes[0]["nodeId"], "ceo");
+        }
+
+        /// A start whose run has no entry is dropped, not turned into a run of
+        /// its own — the same rule the finish arm follows.
+        ///
+        /// The `?workflow=` filter is the reachable way to produce this: the
+        /// start row for another workflow's run never opened an entry, so its
+        /// node brackets have nothing to attach to.
+        #[tokio::test]
+        async fn a_started_node_of_a_filtered_out_run_is_dropped() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "other", "run-other", false).await;
+            journal_node_started(&state, &id, "other", "run-other", "ceo").await;
+            journal_start(&state, &id, "digest", "run-mine", false).await;
+            journal_node_started(&state, &id, "digest", "run-mine", "draft").await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs?workflow=digest",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().expect("array");
+            assert_eq!(rows.len(), 1, "only the asked-for workflow: {body}");
+            assert_eq!(rows[0]["runId"], "run-mine");
+            let started = rows[0]["startedNodes"].as_array().expect("startedNodes");
+            assert_eq!(started.len(), 1, "{body}");
+            assert_eq!(started[0], "draft");
+        }
+
+        /// A run journaled before #382 — no starts at all — keeps the wire shape
+        /// it had: `startedNodes` is omitted entirely rather than sent empty.
+        #[tokio::test]
+        async fn a_run_with_no_started_rows_omits_the_field() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-old", false).await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-old",
+                "ceo",
+                WorkflowNodeStatus::Ok,
+            )
+            .await;
+            journal_finish(&state, &id, "digest", "run-old", false, None).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body["runs"][0].get("startedNodes").is_none(),
+                "an empty trail is absent, not `[]`: {body}"
+            );
+        }
+
+        /// The receipt SURVIVES the finish, so a run that was cancelled or lost
+        /// mid-node still says which node it was standing on.
+        ///
+        /// That id is the one fact neither list carries alone: `nodes` never
+        /// gets a row for a node that did not finish, and a cleared
+        /// `startedNodes` would throw away the only record that it began. The
+        /// console pairs this with `running` before painting anything live —
+        /// see `statesFromRun` — so keeping it cannot leave a settled run
+        /// spinning.
+        #[tokio::test]
+        async fn a_settled_run_keeps_the_node_it_was_standing_on() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-cut", false).await;
+            journal_node_started(&state, &id, "digest", "run-cut", "ceo").await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-cut",
+                "ceo",
+                WorkflowNodeStatus::Ok,
+            )
+            .await;
+            // Begun, and then the run ended without it ever finishing.
+            journal_node_started(&state, &id, "digest", "run-cut", "draft").await;
+            journal_finish(&state, &id, "digest", "run-cut", false, Some("cancelled")).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(body["runs"][0].get("running").is_none(), "settled: {body}");
+            let started = body["runs"][0]["startedNodes"]
+                .as_array()
+                .expect("startedNodes");
+            assert_eq!(started.len(), 2, "{body}");
+            assert_eq!(started[1], "draft");
+            let nodes = body["runs"][0]["nodes"].as_array().expect("nodes");
+            assert_eq!(nodes.len(), 1, "`draft` never finished: {body}");
         }
 
         /// Issues #881 / #880 at the HTTP boundary: a blocked run reads as
@@ -4398,6 +7665,7 @@ mod tests {
                             tools: vec!["publish_artifact".to_string()],
                             approval_ids: vec!["appr-1".to_string()],
                             unparkable: 0,
+                            stranded: 0,
                         }],
                         approvals: vec![crate::ports::WorkflowRunApprovalRow {
                             node_id: Some("spec".to_string()),
@@ -4415,7 +7683,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "{body}");
             assert!(
                 rows[0].get("error").is_none(),
@@ -4429,34 +7697,654 @@ mod tests {
             );
         }
 
-        /// A run whose host died leaves a start with no finish, and it folds as
-        /// `running: true` with the nodes it did complete. Honest only because
-        /// the boot sweep settles such runs — see `sweep_interrupted_runs`.
+        /// Issue #1143. The run's receipt names a card the queue no longer
+        /// holds, so the history says so instead of offering it as a decision.
+        ///
+        /// This is the observed dead end: the drawer rendered "decide in
+        /// Approvals" links for `appr-gone`, the operator followed one, and
+        /// Approvals said "All clear". The run's `approvalIds` is a receipt and
+        /// is right to be immutable; what was missing is anything that reads it
+        /// against the live queue. Nothing is parked in this fixture, so the id
+        /// is stranded.
         #[tokio::test]
-        async fn run_history_reports_an_unsettled_run_as_running() {
+        async fn run_history_marks_a_blocked_approval_the_queue_no_longer_holds() {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, id) = hosted_state(&home).await;
 
-            journal_start(&state, &id, "digest", "run-live", false).await;
-            journal_node(
-                &state,
-                &id,
-                "digest",
-                "run-live",
-                "ceo",
-                WorkflowNodeStatus::Ok,
-            )
-            .await;
+            journal_start(&state, &id, "digest", "run-s", false).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "digest".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-s".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["spec".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                            node_id: "spec".to_string(),
+                            tools: vec!["shell".to_string()],
+                            approval_ids: vec!["appr-gone".to_string()],
+                            unparkable: 0,
+                            stranded: 0,
+                        }],
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
 
             let response = router(state)
                 .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            assert_eq!(body[0]["running"], true, "{body}");
-            assert_eq!(body[0]["nodes"].as_array().unwrap().len(), 1);
-            assert!(body[0].get("error").is_none(), "{body}");
+            assert_eq!(
+                body["runs"][0]["blockedNodes"][0]["stranded"], 1,
+                "an approval id the journal no longer holds must read as stranded, \
+                 or the drawer goes on linking to an empty queue: {body}"
+            );
+            // Issue #1189, and the assertion that pins the reordering: the
+            // verdict pass now runs AFTER this join, so it can see what the join
+            // wrote. With the old ordering the row read `blocked` here — the
+            // blocked-node list said "cannot be continued" and the run's own
+            // one-word reading said "go and decide it", on the same row.
+            assert_eq!(
+                body["runs"][0]["verdict"], "stranded",
+                "the verdict must be derived after the reconciliation, not before it: {body}"
+            );
+        }
+
+        /// The other direction, and the reason the test above proves anything.
+        ///
+        /// A field that marked *every* run stranded would satisfy the assertion
+        /// above and be worse than no field at all — it would retire live work.
+        /// Here the approval is genuinely parked, on both halves the runtime
+        /// reads (the gate's map and the journal), so `stranded` stays zero and
+        /// is skipped off the wire entirely.
+        #[tokio::test]
+        async fn run_history_leaves_a_live_approval_decidable() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            let effect = crate::ports::types::Effect {
+                kind: "filing.submit".into(),
+                group: crate::ports::types::EffectGroup::Sign,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: Some("run-live".to_string()),
+            };
+            let approval_id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("park");
+            runtime
+                .journal()
+                .record_parked(
+                    &approval_id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: None,
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("record");
+
+            journal_start(&state, &id, "digest", "run-live", false).await;
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "digest".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-live".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["spec".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                            node_id: "spec".to_string(),
+                            tools: vec!["shell".to_string()],
+                            approval_ids: vec![approval_id.as_ref().to_string()],
+                            unparkable: 0,
+                            stranded: 0,
+                        }],
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body["runs"][0]["blockedNodes"][0].get("stranded").is_none(),
+                "a parked approval is still decidable, so nothing may be marked \
+                 stranded: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "blocked",
+                "a run with a live card is still blocked, not stranded: {body}"
+            );
+        }
+
+        /// Issue #1189, THE regression test for the bigger half of the defect.
+        ///
+        /// The marketing tenant's shape, verbatim: gate nodes on
+        /// `pendingApprovals`, `blockedNodes` empty, `approvals` empty, and an
+        /// empty queue. #1143's join is keyed on approval ids this shape never
+        /// records, so it could not touch these rows — 34 of the tenant's 60
+        /// runs went on scoring `awaiting-approval` about a person with nothing
+        /// to answer.
+        #[tokio::test]
+        async fn run_history_scores_a_gate_run_with_no_live_card_as_stranded() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "sports_blog", "run-g", true).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-g".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string(), "fetch_espn".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        // The whole point of this shape: a paused gate writes
+                        // NEITHER of the two things #1143 reads.
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(
+                body["runs"][0]["strandedApprovals"], 2,
+                "both gates lost their card, and nothing else on this row says so: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "stranded",
+                "nothing in the queue is waiting on this run: {body}"
+            );
+        }
+
+        /// The negative twin, and the reason the test above proves anything.
+        ///
+        /// A join that marked every gate run stranded would satisfy it and be
+        /// far worse than no join: it would retire runs an operator can still
+        /// act on. Here the gate's card is genuinely parked — a real
+        /// `workflow.approve` effect carrying this run's id and this node's id,
+        /// which is the pair the join keys on — so the run stays awaiting and
+        /// `strandedApprovals` is skipped off the wire entirely.
+        #[tokio::test]
+        async fn run_history_leaves_a_gate_run_with_a_live_card_awaiting() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            // Built by the same `gate_effect` the runner parks with, so the
+            // shape the join reads is the shape the park writes.
+            let effect = crate::runtime::workflow_resume::gate_effect(
+                "sports_blog",
+                "fetch_bbc",
+                &serde_json::json!({}),
+                "run-live-gate",
+                &[],
+                &[],
+                None,
+            );
+            let approval_id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("park");
+            runtime
+                .journal()
+                .record_parked(
+                    &approval_id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: None,
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("record");
+
+            journal_start(&state, &id, "sports_blog", "run-live-gate", true).await;
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-live-gate".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body["runs"][0].get("strandedApprovals").is_none(),
+                "the gate's card is on the queue, so nothing may be marked stranded: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "awaiting-approval",
+                "a decidable gate is still awaiting a person: {body}"
+            );
+        }
+
+        /// A row journaled before issue #371 carries no `run_id`, so the
+        /// `(run, node)` join has no key at all.
+        ///
+        /// It must therefore be left exactly as it read before #1189. Calling
+        /// its gates stranded on the strength of a *missing field* would retire
+        /// live work — the failure mode that is strictly worse than the one this
+        /// issue closes, because an operator cannot argue with a run the console
+        /// says is over.
+        #[tokio::test]
+        async fn run_history_leaves_a_pre_371_row_unreconciled() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "sports_blog".to_string(),
+                        scheduled: true,
+                        // The pre-#371 shape: no correlation id, and so no start
+                        // row to pair with either.
+                        run_id: None,
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["fetch_bbc".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body["runs"][0].get("strandedApprovals").is_none(),
+                "a row with no run id cannot be joined, so it must report nothing: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["verdict"], "awaiting-approval",
+                "an unjoinable row keeps the reading it had before #1189: {body}"
+            );
+        }
+
+        /// A run the process is genuinely executing — registered on the
+        /// supervisor, so its id is in `live()` — folds as `running: true` with
+        /// the nodes it has completed so far. Since #1009 a start with no finish
+        /// whose id is NOT live is settled on the read instead
+        /// ([`a_run_absent_from_the_live_set_is_settled_by_the_read`]); this pins
+        /// the still-running half of that split, with the guard held across the
+        /// request so the registration stays live for the whole read.
+        #[tokio::test]
+        async fn run_history_reports_an_unsettled_run_as_running() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            let runtime = state.registry().get(&id).expect("registered");
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", false)
+                .expect("under the default cap");
+            journal_start(&state, &id, "digest", &ctx.run_id, false).await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                &ctx.run_id,
+                "ceo",
+                WorkflowNodeStatus::Ok,
+            )
+            .await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body["runs"][0]["running"], true, "{body}");
+            assert_eq!(body["runs"][0]["nodes"].as_array().unwrap().len(), 1);
+            assert!(body["runs"][0].get("error").is_none(), "{body}");
+        }
+
+        /// An event log that lets exactly one run settle **inside** `list_runs`'
+        /// window.
+        ///
+        /// `read_from` delegates, and on its FIRST call appends `finish` to the
+        /// inner log *after* taking the snapshot it returns. That is precisely
+        /// the interleaving the race needs and the only way to get it
+        /// deterministically: the run's real finish is missing from the snapshot
+        /// the fold sees, and its supervisor entry is already gone by the time
+        /// `live()` is consulted — so on those two facts alone it is
+        /// indistinguishable from a run that died.
+        ///
+        /// Every later `read_from` — including the settle's own re-read of the
+        /// tail — sees the finish, which is exactly what lets the read tell the
+        /// two apart.
+        struct FinishesDuringTheRead {
+            inner: std::sync::Arc<dyn crate::ports::EventLog>,
+            finish: std::sync::Mutex<Option<(CompanyId, CompanyEvent)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::ports::EventLog for FinishesDuringTheRead {
+            async fn append(
+                &self,
+                id: &CompanyId,
+                event: CompanyEvent,
+            ) -> crate::Result<crate::ports::types::EventSeq> {
+                self.inner.append(id, event).await
+            }
+
+            async fn read_from(
+                &self,
+                id: &CompanyId,
+                seq: crate::ports::types::EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+                let snapshot = self.inner.read_from(id, seq, limit).await?;
+                // Taken out under the lock, so the append happens once however
+                // many readers race here.
+                let pending = self.finish.lock().expect("poisoned").take();
+                if let Some((company, event)) = pending {
+                    self.inner.append(&company, event).await?;
+                }
+                Ok(snapshot)
+            }
+
+            fn subscribe(
+                &self,
+                id: &CompanyId,
+            ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem>
+            {
+                self.inner.subscribe(id)
+            }
+        }
+
+        /// **A run that finishes while the read is folding must not be buried.**
+        ///
+        /// The window: `list_runs` snapshots the journal, folds it, and only
+        /// then asks the supervisor what is live. A run that appends its finish
+        /// after the snapshot and drops its guard before the `live()` call is
+        /// missing from both — so it looks exactly like a run that died.
+        ///
+        /// Settling it is not a harmless duplicate, and the reason is ORDER. The
+        /// rebuild false positive the cross-check knowingly accepts is
+        /// self-correcting: that run's truthful finish lands *after* the
+        /// synthetic one, and the fold settles an entry from the last finish it
+        /// sees. Here the truthful finish lands *first* and loses — so a
+        /// successful run reads `INTERRUPTED_BY_RESTART` for good, and its
+        /// `deliveries` are replaced by the synthetic row's empty list. That is
+        /// a silent, permanent misreport of a run that worked, and of what it
+        /// sent.
+        ///
+        /// So the read confirms against the journal tail before it writes.
+        #[tokio::test]
+        async fn a_run_that_settles_during_the_read_is_not_buried_by_a_synthetic_finish() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let id = CompanyId::new("acme");
+            FsCompanyStore::new(home.clone())
+                .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    id: id.clone(),
+                    manifest: empty_manifest(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                })
+                .await
+                .unwrap();
+
+            // The run's REAL finish: a clean success carrying a delivery, which
+            // is the record a spurious settle would replace with nothing.
+            let real_finish = CompanyEvent::WorkflowRunFinished {
+                workflow_id: "digest".to_string(),
+                scheduled: false,
+                run_id: Some("run-racing".to_string()),
+                deliveries: vec![crate::ports::DeliveryReport {
+                    node: "send".to_string(),
+                    kind: "email".to_string(),
+                    target: Some("ada@example.com".to_string()),
+                    status: crate::ports::DeliveryStatus::Sent,
+                    detail: "sent".to_string(),
+                    reason: crate::ports::DeliveryReason::RecipientEmailed,
+                }],
+                pending_approvals: Vec::new(),
+                error: None,
+                cancelled: false,
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
+            };
+
+            // Built with the interposer UNARMED. Arming it before boot would let
+            // the one-shot fire inside `RuntimeBuilder::build`, whose own
+            // journal read runs `sweep_interrupted_runs` — and the two finishes
+            // that produced would be the boot sweep's doing, not this route's.
+            // Likewise the start is journaled after boot, so the sweep (which is
+            // boot-only, and correctly so) never sees it.
+            let racer = std::sync::Arc::new(FinishesDuringTheRead {
+                inner: std::sync::Arc::new(crate::store::FsEventLog::new(home.clone())),
+                finish: std::sync::Mutex::new(None),
+            });
+            let events: std::sync::Arc<dyn crate::ports::EventLog> = racer.clone();
+
+            let runtime = RuntimeBuilder::new(home.clone(), empty_manifest())
+                .with_id(id.clone())
+                .with_events(events.clone())
+                .build()
+                .await
+                .unwrap();
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+            journal_start(&state, &id, "digest", "run-racing", false).await;
+
+            // Armed now: the next `read_from` — `list_runs`' own snapshot — is
+            // the one the run finishes underneath.
+            *racer.finish.lock().expect("poisoned") = Some((id.clone(), real_finish));
+
+            // Nothing is registered on the supervisor: the run has already
+            // dropped its guard, which is the second half of the interleaving.
+            let body = json_body(
+                router(state.clone())
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+
+            // Exactly one finish in the journal — the truthful one. A synthetic
+            // second row here is the bug: it lands after the real finish and so
+            // wins the fold for good.
+            let finishes: Vec<_> = events
+                .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
+                .await
+                .expect("read")
+                .into_iter()
+                .filter(|stored| matches!(stored.event, CompanyEvent::WorkflowRunFinished { .. }))
+                .collect();
+            assert_eq!(
+                finishes.len(),
+                1,
+                "the read buried a run that had just finished under a synthetic \
+                 interrupted-by-restart finish: {body}"
+            );
+
+            // This response cannot show the finish it did not read — the row is
+            // still the snapshot's, `running: true`. That is honest: the run WAS
+            // in flight when the journal was sampled. What matters is that it is
+            // not stamped dead.
+            let rows = body["runs"].as_array().expect("array");
+            assert_eq!(rows.len(), 1, "{body}");
+            assert!(
+                rows[0].get("error").is_none(),
+                "the run must not be reported as interrupted: {body}"
+            );
+
+            // And the next read — the poll 2s later — sees the truth: a
+            // successful run, with the delivery a synthetic finish would have
+            // replaced with an empty list.
+            let next = json_body(
+                router(state)
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert!(next["runs"][0].get("running").is_none(), "settled: {next}");
+            assert!(
+                next["runs"][0].get("error").is_none(),
+                "a successful run: {next}"
+            );
+            assert_eq!(next["runs"][0]["deliveries"][0]["status"], "sent", "{next}");
+        }
+
+        /// **A settled row keeps one identity across reads.** The response that
+        /// performs the settle and every response after it carry the same `seq`
+        /// and `atMillis` — the appended finish's, not the start's.
+        ///
+        /// Not cosmetic. `RunHistoryPanel` keys its rows on `run.seq`
+        /// (`key={run.seq}`) and compares that same field against
+        /// `selectedRunSeq`, `fixingRunSeq` and `fixReason.seq`. A row whose
+        /// `seq` changed between two polls therefore remounts and loses its
+        /// selection — in the window where that is most likely to be noticed,
+        /// since the 2s recovery poll is running precisely because somebody is
+        /// watching this run.
+        #[tokio::test]
+        async fn a_settled_dead_run_keeps_its_seq_and_time_across_reads() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            // Nothing registered this id, so the read settles it.
+            journal_start(&state, &id, "digest", "run-dead", false).await;
+
+            let first = json_body(
+                router(state.clone())
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let second = json_body(
+                router(state)
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+
+            assert!(
+                first["runs"][0].get("running").is_none(),
+                "settled: {first}"
+            );
+            assert_eq!(
+                first["runs"][0]["seq"], second["runs"][0]["seq"],
+                "the settling read and the one after it must agree on the row's \
+                 identity: {first} then {second}"
+            );
+            assert_eq!(
+                first["runs"][0]["atMillis"], second["runs"][0]["atMillis"],
+                "…and on when it settled: {first} then {second}"
+            );
+            // Specifically the FINISH's row, which is what the next fold uses —
+            // not the start's, which is the only other candidate.
+            assert!(
+                first["runs"][0]["atMillis"].as_u64().unwrap()
+                    >= first["runs"][0]["startedAtMillis"].as_u64().unwrap(),
+                "the settle cannot predate the start: {first}"
+            );
         }
 
         /// **The compatibility claim, pinned.** A journal written before #371
@@ -4476,7 +8364,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["workflowId"], "digest");
             assert!(rows[0].get("nodes").is_none(), "{body}");
@@ -4506,7 +8394,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "{body}");
             let by_id = |run: &str| {
                 rows.iter()
@@ -4518,6 +8406,44 @@ mod tests {
             assert_eq!(by_id("run-a")["nodes"].as_array().unwrap().len(), 1);
             assert_eq!(by_id("run-b")["nodes"][0]["nodeId"], "b1");
             assert_eq!(by_id("run-b")["nodes"].as_array().unwrap().len(), 1);
+        }
+
+        /// Issue #1012. Two interleaved runs — `run-a` starts first but
+        /// `run-b` finishes last — must come back ordered by **finish**, the
+        /// field every row displays, not by the order they started. The old
+        /// `runs.reverse()` only flipped the fold's push order (start order),
+        /// so this exact fixture used to list `run-a` first despite `run-b`
+        /// carrying the newer `seq`/`atMillis`.
+        #[tokio::test]
+        async fn run_history_orders_by_finish_not_start() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // Start order: a, then b. Finish order: a, then b — so b is both
+            // the last to start AND the last to finish, which alone would not
+            // distinguish "ordered by start" from "ordered by finish". Insert
+            // a THIRD run, `c`, that starts before `b` but finishes before `a`
+            // too, so the two orderings genuinely disagree on where it lands.
+            journal_start(&state, &id, "wf", "run-a", false).await;
+            journal_start(&state, &id, "wf", "run-c", false).await;
+            journal_finish(&state, &id, "wf", "run-c", false, None).await;
+            journal_start(&state, &id, "wf", "run-b", false).await;
+            journal_finish(&state, &id, "wf", "run-a", false, None).await;
+            journal_finish(&state, &id, "wf", "run-b", false, None).await;
+
+            // Start order: a, c, b. Finish order: c, a, b.
+            // By-start reversal would read: b, c, a (wrong).
+            // By-finish descending must read: b, a, c.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().expect("array");
+            assert_eq!(rows.len(), 3, "{body}");
+            let ids: Vec<&str> = rows.iter().map(|r| r["runId"].as_str().unwrap()).collect();
+            assert_eq!(ids, vec!["run-b", "run-a", "run-c"], "{body}");
         }
 
         /// `?limit=` now cuts **runs**, not journal rows — the number the caller
@@ -4546,7 +8472,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 2, "{body}");
             // Newest first, and each one whole.
             assert_eq!(rows[0]["runId"], "run-2");
@@ -4579,7 +8505,7 @@ mod tests {
                 .await
                 .unwrap();
             let body = json_body(response).await;
-            let rows = body.as_array().expect("array");
+            let rows = body["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 1, "body: {body}");
             assert_eq!(rows[0]["workflowId"], "digest");
         }
@@ -4611,14 +8537,14 @@ mod tests {
 
             // Explicit cap, taken from the newest end.
             let capped = page("/api/v1/company/workflows/runs?limit=3").await;
-            let rows = capped.as_array().expect("array");
+            let rows = capped["runs"].as_array().expect("array");
             assert_eq!(rows.len(), 3);
             assert_eq!(rows[0]["workflowId"], "wf-24", "newest first: {capped}");
 
             // No `limit` → the default page, not the whole 25.
             let defaulted = page("/api/v1/company/workflows/runs").await;
             assert_eq!(
-                defaulted.as_array().unwrap().len(),
+                defaulted["runs"].as_array().unwrap().len(),
                 DEFAULT_RUN_LIMIT,
                 "{defaulted}"
             );
@@ -4626,11 +8552,15 @@ mod tests {
             // `limit=0` means "I didn't really mean zero" — an empty page is
             // never what a caller wants, so it falls back to the default.
             let zero = page("/api/v1/company/workflows/runs?limit=0").await;
-            assert_eq!(zero.as_array().unwrap().len(), DEFAULT_RUN_LIMIT, "{zero}");
+            assert_eq!(
+                zero["runs"].as_array().unwrap().len(),
+                DEFAULT_RUN_LIMIT,
+                "{zero}"
+            );
 
             // Above the ceiling clamps; with only 25 rows that is all of them.
             let huge = page("/api/v1/company/workflows/runs?limit=100000").await;
-            assert_eq!(huge.as_array().unwrap().len(), 25, "{huge}");
+            assert_eq!(huge["runs"].as_array().unwrap().len(), 25, "{huge}");
         }
 
         /// A company that has never run a workflow gets an empty list, not a
@@ -4646,7 +8576,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(json_body(response).await.as_array().unwrap().len(), 0);
+            assert_eq!(
+                json_body(response).await["runs"].as_array().unwrap().len(),
+                0
+            );
         }
 
         /// **Route-ordering pin.** `runs` is a syntactically valid `wid`, so
@@ -4670,9 +8603,283 @@ mod tests {
                 StatusCode::OK,
                 "the static /workflows/runs must win over /workflows/{{wid}}"
             );
-            // An array of outcomes, not a single graph object.
+            // A runs page — `{ runs: [...], hasMore }` — not a single graph object.
             let body = json_body(response).await;
-            assert!(body.is_array(), "graph read shadowed the history: {body}");
+            assert!(
+                body["runs"].is_array(),
+                "graph read shadowed the history: {body}"
+            );
+        }
+
+        // -------------------------------------------------------------------
+        // Page cut / cursor partition (issue #1012 follow-up)
+        //
+        // `select_run_page` is exercised directly because the anomaly these
+        // tests are about — a run journaled with an `at_millis` OLDER than the
+        // row before it, after the clock stepped backwards — cannot be staged
+        // through the router at all: `FileStore::append` stamps
+        // `at_millis: now_millis()` itself, and `journal_start`/`journal_finish`
+        // hand it only a `CompanyEvent`. There is no seam to fake a clock
+        // regression end-to-end, so the cut is tested where it lives and the
+        // route is tested for the one thing the pure function cannot carry —
+        // the serialized field.
+        // -------------------------------------------------------------------
+
+        /// A settled run at `(seq, at_millis)`, with every other field at its
+        /// nothing-happened value. Only the two keys `select_run_page` reads
+        /// matter here.
+        fn page_run(seq: u64, at_millis: u64) -> WorkflowRunOutcome {
+            WorkflowRunOutcome {
+                seq,
+                at_millis,
+                workflow_id: "wf".to_string(),
+                scheduled: false,
+                run_id: Some(format!("run-{seq}")),
+                deliveries: Vec::new(),
+                pending_approvals: Vec::new(),
+                error: None,
+                nodes: Vec::new(),
+                started_nodes: Vec::new(),
+                started_at_millis: Some(at_millis),
+                running: false,
+                cancelled: false,
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
+                stranded_approvals: 0,
+                verdict: WorkflowRunVerdict::Ok,
+            }
+        }
+
+        /// One request's worth of the read, as the route performs it: everything
+        /// strictly older than the cursor is a candidate (that is exactly what
+        /// `EventLog::read_before` bounds by), and the cut runs over it.
+        ///
+        /// Handing the whole candidate set in is a faithful superset of what the
+        /// backward walk accumulates — it stops once it has settled `limit + 1`
+        /// runs, and because it walks by descending `seq` those are the highest
+        /// `seq`s among the candidates, which is precisely the set the cut keeps.
+        fn page(
+            journal: &[(u64, u64)],
+            before_seq: Option<u64>,
+            limit: usize,
+        ) -> (Vec<WorkflowRunOutcome>, bool, Option<u64>) {
+            let candidates: Vec<WorkflowRunOutcome> = journal
+                .iter()
+                .filter(|(seq, _)| before_seq.is_none_or(|bound| *seq < bound))
+                .map(|(seq, at_millis)| page_run(*seq, *at_millis))
+                .collect();
+            select_run_page(candidates, limit)
+        }
+
+        /// A journal whose clock stepped backwards: `seq` 40 was appended after
+        /// 30 but carries a wall-clock time older than both 30 and 20. Every
+        /// other row is well-behaved.
+        const REGRESSED: [(u64, u64); 5] = [
+            (10, 1_000),
+            (20, 2_000),
+            (30, 3_000),
+            // NTP correction / VM resume / an operator setting the date: the
+            // append order is unchanged, the timestamp goes backwards.
+            (40, 1_500),
+            (50, 5_000),
+        ];
+
+        /// **The issue #1012 follow-up pin.** Paging must reach every run, and
+        /// a run whose `at_millis` regressed below the page boundary's is the
+        /// one that used to be lost.
+        ///
+        /// Pre-fix (cut on `(at_millis, seq)`, cursor derived from the last
+        /// displayed row) the first `limit=2` page is `[50, 30]` — run 40 sorts
+        /// below 30 on time and is truncated away — and the cursor is 30, which
+        /// excludes everything at or above `seq` 30. Run 40 is on neither page,
+        /// and since the boundary only descends, on no later page either.
+        #[test]
+        fn a_clock_regressed_run_is_reachable_on_a_later_page() {
+            let mut seen: Vec<u64> = Vec::new();
+            let mut cursor: Option<u64> = None;
+            // Bounded so a cursor that fails to advance fails the test instead
+            // of hanging it.
+            for _ in 0..10 {
+                let (rows, has_more, next) = page(&REGRESSED, cursor, 2);
+                seen.extend(rows.iter().map(|run| run.seq));
+                if !has_more {
+                    assert!(next.is_none(), "a last page must issue no cursor");
+                    break;
+                }
+                let next = next.expect("a page with more behind it must issue a cursor");
+                assert!(
+                    cursor.is_none_or(|previous| next < previous),
+                    "the cursor must descend, or the walk cannot terminate"
+                );
+                cursor = Some(next);
+            }
+
+            seen.sort_unstable();
+            assert_eq!(
+                seen,
+                vec![10, 20, 30, 40, 50],
+                "every journaled run must be reachable by paging; \
+                 40 is the clock-regressed one"
+            );
+        }
+
+        /// The property the design rests on, asserted directly rather than
+        /// inferred from a walk: the page and the cursor **partition** the
+        /// candidate set. Everything served is at or above the cursor,
+        /// everything withheld is strictly below it — so the next request,
+        /// which asks for `seq < cursor`, gets exactly the remainder with no
+        /// overlap and no gap.
+        #[test]
+        fn the_page_cursor_partitions_the_run_set() {
+            let (rows, has_more, next) = page(&REGRESSED, None, 2);
+            assert!(has_more);
+            let cursor = next.expect("cursor");
+
+            let served: Vec<u64> = rows.iter().map(|run| run.seq).collect();
+            assert!(
+                served.iter().all(|seq| *seq >= cursor),
+                "a served run below the cursor would be served twice: {served:?} vs {cursor}"
+            );
+            let withheld: Vec<u64> = REGRESSED
+                .iter()
+                .map(|(seq, _)| *seq)
+                .filter(|seq| !served.contains(seq))
+                .collect();
+            assert!(
+                withheld.iter().all(|seq| *seq < cursor),
+                "a withheld run at or above the cursor is unreachable forever: \
+                 {withheld:?} vs {cursor}"
+            );
+            assert_eq!(
+                served.len() + withheld.len(),
+                REGRESSED.len(),
+                "the two halves must account for every run"
+            );
+        }
+
+        /// Issue #228 / #1272's ordering is untouched: the cut is keyed on
+        /// `seq`, but what comes back is still sorted newest **finish** first,
+        /// on the very `(at_millis, seq)` pair each row displays.
+        #[test]
+        fn a_page_is_still_displayed_newest_finish_first() {
+            // Within one page, `seq` order and finish order disagree: 40 was
+            // appended last but finished (by the clock) before 30.
+            let (rows, _, _) = page(&[(30, 3_000), (40, 1_500), (50, 5_000)], None, 3);
+            let order: Vec<u64> = rows.iter().map(|run| run.seq).collect();
+            assert_eq!(
+                order,
+                vec![50, 30, 40],
+                "the page must be listed by finish time, not by the key it was cut on"
+            );
+        }
+
+        /// No older page, no cursor. A cursor for a page that does not exist
+        /// invites a caller to ask for it, and an absent field is also what
+        /// tells an older console to fall back to its own derivation.
+        #[test]
+        fn next_before_seq_is_absent_when_there_is_no_older_page() {
+            let (rows, has_more, next) = page(&REGRESSED, None, 50);
+            assert_eq!(rows.len(), 5);
+            assert!(!has_more);
+            assert_eq!(next, None);
+
+            // Exactly `limit` runs is still "no older page" — the read stops at
+            // `limit + 1` precisely so this case is knowable.
+            let (rows, has_more, next) = page(&REGRESSED, None, 5);
+            assert_eq!(rows.len(), 5);
+            assert!(!has_more);
+            assert_eq!(next, None);
+        }
+
+        /// The one part the pure function cannot cover: the cursor reaches the
+        /// console, under the camelCase name the client reads, and feeding it
+        /// back gets the next page with no repeat and no gap.
+        #[tokio::test]
+        async fn run_history_issues_the_page_cursor_on_the_wire() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            for _ in 0..5 {
+                journal_run(&state, &id, "digest", false, Vec::new(), None).await;
+            }
+
+            let fetch = |uri: String| {
+                let state = state.clone();
+                async move {
+                    json_body(
+                        router(state)
+                            .oneshot(request("GET", &uri, None))
+                            .await
+                            .unwrap(),
+                    )
+                    .await
+                }
+            };
+            let seqs = |body: &serde_json::Value| -> Vec<u64> {
+                body["runs"]
+                    .as_array()
+                    .expect("array")
+                    .iter()
+                    .map(|row| row["seq"].as_u64().expect("seq"))
+                    .collect()
+            };
+
+            let first =
+                fetch("/api/v1/company/workflows/runs?workflow=digest&limit=2".to_string()).await;
+            assert_eq!(first["hasMore"], true, "{first}");
+            let cursor = first["nextBeforeSeq"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("nextBeforeSeq must be on the wire: {first}"));
+            let page_one = seqs(&first);
+            assert_eq!(page_one.len(), 2, "{first}");
+            assert_eq!(
+                cursor,
+                *page_one.iter().min().expect("min"),
+                "the cursor is the page's low-water seq: {first}"
+            );
+
+            let second = fetch(format!(
+                "/api/v1/company/workflows/runs?workflow=digest&limit=2&before_seq={cursor}"
+            ))
+            .await;
+            let page_two = seqs(&second);
+            assert!(
+                page_two.iter().all(|seq| *seq < cursor),
+                "the next page must be strictly below the cursor: {second}"
+            );
+            assert!(
+                page_two.iter().all(|seq| !page_one.contains(seq)),
+                "no run may appear on two pages: {page_one:?} then {page_two:?}"
+            );
+
+            let last_cursor = second["nextBeforeSeq"]
+                .as_u64()
+                .expect("a third page exists");
+            let third = fetch(format!(
+                "/api/v1/company/workflows/runs?workflow=digest&limit=2&before_seq={last_cursor}"
+            ))
+            .await;
+            let page_three = seqs(&third);
+            assert_eq!(third["hasMore"], false, "{third}");
+            assert!(
+                third.get("nextBeforeSeq").is_none(),
+                "the last page must omit the cursor entirely: {third}"
+            );
+
+            // No gap: the three pages are the whole history, once each.
+            let mut walked: Vec<u64> = page_one;
+            walked.extend(page_two);
+            walked.extend(page_three);
+            walked.sort_unstable();
+            walked.dedup();
+            assert_eq!(
+                walked.len(),
+                5,
+                "paging must reach all five runs: {walked:?}"
+            );
         }
 
         // -------------------------------------------------------------------
@@ -4803,7 +9010,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
-            assert_eq!(body[0]["workflowId"], "digest");
+            assert_eq!(body["runs"][0]["workflowId"], "digest");
         }
 
         // ── Issue #259: edit + delete at the HTTP boundary ──────────────────
@@ -4847,6 +9054,72 @@ mod tests {
             body
         }
 
+        /// **Regression, issue #1882 review — the round-trip data-loss bug.**
+        /// An `ownerDesk` set on create must survive an edit that never
+        /// touches it. Before the fix, `ownerDesk` was accepted on the write
+        /// body but never appeared on a `GET`/`PUT` response, so a caller that
+        /// builds its edit request from what it just read (the only sane way
+        /// to satisfy `PUT`'s "send the whole graph back" contract) carried no
+        /// `ownerDesk` forward — the very next save silently cleared the desk
+        /// an operator had set. This constructs the edit body the same way a
+        /// conformant client does: by mutating the read response, not by
+        /// hand-copying the field.
+        #[tokio::test]
+        async fn owner_desk_survives_an_unrelated_edit() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let state = desk_state(&home).await;
+
+            let mut body = create_body();
+            body["ownerDesk"] = serde_json::json!("engineering");
+            let response = router(state.clone())
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let created = json_body(response).await;
+            assert_eq!(
+                created["ownerDesk"], "engineering",
+                "the create response must echo the desk the caller set: {created}"
+            );
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let mut graph = json_body(response).await;
+            assert_eq!(
+                graph["ownerDesk"], "engineering",
+                "a read must project the desk a create just set: {graph}"
+            );
+
+            // Build the edit the way a conformant client does: from the graph
+            // it just read, changing only the one field it means to change.
+            let version = graph["version"].as_str().unwrap().to_string();
+            graph["description"] = serde_json::json!("Say hi, differently.");
+            graph["expectedVersion"] = serde_json::json!(version);
+
+            let response = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(graph),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let after = json_body(response).await;
+            assert_eq!(
+                after["ownerDesk"], "engineering",
+                "an edit that never touched ownerDesk must not clear it: {after}"
+            );
+        }
+
         /// **The issue, at the HTTP boundary.** A saved workflow's cron was
         /// permanent; now it can be corrected and the correction reads back.
         #[tokio::test]
@@ -4888,7 +9161,7 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
+            assert_eq!(own_rows(&items).len(), 1, "{items}");
         }
 
         // ── Issue #274: revision history + rollback at the HTTP boundary ────
@@ -4959,7 +9232,9 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
-            create_then_edit_greeter(&state).await;
+            // The token of the now-current (edited) graph — the one the restore
+            // replaces, and which it must carry (required since #1013).
+            let current = create_then_edit_greeter(&state).await;
 
             // Discover the revision id from the list.
             let list = json_body(
@@ -4975,12 +9250,12 @@ mod tests {
             .await;
             let rev_id = list["revisions"][0]["id"].as_str().unwrap().to_string();
 
-            // Restore it (unconditionally — no expectedVersion).
+            // Restore it, carrying the current graph's token.
             let response = router(state.clone())
                 .oneshot(request(
                     "POST",
                     &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
-                    Some(serde_json::json!({})),
+                    Some(serde_json::json!({ "expectedVersion": current })),
                 ))
                 .await
                 .unwrap();
@@ -5031,17 +9306,62 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
-            create_then_edit_greeter(&state).await;
+            // A token is required (issue #1013), so send one; the unknown revision
+            // is resolved before the token is ever compared, so this stays a 404.
+            let current = create_then_edit_greeter(&state).await;
 
             let response = router(state)
                 .oneshot(request(
                     "POST",
                     "/api/v1/company/workflows/greeter/revisions/no-such-rev/restore",
-                    Some(serde_json::json!({})),
+                    Some(serde_json::json!({ "expectedVersion": current })),
                 ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// **The silent-clobber guard on restore (issue #1013).** A restore with
+        /// no token — like an omitted body — used to overwrite unconditionally,
+        /// so a stale editor could clobber a concurrent save. It is now a `400`
+        /// that tells the operator to re-read and send the `version`.
+        #[tokio::test]
+        async fn a_restore_without_a_token_is_rejected() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_then_edit_greeter(&state).await;
+
+            // Discover a real revision id so the 400 is about the missing token,
+            // not the revision.
+            let list = json_body(
+                router(state.clone())
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/greeter/revisions",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let rev_id = list["revisions"][0]["id"].as_str().unwrap().to_string();
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
+                    Some(serde_json::json!({})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(
+                message.contains("version") && message.contains("read"),
+                "the 400 must tell the operator to re-read and send the version: {body}"
+            );
         }
 
         /// A workflow that was never edited has an empty history — `200 []`, not
@@ -5111,15 +9431,19 @@ mod tests {
             assert_eq!(graph["description"], "Say hi, every morning.");
         }
 
-        /// Omitting the token is an unconditional write — the `curl` contract.
+        /// **The silent-clobber guard, at the front door (issue #1013).** Omitting
+        /// the token used to be an unconditional write; a stale editor could then
+        /// overwrite a concurrent save without ever seeing a `409`. A tokenless
+        /// `PUT` is now a `400` that tells the operator to re-read and resend the
+        /// `version`.
         #[tokio::test]
-        async fn an_edit_without_a_token_is_unconditional() {
+        async fn an_edit_without_a_token_is_rejected() {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
             create_greeter(&state).await;
 
-            let response = router(state)
+            let response = router(state.clone())
                 .oneshot(request(
                     "PUT",
                     "/api/v1/company/workflows/greeter",
@@ -5127,7 +9451,21 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(
+                message.contains("version") && message.contains("read"),
+                "the 400 must tell the operator to re-read and resend the version: {body}"
+            );
+
+            // The refusal changed nothing — the original description is intact.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph = json_body(response).await;
+            assert_eq!(graph["description"], "Say hi.");
         }
 
         /// A `PUT` that would rename the id is a 400, not a silent create — the
@@ -5157,8 +9495,9 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
-            assert_eq!(items[0]["id"], "greeter");
+            let own = own_rows(&items);
+            assert_eq!(own.len(), 1, "{items}");
+            assert_eq!(own[0]["id"], "greeter");
         }
 
         #[tokio::test]
@@ -5167,7 +9506,9 @@ mod tests {
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
 
-            let mut body = edited_body(None);
+            // A token is required (issue #1013), so send one; the unknown id is
+            // resolved before the token is ever compared, so this stays a 404.
+            let mut body = edited_body(Some("deadbeef"));
             body["id"] = serde_json::json!("ghost");
             let response = router(state)
                 .oneshot(request(
@@ -5187,14 +9528,16 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
-            create_greeter(&state).await;
+            let version = create_greeter(&state).await;
 
-            // No trigger node at all.
+            // No trigger node at all. Carries a valid token (required since #1013)
+            // so the 400 comes from structural validation, not the token guard.
             let body = serde_json::json!({
                 "id": "greeter",
                 "name": "Greeter",
                 "nodes": [ { "id": "done", "kind": "output", "name": "Report" } ],
-                "edges": []
+                "edges": [],
+                "expectedVersion": version
             });
             let response = router(state)
                 .oneshot(request(
@@ -5234,7 +9577,7 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 0, "{items}");
+            assert_eq!(own_rows(&items).len(), 0, "{items}");
 
             // …and from the graph read.
             let response = router(state)
@@ -5251,7 +9594,7 @@ mod tests {
                 .unwrap();
             let items = json_body(response).await;
             assert_eq!(
-                items.as_array().unwrap().len(),
+                own_rows(&items).len(),
                 0,
                 "a deleted workflow must not come back on restart: {items}"
             );
@@ -5264,7 +9607,7 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, id) = hosted_state(&home).await;
-            create_greeter(&state).await;
+            let version = create_greeter(&state).await;
             journal_run(
                 &state,
                 &id,
@@ -5276,7 +9619,11 @@ mod tests {
             .await;
 
             let response = router(state.clone())
-                .oneshot(request("DELETE", "/api/v1/company/workflows/greeter", None))
+                .oneshot(request(
+                    "DELETE",
+                    &format!("/api/v1/company/workflows/greeter?expectedVersion={version}"),
+                    None,
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -5290,12 +9637,9 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            let rows = json_body(response).await;
-            assert_eq!(
-                rows.as_array().unwrap().len(),
-                1,
-                "past runs must outlive the workflow: {rows}"
-            );
+            let body = json_body(response).await;
+            let rows = body["runs"].as_array().unwrap();
+            assert_eq!(rows.len(), 1, "past runs must outlive the workflow: {body}");
             assert_eq!(rows[0]["workflowId"], "greeter");
         }
 
@@ -5306,12 +9650,14 @@ mod tests {
             let (state, _store, _id) = hosted_state(&home).await;
             let stale = create_greeter(&state).await;
 
-            // Someone edits after the console loaded the graph.
+            // Someone edits after the console loaded the graph. This uses the
+            // then-current token (`stale`); the edit moves the version, so the
+            // delete below carries a now-stale one.
             let edited = router(state.clone())
                 .oneshot(request(
                     "PUT",
                     "/api/v1/company/workflows/greeter",
-                    Some(edited_body(None)),
+                    Some(edited_body(Some(&stale))),
                 ))
                 .await
                 .unwrap();
@@ -5341,11 +9687,48 @@ mod tests {
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
 
+            // A token is required (issue #1013), so send one; the unknown id is
+            // resolved before the token is ever compared, so this stays a 404.
             let response = router(state)
-                .oneshot(request("DELETE", "/api/v1/company/workflows/ghost", None))
+                .oneshot(request(
+                    "DELETE",
+                    "/api/v1/company/workflows/ghost?expectedVersion=deadbeef",
+                    None,
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// **The silent-clobber guard on delete (issue #1013).** A tokenless
+        /// `DELETE` used to remove unconditionally; a stale editor could drop a
+        /// workflow that changed underneath them. It is now a `400` that tells the
+        /// operator to re-read and pass the `version`, and removes nothing.
+        #[tokio::test]
+        async fn a_delete_without_a_token_is_rejected() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_greeter(&state).await;
+
+            let response = router(state.clone())
+                .oneshot(request("DELETE", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(
+                message.contains("version") && message.contains("read"),
+                "the 400 must tell the operator to re-read and pass the version: {body}"
+            );
+
+            // The refusal removed nothing — the workflow is still there.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
         }
 
         /// The write verbs are reachable under the platform scope form too, not
@@ -5355,22 +9738,27 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
-            create_greeter(&state).await;
+            let version = create_greeter(&state).await;
 
             let response = router(state.clone())
                 .oneshot(request(
                     "PUT",
                     "/api/v1/companies/acme/workflows/greeter",
-                    Some(edited_body(None)),
+                    Some(edited_body(Some(&version))),
                 ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
+            // The edit moved the token; delete with the one it just returned.
+            let next = json_body(response).await["version"]
+                .as_str()
+                .expect("edit returns a fresh token")
+                .to_string();
 
             let response = router(state)
                 .oneshot(request(
                     "DELETE",
-                    "/api/v1/companies/acme/workflows/greeter",
+                    &format!("/api/v1/companies/acme/workflows/greeter?expectedVersion={next}"),
                     None,
                 ))
                 .await
@@ -5391,6 +9779,8 @@ mod tests {
             manifest.workflows.enabled.push("legacy".to_string());
             store
                 .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
                     id: id.clone(),
                     manifest: manifest.clone(),
                     ledger: Vec::new(),
@@ -5402,9 +9792,13 @@ mod tests {
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
+                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -5434,12 +9828,131 @@ mod tests {
                 .expect("listed under its id");
             assert_eq!(legacy["editable"], false, "{items}");
 
-            // And the host agrees when actually asked to delete it.
+            // And the host agrees when actually asked to delete it. A token is
+            // required (issue #1013), so send one; the body-less id is a 409
+            // before the token is ever compared.
             let response = router(state)
-                .oneshot(request("DELETE", "/api/v1/company/workflows/legacy", None))
+                .oneshot(request(
+                    "DELETE",
+                    "/api/v1/company/workflows/legacy?expectedVersion=deadbeef",
+                    None,
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        // ── Issue #1009: settle eternal-`running` rows on the read ─────────
+
+        /// Every `WorkflowRunFinished` the company journaled carrying `run_id`.
+        async fn finishes_for(
+            state: &AppState,
+            id: &CompanyId,
+            run_id: &str,
+        ) -> Vec<(Option<String>, bool)> {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .read_from(id, crate::ports::types::EventSeq::new(0), usize::MAX)
+                .await
+                .expect("read")
+                .into_iter()
+                .filter_map(|s| match s.event {
+                    CompanyEvent::WorkflowRunFinished {
+                        run_id: Some(rid),
+                        error,
+                        cancelled,
+                        ..
+                    } if rid == run_id => Some((error, cancelled)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// **The decisive case (issue #1009, path B).** A run whose start was
+        /// journaled but whose finish never landed — and whose id is absent from
+        /// the live run set — is settled by `list_runs` itself, between boots.
+        ///
+        /// Two halves, both asserted: the returned row is `running: false` +
+        /// `INTERRUPTED_BY_RESTART` (so this very response is self-consistent),
+        /// AND a synthetic finish is **durably appended** so the next read folds
+        /// it settled and the boot sweep has nothing left to do. Before the fix
+        /// the row read `running: true` and nothing was appended.
+        #[tokio::test]
+        async fn a_run_absent_from_the_live_set_is_settled_by_the_read() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            // A start with no finish. Nothing is registered on the supervisor,
+            // so this id is absent from `live()`: the process that owned it went
+            // away without journaling a finish.
+            journal_start(&state, &id, "digest", "run-dead", true).await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body["runs"].as_array().unwrap().len(), 1);
+            // `running` is skip-serialized when false, so a settled row simply
+            // omits it — assert it is not `true` rather than equal to `false`.
+            assert_ne!(
+                body["runs"][0]["running"], true,
+                "an absent run is settled on the read, not left spinning: {body}"
+            );
+            assert_eq!(
+                body["runs"][0]["error"],
+                crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART
+            );
+
+            // Durable half: exactly one synthetic finish is now in the journal.
+            let finishes = finishes_for(&state, &id, "run-dead").await;
+            assert_eq!(finishes.len(), 1, "exactly one synthetic finish appended");
+            assert_eq!(
+                finishes[0].0.as_deref(),
+                Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART)
+            );
+            assert!(!finishes[0].1, "a host-restart settle is not a cancel");
+        }
+
+        /// **The mandatory negative (issue #1009, rebuild/clean guard).** A run
+        /// the current process is genuinely running is registered on the
+        /// supervisor, so its id is in `live()` — and `list_runs` must leave it
+        /// alone: the row stays `running: true` and **nothing** is appended.
+        ///
+        /// This is what keeps the cross-check keyed strictly on `live()`
+        /// membership rather than on "has no finish yet", which would stamp
+        /// `INTERRUPTED_BY_RESTART` on a run still walking its graph and then
+        /// contradict its real finish. The guard is held across the read so the
+        /// registration stays live for the whole request.
+        #[tokio::test]
+        async fn a_run_in_the_live_set_is_left_running() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            let runtime = state.registry().get(&id).expect("registered");
+            // Register a live run and HOLD its guard: its id is now in `live()`.
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", true)
+                .expect("under the default cap");
+            journal_start(&state, &id, "digest", &ctx.run_id, true).await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body["runs"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                body["runs"][0]["running"], true,
+                "a run the process is running must not be settled from under it"
+            );
+
+            assert!(
+                finishes_for(&state, &id, &ctx.run_id).await.is_empty(),
+                "a live run gets no synthetic finish appended"
+            );
         }
     }
 
@@ -5566,6 +10079,8 @@ label = "ok"
             let id = CompanyId::new("acme");
             FsCompanyStore::new(home.to_path_buf())
                 .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
                     id: id.clone(),
                     manifest: manifest.clone(),
                     ledger: Vec::new(),
@@ -5579,10 +10094,14 @@ label = "ok"
                     }],
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
+                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -6009,7 +10528,7 @@ label = "ok"
                 .await
                 .unwrap();
             let rows = json_body(response).await;
-            let row = &rows.as_array().expect("array")[0];
+            let row = &rows["runs"].as_array().expect("array")[0];
             assert_eq!(row["runId"], run_id.as_str(), "{rows}");
             assert_eq!(row["cancelled"], true, "{rows}");
             assert!(
@@ -6150,6 +10669,87 @@ label = "ok"
                         node_id: "done".to_string(),
                         status: crate::ports::types::WorkflowNodeStatus::Ok,
                         elapsed_ms: 3,
+                        diagnostics: Vec::new(),
+                    }],
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                })
+            }
+        }
+
+        /// A runner that settles cleanly and hands back one delivery row —
+        /// every node `ok`, no error, nothing cancelled, and a report that did
+        /// not go out. The exact shape issue #981 caught reading green.
+        struct DroppedReportRunner;
+
+        /// A runner whose only delivery row is a **dry run**'s (issue #542): the
+        /// report was routed as far as its destination and deliberately not
+        /// dispatched. The row shape a real `deliver_outputs_dry` writes.
+        struct DryRunRunner;
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for DryRunRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &crate::company::WorkflowFile,
+                _input: serde_json::Value,
+                _ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                Ok(WorkflowRun {
+                    output: serde_json::json!({ "run": {}, "nodes": {} }),
+                    pending_approvals: Vec::new(),
+                    deliveries: vec![crate::ports::DeliveryReport {
+                        node: "done".to_string(),
+                        kind: "channel".to_string(),
+                        target: Some("engineering".to_string()),
+                        status: crate::ports::DeliveryStatus::Skipped,
+                        detail: "this was a test run — nothing was sent".to_string(),
+                        reason: crate::ports::DeliveryReason::DryRun,
+                    }],
+                    cancelled: false,
+                    nodes: vec![crate::ports::WorkflowRunNodeRow {
+                        node_id: "done".to_string(),
+                        status: crate::ports::types::WorkflowNodeStatus::Ok,
+                        elapsed_ms: 3,
+                        diagnostics: Vec::new(),
+                    }],
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for DroppedReportRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &crate::company::WorkflowFile,
+                _input: serde_json::Value,
+                _ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                Ok(WorkflowRun {
+                    output: serde_json::json!({ "run": {}, "nodes": {} }),
+                    pending_approvals: Vec::new(),
+                    deliveries: vec![crate::ports::DeliveryReport {
+                        node: "done".to_string(),
+                        kind: "channel".to_string(),
+                        target: Some("operator".to_string()),
+                        status: crate::ports::DeliveryStatus::Failed,
+                        detail: "`operator` is not a workflow delivery channel".to_string(),
+                        reason: crate::ports::DeliveryReason::ChannelNotWired,
+                    }],
+                    cancelled: false,
+                    nodes: vec![crate::ports::WorkflowRunNodeRow {
+                        node_id: "done".to_string(),
+                        status: crate::ports::types::WorkflowNodeStatus::Ok,
+                        elapsed_ms: 3,
+                        diagnostics: Vec::new(),
                     }],
                     notices: Vec::new(),
                     board: Vec::new(),
@@ -6161,11 +10761,23 @@ label = "ok"
 
         /// A hosted company whose runner echoes immediately.
         async fn echo_company(home: &std::path::Path) -> axum::Router {
+            company_with_runner(home, Arc::new(EchoRunner)).await
+        }
+
+        /// A hosted company with one overlay graph and the given runner behind
+        /// the port, so the route, the supervisor and the journal write are all
+        /// production code and only the graph walk is stubbed.
+        async fn company_with_runner(
+            home: &std::path::Path,
+            runner: Arc<dyn WorkflowRunner>,
+        ) -> axum::Router {
             let manifest: CompanyManifest =
                 toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
             let id = CompanyId::new("acme");
             FsCompanyStore::new(home.to_path_buf())
                 .save(&CompanyRecord {
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
                     id: id.clone(),
                     manifest: manifest.clone(),
                     ledger: Vec::new(),
@@ -6179,10 +10791,14 @@ label = "ok"
                     }],
                     overlay_budgets: Vec::new(),
                     overlay_policy: None,
+                    overlay_tool_grants: None,
                     overlay_desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
                 })
                 .await
                 .unwrap();
@@ -6191,7 +10807,7 @@ label = "ok"
                 .build()
                 .await
                 .unwrap();
-            runtime.set_workflow_runner(Arc::new(EchoRunner));
+            runtime.set_workflow_runner(runner);
             let state = AppState::new(AppConfig::default());
             state.registry().insert(id.clone(), Arc::new(runtime));
             crate::server::test_support::seed_fixed_admin(&state, "acme").await;
@@ -6230,6 +10846,90 @@ label = "ok"
             );
             // The node trail rides every settled run, dry or not.
             assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
+        }
+
+        // ── Issue #981 (part 2): the run's own verdict ───────────────────────
+
+        /// **The defect, at the HTTP boundary.** A run whose report was refused
+        /// answers `200` with every node `ok` and no error — and before this
+        /// there was nothing on the body that said otherwise, so a client
+        /// folding `nodes[].status` (the QA harness among them) scored it green.
+        #[tokio::test]
+        async fn a_run_whose_report_was_dropped_does_not_answer_as_a_clean_run() {
+            let home_dir = home();
+            let app = company_with_runner(home_dir.path(), Arc::new(DroppedReportRunner)).await;
+
+            let response = app
+                .oneshot(run_request(serde_json::json!({})))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+
+            assert_eq!(body["verdict"], "undelivered", "{body}");
+
+            // …and the three facts the verdict must NOT have disturbed. A
+            // delivery failure is not a broken graph: the node ran, so its
+            // status stays `ok`, no `error` appears, and the run is not
+            // cancelled. Flipping any of them would send the copilot's
+            // fix-from-run at a graph that was fine.
+            assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
+            assert_eq!(body["nodes"][0]["status"], "ok", "{body}");
+            assert!(body.get("error").is_none(), "{body}");
+            assert!(body.get("cancelled").is_none(), "{body}");
+            // The row is still where the *reason* lives; the verdict is the
+            // reading.
+            assert_eq!(
+                body["deliveries"][0]["reason"], "channel-not-wired",
+                "{body}"
+            );
+        }
+
+        /// Issue #981, the second half: a **test run** is not a run that lost
+        /// its report.
+        ///
+        /// `deliver_outputs_dry` writes one `skipped`/`dry-run` row per routed
+        /// `output` node, so before this every single test run of a graph with
+        /// a destination answered `undelivered` — the console badged the safest
+        /// thing an operator can do as a failure, every time. The rows stay on
+        /// the body: they are what say *where* the report would have gone.
+        ///
+        /// Asked for as a **real dry run** (`dry_run: true`) and the `dryRun`
+        /// discriminator asserted alongside the verdict, so this cannot pass on
+        /// a run that was not one — a stub runner returning a `dry-run` row is
+        /// only half the claim.
+        #[tokio::test]
+        async fn a_test_run_is_not_a_run_that_lost_its_report() {
+            let home_dir = home();
+            let app = company_with_runner(home_dir.path(), Arc::new(DryRunRunner)).await;
+
+            let response = app
+                .oneshot(run_request(serde_json::json!({ "dry_run": true })))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+
+            assert_eq!(body["verdict"], "ok", "{body}");
+            assert_eq!(body["dryRun"], serde_json::json!(true), "{body}");
+            assert_eq!(body["deliveries"][0]["reason"], "dry-run", "{body}");
+            assert_eq!(body["deliveries"][0]["status"], "skipped", "{body}");
+        }
+
+        /// The other direction, which is the one that must not regress: a run
+        /// that delivered everything still reads `ok`.
+        #[tokio::test]
+        async fn a_run_that_delivered_fine_still_answers_ok() {
+            let home_dir = home();
+            let app = echo_company(home_dir.path()).await;
+
+            let response = app
+                .oneshot(run_request(serde_json::json!({})))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(body["verdict"], "ok", "{body}");
         }
     }
 }

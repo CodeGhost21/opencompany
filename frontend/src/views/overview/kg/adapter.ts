@@ -57,9 +57,10 @@ import type { MemoryEntry } from "@/api/memory";
 import type { DeskDto } from "@/api/types";
 import type { WorkflowGraph } from "@/api/workflows";
 import type { TeamMember } from "@/lib/team";
-import { TASK_COLUMNS } from "@/lib/tasks-sample";
+import { humanizeStatus } from "@/lib/board-columns";
 import type { BrainGraphEdge, BrainGraphNode, MemoryGraph } from "./memory-core";
 import { distillMemoryGraph } from "./memory-core";
+import { personName } from "@/lib/person";
 import { isOpen } from "../pulse";
 import type { Agent, Department, Person, SopTask, Workflow, WorkflowStage } from "./schemas";
 
@@ -325,7 +326,11 @@ export function adapt(input: AdaptInput): Adapted {
       title: task.title,
       summary: task.note ?? "",
       steps: [
-        `Column: ${TASK_COLUMNS.find((c) => c.id === task.column)?.label ?? task.column}`,
+        // Humanised rather than read off the ledger: this adapter is a pure
+        // function over what the graph was handed, and threading an async
+        // column read through it would buy "In progress" instead of "In
+        // progress" — the two agree on every column but `todo`.
+        `Column: ${humanizeStatus(task.column)}`,
         `Priority: ${task.priority}`,
         `Owner: ${task.assignee}`,
       ],
@@ -345,9 +350,10 @@ export function adapt(input: AdaptInput): Adapted {
     // Never a desk: the company staffs desks with agents and declares no desk
     // for a person. See the note where `assignHumanDepartment` used to be.
     departmentId: UNPLACED,
-    // Falling back to the local part of the address keeps a real name off the
-    // graph only when nobody has set one.
-    name: p.displayName?.trim() || p.email.split("@")[0],
+    // Falling back to a name derived from the address keeps a real name off
+    // the graph only when nobody has set one — the same derivation every other
+    // surface uses, so one person is not two names on two screens.
+    name: personName(p),
     role: p.role === "admin" ? "Admin" : "Member",
     // Humans get no derived tool shelf: an operator's tools are their browser,
     // and inventing an MCP loadout for a person would read as a claim.

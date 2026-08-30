@@ -108,16 +108,16 @@ fn operator_request() -> CycleRequest {
         cycle_id: "unused".into(),
         company_id: CompanyId::new("acme"),
         events: vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }],
         event_seqs: Vec::new(),
-        compressed_history: Vec::new(),
-        roster: Vec::new(),
-        context_index: Vec::new(),
+        policy: None,
     }
 }
 
@@ -497,11 +497,10 @@ fn manifest(policy_mode: &str) -> CompanyManifest {
 /// finishes booting (issue #327).
 ///
 /// Boot lays down the reserved workspace roots, and since #327 the workspace
-/// store announces its own writes — so one `WorkspaceChanged` per root is
-/// journalled before any operator message arrives. Derived from `SYSTEM_ROOTS`
-/// rather than written as a literal, so adding a root cannot silently
-/// desynchronise the scripted cycle id below from the one the runtime computes.
-const BOOT_JOURNAL_EVENTS: u64 = crate::company::workspace_scaffold::SYSTEM_ROOTS.len() as u64;
+/// store announces its own writes — one `WorkspaceChanged` per root, plus one
+/// per explanatory note the scaffold provisions (`secrets/readme.md` and
+/// `artifacts/readme.md`), is journalled before any operator message.
+const BOOT_JOURNAL_EVENTS: u64 = crate::company::workspace_scaffold::SYSTEM_ROOTS.len() as u64 + 2;
 
 /// The deterministic first-cycle id a real runtime for `Acme` produces: the
 /// company id slugs to `acme`, and the first *cycle* event lands at the first
@@ -533,11 +532,13 @@ async fn e2e_operator_message_drives_tool_call_and_gated_send_dm() {
 
     let report = rt
         .run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "how are we doing".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -586,11 +587,13 @@ async fn e2e_supervised_effect_runs_without_policy_hitl() {
 
     let report = rt
         .run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "file it".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -632,11 +635,13 @@ async fn e2e_reported_usage_lands_on_the_usage_meter() {
         .unwrap();
 
     rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+        mentions: Vec::new(),
         parent: None,
         text: "how are we doing".into(),
         by: None,
         chat: None,
         deliverable: None,
+        attachments: Vec::new(),
     }])
     .await
     .unwrap();
@@ -659,7 +664,7 @@ async fn e2e_reported_usage_lands_on_the_usage_meter() {
         record
             .ledger
             .iter()
-            .any(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND && e.amount_usd == 0.042)
+            .any(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND && e.amount_usd == -0.042)
     );
 }
 
@@ -719,11 +724,15 @@ async fn e2e_hosted_catalog_advertises_delegation_tools() {
         .unwrap();
 
     rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+        mentions: Vec::new(),
         parent: None,
-        text: "hi".into(),
+        // Issue #1725: not "hi". A bare pleasantry is answered by the runtime
+        // without reaching a brain, so no catalog would be registered at all.
+        text: "ship the landing page".into(),
         by: None,
         chat: None,
         deliverable: None,
+        attachments: Vec::new(),
     }])
     .await
     .unwrap();
@@ -767,11 +776,13 @@ async fn e2e_spawn_task_tool_call_opens_a_board_card() {
         .unwrap();
 
     rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+        mentions: Vec::new(),
         parent: None,
         text: "open a task to ship invoicing".into(),
         by: None,
         chat: None,
         deliverable: None,
+        attachments: Vec::new(),
     }])
     .await
     .unwrap();
@@ -822,11 +833,13 @@ async fn e2e_delegate_to_desk_tool_call_writes_a_handoff_card() {
         .unwrap();
 
     rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+        mentions: Vec::new(),
         parent: None,
         text: "have engineering build invoicing".into(),
         by: None,
         chat: None,
         deliverable: None,
+        attachments: Vec::new(),
     }])
     .await
     .unwrap();
@@ -875,11 +888,13 @@ async fn e2e_a_cycle_without_usage_frames_meters_nothing() {
         .unwrap();
 
     rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+        mentions: Vec::new(),
         parent: None,
         text: "hello".into(),
         by: None,
         chat: None,
         deliverable: None,
+        attachments: Vec::new(),
     }])
     .await
     .unwrap();

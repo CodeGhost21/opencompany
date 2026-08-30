@@ -5,7 +5,7 @@ states each must handle. Built on [Base UI](https://base-ui.com) via shadcn's
 `base-nova` style — so behaviour, focus management and ARIA come from the
 primitive, and this system supplies only the visual layer.
 
-Rendered reference for every state below: `#/styleguide`.
+Rendered reference for every shipped primitive below: `#/styleguide`.
 
 ---
 
@@ -147,7 +147,7 @@ platforms. An icon button still needs its `aria-label` regardless of tooltip.
 
 ---
 
-## Dialog, Sheet, AlertDialog, DropdownMenu, Select, Popover
+## Dialog, Sheet, AlertDialog, DropdownMenu, Select
 
 Floating surfaces. All render on `--popover` at `shadow-lg` — this is what
 elevation is *for*.
@@ -168,8 +168,10 @@ Never nest a modal inside a modal.
 
 ## ScrollArea, Separator, Skeleton, Avatar, Sonner, Chart
 
-- **ScrollArea** — styled scrollbars for panels. The page itself uses native
-  scrolling.
+- **ScrollArea** — a JS-driven scrollbar for panels that need one they can
+  position. Native scrolling is themed globally (see **Scrollbars** below), so
+  reach for this only when a panel needs the overlay behaviour, not merely to
+  make the bar look right.
 - **Separator** — a single `--border` hairline. Two adjacent separators, or a
   separator against a border, is one too many.
 - **Skeleton** — `bg-muted` blocks matching the shape of what is loading.
@@ -185,6 +187,105 @@ Never nest a modal inside a modal.
   gridlines and legends use `--muted-foreground` and `--border`, never a series
   colour.
 
+## Stepper and Sidebar
+
+- **Stepper** — a horizontal progress indicator for a multi-step flow. The
+  active step has `aria-current="step"`; only completed steps may be clickable,
+  so validation cannot be bypassed.
+- **Sidebar** — the console shell's navigation primitive. `SidebarProvider`
+  owns expanded/collapsed state and the Cmd/Ctrl+B shortcut. The desktop shell
+  is transparent over `bg-chrome`; the mobile sidebar is a `Sheet` overlay.
+
+---
+
+## Shell: chrome and the content card
+
+The console's window is two layers, not two panes (issue #1178).
+
+| Layer | What paints it | Fill |
+| --- | --- | --- |
+| Chrome | the shell root (`SidebarProvider`) | `bg-chrome` |
+| Card | `ContentSurface` | `bg-background`, `rounded-2xl`, `border-chrome-border`, `shadow-sm` |
+
+The chrome is painted **once**. The sidebar column and the frame around the card
+are the same surface showing through: `Sidebar`'s inner container and
+`SidebarInset` are both `bg-transparent`, and the sidebar draws no border. Give
+either one a fill of its own and the two regions land on different values, which
+is the seam this layout exists to remove — the reason the rule is "painted
+once" and not "painted the same".
+
+The card is the only opaque sheet in the shell. Everything a page draws — its
+own `bg-card` panels, its dialogs — stacks on top of it, which is why it keeps
+`--background` rather than a colour of its own: page contrast is exactly what it
+was before the shell was rebuilt.
+
+**Anything that cuts a hole in the chrome must ask for the chrome.** A `ring-2`
+around a status dot is a cut-out of the ground behind it, not a decoration. The
+two in the shell — `SidebarMenuDot` on the collapsed rail and the host
+switcher's status dot — take `ring-chrome`. `ring-sidebar` there paints a halo.
+
+### The frame
+
+`ContentSurface` is inset by `--frame-inset` (12px) on all four sides — one
+quantity, spent four times, so the frame is even by construction rather than by
+four numbers that happen to agree.
+
+The top was briefly a special case, aligned to the sidebar's header block and
+measured at runtime to stay aligned as the header changed. That is gone, and so
+is the measurement: an even frame is what this needs, and a mechanism kept for a
+rule that no longer exists is a thing that rots.
+
+### Every page is framed
+
+There is no full-bleed escape hatch, deliberately. `ContentSurface` carried an
+`unframed` prop and two surfaces used it — the Overview knowledge graph and the
+React Flow workflow canvas — and both are framed now. The reference shell keeps
+that prop for a constraint this console does not have: CEF composited its
+provider webviews *above* the HTML layer, so a rounded card underneath showed
+four square corners punching through, maskable by no CSS. Nothing here draws
+above the HTML layer.
+
+If a surface ever genuinely cannot be framed, the prop goes back — with the
+surface that needs it, not before. What a full-bleed page must not do meanwhile
+is size itself against the *viewport*: Overview claimed `h-svh`, which inside a
+card shorter than the window laid the graph out taller than the box clipping it
+and cropped its bottom band. Take the height the card gives you.
+
+---
+
+## Scrollbars
+
+Native scrollbars are themed once, globally, in `index.css` — nothing opts in
+and nothing per-view is needed.
+
+| State | Thumb |
+| --- | --- |
+| Rest | `--scrollbar-thumb-rest` — ~22% `--muted-foreground` (30% in dark) |
+| Scrolling | `--scrollbar-thumb-active` — 48% (58% in dark) |
+| Thumb hover / drag | `--scrollbar-thumb-grab` — 70% (80% in dark) |
+
+The track is transparent, so the thumb composites onto whatever surface it sits
+on; the lane is 10px with a 6px pill inset inside it, matching the rail
+`ScrollArea` draws.
+
+Three things to know before touching it:
+
+- **The bar never disappears.** It fades in weight, not out of existence — it
+  is the only affordance saying there is more content, and a panel whose action
+  is below the fold must keep it. Never replace this with `width: 0`.
+- **"Scrolling" is a JS signal.** `src/lib/scroll-activity.ts` marks the
+  scrolled element with `data-scrolling` from one capturing document listener
+  and clears it after an idle beat. It is not `:hover`, which matches every
+  ancestor of the pointer up to `html` and so lights every nested scroller at
+  once.
+- **The engines are mutually exclusive.** Chromium ignores `::-webkit-scrollbar`
+  as soon as `scrollbar-width`/`scrollbar-color` are set, so the standard
+  properties live behind `@supports not selector(::-webkit-scrollbar)` — the
+  Firefox arm — and the pseudo-element block serves Chromium and WebKit.
+
+Under `prefers-reduced-motion: reduce` the bar holds the active weight
+permanently: no transition and no state change to notice.
+
 ---
 
 ## Adding a component
@@ -197,9 +298,9 @@ Never nest a modal inside a modal.
 3. **Express every colour, size and radius as a token.** If a value has no
    token, add it to layer 2 of `index.css` — see
    [`README.md`](README.md#the-one-rule).
-4. **Add it to `#/styleguide`** with every variant and state, including
-   disabled and invalid. A state absent from the styleguide is a state nobody
-   will notice breaking.
+4. **Add it to `#/styleguide`** with its defined variants and states, including
+   disabled and invalid where it applies. A state absent from the styleguide is
+   a state nobody will notice breaking.
 5. **Write out class names in full.** Tailwind finds classes by scanning source
    text, so a template-assembled name like `` `bg-status-${key}` `` is never
    generated and fails silently at runtime.

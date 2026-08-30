@@ -19,6 +19,42 @@ use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, InboundMessage, Out
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
 
+/// Whether a channel with this id may be named as the target of an `output`
+/// node's `channel` delivery destination.
+///
+/// The operator channel is the single exclusion, and it is deliberate:
+/// [`OperatorChannel`] is an in-memory response spy with no durable reader.
+/// Interactive chat journals its own replies after the cycle, but a workflow
+/// report posted here reaches nobody — accepting it would report a successful
+/// discard. Everything else that is wired (desk channels, provider channels) is
+/// a real write path.
+///
+/// Issue #981: this is the one place the rule is stated. It previously lived as
+/// an inline `!=` where the builder assembles the delivery deps, as a `by name`
+/// refusal in [`crate::workflows::delivery`], and as a prose sentence in the
+/// accessor the console's destination picker reads — and that third copy said
+/// the opposite, so the picker offered authors the one target guaranteed to
+/// fail. Call this instead of re-deciding.
+pub fn is_deliverable_channel(channel_id: &str) -> bool {
+    channel_id != OPERATOR_CHANNEL
+}
+
+/// The operator-readable sentence for a `channel` destination that names
+/// something outside the deliverable set, built from the set that is live right
+/// now so the fix is legible without a second lookup.
+///
+/// Shared by the delivery-time refusal and the save-time rejection (issue
+/// #981), so an author who trips the guard at save and an author who reads a
+/// failed delivery row are told the same thing about the same runtime.
+pub fn undeliverable_channel_message(target: &str, deliverable: &[&str]) -> String {
+    let has = if deliverable.is_empty() {
+        "no durable channels".to_string()
+    } else {
+        deliverable.join(", ")
+    };
+    format!("`{target}` is not a workflow delivery channel — this runtime has: {has}")
+}
+
 /// A desk-backed [`ChannelAdapter`]. Sending appends an agent reply to the
 /// company's durable event log, which is the existing read path for desk chat
 /// history. The adapter is deliberately one-per-desk so channel lookup and
@@ -65,6 +101,13 @@ impl ChannelAdapter for DeskChannel {
                         .reply_to
                         .and_then(|reply| reply.chat_id.parse::<u64>().ok())
                         .map(EventSeq::new),
+                    // Workflow node output. This adapter holds no company
+                    // record, so it has nothing to resolve an `@name` against
+                    // — and a workflow bubble addresses the channel it posts
+                    // into, not a person in it. Left empty rather than
+                    // half-resolved.
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                 },
             )
             .await?;
@@ -134,7 +177,7 @@ impl std::fmt::Debug for OperatorChannel {
 /// assert is "how many times did the report reach the channel", and a refusal
 /// answers a different question. This carries an ordinary channel id so it
 /// clears the refusal, and keeps the buffer so the counting still works.
-// Every consumer of this lives behind `openhuman`/`tinycortex`, so a
+// Every consumer of this lives behind `openhuman`/`tinymemory`, so a
 // default-feature build compiles it and constructs it nowhere. That is a
 // feature-configuration fact, not dead code: the runner and delivery suites
 // that use it are simply not selected in that lane (issue #770).
@@ -185,6 +228,59 @@ impl ChannelAdapter for RecordingChannel {
 mod test {
     use super::*;
 
+    /// The operator channel is excluded from workflow delivery, and every other
+    /// wired id is not. The rule reads the same for a desk, a provider channel
+    /// and an id nobody wired — deliverability is about `operator`, not about
+    /// whether the caller has already checked the adapter exists.
+    #[test]
+    fn only_the_operator_channel_is_undeliverable() {
+        assert!(!is_deliverable_channel(OPERATOR_CHANNEL));
+        assert!(is_deliverable_channel("engineering"));
+        assert!(is_deliverable_channel("email"));
+        assert!(is_deliverable_channel("Operator"));
+    }
+
+    /// The shared refusal sentence names what IS deliverable, and says so
+    /// plainly when the answer is nothing — a desk-less company is a legitimate
+    /// state (issue #963), not a malformed one, so the empty case gets a
+    /// sentence rather than a dangling `has: `.
+    #[test]
+    fn the_refusal_sentence_names_the_live_set() {
+        let message = undeliverable_channel_message("operator", &["engineering", "product"]);
+        assert!(message.contains("`operator` is not a workflow delivery channel"));
+        assert!(message.ends_with("this runtime has: engineering, product"));
+
+        let empty = undeliverable_channel_message("engineering", &[]);
+        assert!(
+            empty.ends_with("this runtime has: no durable channels"),
+            "{empty}"
+        );
+    }
+
+    /// The console's own pre-flight tells an author the same thing the host
+    /// does, and this fails if either side is reworded alone — the same
+    /// contract `destination_messages_match_the_console` holds for the other
+    /// destination rules (issue #260).
+    ///
+    /// It matters more here than elsewhere: the console's list and the host's
+    /// refusal disagreeing about which channels are real is exactly issue #981.
+    #[test]
+    fn the_consoles_pre_flight_says_the_same_thing() {
+        const CONSOLE_DIALOG: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/views/WorkflowCreateDialog.tsx"
+        ));
+        const TAIL: &str = "is not a workflow delivery channel — this runtime has:";
+
+        assert!(undeliverable_channel_message("operator", &["engineering"]).contains(TAIL));
+        assert!(
+            CONSOLE_DIALOG.contains(TAIL),
+            "frontend/src/views/WorkflowCreateDialog.tsx no longer says `{TAIL}` — the console's \
+             client-side pre-flight has drifted from the host's rule. Reword both sides together, \
+             or drop the pre-flight and surface the host's message on the failed save."
+        );
+    }
+
     #[tokio::test]
     async fn buffers_sent_messages() {
         let channel = OperatorChannel::new();
@@ -194,9 +290,11 @@ mod test {
                 message_id: None,
                 task_id: None,
                 channel: "operator".into(),
+                agent: None,
                 text: "hello".into(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             })
             .await
             .unwrap();
@@ -228,7 +326,7 @@ mod test {
         fn subscribe(
             &self,
             _company: &CompanyId,
-        ) -> BoxStream<'static, crate::ports::types::StoredEvent> {
+        ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
             Box::pin(stream::empty())
         }
     }
@@ -251,9 +349,11 @@ mod test {
                 message_id: None,
                 task_id: None,
                 channel: "engineering".into(),
+                agent: None,
                 text: "the weekly digest".into(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             })
             .await;
         assert!(result.is_err(), "an unwritable journal must fail the send");

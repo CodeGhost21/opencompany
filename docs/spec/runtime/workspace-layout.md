@@ -81,6 +81,48 @@ subdirectories, it can only fail on a genuinely broken mount or an explicitly
 misconfigured `OPENHUMAN_WORKSPACE`, so it cannot turn a healthy tenant into one
 that will not wake.
 
+#### Seeing an append failure that happens anyway (issue #450)
+
+Boot proving the root writable does not make the sink infallible — a volume can
+fill, go read-only or disappear under a running tenant. The vendored append
+worker no longer prints its one-line-per-event flood described above; since
+tinyagents `73e6f5d` it keeps a failure-run state machine and reports through
+`tracing` on the target `tinyagents::observability`. Only the **first** failure of
+a run is `error`. The three lines that say how bad it got are `warn`:
+
+| Line | Level | Says |
+|---|---|---|
+| `durable append failed; the observation is lost…` | `error` | a failure run started |
+| `…still failing after N consecutive observations` | `warn` | it is still going (rate-limited reminder) |
+| `durable append recovered; N observation(s) lost` | `warn` | it ended, and the cost |
+| `…never recovered before shutdown, N observation(s) lost` | `warn` | it outlived the process |
+
+The binary's default `EnvFilter` is `error` and nothing in the container images,
+compose files or deploy workflows sets `RUST_LOG`, so those three `warn` lines
+were dropped in every deployed tenant: an operator saw a degraded run begin and
+never learned that it continued, that it ended, or how many observations went
+missing. `DEFAULT_LOG_FILTER` in `src/bin/opencompany.rs` is therefore
+`error,tinyagents::observability=warn` — today's default plus that one target.
+`RUST_LOG`, when set, still replaces the whole thing — and is parsed *lossily*,
+carrying the same `error` default the binary had before this constant existed, so
+one unparseable directive drops itself rather than the operator's whole
+configuration, and an empty value still reports errors rather than silencing the
+binary outright. The desktop shell
+(`src-tauri/src/lib.rs`) names the same target for a sharper reason: its fallback
+has no global directive at all, so an unnamed target is dropped at every level
+including `error`.
+
+**Known limitation.** The worker's own subscriber-independent fallback,
+`AppendWorker::append_failures()` — a counter of appends attempted and rejected,
+documented there as "the only subscriber-free signal of durable-log loss" — is
+`pub(crate)` in tinyagents. OpenCompany cannot read it, and there is no other
+seam that exposes it: the worker is constructed inside OpenHuman's agent journal,
+which hands out no handle to it. So the log filter is the *whole* mechanism here,
+and a tenant whose operator overrides `RUST_LOG` with something that excludes
+`tinyagents::observability` has no second channel. Surfacing the count — as a
+health field, a metric, or simply a `pub` accessor — needs an upstream tinyagents
+change first; do not try to plumb it from this repo.
+
 ### Agent sandboxes (`<home>/harness`)
 
 The tree an agent's file tools actually act in hangs off the **home**, not off a
@@ -93,6 +135,14 @@ same rule `companies/` follows: whoever owns a subtree mints it on demand.
   <agent>/skill-catalog/                  ← its materialized skill bundles
   _workflow/<workflow>/<run>/workspace/   ← one workflow run's sandbox
 ```
+
+`<company>` and `<agent>` are the ids under the workspace naming rule —
+lowercase and dashed, so a roster id `page_builder` lands at `page-builder/`
+([`workspace-names.md`](workspace-names.md)). A sandbox left at the pre-rule
+path is moved onto the canonical one, once, by `ensure_agent_workspace`: unlike
+the note tree, this directory is private scratch that nothing outside the
+process addresses, so an in-place move is invisible — and losing an agent's
+half-finished work to a silent path change would not be.
 
 An agent's sandbox is named by `harness::build::agent_workspace` and created by
 `harness::build::ensure_agent_workspace`; a workflow run's is named and created
@@ -245,12 +295,49 @@ The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle
 
 ```toml
 [workspace]
+git_enabled = false           # opt in to automatic Git checkpoints per agent workspace
 clear_tmp_on_startup = true   # default; set false to preserve tmp/ across restarts
 storage_quota_gb = 5          # soft whole-workspace quota; omit or <= 0 = unlimited
 tmp_quota_gb = 1              # soft tmp/ quota; omit or <= 0 = unlimited
 tree_quota_gb = 2             # HARD cap on the note tree's binary payloads (#553)
 max_blob_mb = 64              # HARD cap on ONE binary write (default 64)
 ```
+
+When `git_enabled = true`, every private agent filesystem workspace under
+`harness/<company>/<agent>/workspace` is initialized as a Git working tree.
+OpenCompany creates a baseline commit and then commits changed files after each
+tool call, including shell commands, so redirects and generated files are not
+missed. Calls that leave the tree unchanged add no commit. Git history lives in
+the sibling `workspace.git/` directory; the working tree contains only Git's
+small `.git` pointer file, which keeps ordinary Git commands usable from inside
+the workspace. The pointer file is write-only scaffolding: a `.git` an agent
+plants is ignored for the checkpointer's own commands (which pass an explicit
+`--git-dir`) and rewritten to name the real repository, and checkpoint Git
+invocations are isolated from inherited config and hooks. Checkpoint failures
+are warned about but never replace a tool's successful result. The setting
+defaults to `false`, preserving existing workspaces unless an operator
+explicitly opts in. See [sandbox.md](orchestration/sandbox.md#checkpointing) for
+the security rationale.
+
+**Checkpoint history retains everything a workspace ever contained.** Because the
+checkpoint repository records the workspace tree state at each tool call, a file
+an agent writes and later deletes survives in `workspace.git/` history long after
+it leaves the working tree. Content an agent downloads, generates, or is handed
+by the operator can therefore accumulate there with no size bound — there are no
+ignore rules and `[workspace]` quotas do not apply to Git objects. Treat the
+feature as suitable for workspaces whose contents are not secrets, or purge
+history deliberately on the same schedule such data would otherwise be rotated.
+The supported purge path is to drop the checkpoint history from the host,
+because every checkpoint is committed to the `checkpoints` branch and remains
+reachable from it even after data leaves the working tree — reflog expiry and
+`gc` alone do **not** remove it. The clean purge is to delete the whole
+`<workspace>.git/` directory, after which the next tool call re-initializes the
+checkpointer from a fresh baseline. To keep a workspace but drop its prior
+history without fully resetting, delete the branch ref first so its commits
+become unreachable, then garbage-collect them: `git --git-dir=<workspace>.git update-ref -d refs/heads/checkpoints` followed by `git --git-dir=<workspace>.git gc --prune=now`. Either way, `<workspace>.git` must be removed or the `checkpoints` ref must be deleted before `gc --prune=now` will actually free the blobs. Deleting
+`<workspace>.git/` resets a workspace to its next checkpoint baseline. No
+retention is automatic: the checkpointer never rewrites history and leaves the
+repository alone between checkpoints.
 
 **The first two quotas are soft/advisory in the binary.** At boot `serve`
 measures the workspace (and `tmp/`) and emits an operator-visible

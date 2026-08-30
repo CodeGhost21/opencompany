@@ -37,6 +37,7 @@ describe("buildTimeline", () => {
         message({ id: "b", text: "yes", parentId: "a" }),
       ],
       CHANNEL,
+      [],
     );
 
     // One row, not two: the reply is folded, not laid out inline.
@@ -53,6 +54,7 @@ describe("buildTimeline", () => {
         message({ id: "c", parentId: "a", at: T0 + 2 }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[0].replies.map((r) => r.id)).toEqual(["b", "c"]);
   });
@@ -79,6 +81,7 @@ describe("buildTimeline", () => {
         message({ id: "c", text: "when?", parentId: "b", at: T0 + 2 }),
       ],
       CHANNEL,
+      [],
     );
 
     // The root is the only row, and it holds only its direct reply.
@@ -94,7 +97,7 @@ describe("buildTimeline", () => {
     // A reply pointing at an id this transcript does not hold must not fall
     // back to the channel — that is precisely the "the console lost my thread"
     // symptom reconcileIds exists to prevent.
-    const entries = buildTimeline([message({ id: "b", parentId: "missing" })], CHANNEL);
+    const entries = buildTimeline([message({ id: "b", parentId: "missing" })], CHANNEL, []);
     expect(entries).toHaveLength(0);
   });
 
@@ -105,6 +108,7 @@ describe("buildTimeline", () => {
         message({ id: "b", from: "you", at: T0 + MINUTE }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[0].continuation).toBe(false);
     expect(entries[1].continuation).toBe(true);
@@ -117,6 +121,7 @@ describe("buildTimeline", () => {
         message({ id: "b", from: "you", at: T0 + 6 * MINUTE }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[1].continuation).toBe(false);
   });
@@ -131,6 +136,7 @@ describe("buildTimeline", () => {
         message({ id: "b", from: "you", at: T0 + MINUTE }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[0].replies).toHaveLength(1);
     expect(entries[1].continuation).toBe(false);
@@ -144,9 +150,96 @@ describe("buildTimeline", () => {
         message({ id: "b", from: "you", at: nextDay }),
       ],
       CHANNEL,
+      [],
     );
     expect(entries[0].dayLabel).toBeDefined();
     expect(entries[1].dayLabel).toBeDefined();
     expect(entries[1].continuation).toBe(false);
+  });
+});
+
+/**
+ * Who a thread's summary pile draws (issue #1324).
+ *
+ * The facepile under a threaded row used to seed each tile on the *message's*
+ * channel, and every reply in a thread carries the same channel — so a
+ * three-face pile hashed to one tone and drew one colour three times. Combined
+ * with `markOnly`, which renders a deliberately empty tile, the row showed
+ * three identical featureless squares: not faces, and not information.
+ *
+ * Resolving the senders here is what makes the pile able to say anything. It
+ * goes through the same `senderOf` every rendered row uses, so a face in the
+ * summary is the same face the thread shows when it is opened — the agreement
+ * #1170 and #1185 established for DMs, extended to threads.
+ */
+describe("buildTimeline: the voices behind a thread", () => {
+  it("tells apart voices the message channel alone could not", () => {
+    // Both replies are `from: "company"` on the same parent. Before, both
+    // seeded on `channel` and collapsed to one tone; the *originating* channel
+    // is what actually distinguishes them.
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "who can take this?" }),
+        message({ id: "b", from: "company", channel: "agent_ada", parentId: "a", at: T0 + 1 }),
+        message({ id: "c", from: "company", channel: "agent_bo", parentId: "a", at: T0 + 2 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries[0].replySenders.map((s) => s.key)).toEqual(["agent:agent_ada", "agent:agent_bo"]);
+  });
+
+  it("counts a person once however often they replied — a pile is people, not messages", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a" }),
+        message({ id: "b", parentId: "a", at: T0 + 1 }),
+        message({ id: "c", parentId: "a", at: T0 + 2 }),
+        message({ id: "d", parentId: "a", at: T0 + 3 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries[0].replies).toHaveLength(3);
+    expect(entries[0].replySenders.map((s) => s.key)).toEqual(["you"]);
+  });
+
+  it("keeps the voices in the order they first spoke", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a" }),
+        message({ id: "b", from: "company", channel: "agent_bo", parentId: "a", at: T0 + 1 }),
+        message({ id: "c", parentId: "a", at: T0 + 2 }),
+        // Bo again — already seen, so this must not move them down the pile.
+        message({ id: "d", from: "company", channel: "agent_bo", parentId: "a", at: T0 + 3 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries[0].replySenders.map((s) => s.key)).toEqual(["agent:agent_bo", "you"]);
+  });
+
+  it("draws no face for a system line — it has no voice to draw", () => {
+    // A pile that counted this would claim one more participant than the
+    // thread has.
+    const entries = buildTimeline(
+      [
+        message({ id: "a" }),
+        message({ id: "b", from: "system", text: "approved", parentId: "a", at: T0 + 1 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries[0].replies).toHaveLength(1);
+    expect(entries[0].replySenders).toEqual([]);
+  });
+
+  it("leaves a row with no replies with no voices", () => {
+    const entries = buildTimeline([message({ id: "a" })], CHANNEL, []);
+    expect(entries[0].replySenders).toEqual([]);
   });
 });

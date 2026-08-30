@@ -82,6 +82,8 @@ async fn main() -> anyhow::Result<()> {
 
     let manifest: CompanyManifest = toml::from_str(MANIFEST)?;
     let record = CompanyRecord {
+        overlay_retired_agents: Vec::new(),
+        overlay_agent_edits: Vec::new(),
         id: CompanyId::new("demo"),
         manifest,
         ledger: Vec::new(),
@@ -93,20 +95,29 @@ async fn main() -> anyhow::Result<()> {
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
+        overlay_tool_grants: None,
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
     };
 
     let dir = tempfile::tempdir()?;
     let meter = Arc::new(CapturingMeter::default());
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(cfg)),
         provider_slug: "managed".to_string(),
+        serves: None,
         context: Arc::new(FsContextStore::new(dir.path())),
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),
         workspace_root: dir.path().join("harness"),
+        mcp_home: Some(dir.path().join("mcp")),
+        workspace_git_enabled: false,
         // Issue #775: the shell audit sink hangs off the data root as
         // `companies/<slug>/audit/<agent>/`, deliberately a sibling of the
         // workspace tree rather than inside it.
@@ -137,14 +148,19 @@ async fn main() -> anyhow::Result<()> {
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
+        hosting: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
         run_supervisor: opencompany::runtime::RunSupervisor::default(),
         delivery: None,
         search: None,
+        tenant_search: None,
         workspace: None,
-        repos: None,
-        repo_bindings: Vec::new(),
-        checkouts: Default::default(),
+        workflow_runs: None,
+        deep_trace: None,
     };
 
     let pool = HarnessPool::new();
@@ -152,7 +168,13 @@ async fn main() -> anyhow::Result<()> {
 
     println!("── prompt → ceo ──\n{prompt}\n");
     let outcome = pool
-        .run(&record.id, "ceo", &prompt, &deps, Some("General"))
+        .run(
+            &record.id,
+            "ceo",
+            &prompt,
+            &deps,
+            opencompany::runtime::delegation::ChatTarget::channel(Some("General")),
+        )
         .await?;
     let reply = outcome.reply;
     println!("── ceo reply ──\n{reply}\n");

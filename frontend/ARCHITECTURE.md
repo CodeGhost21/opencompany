@@ -42,6 +42,13 @@ Which applies is **derived, not configured**: `needsCarriedSession` compares the
 host's origin with the document's, so a console cannot be told to hold a token
 where a cookie would have worked.
 
+Which of the N is on screen is part of the **address**, not private state: a
+console holding more than one host writes `#/<view>?host=<connectionId>`, so
+switching is a history entry Back can undo and the bar names the host being
+looked at even when that host answers nothing. `src/hooks/use-host-route.ts`
+owns the rule; see
+[desktop-hosts.md](../docs/spec/runtime/desktop-hosts.md#which-host-the-address-names).
+
 Every surface is built to one pattern so the backend can land incrementally:
 
 1. **Real** — the endpoint exists; the console uses it directly. **This is now
@@ -92,10 +99,18 @@ workload or committed.
 | GET | `…/{id}/approvals` | parked approvals |
 | POST | `…/{id}/approvals/{approvalId}` | `{verdict, note?}` → follow-up reply |
 | POST | `…/{id}/feedback` | scrub-then-preview feedback |
-| POST | `…/{id}/{pause\|resume\|suspend\|archive}` | lifecycle control |
+| POST | `…/{id}/{pause\|resume}` | lifecycle control (company-scoped) |
+| POST | `…/{id}/{suspend\|archive}` | lifecycle control (**platform-scoped**) |
 
 These back Overview, Conversation (send/reply), Approvals, Feedback, Settings
-(connection + lifecycle). Everything below is now **delivered** too — the
+(connection + lifecycle). The two scopes are not interchangeable, and the
+Settings lifecycle card renders accordingly: `suspend` and `archive` resolve
+through `resolve_claims`, which cannot return a human, so a console
+authenticating with a session cookie can never reach them — it offers them only
+when it carries a platform bearer, and otherwise says so in the page rather than
+failing after the confirmation (issue #1401). `resume` is company-scoped but the
+handler refuses a non-platform caller on a `suspended` company, so that button is
+withheld there too. Everything below is now **delivered** too — the
 sections document the surface, its read (GraphQL) and its writes (REST).
 
 ---
@@ -114,8 +129,25 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
 - **Note:** overlay teammates are **roster-only in v1** — they show in the
   roster and get an inbox, but no harness agent is built for them yet.
 
-### Conversation threads — `src/views/Conversation.tsx`, `src/lib/threads.ts`
+### Conversation threads — `src/views/Conversation.tsx`, `src/views/conversation/`, `src/lib/threads.ts`
 - WhatsApp-style two-pane; left list = the company's **desks** (group chats).
+- **The transcript half runs on `@assistant-ui/react`**, through its
+  **external-store** runtime (`src/views/conversation/runtime.ts`). The library
+  owns the composer, the scroll viewport and the run state; `AppShell` keeps
+  owning the transcripts, which is why that runtime and not one of the others:
+  a reply can arrive over SSE while this view is unmounted, and a turn can
+  outlive the request that started it (issue #983), so the message array cannot
+  move into the library. **The transport is unchanged** — still `POST …/chat`
+  and the company event stream, never a data-stream protocol.
+- Everything around the transcript stays this console's own. The left list is
+  the company's desks and teammates rather than an assistant's saved
+  conversations, so it is not a `ThreadListPrimitive`; the strip above the
+  composer steers **named** in-flight runs (issue #111), which is why the
+  runtime is handed no `onCancel`.
+- assistant-ui renders one message at a time, so who a line is from, how
+  consecutive lines group and where a day separator falls are decided up front
+  by a pure `decorate` pass in `src/views/conversation/model.ts` — covered by
+  `test/unit/conversation-model.test.ts` rather than only by a browser.
 - **Source:** ✅ real — `Company.chats` / `Company.chat(id)` (GraphQL) list the
   desks from `[[group_chat]]` and page their history; send uses the `chat`
   endpoint. Desk-scoped routing of replies is single-responder in v1 (the full
@@ -169,10 +201,20 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   mail renders empty (issue #173 replaced a localStorage fixture that showed the
   same four invented emails for every teammate).
 
-### Tasks (Kanban) — `src/views/TasksView.tsx`, `src/lib/tasks-sample.ts`
-- Columns To-do/Planning/In progress/Paused/In review/Done; drag to move. New work
-  enters through one prompt box on To-do (issue #301); priority + assignee are
+### Tasks (Kanban) — `src/views/LedgersView.tsx`, `src/views/TaskCard.tsx`
+- **The board has no page of its own.** It is the `tasks` ledger, rendered as
+  that ledger's columns under `#/ledgers/tasks` (issue #1140 retired the
+  standalone Tasks page, which showed the same records through the same
+  component). `src/views/LedgerBoard.tsx` is the board; `TaskCard` is the card
+  it renders when the row behind it is a `Task`.
+- Columns To-do/Planning/In progress/Paused/In review/Done, declared by the host
+  and read off the ledger; drag to move. New work enters through one prompt box
+  landing in To-do (issue #301), which keeps its own `POST …/tasks` dialog
+  because `record_entry` is refused for this ledger; priority + assignee are
   edited on the card afterwards.
+- `#/tasks/<id>` survives as the card detail (`TaskDetailView`, routed by
+  `src/views/TaskDetailRoute.tsx`) — a timeline, a plan brief, a discussion, its
+  attempts and the steer controls, none of which fits on a column.
 - **Source:** ✅ real — `Company.tasks` (GraphQL, `TaskStore`-backed) reads the
   board; `POST …/tasks`, `PATCH`/`DELETE …/tasks/{id}` (REST) write it.
 
@@ -224,16 +266,20 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   revenue, byCategory, transactions). **Caveat:** the inference-cost component
   of spend is `0` until openhuman#4940 (as with Usage).
 
-### Connections — `src/views/ConnectionsView.tsx`, `src/lib/provider-grid.ts`
+### OAuth — `src/views/OAuthView.tsx`, `src/lib/provider-grid.ts`
 - **One** provider grid with connect/disconnect and connected-account state,
-  plus the credential sections above it (MCP, inference, company key, Composio
-  token, channels).
+  plus the credential sections above it (the company key and the Composio
+  token).
+- **One question per page.** This was "Connections" and carried five unrelated
+  ones; MCP (`#/settings/mcp`) and inference (`#/settings/inference`) are their
+  own pages now, and the channels and repositories sections left with those
+  subsystems.
 - **Source:** ✅ real (feature `oauth`) — `Company.connections` (GraphQL) reads
-  manifest intent (`[[connection]]`) + live OAuth status; `POST
-  …/connections/{provider}/start` returns the authorize URL,
-  `…/disconnect` drops tokens, and `GET /api/v1/oauth/callback` completes the
-  flow. Without the `oauth` feature the write routes `404 not_wired` and the
-  console shows the read-only catalog.
+  manifest intent (`[[connection]]`) + legacy native OAuth status. `POST
+  …/connections/{provider}/start` and `GET /api/v1/oauth/callback` are dated
+  410 retirement responses (#838); `…/disconnect` remains so a tenant can
+  release a token written before #828. The supported actionable connection path
+  is Composio.
 - **One list, one answer (issue #582).** The page used to render two provider
   lists — `ComposioSection`'s grid off `GET …/composio/connections`, and a
   categorised grid of eleven hardcoded tiles off `GET …/connections` — which
@@ -243,6 +289,44 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   native-route metadata rather than a list, and `src/lib/provider-grid.ts` merges
   the three into the rows `ProvidersSection` renders. `ComposioSection` keeps
   only the credential layer.
+
+### Domain & Email (Settings) — `src/components/domain-settings.tsx`, `src/api/domain.ts`, `src/api/smtp.ts`
+- Custom domain with the DNS records the host wants created (verification TXT,
+  CNAME, DKIM, SPF) + per-record verification results; SMTP credentials + test.
+- **Source:** ✅ real — `GET …/domain` and `GET …/smtp` read non-secret status;
+  `PUT …/domain` + `POST …/domain/verify` (server-side DNS check) and `PUT
+  …/smtp` (credentials to the **secret store**) + `POST …/smtp/test` write. The
+  DNS/SMTP network seams are dependency-inverted and feature-gated —
+  `verify`/`test` `404 not_wired` when absent. The same non-secret status is
+  also on `Company.domain`/`Company.smtp` in GraphQL, minus `checks` and the
+  SMTP `security`/from fields.
+- **Records are the host's answer; the console derives nothing.** It used to:
+  `src/lib/domain.ts::dnsRecords` hashed the domain into a verification token
+  client-side and pasted it into a hardcoded target, so every row an operator
+  copied into their registrar was a guess. That generator is gone, and so is the
+  `oc-mail` `localStorage` draft the card kept beside it (issue #1460) — a
+  remembered copy is only a second answer that can disagree with the
+  authoritative one, and the SMTP password was in it. `src/lib/domain.ts` is now
+  a domain pre-flight plus a one-shot purge of what older builds already wrote.
+### MCP Servers (Settings) — `src/views/McpServersView.tsx`
+- Two tabs over one configuration: **Connections**, a row per server with its
+  status and its controls as icons (`src/views/mcp/McpIconButton.tsx` —
+  credential, connect, re-check, tools, enable/disable, remove), and
+  **mcp.json** (`src/views/mcp/McpJsonEditor.tsx`), the declared set as one
+  editable document.
+- **Source:** ✅ real — `…/mcp/servers` per row, `…/mcp/config` for the file.
+  Both write the same store, so the two tabs cannot describe different
+  configurations; a save re-mounts the rows so the list re-reads.
+- Credentials stay write-only in both: the document reports `authConfigured` and
+  never a token, and an entry with no `headers` leaves the stored credential
+  alone rather than clearing it.
+
+### Settings sub-pages — `src/views/settings-pages.ts`
+- The table lives in its own module rather than in `SettingsSection.tsx`, so
+  prose that sends someone to a sub-page can name one without importing the
+  section back through itself — and cannot name one that does not exist.
+- **Devices is gone.** The pairing page and its `…/devices` routes left with
+  device pairing itself: the frontend client holds its own session.
 
 ### Domain & Email (Settings) — `src/components/domain-settings.tsx`, `src/lib/domain.ts`
 - Custom domain with generated DNS records (verification TXT, CNAME, DKIM, SPF)
@@ -261,12 +345,14 @@ The console's models are the response contract. Keep host payloads aligned with:
 
 - `src/api/types.ts` — `CompanyStatus`, `ApprovalSummary`, `ChatResponse`,
   `FeedbackResponse`, `TeamMemberDto`, `InboxDto`, `InboxMessageDto`,
-  `ConnectionState`, `ConnectionStart`.
+  `ConnectionState`.
 - `src/lib/threads.ts` `Thread`/`ThreadContact`,
   `src/lib/tasks-sample.ts` `TaskCard`, `src/lib/skills.ts` `InstalledSkill`,
   `src/lib/workspace.ts` `FsNode`, `src/lib/memory.ts` `MemoryEntry`,
   `src/lib/usage-sample.ts` `UsageData`, `src/lib/finance-sample.ts` `FinanceData`,
-  `src/lib/domain.ts` `DnsRecord`/`SmtpConfig`, `src/lib/workflow-sample.ts` `WorkflowNodeData`.
+  `src/api/domain.ts` `DomainStatus`/`DnsRecord`/`RecordCheck`,
+  `src/api/smtp.ts` `SmtpStatus`/`SmtpConfig`,
+  `src/lib/workflow-sample.ts` `WorkflowNodeData`.
 
 The reads now come from GraphQL (one `Company` query per view) rather than a
 `localStorage` seed; the fallback seam remains only where a write path is
@@ -285,6 +371,26 @@ feature-gated off.
 - **Graceful 404:** until an endpoint exists it should 404; the console already
   treats that as "not wired yet" and shows the sample/notice — so partial
   rollout is safe.
+- **Toast lifetime:** the one `<Toaster>` is mounted at the app root, outside the
+  routed tree, so a toast outlives the view that raised it and nothing about
+  changing view clears one. `sonner`'s auto-dismiss is a timer it *pauses* — on
+  hover, on a pointer interaction, on a hidden tab — and two of those latch with
+  no way back (issue #933). `src/lib/toast-lifetime.ts` is the ceiling that makes
+  a stuck toast impossible: it accumulates each toast's *visible* time and
+  dismisses one whose duration plus a grace period is spent. Hovering to read, a
+  backgrounded tab, and an explicit `duration: Infinity` are all still honoured,
+  so callers keep raising plain `toast.*` calls and need not think about it.
+- **How a write answers:** a toast, everywhere. The inline `role="alert"` banner
+  is reserved for a surface that could not *load* — it is a state of the page and
+  it sits with the Retry that clears it, whereas the answer to an action the
+  operator just took has to survive the dialog closing over it. Issue #1099 is
+  the case that fixed the split: adding a teammate said nothing on success from
+  any of its three surfaces (Team, Company, the chat empty state) and reported
+  failure two different ways. `src/lib/member-feedback.ts` now owns that one
+  answer — the views decide *what happened*, it decides what that is called and
+  how loudly. Half-landed writes stay distinguishable from clean ones
+  (`toast.warning`, as `PeopleView`'s invite already did), because a teammate
+  whose inbox never came up is not a clean add.
 
 ## Implementation order (delivered)
 

@@ -81,7 +81,7 @@ pub(crate) fn render_path(
 /// Takes the component-wise shape of tinycortex's `resolve_within_content_root`:
 /// validate every component *before* it can be used, and reject rather than
 /// normalise anything traversal-shaped. Leading/trailing and repeated `/` are
-/// tolerated (a caller writing `/Standards/` means `Standards`); `.` and `..`
+/// tolerated (a caller writing `/standards/` means `Standards`); `.` and `..`
 /// segments are refused outright.
 ///
 /// Note this is defence in depth, not the boundary itself: the result is only
@@ -129,6 +129,7 @@ mod tests {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         }
     }
 
@@ -139,15 +140,15 @@ mod tests {
     #[test]
     fn a_path_is_the_ancestor_chain_joined() {
         let nodes = vec![
-            node("a", "Standards", None),
-            node("b", "Engineering standards.md", Some("a")),
+            node("a", "standards", None),
+            node("b", "engineering-standards.md", Some("a")),
         ];
         let by_id = index(&nodes);
         assert_eq!(
             render_path(&nodes[1], &by_id).as_deref(),
-            Some("Standards/Engineering standards.md")
+            Some("standards/engineering-standards.md")
         );
-        assert_eq!(render_path(&nodes[0], &by_id).as_deref(), Some("Standards"));
+        assert_eq!(render_path(&nodes[0], &by_id).as_deref(), Some("standards"));
     }
 
     #[test]
@@ -180,10 +181,10 @@ mod tests {
     fn traversal_shaped_paths_are_rejected() {
         for path in [
             "../secrets.md",
-            "Standards/../../etc/passwd",
+            "standards/../../etc/passwd",
             "./Standards",
             "..",
-            "Standards/..",
+            "standards/..",
             "C:\\Windows",
             "   ",
         ] {
@@ -197,12 +198,12 @@ mod tests {
     #[test]
     fn redundant_separators_are_tolerated_but_segments_are_not_invented() {
         assert_eq!(
-            split_logical_path("/Standards/").unwrap(),
-            vec!["Standards"]
+            split_logical_path("/standards/").unwrap(),
+            vec!["standards"]
         );
         assert_eq!(
-            split_logical_path("Standards//Eng.md").unwrap(),
-            vec!["Standards", "Eng.md"]
+            split_logical_path("standards//eng.md").unwrap(),
+            vec!["standards", "eng.md"]
         );
         assert!(split_logical_path("/").unwrap_err().contains("segments"));
     }

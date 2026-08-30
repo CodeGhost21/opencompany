@@ -25,6 +25,20 @@
 
 Humans keep **final hiring decisions**; the agents run everything else. The output of this harness is **sourced, screened, and scheduled candidates**.
 
+## Tool servers
+
+Search briefs and scorecards live in a shared workspace; an open search is often tracked as work in the client's own tracker.
+
+Declared in [`mcp.json`](mcp.json) and merged with anything the install
+ships and anything an operator adds from the console. A server marked
+*needs a token* is declared but off: write its credential from
+Settings → Connections, then enable it there.
+
+| Server | What it is for | Ships |
+| --- | --- | --- |
+| `notion` | The workspace this company's documents already live in. Needs a token. | off — needs a token |
+| `linear` | Issues and cycles, when the work is tracked outside this board. Needs a token. | off — needs a token |
+
 ## Run it
 
 ```sh

@@ -1,0 +1,49 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a venture studio is defined by — the
+# flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-validation-bar"
+title = "Set up the validation bar"
+priority = "high"
+note = """
+State what a `validations` row must show before an idea gets real \
+resources: what was tested, with whom, and the result that would have \
+stopped it.
+
+A studio without a bar builds whatever the loudest idea was, and finds out \
+at launch.
+
+Done when the bar is a `decisions` row and live ideas are graded against \
+it.\
+"""
+
+[[task]]
+id = "set-up-the-venture-record"
+title = "Set up the venture record"
+priority = "high"
+note = """
+Open a `ventures` row for each thing being built, with its stage, its \
+owner and the next decision due on it.
+
+Done when every venture has a row naming its next decision.\
+"""
+
+[[task]]
+id = "set-up-the-shared-asset-library"
+title = "Set up the shared asset library"
+priority = "medium"
+note = """
+Record on `shared-assets` what every venture can reuse — infrastructure, \
+contracts, playbooks — because building it once is the whole reason a \
+studio exists.
+
+Done when the reusable assets have rows.\
+"""

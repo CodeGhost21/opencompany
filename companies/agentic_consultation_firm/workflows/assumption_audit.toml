@@ -1,0 +1,92 @@
+# Workflow graph: assumption_audit
+#
+# Referenced by `[workflows].enabled` in ../company.toml. Before anything is
+# presented, every load-bearing assumption is enumerated, rated for how much the
+# conclusion moves if it is wrong, and either checked or flagged in the room.
+# An assumption nobody enumerated is one nobody checked, and it is found by the
+# executive rather than by this firm.
+
+id = "assumption_audit"
+name = "Assumption audit"
+description = "Every load-bearing assumption is enumerated, rated, and checked or flagged before presentation."
+
+[[node]]
+id = "pending"
+kind = "trigger"
+name = "Presentation pending"
+summary = "A deck or recommendation is about to go to a client."
+
+[[node]]
+id = "enumerate"
+kind = "agent"
+name = "Enumerate the assumptions"
+summary = "Every input the analysis rests on that was not verified, with its source."
+agent = "financial_modeler"
+
+[[node]]
+id = "rate"
+kind = "agent"
+name = "Rate the sensitivity"
+summary = "How far the conclusion moves if each one is wrong. Usually two matter."
+agent = "financial_modeler"
+
+[[node]]
+id = "material"
+kind = "condition"
+name = "Anything load-bearing?"
+summary = "Branch on whether an unverified assumption actually moves the conclusion."
+[node.config]
+field = "=item.load_bearing"
+
+[[node]]
+id = "verify"
+kind = "agent"
+name = "Check what can be checked"
+summary = "Verify the load-bearing inputs against something external, or price what verifying would cost."
+agent = "industry_analyst"
+
+[[node]]
+id = "frame"
+kind = "agent"
+name = "Frame the conditionality"
+summary = "State plainly what would have to be true. A footnote is the same failure with better typography."
+agent = "strategist"
+
+[[node]]
+id = "ready"
+kind = "output"
+name = "Hand it to the workshop"
+summary = "Deliver the deck with its conditions stated rather than buried."
+[node.destination]
+kind = "channel"
+target = "engagement_delivery"
+
+[[edge]]
+from = "pending"
+to = "enumerate"
+
+[[edge]]
+from = "enumerate"
+to = "rate"
+
+[[edge]]
+from = "rate"
+to = "material"
+
+[[edge]]
+from = "material"
+to = "verify"
+label = "yes"
+
+[[edge]]
+from = "material"
+to = "frame"
+label = "no"
+
+[[edge]]
+from = "verify"
+to = "frame"
+
+[[edge]]
+from = "frame"
+to = "ready"

@@ -144,6 +144,25 @@ pub struct PruneReport {
     pub oldest_retained: Option<EventSeq>,
 }
 
+/// One item from an [`EventLog`] live subscription.
+///
+/// A lag notice is deliberately not a [`StoredEvent`]: it was never written to
+/// the journal, has no sequence, and says only that a live receiver fell behind.
+/// Consumers must discard incremental assumptions and re-read durable state.
+#[derive(Clone, Debug, PartialEq)]
+// `Event` is deliberately stored by value rather than boxed: these items are
+// produced one at a time by a live event stream and consumed immediately —
+// never collected into an owning container — so the large_enum_variant
+// optimization (boxing the larger arm to shrink the enum) would only add a
+// heap allocation to the per-event hot path without any size benefit.
+#[allow(clippy::large_enum_variant)]
+pub enum EventStreamItem {
+    /// One durable event appended after the subscription opened.
+    Event(StoredEvent),
+    /// The receiver fell behind by this many broadcast messages.
+    Gap { missed: u64 },
+}
+
 /// Decides which entries a retention pass removes.
 ///
 /// Pure and total: no clock, no I/O, no backend knowledge. Every production
@@ -243,7 +262,10 @@ pub trait EventLog: Send + Sync {
         Ok(events)
     }
     /// Subscribes to events appended after the call.
-    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent>;
+    ///
+    /// A [`EventStreamItem::Gap`] means the receiver missed one or more live
+    /// entries. It is not persisted and carries no payload from those entries.
+    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem>;
 
     /// Applies `policy`, removing the entries [`plan_prune`] selects, and
     /// reports what went.
@@ -275,6 +297,7 @@ mod test {
             workflow_id: "wf".into(),
             run_id: format!("run-{n}"),
             scheduled: false,
+            started_by: None,
         }
     }
 
@@ -285,6 +308,8 @@ mod test {
             node_id: format!("node-{n}"),
             status: WorkflowNodeStatus::Ok,
             elapsed_ms: 1,
+            diagnostics: Vec::new(),
+            agent_run_id: None,
         }
     }
 
@@ -473,13 +498,17 @@ mod test {
         // tombstone. Pruning any of them dangles a stored pointer.
         for event in [
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 text: "hi".into(),
                 by: None,
                 chat: None,
                 parent: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 chat_id: "desk".into(),
                 agent_id: "ceo".into(),
                 text: "hello".into(),

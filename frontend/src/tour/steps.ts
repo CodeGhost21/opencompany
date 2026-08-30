@@ -10,7 +10,7 @@ import type { View } from "@/components/app-shell";
  * element (`[data-tour="nav-<view>"]`), which sidesteps the lazy/Suspense race
  * entirely — navigating still swaps the main pane so the operator sees the
  * view, but the spotlight never waits on a code-split chunk. Only the two
- * richest moments (the Overview graph, the chat composer) anchor to content on
+ * richest moments (the operator overview, the chat composer) anchor to content on
  * non-lazy views.
  */
 export interface TourStop {
@@ -33,10 +33,10 @@ export const TOUR: TourStop[] = [
   },
   {
     view: "overview",
-    target: '[data-tour="overview-graph"]',
+    target: '[data-tour="operator-overview"]',
     placement: "top",
     title: "Start here each day",
-    body: "Your company at a glance: its departments, the work in flight, who's doing it, and what it remembers. Pull the graph around to explore it.",
+    body: "Start with the decisions waiting for you and work that stopped. The company graph is one click away when you need its structure.",
   },
   {
     view: "chat",
@@ -50,14 +50,14 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="nav-chat"]',
     placement: "right",
     title: "Your AI staff",
-    body: "The agents that actually do the work each have a channel and a direct message here. Open the members pane to see the whole roster.",
+    body: "The teammates that actually do the work each have a channel and a direct message here. Open the team pane to see the whole roster.",
   },
   {
     view: "workflows",
     target: '[data-tour="nav-workflows"]',
     placement: "right",
     title: "Workflows",
-    body: "Turn recurring work into a repeatable workflow — a graph of steps your agents run end to end.",
+    body: "Turn recurring work into a repeatable workflow — a graph of steps your teammates run end to end.",
   },
   {
     view: "approvals",
@@ -67,14 +67,14 @@ export const TOUR: TourStop[] = [
     body: "Anything that needs your sign-off before it happens waits here. Nothing risky runs without you.",
   },
   {
-    // Connections is a page of the Settings section now, so the stop navigates
-    // to `#/settings/connections` and spotlights the nav row that leads there.
+    // The accounts page is `#/settings/oauth` since the Connections split, so
+    // the stop navigates there and spotlights the nav row that leads to it.
     view: "settings",
-    sub: "connections",
+    sub: "oauth",
     target: '[data-tour="nav-settings"]',
     placement: "right",
     title: "Connect your tools",
-    body: "Plug in the tools your company already uses — Gmail, Slack, GitHub — so your agents can act for real.",
+    body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your teammates can act for real.",
   },
   {
     view: "chat",

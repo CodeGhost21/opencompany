@@ -38,9 +38,14 @@ other's companies, and until `src/store/lock.rs` existed nothing stopped them �
 
 On a server that was survivable, because a second `opencompany serve` against
 one root is a deliberate act. A desktop application is different in kind: it is
-launched by double-clicking, and being launched twice is ordinary. So is the
-common development shape — `opencompany serve` in a terminal against
-`~/.opencompany`, then the desktop app opening the same root.
+launched by double-clicking, and being launched twice is ordinary — two windows
+of the installed app contend for one root with nobody having decided to do
+anything.
+
+A terminal `serve` and the desktop app resolve the same root by default (see
+[the desktop root](#the-desktop-root-is-the-cli-root) below), so they cannot run
+over that root at the same time. Give one process a different
+`OPENCOMPANY_DATA_DIR` when both need to run side by side.
 
 `serve` and `app::boot::prepare_instance` both take an exclusive advisory lock
 on `<root>/.lock` (`flock`/`LockFileEx` via `fs2`) and hold it for the life of
@@ -118,6 +123,27 @@ OPENCOMPANY_DATA_DIR=/tmp/oc-b opencompany serve \
 `--home /tmp/oc-a` places the bundles the same way and takes precedence, but it
 does **not** move the shared workspace — prefer the variable for side-by-side
 hosts.
+
+## The desktop root is the CLI root
+
+The desktop shell calls the host binary's canonical data-root resolver
+(`src/app/config.rs::data_dir_from_env`) and passes the result explicitly to
+`app::prepare_instance`. Consequently a default desktop install and a default
+`opencompany serve` both use `$HOME/.opencompany` (or
+`%USERPROFILE%\.opencompany` on Windows). Companies and instance metadata are
+therefore visible in the same place whichever launcher starts the binary.
+
+`OPENCOMPANY_DATA_DIR` still wins where it is set, so a developer can point a
+desktop build or CLI process at a scratch root. When neither a home directory
+nor an explicit root is available, both fall back to a relative
+`.opencompany`.
+
+The desktop takes the same prepare sequence as `serve` through
+`app::boot::prepare_instance`: resolve, lock, migrate, materialize the
+[workspace layout](workspace-layout.md), and probe the journal root. It does
+**not** run `serve`'s storage-backend selection, so the desktop is always
+`fs`-backed — `OPENCOMPANY_STORAGE`, `OPENCOMPANY_MONGODB_URI` and the sqlite
+backend are command-line-only today.
 
 ## Instance identity
 

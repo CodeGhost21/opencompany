@@ -7,20 +7,25 @@ under `src/`. Public module surfaces live in source module directories:
 
 - `src/app/`: runtime configuration and shared Axum state
 - `src/server/`: Axum router and HTTP handlers
+- `src/ledger/`: dynamic ledgers — declared record shapes, the append-only fold,
+  and the `derived/` folder they render into (`docs/spec/runtime/ledgers.md`)
+- `src/globals/`: the global baseline — the agents, workflows, skills and
+  starting tool belt every company gets whichever vertical it started from,
+  authored in `globals/` and embedded at build time
+  (`docs/spec/runtime/globals.md`)
 - `src/openhuman/`: launcher and integration seams for the vendored OpenHuman checkout
 - `src/tiny/`: optional TinyAgents crate feature/status surface
 
 The command-line entrypoint lives in `src/bin/opencompany.rs`. Business types
 are data-only definitions under `companies/` (a `company.toml` manifest plus a
 `README.md` — not Cargo crates), loaded at runtime via `opencompany serve
---company companies/<name>`. The operator console is a Vite/React app under
-`frontend/`. Design notes and module specifications live in `docs/`, with
+--company companies/<name>`. What every company has regardless of which of
+those it started from is authored beside them in `globals/`. The operator
+console is a Vite/React app under `frontend/`. Design notes and module specifications live in `docs/`, with
 `docs/spec/README.md` as the top-level architecture reference and
 `docs/modules/` holding per-surface design docs.
-Vendored runtime sources live under `vendor/` as Git submodules:
-
-- `vendor/openhuman/`
-- `vendor/tinyagents/`
+The vendored runtime source is the `vendor/openhuman/` Git submodule. TinyAgents
+is inherited from OpenHuman at `vendor/openhuman/vendor/tinyagents/`.
 
 Prefer small modules with focused responsibilities. Keep core type definitions
 in a dedicated `types.rs` file and package-local tests in the module file or a
@@ -35,11 +40,48 @@ dedicated `test.rs` file when they grow.
 - `cargo test`: run the full test suite.
 - `cargo run --bin opencompany`: run the CLI.
 - `cargo run --bin opencompany -- serve`: run the Axum HTTP server on `127.0.0.1:8080`.
-- `git submodule update --init --recursive`: initialize OpenHuman and TinyAgents.
-- `cargo check --features tiny`: compile against vendored TinyAgents.
+- `./scripts/dump-prompt.sh --company companies/<name>`: print the system prompt each agent in that bundle is built with (`docs/spec/runtime/agents.md`).
+- `git submodule update --init vendor/openhuman`: initialize OpenHuman.
+- `scripts/ci/init-vendored-submodules.sh`: initialize its vendored crates.
+- `cargo check --features tiny`: compile against OpenHuman's TinyAgents pin.
 
 Run commands from the repository root unless a future workspace layout changes
 the module location.
+
+`rust-toolchain.toml` pins an **explicit** Rust version (issue #1298), and
+every `dtolnay/rust-toolchain` call site in `.github/workflows/` passes that
+same version. Do not change either back to `stable`. Both said `stable` until
+rustc 1.98.0 shipped on 2026-08-18 with a newly-enforced
+`clippy::result_large_err`, at which point every open PR in the repo went red
+at once — including PRs touching no Rust — while everyone still on 1.97.x
+passed `cargo clippy` locally and could not reproduce it. A pin turns the next
+stable release into one reviewable bump PR instead.
+
+To bump: edit `rust-toolchain.toml`, then run
+`scripts/ci/assert-toolchain-pin.sh`, which fails and names any workflow call
+site still on the old version. That script runs in the `rust` job, so a
+half-finished bump is caught rather than shipped. Because the pin is in
+`rust-toolchain.toml`, a plain `cargo` in this checkout already uses it — you
+do not need `cargo +<version>`, and if your `rustup` lacks the toolchain it
+will fetch it.
+
+`.cargo/config.toml` sets `RUST_MIN_STACK = 8388608` for every cargo-invoked
+process (issue #895). Do not drop it. The gated suite exceeds libtest's 2 MiB
+default thread stack, and when it does the failure is a `SIGABRT` that aborts
+the **whole test binary** — so every test after it is skipped, and the symptom
+reads as "I broke the harness" rather than "this needs a bigger stack".
+
+8 MiB is 2.7x the measured floor: the whole gated suite aborts at 2 MiB and
+passes 4182/4182 at 3 MiB (aarch64-darwin, default parallelism). The margin
+covers x86-64 CI frame layout, higher CI parallelism, and growth. The depth is
+cumulative `async fn` composition in the vendored OpenHuman turn chain (~117 KiB
+for its largest single future, against ~32 KiB for the largest OpenCompany-owned
+one), so it is not bounded from this repo — `Box::pin` at our own seam was tried
+and moved it by nothing. Full evidence is in `.cargo/config.toml`.
+
+If you change the value, say what you measured; an unexplained ceiling is the
+ratchet #895 exists to complain about. Export `RUST_MIN_STACK` yourself to
+override it — the file does not use `force`.
 
 ## Coding Style & Naming Conventions
 
@@ -122,6 +164,13 @@ injects its environment. When developing hosted behavior, know the seams:
   application-layer only in this mode — a compromised container can reach
   every tenant's documents; db-per-tenant stays the security default. See
   `docs/spec/runtime/storage.md`. Unset (the default) is a full no-op.
+- The manager should also inject `OPENCOMPANY_DEPLOYMENT=hosted-tenant` and,
+  when product analytics is on, `OPENCOMPANY_ANALYTICS_TOKEN`. Neither is
+  required to boot: an instance that says nothing is treated as **self-hosted**
+  and reports nothing, which is the safe direction and the documented default
+  (`docs/spec/runtime/analytics.md`). `OPENCOMPANY_TENANT_ID` alone also implies
+  a hosted tenant, so shared-single-DB tenants are covered without the new
+  variable; db-per-tenant tenants need it.
 - Storage backend selection and the MongoDB backend are documented in
   `docs/spec/runtime/storage.md`; the port traits it implements are the
   entire persistence contract (`docs/spec/runtime/ports.md`).

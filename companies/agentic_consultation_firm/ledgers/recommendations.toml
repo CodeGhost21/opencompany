@@ -1,0 +1,106 @@
+# What this firm has advised a client to do, and what happened.
+#
+# Consulting's own accountability gap. A deck is delivered, a recommendation is
+# made, and nothing anywhere records whether the client did it or whether it
+# worked. Without this ledger the firm's expertise is a stack of decks; with it,
+# the firm can say "we advised this four times, twice it was implemented, and
+# here is what happened" — which is the only thing that separates advice from
+# opinion.
+
+title = "Recommendations"
+purpose = """
+Every recommendation this firm has made: what was advised, what it rested on, \
+whether the client acted on it, and what resulted. Read it before advising \
+anything — this firm has probably advised it before, and knows how it went.\
+"""
+written_by = "`record_entry` to make or update a recommendation, `close_entry` when its outcome is known or it is withdrawn"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "recommendation"
+role = "title"
+required = true
+description = "What the client should do, stated as an action rather than a theme."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "engagement"
+role = "refs"
+required = true
+description = "The engagement it was made in."
+
+[[field]]
+name = "rests_on"
+role = "prose"
+required = true
+description = "The analysis, model or interview behind it. A recommendation with no basis is a preference in a deck."
+
+[[field]]
+name = "expected"
+role = "prose"
+description = "What it should achieve, stated before the client decides. This is what makes the outcome checkable."
+
+[[field]]
+name = "outcome"
+role = "prose"
+description = "What actually happened, once known. Including nothing, which is the commonest."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — implemented, declined, or withdrawn. Required when it closes."
+
+[[status]]
+name = "drafted"
+
+[[status]]
+name = "presented"
+
+[[status]]
+name = "accepted"
+
+[[status]]
+name = "implemented"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "declined"
+closed = true
+needs_reason = true
+aliases = ["withdrawn"]
+
+[[section]]
+heading = "Live"
+blurb = "Presented or accepted, not yet done. These are what the firm is currently accountable for."
+statuses = ["presented", "accepted"]
+order = "recent"
+
+[[section]]
+heading = "Drafted"
+blurb = "Reached internally, not yet shown to a client."
+statuses = ["drafted"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+blurb = """
+Implemented, declined, or withdrawn — each with the reason and, where known, \
+the outcome. A declined recommendation's reason is what stops this firm making \
+the same case to the same client twice.\
+"""
+statuses = ["implemented", "declined"]
+cap = 20

@@ -1,0 +1,23 @@
+{
+  "$comment": "Tickets arrive in the support inbox, escalations become engineering issues, and the documentation the answers cite is the workspace's.",
+  "mcpServers": {
+    "intercom": {
+      "url": "https://mcp.intercom.com/mcp",
+      "description": "Live conversations and help-centre articles. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/intercom/auth"
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "description": "Issues and cycles, when the work is tracked outside this board. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/linear/auth"
+    },
+    "notion": {
+      "url": "https://mcp.notion.com/mcp",
+      "description": "The workspace this company's documents already live in. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/notion/auth"
+    }
+  }
+}

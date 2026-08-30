@@ -28,13 +28,16 @@ use crate::company::CompanyManifest;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
 use crate::ports::events::EventLog;
+use crate::ports::facts::{FactRecord, FactStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
-    BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk,
-    EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember, OverlayDeskOrder,
-    OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
+    AgentOverride, BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
+    ContextChunk, EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember,
+    OverlayDeskOrder, OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
+    ToolGrantsOverride,
 };
+use crate::store::select::MemoryScopes;
 
 /// Canonical bundle file and directory names, matching the fs
 /// [`Bundle`](crate::store::paths::Bundle) layout.
@@ -44,6 +47,15 @@ const EVENTS_JSONL: &str = "events.jsonl";
 const LEDGER_JSONL: &str = "ledger.jsonl";
 const MEMORY_DIR: &str = "memory";
 const TRACES_JSONL: &str = "traces.jsonl";
+const ARCHIVES_JSONL: &str = "archives.jsonl";
+/// Operator facts, at the bundle ROOT — the same place the live fs bundle
+/// keeps them (`paths::Bundle::facts_jsonl`), so an export stays diffable
+/// against a live home and a direct reader finds them where the canonical
+/// layout says. Absent from bundles written before facts joined the export;
+/// `read_jsonl` treats an absent file as empty, so both directions stay
+/// compatible — an old importer ignores the new file, a new importer accepts
+/// an old bundle.
+const FACTS_JSONL: &str = "facts.jsonl";
 const CONTEXT_DIR: &str = "context";
 const CONTEXT_INDEX_JSONL: &str = "index.jsonl";
 const CONTEXT_BLOBS_DIR: &str = "blobs";
@@ -124,11 +136,37 @@ struct BundleMeta {
     /// `#[serde(default)]` for back-compat with older bundles.
     #[serde(default)]
     overlay_budgets: Vec<BudgetOverride>,
+    /// The operator's edits of manifest-declared teammates at export time.
+    /// Preserved so an export→import keeps the roster the operator shaped from
+    /// the console, rather than silently reverting every blueprint teammate to
+    /// the name, role, instructions and scope `company.toml` declared.
+    /// `#[serde(default)]` for back-compat with older bundles.
+    #[serde(default)]
+    overlay_agent_edits: Vec<AgentOverride>,
+    /// The ids of manifest teammates removed from the console at export time.
+    /// Preserved so an import does not silently restore a teammate the operator
+    /// retired — the blueprint still declares it, so without the tombstone it
+    /// comes straight back. `#[serde(default)]` for back-compat with older
+    /// bundles.
+    #[serde(default)]
+    overlay_retired_agents: Vec<String>,
     /// The operator's `[policy]` override at export time (issue #562).
     /// `#[serde(default)]` for back-compat with older bundles, which read as
     /// `None` — the manifest's `[policy]` decides, exactly as before.
     #[serde(default)]
     overlay_policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants at export time
+    /// (issue #1796). Preserved so an export→import does not silently revoke an
+    /// integration the operator granted from a connect surface, leaving the
+    /// restored company "Connected" and reaching nobody. `#[serde(default)]`
+    /// for back-compat with older bundles, which read as `None`: the manifest's
+    /// `[tools]` decides, exactly as before.
+    ///
+    /// Carries the **seed's** list beside it, not the record's materialised one
+    /// — see `read_via_ports` for why the bundle's `company.toml` must not name
+    /// what the console added.
+    #[serde(default)]
+    overlay_tool_grants: Option<ToolGrantsOverride>,
     /// The operator-set per-desk tool ceilings at export time. Preserved so an
     /// export→import does not silently widen a desk back to the company's full
     /// grant — the same class of loss `overlay_policy` above is carried to
@@ -148,6 +186,37 @@ struct BundleMeta {
     /// importing cleanly (they decode to `None` — no migration).
     #[serde(default)]
     template_provenance: Option<TemplateProvenance>,
+    /// What the operator told first-run setup about their business, carried
+    /// through the bundle so an export→import keeps it — Phase 2 builds
+    /// workflows from these answers, and a company that lost them on a restore
+    /// would be asked to describe itself twice.
+    /// `#[serde(default)]` keeps older bundles importing cleanly.
+    #[serde(default)]
+    setup: Option<crate::company::setup::SetupAnswers>,
+    /// Whether the operator had confirmed the company's display name at export
+    /// time (issue #1843). Preserved so an export→import does not silently
+    /// re-open a confirmation step the operator already cleared.
+    /// `#[serde(default)]` keeps older bundles importing cleanly (they decode
+    /// to `false`, the pre-#1843 behaviour every such bundle already had).
+    #[serde(default)]
+    name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed at export time
+    /// (issue #1843). Preserved for the same reason `overlay_policy` and
+    /// `disabled_workflows` above are: without this, an export→import would
+    /// silently re-gate an already-activated company behind onboarding.
+    /// `#[serde(default)]` keeps older bundles importing cleanly (`None`).
+    #[serde(default)]
+    activation_completed_at: Option<u64>,
+    /// Whether the source company had ever been saved by activation-aware
+    /// code at export time (PR #1875 review finding). Preserved so import
+    /// does not silently stamp a legacy pre-#1843 company — one whose gate
+    /// was never seen — as activation-aware, which would block
+    /// `RuntimeBuilder::build`'s grandfather back-fill on the very next boot
+    /// and show an established operator the fresh-company onboarding gate.
+    /// `#[serde(default)]` reads a bundle written before this field existed
+    /// as `false`: exactly the legacy state such a bundle actually has.
+    #[serde(default)]
+    activation_gate_seen: bool,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -172,9 +241,16 @@ struct BundleContents {
     manifest: CompanyManifest,
     lifecycle: String,
     template_provenance: Option<TemplateProvenance>,
+    setup: Option<crate::company::setup::SetupAnswers>,
     ledger: Vec<LedgerEntry>,
     events: Vec<StoredEvent>,
     traces: Vec<CompressedTrace>,
+    /// Traces retained in a provider's archive tier. Empty for base stores and
+    /// bundles written before archive export was introduced.
+    archived_traces: Vec<CompressedTrace>,
+    /// Operator facts. Empty when the source served no fact port (an old
+    /// bundle, or an export run without one) — never a failure.
+    facts: Vec<FactRecord>,
     context: Vec<ExportedChunk>,
     /// The operator team overlay (operator-added teammates), carried through the
     /// bundle so export→import preserves the operator roster.
@@ -194,6 +270,12 @@ struct BundleContents {
     /// The operator-set per-teammate daily spend caps, carried through the
     /// bundle so export→import preserves console-set budgets (issue #343).
     overlay_budgets: Vec<BudgetOverride>,
+    /// The operator's edits of manifest-declared teammates, carried through the
+    /// bundle so export→import preserves a console-shaped roster.
+    overlay_agent_edits: Vec<AgentOverride>,
+    /// The ids of manifest teammates the operator removed, carried through the
+    /// bundle so an import does not restore them.
+    overlay_retired_agents: Vec<String>,
     /// The operator's `[policy]` override, carried through the bundle so
     /// export→import preserves a console-set autonomy tier (issue #562).
     ///
@@ -201,6 +283,10 @@ struct BundleContents {
     /// silently re-tightening (or re-loosening) the approval gate on import —
     /// the same class of loss #343 fixed for spend caps.
     overlay_policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants, carried through the
+    /// bundle so export→import preserves an integration granted from a connect
+    /// surface (rather than restoring it "Connected" and reaching nobody).
+    overlay_tool_grants: Option<ToolGrantsOverride>,
     /// The operator-set per-desk tool ceilings, carried through the bundle so
     /// export→import preserves a console-narrowed department (rather than
     /// restoring it at the company's full grant).
@@ -208,6 +294,20 @@ struct BundleContents {
     /// The workflow ids switched off, carried through the bundle so an import
     /// restores a paused workflow paused (issue #276).
     disabled_workflows: Vec<String>,
+    /// Whether the operator had confirmed the company's display name
+    /// (issue #1843), carried through the bundle so export→import preserves
+    /// it.
+    name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed (issue #1843), carried
+    /// through the bundle so export→import does not silently re-gate an
+    /// already-activated company behind onboarding.
+    activation_completed_at: Option<u64>,
+    /// Whether the source company had ever been saved by activation-aware
+    /// code (PR #1875 review finding), carried through the bundle so import
+    /// restores a legacy pre-#1843 company with its gate still unseen —
+    /// otherwise `write_via_ports`'s save would stamp it seen on arrival and
+    /// permanently block the grandfather back-fill for that company.
+    activation_gate_seen: bool,
 }
 
 impl BundleContents {
@@ -218,11 +318,17 @@ impl BundleContents {
         events: Arc<dyn EventLog>,
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
+        facts: Option<Arc<dyn FactStore>>,
+        scopes: Option<Arc<dyn MemoryScopes>>,
     ) -> Result<Self> {
         let record = store
             .load(id)
             .await?
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(id.to_string()))?;
+        // PR #1875 review finding: read alongside the record, not derived
+        // from it — `CompanyRecord` carries no such field, only the store
+        // does (see `CompanyStore::activation_gate_seen`'s doc comment).
+        let activation_gate_seen = store.activation_gate_seen(id).await?;
 
         // Issue #358: the withdrawn half of a discussion never reaches the
         // bundle. This is the load-bearing half of that issue — hiding a
@@ -232,6 +338,14 @@ impl BundleContents {
         let events =
             scrub_redacted_discussion(events.read_from(id, EventSeq::new(0), usize::MAX).await?);
         let traces = memory.recent_traces(id, usize::MAX).await?;
+        let archived_traces = match scopes {
+            Some(scopes) => scopes.archived_traces(id).await?,
+            None => Vec::new(),
+        };
+        let facts = match facts {
+            Some(port) => port.list(id, None, None).await?,
+            None => Vec::new(),
+        };
 
         let metas = context.list(id, "").await?;
         let mut chunks = Vec::with_capacity(metas.len());
@@ -244,14 +358,36 @@ impl BundleContents {
             });
         }
 
+        // Issue #1796: the bundle carries the **seed's** `[tools].allow`, not the
+        // record's materialised one.
+        //
+        // `write_to_dir` serializes this manifest straight into the bundle's
+        // `company.toml`, and that file BECOMES THE SEED for whatever host
+        // serves the restored company. Writing the folded list there would hand
+        // the next rebuild a seed that already grants `chargebee`, the carry
+        // rule would correctly read that as "version control spoke" and drop the
+        // override — and the console grant would have been silently promoted to
+        // a manifest grant: attribution gone, and `DELETE …/tools/grants` unable
+        // to reach it ever again. The override rides the bundle beside it, and
+        // `restore_via_ports` re-folds, so the restored record is materialised
+        // exactly as the builder would leave it.
+        let mut manifest = record.manifest;
+        manifest.tools.allow = crate::ports::types::seed_tool_allow(
+            &manifest.tools.allow,
+            record.overlay_tool_grants.as_ref(),
+        );
+
         Ok(Self {
             id: id.clone(),
-            manifest: record.manifest,
+            manifest,
             lifecycle: record.lifecycle,
             template_provenance: record.template_provenance,
+            setup: record.setup,
             ledger: record.ledger,
             events,
             traces,
+            archived_traces,
+            facts,
             context: chunks,
             overlay_agents: record.overlay_agents,
             overlay_desk_members: record.overlay_desk_members,
@@ -259,9 +395,15 @@ impl BundleContents {
             overlay_desks: record.overlay_desks,
             overlay_workflows: record.overlay_workflows,
             overlay_budgets: record.overlay_budgets,
+            overlay_agent_edits: record.overlay_agent_edits,
+            overlay_retired_agents: record.overlay_retired_agents,
             overlay_policy: record.overlay_policy,
+            overlay_tool_grants: record.overlay_tool_grants,
             overlay_desk_tools: record.overlay_desk_tools,
             disabled_workflows: record.disabled_workflows,
+            name_confirmed: record.name_confirmed,
+            activation_completed_at: record.activation_completed_at,
+            activation_gate_seen,
         })
     }
 
@@ -275,26 +417,83 @@ impl BundleContents {
         events: Arc<dyn EventLog>,
         memory: Arc<dyn MemoryStore>,
         context: Arc<dyn ContextStore>,
+        facts: Option<Arc<dyn FactStore>>,
+        scopes: Option<Arc<dyn MemoryScopes>>,
     ) -> Result<()> {
+        // Archived traces must remain in their recovery tier. Refuse before any
+        // append-only writes when the import target cannot restore that tier.
+        if !self.archived_traces.is_empty() && scopes.is_none() {
+            return Err(OpenCompanyError::Store(format!(
+                "bundle carries {} archived traces but the import target serves no archive tier",
+                self.archived_traces.len()
+            )));
+        }
+        // append-only, so a refusal after `store.save`/`append` would leave a
+        // half-imported company whose retry duplicates history.
+        if facts.is_none() && !self.facts.is_empty() {
+            return Err(OpenCompanyError::Store(format!(
+                "bundle carries {} operator facts but the import target serves no fact port",
+                self.facts.len()
+            )));
+        }
+        // Facts land FIRST, for the same append-only reason the refusal above
+        // fires first: `upsert` is idempotent, so a failure here leaves a
+        // retry-safe state — whereas a fact failure AFTER `store.save` and the
+        // ledger/event appends would leave a half-import whose retry
+        // duplicates history.
+        if let Some(port) = &facts {
+            for fact in &self.facts {
+                port.upsert(&self.id, fact).await?;
+            }
+        }
+        if let Some(scopes) = scopes {
+            scopes
+                .restore_archived_traces(&self.id, &self.archived_traces)
+                .await?;
+        }
         // The manifest + lifecycle; ledger is appended separately so the store's
         // append-only ledger stays authoritative.
+        // The mirror of the strip in `read_via_ports`: the bundle holds the seed,
+        // so the record written here is re-folded. Without it a restored company
+        // would report its console grants as ungranted — and every reader of
+        // `[tools].allow` would agree with that — until its first rebuild.
+        let mut manifest = self.manifest.clone();
+        manifest.tools.allow = crate::ports::types::effective_tool_allow(
+            &manifest.tools.allow,
+            self.overlay_tool_grants.as_ref(),
+        );
+        // `save_importing`, not `save`: this call is replaying a bundle's
+        // prior state rather than a normal activation-aware write, so the
+        // gate marker must land as `self.activation_gate_seen` — `false` for
+        // a legacy pre-#1843 bundle — instead of unconditionally `true`
+        // (PR #1875 review finding; see `CompanyStore::save_importing`'s doc
+        // comment for the full reasoning).
         store
-            .save(&CompanyRecord {
-                id: self.id.clone(),
-                manifest: self.manifest.clone(),
-                ledger: Vec::new(),
-                lifecycle: self.lifecycle.clone(),
-                overlay_agents: self.overlay_agents.clone(),
-                overlay_desk_members: self.overlay_desk_members.clone(),
-                overlay_desk_order: self.overlay_desk_order.clone(),
-                overlay_desks: self.overlay_desks.clone(),
-                overlay_workflows: self.overlay_workflows.clone(),
-                overlay_budgets: self.overlay_budgets.clone(),
-                overlay_policy: self.overlay_policy.clone(),
-                overlay_desk_tools: self.overlay_desk_tools.clone(),
-                disabled_workflows: self.disabled_workflows.clone(),
-                template_provenance: self.template_provenance.clone(),
-            })
+            .save_importing(
+                &CompanyRecord {
+                    overlay_agent_edits: self.overlay_agent_edits.clone(),
+                    overlay_retired_agents: self.overlay_retired_agents.clone(),
+                    id: self.id.clone(),
+                    manifest,
+                    ledger: Vec::new(),
+                    lifecycle: self.lifecycle.clone(),
+                    overlay_agents: self.overlay_agents.clone(),
+                    overlay_desk_members: self.overlay_desk_members.clone(),
+                    overlay_desk_order: self.overlay_desk_order.clone(),
+                    overlay_desks: self.overlay_desks.clone(),
+                    overlay_workflows: self.overlay_workflows.clone(),
+                    overlay_budgets: self.overlay_budgets.clone(),
+                    overlay_policy: self.overlay_policy.clone(),
+                    overlay_tool_grants: self.overlay_tool_grants.clone(),
+                    overlay_desk_tools: self.overlay_desk_tools.clone(),
+                    disabled_workflows: self.disabled_workflows.clone(),
+                    template_provenance: self.template_provenance.clone(),
+                    setup: self.setup.clone(),
+                    name_confirmed: self.name_confirmed,
+                    activation_completed_at: self.activation_completed_at,
+                },
+                self.activation_gate_seen,
+            )
             .await?;
         for entry in &self.ledger {
             store.append_ledger(&self.id, entry.clone()).await?;
@@ -336,10 +535,17 @@ impl BundleContents {
             overlay_desks: self.overlay_desks.clone(),
             overlay_workflows: self.overlay_workflows.clone(),
             overlay_budgets: self.overlay_budgets.clone(),
+            overlay_agent_edits: self.overlay_agent_edits.clone(),
+            overlay_retired_agents: self.overlay_retired_agents.clone(),
             overlay_policy: self.overlay_policy.clone(),
+            overlay_tool_grants: self.overlay_tool_grants.clone(),
             overlay_desk_tools: self.overlay_desk_tools.clone(),
             disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
+            setup: self.setup.clone(),
+            name_confirmed: self.name_confirmed,
+            activation_completed_at: self.activation_completed_at,
+            activation_gate_seen: self.activation_gate_seen,
         };
         write_file(
             &dest.join(META_JSON),
@@ -357,6 +563,42 @@ impl BundleContents {
             jsonl(&self.traces)?.as_bytes(),
         )
         .await?;
+        if !self.archived_traces.is_empty() {
+            write_file(
+                &memory_dir.join(ARCHIVES_JSONL),
+                jsonl(&self.archived_traces)?.as_bytes(),
+            )
+            .await?;
+        } else {
+            match tokio::fs::remove_file(memory_dir.join(ARCHIVES_JSONL)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(OpenCompanyError::Store(format!(
+                        "cannot remove a stale archive file from the bundle: {e}"
+                    )));
+                }
+            }
+        }
+        // Only when there are any: an empty file would make every new export
+        // differ from an old host's byte-for-byte for no information. At the
+        // bundle root, matching `paths::Bundle::facts_jsonl`. A factless
+        // export must also REMOVE a stale file a previous export left in the
+        // same directory — otherwise a later import resurrects facts that are
+        // absent from the selected source.
+        if !self.facts.is_empty() {
+            write_file(&dest.join(FACTS_JSONL), jsonl(&self.facts)?.as_bytes()).await?;
+        } else {
+            match tokio::fs::remove_file(dest.join(FACTS_JSONL)).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(OpenCompanyError::Store(format!(
+                        "cannot remove a stale facts file from the bundle: {e}"
+                    )));
+                }
+            }
+        }
 
         let context_dir = dest.join(CONTEXT_DIR);
         let blobs_dir = context_dir.join(CONTEXT_BLOBS_DIR);
@@ -406,6 +648,20 @@ impl BundleContents {
                 meta.id
             )));
         }
+        // The roster edits carry the same invariant for the same reason, and are
+        // checked in the same breath: `CompanyRecord::agent_override` also reads
+        // the first match, so two rows for one teammate would apply whichever the
+        // bundle happened to serialize first — restoring a name the operator
+        // changed, or a tool grant they narrowed, with nothing to say which row
+        // won. Both refusals fire before any port is written, so a rejected
+        // bundle leaves the target untouched.
+        if let Some(agent_id) = AgentOverride::duplicate_agent_id(&meta.overlay_agent_edits) {
+            return Err(OpenCompanyError::Store(format!(
+                "invalid {META_JSON}: {} carries more than one edit for teammate \
+                 '{agent_id}'; at most one is allowed",
+                meta.id
+            )));
+        }
 
         let ledger = read_jsonl::<LedgerEntry>(&src.join(LEDGER_JSONL)).await?;
         // Scrubbed on the way IN as well as on the way out (issue #358), which
@@ -418,6 +674,10 @@ impl BundleContents {
             scrub_redacted_discussion(read_jsonl::<StoredEvent>(&src.join(EVENTS_JSONL)).await?);
         let traces =
             read_jsonl::<CompressedTrace>(&src.join(MEMORY_DIR).join(TRACES_JSONL)).await?;
+        let archived_traces =
+            read_jsonl::<CompressedTrace>(&src.join(MEMORY_DIR).join(ARCHIVES_JSONL)).await?;
+        // Absent on bundles that predate facts-in-the-bundle: empty, not an error.
+        let facts = read_jsonl::<FactRecord>(&src.join(FACTS_JSONL)).await?;
 
         let context_dir = src.join(CONTEXT_DIR);
         let index = read_jsonl::<IndexEntry>(&context_dir.join(CONTEXT_INDEX_JSONL)).await?;
@@ -437,9 +697,12 @@ impl BundleContents {
             manifest,
             lifecycle: meta.lifecycle,
             template_provenance: meta.template_provenance,
+            setup: meta.setup,
             ledger,
             events,
             traces,
+            archived_traces,
+            facts,
             context,
             overlay_agents: meta.overlay_agents,
             overlay_desk_members: meta.overlay_desk_members,
@@ -447,9 +710,15 @@ impl BundleContents {
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
+            overlay_agent_edits: meta.overlay_agent_edits,
+            overlay_retired_agents: meta.overlay_retired_agents,
             overlay_policy: meta.overlay_policy,
+            overlay_tool_grants: meta.overlay_tool_grants,
             overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
+            name_confirmed: meta.name_confirmed,
+            activation_completed_at: meta.activation_completed_at,
+            activation_gate_seen: meta.activation_gate_seen,
         })
     }
 }
@@ -520,6 +789,11 @@ fn scrub_redacted_discussion(events: Vec<StoredEvent>) -> Vec<StoredEvent> {
 /// backend's private on-disk shape. When [`ExportOpts::include_secrets`] is set
 /// and [`ExportOpts::fs_bundle`] points at the source fs bundle, the fs-only
 /// `secrets/` and `keys/` directories are copied verbatim.
+// Eight arguments is over clippy's default ceiling, taken knowingly: five of
+// them are the durable ports, and folding them into a struct is a wider
+// refactor than this addition warrants (the repo carries the same allow at
+// its other port-heavy seams).
+#[allow(clippy::too_many_arguments)]
 pub async fn export_bundle(
     id: &CompanyId,
     dest: &Path,
@@ -527,9 +801,27 @@ pub async fn export_bundle(
     events: Arc<dyn EventLog>,
     memory: Arc<dyn MemoryStore>,
     context: Arc<dyn ContextStore>,
+    facts: Option<Arc<dyn FactStore>>,
     opts: ExportOpts,
 ) -> Result<()> {
-    let contents = BundleContents::read_via_ports(id, store, events, memory, context).await?;
+    export_bundle_with_scopes(id, dest, store, events, memory, context, facts, None, opts).await
+}
+
+/// Exports a bundle while preserving an optional provider archive tier.
+#[allow(clippy::too_many_arguments)]
+pub async fn export_bundle_with_scopes(
+    id: &CompanyId,
+    dest: &Path,
+    store: Arc<dyn CompanyStore>,
+    events: Arc<dyn EventLog>,
+    memory: Arc<dyn MemoryStore>,
+    context: Arc<dyn ContextStore>,
+    facts: Option<Arc<dyn FactStore>>,
+    scopes: Option<Arc<dyn MemoryScopes>>,
+    opts: ExportOpts,
+) -> Result<()> {
+    let contents =
+        BundleContents::read_via_ports(id, store, events, memory, context, facts, scopes).await?;
     contents.write_to_dir(dest).await?;
 
     if opts.include_secrets
@@ -555,11 +847,25 @@ pub async fn import_bundle(
     events: Arc<dyn EventLog>,
     memory: Arc<dyn MemoryStore>,
     context: Arc<dyn ContextStore>,
+    facts: Option<Arc<dyn FactStore>>,
+) -> Result<CompanyId> {
+    import_bundle_with_scopes(src, store, events, memory, context, facts, None).await
+}
+
+/// Imports a bundle while restoring its optional provider archive tier.
+pub async fn import_bundle_with_scopes(
+    src: &Path,
+    store: Arc<dyn CompanyStore>,
+    events: Arc<dyn EventLog>,
+    memory: Arc<dyn MemoryStore>,
+    context: Arc<dyn ContextStore>,
+    facts: Option<Arc<dyn FactStore>>,
+    scopes: Option<Arc<dyn MemoryScopes>>,
 ) -> Result<CompanyId> {
     let contents = BundleContents::read_from_dir(src).await?;
     let id = contents.id.clone();
     contents
-        .write_via_ports(store, events, memory, context)
+        .write_via_ports(store, events, memory, context, facts, scopes)
         .await?;
     Ok(id)
 }
@@ -755,6 +1061,32 @@ mod test {
         toml::from_str(toml_src).expect("parse manifest")
     }
 
+    /// A minimal running company record for tests that only need one to exist.
+    fn company_record(id: &CompanyId) -> CompanyRecord {
+        CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        }
+    }
+
     fn fs_ports(root: &Path) -> Ports {
         (
             Arc::new(FsCompanyStore::new(root.to_path_buf())),
@@ -762,6 +1094,82 @@ mod test {
             Arc::new(FsMemoryStore::new(root.to_path_buf())),
             Arc::new(FsContextStore::new(root.to_path_buf())),
         )
+    }
+
+    struct ArchiveScopes {
+        archived: Vec<CompressedTrace>,
+        restored: Arc<std::sync::Mutex<Vec<CompressedTrace>>>,
+        context: Arc<FsContextStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryScopes for ArchiveScopes {
+        fn agent_context(&self, _agent_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        fn desk_context(&self, _desk_id: &str) -> Arc<dyn ContextStore> {
+            self.context.clone()
+        }
+
+        async fn archived_traces(&self, _company: &CompanyId) -> Result<Vec<CompressedTrace>> {
+            Ok(self.archived.clone())
+        }
+
+        async fn restore_archived_traces(
+            &self,
+            _company: &CompanyId,
+            traces: &[CompressedTrace],
+        ) -> Result<()> {
+            self.restored.lock().unwrap().extend_from_slice(traces);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_traces_survive_bundle_roundtrip_in_the_archive_tier() {
+        let home1 = tmp_root("archive-src");
+        let home2 = tmp_root("archive-dst");
+        let dest = tmp_root("archive-bundle");
+        let id = CompanyId::new("archive-co");
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&company_record(&id)).await.unwrap();
+        let archived = vec![CompressedTrace {
+            cycle_id: "evicted-cycle".into(),
+            summary: "retained recovery trace".into(),
+            at_millis: 7,
+        }];
+        let source_scopes = Arc::new(ArchiveScopes {
+            archived: archived.clone(),
+            restored: Arc::new(std::sync::Mutex::new(Vec::new())),
+            context: Arc::new(FsContextStore::new(home1.clone())),
+        });
+        export_bundle_with_scopes(
+            &id,
+            &dest,
+            s1,
+            e1,
+            m1,
+            c1,
+            None,
+            Some(source_scopes),
+            ExportOpts::default(),
+        )
+        .await
+        .unwrap();
+        assert!(dest.join(MEMORY_DIR).join(ARCHIVES_JSONL).is_file());
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let restored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_scopes = Arc::new(ArchiveScopes {
+            archived: Vec::new(),
+            restored: restored.clone(),
+            context: Arc::new(FsContextStore::new(home2)),
+        });
+        import_bundle_with_scopes(&dest, s2, e2, m2, c2, None, Some(target_scopes))
+            .await
+            .unwrap();
+        assert_eq!(*restored.lock().unwrap(), archived);
     }
 
     /// The mandatory end-to-end round-trip: build a company, run a cycle to
@@ -781,11 +1189,13 @@ mod test {
         let id = runtime.id().clone();
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "kick off".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .expect("cycle");
@@ -828,15 +1238,17 @@ mod test {
             e1.clone(),
             m1.clone(),
             c1.clone(),
+            None,
             ExportOpts::default(),
         )
         .await
         .expect("export");
 
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        let imported_id = import_bundle(&dest, s2.clone(), e2.clone(), m2.clone(), c2.clone())
-            .await
-            .expect("import");
+        let imported_id =
+            import_bundle(&dest, s2.clone(), e2.clone(), m2.clone(), c2.clone(), None)
+                .await
+                .expect("import");
         assert_eq!(imported_id, id, "id preserved through the bundle");
 
         // Charter + lifecycle identical.
@@ -880,6 +1292,74 @@ mod test {
         }
     }
 
+    /// PR #1875 review finding: importing a legacy bundle — one whose source
+    /// company predates activation tracking, so `store.activation_gate_seen`
+    /// answers `false` — must land in the target store still answering
+    /// `false`. Before the fix, `write_via_ports` called plain `store.save`,
+    /// which unconditionally stamps the marker `true`; every OTHER save
+    /// really is made by activation-aware code, but import is replaying
+    /// history, not writing it, so that stamp falsely marked a restored
+    /// legacy company as already seen. That permanently blocks
+    /// `RuntimeBuilder::build`'s pre-#1843 grandfather back-fill on the
+    /// imported company's very next boot, showing an established operator
+    /// the fresh-company onboarding gate.
+    #[tokio::test]
+    async fn import_preserves_unseen_activation_gate() {
+        let home1 = tmp_root("gate-src");
+        let home2 = tmp_root("gate-dst");
+        let dest = tmp_root("gate-bundle");
+
+        // A legacy company: `company.toml` on disk, no `meta.json` at all —
+        // the exact shape a pre-#1843 bundle has. `FsCompanyStore::load`
+        // reads a missing meta.json as `Meta::default()`
+        // (`lifecycle: "running"`, no overlays), and its
+        // `activation_gate_seen` reads the same absence as `false` — both
+        // "never saved by activation-aware code".
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        let id = CompanyId::new("legacy-co");
+        let bundle = Bundle::new(home1.clone(), &id);
+        bundle.ensure_dirs().await.unwrap();
+        tokio::fs::write(bundle.company_toml(), toml::to_string(&manifest()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(
+            !s1.activation_gate_seen(&id).await.unwrap(),
+            "fixture must start as a legacy, gate-unseen record"
+        );
+
+        export_bundle(
+            &id,
+            &dest,
+            s1.clone(),
+            e1.clone(),
+            m1.clone(),
+            c1.clone(),
+            None,
+            ExportOpts::default(),
+        )
+        .await
+        .expect("export");
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let imported_id =
+            import_bundle(&dest, s2.clone(), e2.clone(), m2.clone(), c2.clone(), None)
+                .await
+                .expect("import");
+        assert_eq!(imported_id, id);
+
+        assert!(
+            !s2.activation_gate_seen(&id).await.unwrap(),
+            "importing a legacy bundle must not stamp the activation gate as \
+             seen — doing so hides an established operator's grandfather \
+             back-fill behind the fresh-company onboarding gate"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
     /// Secrets and keys are excluded from an export by default and only appear
     /// when `include_secrets` is set with a source bundle.
     #[tokio::test]
@@ -916,6 +1396,7 @@ mod test {
             e.clone(),
             m.clone(),
             c.clone(),
+            None,
             ExportOpts::default(),
         )
         .await
@@ -935,6 +1416,7 @@ mod test {
             e,
             m,
             c,
+            None,
             ExportOpts {
                 include_secrets: true,
                 fs_bundle: Some(bundle.dir().to_path_buf()),
@@ -964,6 +1446,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -975,9 +1459,13 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -995,11 +1483,11 @@ mod test {
         .await
         .unwrap();
 
-        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
             .await
             .unwrap();
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        import_bundle(&dest, s2.clone(), e2.clone(), m2, c2)
+        import_bundle(&dest, s2.clone(), e2.clone(), m2, c2, None)
             .await
             .unwrap();
 
@@ -1044,6 +1532,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1055,9 +1545,13 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1098,7 +1592,7 @@ mod test {
         .await
         .unwrap();
 
-        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
             .await
             .unwrap();
 
@@ -1121,7 +1615,9 @@ mod test {
 
         // 2 and 3. What the importing instance ends up holding.
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        import_bundle(&dest, s2, e2.clone(), m2, c2).await.unwrap();
+        import_bundle(&dest, s2, e2.clone(), m2, c2, None)
+            .await
+            .unwrap();
         let events = e2
             .read_from(&id, EventSeq::new(0), usize::MAX)
             .await
@@ -1173,6 +1669,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1184,9 +1682,13 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1212,7 +1714,7 @@ mod test {
         .await
         .unwrap();
 
-        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
             .await
             .unwrap();
 
@@ -1224,7 +1726,9 @@ mod test {
         tokio::fs::write(&path, old_shape).await.unwrap();
 
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        import_bundle(&dest, s2, e2.clone(), m2, c2).await.unwrap();
+        import_bundle(&dest, s2, e2.clone(), m2, c2, None)
+            .await
+            .unwrap();
         let events = e2
             .read_from(&id, EventSeq::new(0), usize::MAX)
             .await
@@ -1262,6 +1766,8 @@ mod test {
         // Register a company carrying template provenance in the source home.
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1273,19 +1779,25 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
 
         // Export → import into a fresh home.
-        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
             .await
             .unwrap();
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        let imported = import_bundle(&dest, s2.clone(), e2, m2, c2).await.unwrap();
+        let imported = import_bundle(&dest, s2.clone(), e2, m2, c2, None)
+            .await
+            .unwrap();
         assert_eq!(imported, id, "id preserved through the bundle");
 
         // The imported record carries the identical provenance — all three fields.
@@ -1350,20 +1862,35 @@ mod test {
             name: "Dana Designer".into(),
             role: "Design".into(),
             description: Some("Owns the brand".into()),
-            tools: Vec::new(),
+            tools: None,
+            model: None,
+            harness: None,
         }];
         // That teammate added to the `eng` desk through the membership overlay.
         let desk_members = vec![OverlayDeskMember {
             desk_id: "eng".into(),
             agent_id: "designer".into(),
         }];
-        // An operator-created desk the manifest never declared.
-        let desks = vec![OverlayDesk {
-            id: "growth".into(),
-            name: "Growth".into(),
-            description: Some("Marketing pod".into()),
-            members: vec!["ceo".into()],
-        }];
+        // Operator-created desks the manifest never declared — one of each
+        // responder mode, so the round-trip below (whole-vec equality) proves
+        // the `auto` flag survives export→import rather than silently
+        // reverting a leadless channel to a lead desk (issue #1835).
+        let desks = vec![
+            OverlayDesk {
+                id: "growth".into(),
+                name: "Growth".into(),
+                description: Some("Marketing pod".into()),
+                members: vec!["ceo".into()],
+                responder: crate::ports::types::ResponderMode::default(),
+            },
+            OverlayDesk {
+                id: "launch".into(),
+                name: "Launch".into(),
+                description: None,
+                members: vec!["ceo".into(), "cto".into()],
+                responder: crate::ports::types::ResponderMode::Auto,
+            },
+        ];
         // A workflow graph authored at runtime (issue #168). On a hosted tenant
         // this body is the ONLY copy — a bundle that dropped it would lose the
         // workflow outright.
@@ -1376,6 +1903,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -1387,9 +1916,13 @@ mod test {
             overlay_workflows: workflows.clone(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1398,11 +1931,13 @@ mod test {
         let src_record = s1.load(&id).await.unwrap().unwrap();
         assert_eq!(src_record.effective_desk_members("eng")[0], "cto");
 
-        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
             .await
             .unwrap();
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        import_bundle(&dest, s2.clone(), e2, m2, c2).await.unwrap();
+        import_bundle(&dest, s2.clone(), e2, m2, c2, None)
+            .await
+            .unwrap();
 
         // Every overlay came across intact — not reset to an empty list.
         let dst_record = s2.load(&id).await.unwrap().unwrap();
@@ -1478,6 +2013,15 @@ mod test {
             id = "cto"
             role = "Tech"
             budget_usd_daily = 9.0
+
+            # Carries no budget override, and exists so the retirement fixture
+            # below can remove a teammate without leaving a cap behind for one
+            # that is no longer on the roster — a pairing the product never
+            # produces, since `remove_member` drops the override with the
+            # teammate.
+            [[agent]]
+            id = "ops"
+            role = "Operations"
         "#,
         )
         .expect("parse manifest")
@@ -1547,8 +2091,21 @@ mod test {
             overlay_policy: Some(PolicyOverride {
                 mode: Some("auto".to_string()),
                 always_approve: Some(vec!["payment.send".to_string()]),
+                auto_approve_under_usd: Some(Some(25.0)),
+                approval_ttl_hours: Some(48),
                 set_by: admin_actor(),
                 at_millis: 1_700_000_000_002,
+            }),
+            // Issue #1796: the console tool grants ride the same bundle, and
+            // need it more sharply than the desk ceiling below — this is the
+            // one overlay that WIDENS `[tools].allow`, so dropping it would
+            // silently revoke an integration the operator granted from a
+            // connect surface, leaving the imported company "Connected" and
+            // reaching nobody.
+            overlay_tool_grants: Some(ToolGrantsOverride {
+                added: vec!["chargebee".to_string()],
+                set_by: admin_actor(),
+                at_millis: 1_700_000_000_003,
             }),
             // Non-empty for the same reason the tier above is: an empty map here
             // could not detect the field being dropped from the bundle, and
@@ -1564,7 +2121,29 @@ mod test {
             // an operator had switched off, which is the one direction an
             // import must never move on its own.
             disabled_workflows: vec!["digest".to_string()],
+            // A console-shaped roster rides the same bundle: without the field
+            // an imported company would silently come back on the blueprint's
+            // names, roles and scopes, undoing every edit an operator made.
+            overlay_agent_edits: vec![AgentOverride {
+                agent_id: "ceo".to_string(),
+                role: Some("Chief Vibes".to_string()),
+                ..Default::default()
+            }],
+            // And a tombstone, for the sharper version of the same loss: the
+            // blueprint still declares this teammate, so a bundle that dropped
+            // the field would restore somebody the operator had removed.
+            //
+            // `ops` rather than one of the capped pair on purpose. Removing a
+            // teammate drops its budget override with it, so a record holding
+            // both a tombstone and a cap for the same id is a state no write
+            // path can reach — a fixture that carried one would be asserting
+            // that the bundle faithfully preserves something the product never
+            // writes.
+            overlay_retired_agents: vec!["ops".to_string()],
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1574,11 +2153,13 @@ mod test {
         assert_eq!(src_record.effective_budget("ceo"), Some(0.0));
         assert_eq!(src_record.effective_budget("cto"), None);
 
-        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
             .await
             .unwrap();
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        import_bundle(&dest, s2.clone(), e2, m2, c2).await.unwrap();
+        import_bundle(&dest, s2.clone(), e2, m2, c2, None)
+            .await
+            .unwrap();
 
         let dst_record = s2.load(&id).await.unwrap().unwrap();
         assert_eq!(
@@ -1588,6 +2169,24 @@ mod test {
         assert!(
             !dst_record.workflow_enabled("digest"),
             "the bundle round-trip re-armed a paused workflow"
+        );
+        assert_eq!(
+            dst_record
+                .effective_agent("ceo")
+                .expect("the roster still names the ceo")
+                .role,
+            "Chief Vibes",
+            "the bundle round-trip restored the blueprint's role over the operator's edit"
+        );
+        assert!(
+            dst_record.effective_agent("ops").is_none(),
+            "the bundle round-trip restored a teammate the operator had removed"
+        );
+        // The capped pair is still on the roster, so the budget assertions below
+        // are read through teammates that actually exist.
+        assert!(
+            dst_record.effective_agent("cto").is_some(),
+            "cto was retired by accident"
         );
         // Issue #562: the console-set tier survives export→import, attribution
         // included. Without this the seeded fixture proves nothing — a bundle
@@ -1602,6 +2201,8 @@ mod test {
             policy.always_approve.as_deref(),
             Some(["payment.send".to_string()].as_slice())
         );
+        assert_eq!(policy.auto_approve_under_usd, Some(Some(25.0)));
+        assert_eq!(policy.approval_ttl_hours, Some(48));
         assert_eq!(policy.set_by, admin_actor());
         assert_eq!(policy.at_millis, 1_700_000_000_002);
         assert_eq!(
@@ -1636,6 +2237,137 @@ mod test {
         }
     }
 
+    /// **A console tool grant must not be promoted to a seed grant by a
+    /// round-trip** (issue #1796).
+    ///
+    /// `write_to_dir` serializes the bundle's manifest straight into
+    /// `company.toml`, and that file becomes the SEED for whatever host serves
+    /// the restored company. The record's manifest is materialised
+    /// seed-plus-grants, so carrying it verbatim would write a seed that already
+    /// grants `chargebee` — the next rebuild's carry rule would correctly read
+    /// that as "version control spoke", drop the override, and the operator's
+    /// attributed grant would have become a manifest grant that
+    /// `DELETE …/tools/grants` can never reach again.
+    ///
+    /// So the bundle carries the seed and the override separately, and the
+    /// restored record is re-folded. Both halves are asserted: the `company.toml`
+    /// on disk must NOT name the namespace, and the imported record must.
+    #[tokio::test]
+    async fn a_console_tool_grant_survives_a_roundtrip_without_becoming_a_seed_grant() {
+        let home1 = tmp_root("grants-src");
+        let home2 = tmp_root("grants-dst");
+        let dest = tmp_root("grants-bundle");
+        let id = CompanyId::new("grants-co");
+
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Grants Co"
+            output = "widgets"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [tools]
+            allow = ["*", "search"]
+        "#,
+        )
+        .expect("valid manifest");
+
+        let held = ToolGrantsOverride {
+            added: vec!["chargebee".to_string()],
+            set_by: admin_actor(),
+            at_millis: 1_700_000_000_003,
+        };
+
+        // The record exactly as `PUT …/tools/grants` leaves it: the override
+        // stored, and the grant folded into the manifest every reader consults.
+        let mut folded = manifest.clone();
+        folded.tools.allow.push("chargebee".to_string());
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: folded,
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: Some(held.clone()),
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_retired_agents: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        })
+        .await
+        .unwrap();
+
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
+            .await
+            .unwrap();
+
+        // The bundle's `company.toml` IS the restored company's seed. It must
+        // carry version control's own list and nothing the console added.
+        let seed_toml = tokio::fs::read_to_string(dest.join(COMPANY_TOML))
+            .await
+            .expect("the bundle writes a company.toml");
+        let seed: CompanyManifest = toml::from_str(&seed_toml).expect("a valid seed");
+        assert_eq!(
+            seed.tools.allow,
+            vec!["*".to_string(), "search".to_string()],
+            "the exported seed must not carry the console's grant"
+        );
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        import_bundle(&dest, s2.clone(), e2, m2, c2, None)
+            .await
+            .unwrap();
+        let dst = s2.load(&id).await.unwrap().unwrap();
+
+        // The grant itself survives, still attributed to the operator...
+        assert_eq!(
+            dst.overlay_tool_grants.as_ref(),
+            Some(&held),
+            "the console grant was dropped by the bundle round-trip"
+        );
+        // ...and is folded back in, so the restored company grants it from the
+        // first read rather than from its first rebuild.
+        assert!(
+            crate::company::grants_chargebee_explicit(&dst.manifest.tools.allow),
+            "the restored record must grant it: {:?}",
+            dst.manifest.tools.allow
+        );
+        assert_eq!(
+            dst.manifest
+                .tools
+                .allow
+                .iter()
+                .filter(|g| *g == "chargebee")
+                .count(),
+            1,
+            "folded twice"
+        );
+        // And the seed is still recoverable from it, which is what keeps the
+        // grant revocable and keeps the next rebuild from clearing it.
+        assert_eq!(
+            crate::ports::types::seed_tool_allow(
+                &dst.manifest.tools.allow,
+                dst.overlay_tool_grants.as_ref()
+            ),
+            vec!["*".to_string(), "search".to_string()]
+        );
+    }
+
     /// Issue #343: a bundle carrying two overrides for one teammate is **refused**
     /// at import, not silently reduced to whichever row deserialized first.
     ///
@@ -1654,6 +2386,8 @@ mod test {
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: budget_manifest(),
             ledger: Vec::new(),
@@ -1665,13 +2399,17 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
-        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
             .await
             .unwrap();
 
@@ -1702,12 +2440,100 @@ mod test {
             .unwrap();
 
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        let err = import_bundle(&dest, s2.clone(), e2, m2, c2)
+        let err = import_bundle(&dest, s2.clone(), e2, m2, c2, None)
             .await
             .expect_err("import must refuse a bundle with two overrides for one teammate");
         let message = err.to_string();
         assert!(
             message.contains("ceo") && message.contains("budget override"),
+            "the refusal must name the teammate so an operator can fix the bundle: {message}"
+        );
+
+        // And nothing was written: a refused import must not half-apply.
+        assert!(
+            s2.load(&id).await.unwrap().is_none(),
+            "a rejected bundle must not persist a partial company record"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// The same refusal for the roster edits, which arrive through the same one
+    /// door and are read the same first-match way.
+    ///
+    /// The two rows here disagree about the teammate's role and were set by
+    /// different people, which is the point: there is no correct row to pick.
+    /// Applying whichever deserialized first would restore a name an operator
+    /// changed — or, through `tools`, a grant they narrowed — and attribute it to
+    /// somebody who did not do it.
+    #[tokio::test]
+    async fn a_bundle_with_duplicate_agent_edits_is_rejected() {
+        let home1 = tmp_root("dupedit-src");
+        let home2 = tmp_root("dupedit-dst");
+        let dest = tmp_root("dupedit-bundle");
+        let id = CompanyId::new("dupedit-co");
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: budget_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        })
+        .await
+        .unwrap();
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
+            .await
+            .unwrap();
+
+        // The shape an import can be handed but `upsert_agent_override` can never
+        // produce: it replaces in place, so a second row for one teammate only
+        // exists in a bundle written elsewhere.
+        let meta_path = dest.join(META_JSON);
+        let mut meta: BundleMeta =
+            serde_json::from_str(&tokio::fs::read_to_string(&meta_path).await.unwrap()).unwrap();
+        meta.overlay_agent_edits = vec![
+            AgentOverride {
+                agent_id: "ceo".into(),
+                role: Some("Chief Vibes".into()),
+                ..Default::default()
+            },
+            AgentOverride {
+                agent_id: "ceo".into(),
+                role: Some("Interim Chief".into()),
+                tools: Some(Some(vec!["docs.read".into()])),
+                ..Default::default()
+            },
+        ];
+        tokio::fs::write(&meta_path, serde_json::to_string(&meta).unwrap())
+            .await
+            .unwrap();
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let err = import_bundle(&dest, s2.clone(), e2, m2, c2, None)
+            .await
+            .expect_err("import must refuse a bundle with two edits for one teammate");
+        let message = err.to_string();
+        assert!(
+            message.contains("ceo") && message.contains("more than one edit"),
             "the refusal must name the teammate so an operator can fix the bundle: {message}"
         );
 
@@ -1732,18 +2558,20 @@ mod test {
         let id = runtime.id().clone();
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }])
             .await
             .unwrap();
 
         let (s, e, m, c) = fs_ports(&home);
         let bundle_dir = tmp_root("tar-bundle").join(id.as_ref());
-        export_bundle(&id, &bundle_dir, s, e, m, c, ExportOpts::default())
+        export_bundle(&id, &bundle_dir, s, e, m, c, None, ExportOpts::default())
             .await
             .unwrap();
 
@@ -1761,7 +2589,9 @@ mod test {
         // Import the unpacked bundle into a fresh home.
         let home2 = tmp_root("tar-dst");
         let (s2, e2, m2, c2) = fs_ports(&home2);
-        let imported = import_bundle(&root, s2.clone(), e2, m2, c2).await.unwrap();
+        let imported = import_bundle(&root, s2.clone(), e2, m2, c2, None)
+            .await
+            .unwrap();
         assert_eq!(imported, id);
         let rec = s2.load(&id).await.unwrap().unwrap();
         assert_eq!(rec.manifest.company.name, "Export Co");
@@ -1775,5 +2605,258 @@ mod test {
         ] {
             tokio::fs::remove_dir_all(&dir).await.ok();
         }
+    }
+
+    /// The third knowledge port finally travels: facts written on the source
+    /// come back from the imported bundle, and the bundle carries them in
+    /// `facts.jsonl (bundle root)` beside the traces they conceptually sit with.
+    #[tokio::test]
+    async fn operator_facts_travel_with_the_bundle() {
+        use crate::ports::facts::FactStore;
+        use crate::ports::{FactKind, FactRecord};
+        use crate::store::FsOps;
+
+        let home1 = tmp_root("facts-src");
+        let home2 = tmp_root("facts-dst");
+        let dest = tmp_root("facts-bundle");
+        let id = CompanyId::new("facts-co");
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&company_record(&id)).await.unwrap();
+        let f1: Arc<dyn FactStore> = Arc::new(FsOps::new(home1.clone()));
+        f1.upsert(
+            &id,
+            &FactRecord {
+                id: "supplier".into(),
+                kind: FactKind::Fact,
+                title: "supplier".into(),
+                body: "lathe parts come from Initech".into(),
+                source: "cto".into(),
+                updated_at_millis: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        export_bundle(&id, &dest, s1, e1, m1, c1, Some(f1), ExportOpts::default())
+            .await
+            .unwrap();
+        assert!(
+            dest.join(FACTS_JSONL).is_file(),
+            "the bundle must carry the facts file at the bundle root, where \
+             the live fs layout keeps it"
+        );
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let f2: Arc<dyn FactStore> = Arc::new(FsOps::new(home2.clone()));
+        let imported = import_bundle(&dest, s2, e2, m2, c2, Some(f2.clone()))
+            .await
+            .unwrap();
+        let listed = f2.list(&imported, None, None).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].body, "lathe parts come from Initech");
+    }
+
+    /// Both compatibility directions: a bundle written without facts (an old
+    /// host, or an export run without the port) imports clean into a target
+    /// that has one — empty, never an error — and a bundle WITH facts refuses
+    /// a target with no fact port rather than dropping them silently.
+    #[tokio::test]
+    async fn facts_compatibility_is_explicit_in_both_directions() {
+        use crate::ports::facts::FactStore;
+        use crate::ports::{FactKind, FactRecord};
+        use crate::store::FsOps;
+
+        // Old bundle (no facts file) into a facts-capable target: clean.
+        let home1 = tmp_root("factless-src");
+        let home2 = tmp_root("factless-dst");
+        let dest = tmp_root("factless-bundle");
+        let id = CompanyId::new("factless-co");
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&company_record(&id)).await.unwrap();
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
+            .await
+            .unwrap();
+        assert!(!dest.join(FACTS_JSONL).exists());
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let f2: Arc<dyn FactStore> = Arc::new(FsOps::new(home2.clone()));
+        let imported = import_bundle(&dest, s2, e2, m2, c2, Some(f2.clone()))
+            .await
+            .unwrap();
+        assert!(f2.list(&imported, None, None).await.unwrap().is_empty());
+
+        // Facts-bearing bundle into a target with no fact port: a refusal
+        // naming the loss, not a silent drop.
+        let home3 = tmp_root("factful-src");
+        let home4 = tmp_root("factful-dst");
+        let dest2 = tmp_root("factful-bundle");
+        let id2 = CompanyId::new("factful-co");
+        let (s3, e3, m3, c3) = fs_ports(&home3);
+        s3.save(&company_record(&id2)).await.unwrap();
+        let f3: Arc<dyn FactStore> = Arc::new(FsOps::new(home3.clone()));
+        f3.upsert(
+            &id2,
+            &FactRecord {
+                id: "f".into(),
+                kind: FactKind::Fact,
+                title: "t".into(),
+                body: "b".into(),
+                source: "s".into(),
+                updated_at_millis: 1,
+            },
+        )
+        .await
+        .unwrap();
+        export_bundle(
+            &id2,
+            &dest2,
+            s3,
+            e3,
+            m3,
+            c3,
+            Some(f3),
+            ExportOpts::default(),
+        )
+        .await
+        .unwrap();
+        let (s4, e4, m4, c4) = fs_ports(&home4);
+        let err = import_bundle(&dest2, s4.clone(), e4, m4, c4, None)
+            .await
+            .expect_err("facts with no target port must refuse");
+        assert!(err.to_string().contains("fact"), "{err}");
+        // The property the refuse-before-write ordering exists for: NOTHING
+        // landed. A refusal after `store.save` would leave a half-import
+        // whose append-only retry duplicates history.
+        assert!(
+            s4.load(&id2).await.unwrap().is_none(),
+            "the refusal must precede every write"
+        );
+    }
+    /// The fact-port failure case of the ordering guarantee: facts are the
+    /// FIRST write, so a failing fact port leaves zero company state behind —
+    /// the retry-safety claim, asserted rather than narrated.
+    #[tokio::test]
+    async fn a_failing_fact_port_leaves_nothing_written() {
+        use crate::ports::facts::FactStore;
+        use crate::ports::{FactKind, FactRecord};
+        use crate::store::FsOps;
+
+        struct FailingFacts;
+        #[async_trait::async_trait]
+        impl FactStore for FailingFacts {
+            async fn list(
+                &self,
+                _: &CompanyId,
+                _: Option<&str>,
+                _: Option<FactKind>,
+            ) -> crate::Result<Vec<FactRecord>> {
+                Ok(Vec::new())
+            }
+            async fn upsert(&self, _: &CompanyId, _: &FactRecord) -> crate::Result<()> {
+                Err(crate::error::OpenCompanyError::Store(
+                    "injected fact-port failure".into(),
+                ))
+            }
+            async fn delete(&self, _: &CompanyId, _: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let home_src = tmp_root("factfail-src");
+        let home_dst = tmp_root("factfail-dst");
+        let dest = tmp_root("factfail-bundle");
+        let id = CompanyId::new("factfail-co");
+        let (s1, e1, m1, c1) = fs_ports(&home_src);
+        s1.save(&company_record(&id)).await.unwrap();
+        let f1: Arc<dyn FactStore> = Arc::new(FsOps::new(home_src.clone()));
+        f1.upsert(
+            &id,
+            &FactRecord {
+                id: "f".into(),
+                kind: FactKind::Fact,
+                title: "t".into(),
+                body: "b".into(),
+                source: "s".into(),
+                updated_at_millis: 1,
+            },
+        )
+        .await
+        .unwrap();
+        export_bundle(&id, &dest, s1, e1, m1, c1, Some(f1), ExportOpts::default())
+            .await
+            .unwrap();
+
+        let (s2, e2, m2, c2) = fs_ports(&home_dst);
+        let err = import_bundle(&dest, s2.clone(), e2, m2, c2, Some(Arc::new(FailingFacts)))
+            .await
+            .expect_err("the injected fact failure must surface");
+        assert!(err.to_string().contains("injected"), "{err}");
+        assert!(
+            s2.load(&id).await.unwrap().is_none(),
+            "a fact-port failure must precede every append-only write"
+        );
+    }
+
+    /// Re-exporting a now-factless company into the SAME directory must not
+    /// leave the previous export's facts behind for a later import to
+    /// resurrect.
+    #[tokio::test]
+    async fn a_factless_reexport_removes_the_stale_facts_file() {
+        use crate::ports::facts::FactStore;
+        use crate::ports::{FactKind, FactRecord};
+        use crate::store::FsOps;
+
+        let home = tmp_root("stale-src");
+        let dest = tmp_root("stale-bundle");
+        let id = CompanyId::new("stale-co");
+        let (s1, e1, m1, c1) = fs_ports(&home);
+        s1.save(&company_record(&id)).await.unwrap();
+        let facts: Arc<dyn FactStore> = Arc::new(FsOps::new(home.clone()));
+        facts
+            .upsert(
+                &id,
+                &FactRecord {
+                    id: "f".into(),
+                    kind: FactKind::Fact,
+                    title: "t".into(),
+                    body: "b".into(),
+                    source: "s".into(),
+                    updated_at_millis: 1,
+                },
+            )
+            .await
+            .unwrap();
+        export_bundle(
+            &id,
+            &dest,
+            s1.clone(),
+            e1.clone(),
+            m1.clone(),
+            c1.clone(),
+            Some(facts.clone()),
+            ExportOpts::default(),
+        )
+        .await
+        .unwrap();
+        assert!(dest.join(FACTS_JSONL).is_file());
+
+        // The operator deletes the fact, then re-exports into the same dir.
+        assert!(facts.delete(&id, "f").await.unwrap());
+        export_bundle(
+            &id,
+            &dest,
+            s1,
+            e1,
+            m1,
+            c1,
+            Some(facts),
+            ExportOpts::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !dest.join(FACTS_JSONL).exists(),
+            "a factless re-export must remove the stale facts file"
+        );
     }
 }

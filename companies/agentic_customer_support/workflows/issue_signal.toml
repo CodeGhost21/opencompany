@@ -1,0 +1,102 @@
+# Workflow graph: issue_signal
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A repeated report stops
+# being N tickets and becomes one known issue with an agreed answer, a bug report
+# somebody can act on, and — the part that is always skipped — a list of who has
+# to be told when it lands.
+
+id = "issue_signal"
+name = "Issue signal"
+description = "A repeated report becomes a known issue with an agreed answer and a list of who to tell."
+
+[[node]]
+id = "repeat"
+kind = "trigger"
+name = "Reported again"
+summary = "The same problem arrives from a second customer."
+
+[[node]]
+id = "confirm"
+kind = "agent"
+name = "Confirm it is the same thing"
+summary = "Two reports that sound alike are often two problems; check before merging them."
+agent = "support_agent"
+
+[[node]]
+id = "known"
+kind = "condition"
+name = "Already a known issue?"
+summary = "Branch on whether a row already exists."
+[node.config]
+field = "=item.already_known"
+
+[[node]]
+id = "append"
+kind = "agent"
+name = "Add to the existing row"
+summary = "Raise the count and add the customer to `waiting`. Do not open a second row."
+agent = "support_agent"
+
+[[node]]
+id = "open"
+kind = "agent"
+name = "Open the known issue"
+summary = "With the agreed answer support will give, and the workaround — `none` if there is none."
+agent = "escalation_manager"
+
+[[node]]
+id = "file"
+kind = "agent"
+name = "File the bug"
+summary = "One actionable report with reproduction steps, referenced from the issue row."
+agent = "bug_reporter"
+
+[[node]]
+id = "document"
+kind = "agent"
+name = "Update the docs"
+summary = "If customers keep hitting this, the docs are part of why."
+agent = "docs_writer"
+
+[[node]]
+id = "brief"
+kind = "output"
+name = "Brief the desk"
+summary = "Everyone answering tickets gets the agreed answer, so five agents do not give five accounts."
+[node.destination]
+kind = "channel"
+target = "support_operations"
+
+[[edge]]
+from = "repeat"
+to = "confirm"
+
+[[edge]]
+from = "confirm"
+to = "known"
+
+[[edge]]
+from = "known"
+to = "append"
+label = "yes"
+
+[[edge]]
+from = "known"
+to = "open"
+label = "no"
+
+[[edge]]
+from = "open"
+to = "file"
+
+[[edge]]
+from = "file"
+to = "document"
+
+[[edge]]
+from = "append"
+to = "brief"
+
+[[edge]]
+from = "document"
+to = "brief"

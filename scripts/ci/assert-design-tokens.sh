@@ -2,18 +2,22 @@
 #
 # Fail if the console reaches past the design system's token layer.
 #
-# Three things are checked, and each one is debt that returns a single
+# Four things are checked, and each one is debt that returns a single
 # convenient exception at a time:
 #
 #   1. Arbitrary font sizes — `text-[11px]`. The scale has a name for every
 #      rung the console uses, including the dense ones (`text-2xs`, `text-3xs`).
 #      A size written inline is a decision the system cannot see or change.
 #
-#   2. Raw Tailwind palette colours — `text-emerald-600`, `bg-amber-500/10`.
+#   2. SVG labels smaller than the 10px floor — `fixedLabel(9)`. SVG styles
+#      bypass Tailwind classes, but they are still typography and must stay on
+#      the same scale.
+#
+#   3. Raw Tailwind palette colours — `text-emerald-600`, `bg-amber-500/10`.
 #      Palette steps carry no meaning and are untuned for this canvas. State
 #      belongs to `--status-*`, identity to `--tone-*`.
 #
-#   3. Raw hex — `#5865f2`. A hex cannot theme.
+#   4. Raw hex — `#5865f2`. A hex cannot theme.
 #
 # Every one of these was cleared once (192, 87 and 26 sites respectively).
 # This script is what stops them coming back, because a grep is cheaper than
@@ -69,7 +73,20 @@ if [ -n "$hits" ]; then
     "$hits"
 fi
 
-# ---- 2. raw Tailwind palette colours ------------------------------------
+# ---- 2. SVG font sizes below the floor ----------------------------------
+# `fixedLabel` is the graph's SVG font-size seam. A numeric literal below 10px
+# is below the floor — one-digit, decimal, signed or leading-decimal forms all
+# count; 10 itself and named constants stay reviewable, while this catches the
+# literal escape hatch that Tailwind cannot.
+hits=$(grep -rnE 'fixedLabel\([[:space:]]*[+-]?([0-9](\.[0-9]+)?|\.[0-9]+)[[:space:]]*[,)]' "$SRC" "${INCLUDES[@]}" 2>/dev/null \
+  | strip_comments || true)
+if [ -n "$hits" ]; then
+  report "SVG font size below 10px" \
+    "Use the 10px text-3xs floor (or a named constant set to it); below 10px is not a size." \
+    "$hits"
+fi
+
+# ---- 3. raw Tailwind palette colours ------------------------------------
 PALETTE='emerald|rose|amber|sky|red|green|blue|yellow|orange|violet|indigo|teal|cyan|fuchsia|purple|pink|lime|slate|stone|zinc'
 PROPS='text|bg|border|from|to|via|ring|shadow|fill|stroke|divide|outline|decoration|accent|caret'
 hits=$(grep -rnE "(^|[\"' ])($PROPS)-($PALETTE)-[0-9]" "$SRC" "${INCLUDES[@]}" 2>/dev/null \
@@ -80,7 +97,7 @@ if [ -n "$hits" ]; then
     "$hits"
 fi
 
-# ---- 3. raw hex ----------------------------------------------------------
+# ---- 4. raw hex ----------------------------------------------------------
 # connections.ts is the one allowed file: eleven third-party provider brand
 # colours, which identify someone else and are correct as literals. The field
 # itself documents why.

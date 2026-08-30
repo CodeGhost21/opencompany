@@ -22,7 +22,14 @@
 // in desktop localStorage is a shortcut it means to undo. This one does not
 // inherit the shortcut.
 
-import type { ConnectionId, ConnectionOrigin, Credential } from "./types";
+import type {
+  ConnectionId,
+  ConnectionOrigin,
+  Connector,
+  Credential,
+  SshTarget,
+} from "./types";
+import { DEFAULT_CONNECTOR } from "./types";
 
 const INDEX_KEY = "oc.connections.v1";
 
@@ -49,6 +56,25 @@ export interface ConnectionProfile {
    * `/spec` — after the point where it would have been useful for matching.
    */
   instanceId?: string;
+  /**
+   * Where this host runs. See `Connector`.
+   *
+   * Absent on every profile written before connectors existed; `connectorOf`
+   * reads those forward off {@link ConnectionProfile.origin}.
+   */
+  connector?: Connector;
+  /**
+   * What `connector` used to be, written alongside it for one release.
+   *
+   * A downgrade is a real path here — the desktop shell and the console ship
+   * independently, so an older bundle can end up reading storage a newer one
+   * wrote — and an older bundle that cannot recognise a local host treats every
+   * one of them as a host someone typed in. It then never prunes last launch's
+   * address, which is issue #615 coming back through the version someone rolled
+   * back to. Drop this field once no shipped build reads it.
+   *
+   * @deprecated Written for compatibility; read through `connectorOf`.
+   */
   origin?: ConnectionOrigin;
 }
 
@@ -93,7 +119,35 @@ function isProfile(value: unknown): value is ConnectionProfile {
     // common case on an upgrade — so missing is valid and only a *wrong* type
     // disqualifies the entry.
     (p.instanceId === undefined || typeof p.instanceId === "string") &&
-    (p.origin === undefined || p.origin === "embedded")
+    (p.origin === undefined || p.origin === "embedded") &&
+    (p.connector === undefined || isConnector(p.connector))
+  );
+}
+
+/**
+ * Whether a stored value is a connector this build understands.
+ *
+ * Validated rather than cast, like everything else read out of this store: a
+ * hand-edited `{"kind":"ssh"}` with no target would otherwise reach the shell
+ * as a tunnel request for `undefined`. An unrecognised kind disqualifies the
+ * whole profile, which sends it back through `connectorOf` — where it comes
+ * out as `remote`, the only reading that is safe for a url nobody can explain.
+ */
+function isConnector(value: unknown): value is Connector {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as Record<string, unknown>;
+  if (c.kind === "local" || c.kind === "remote") return true;
+  if (c.kind === "cloud") return typeof c.tenant === "string";
+  if (c.kind !== "ssh") return false;
+  const target = c.target as Record<string, unknown> | undefined;
+  return (
+    typeof target === "object" &&
+    target !== null &&
+    typeof target.destination === "string" &&
+    target.destination.length > 0 &&
+    typeof target.remotePort === "number" &&
+    (target.port === undefined || typeof target.port === "number") &&
+    (target.secretRef === undefined || typeof target.secretRef === "string")
   );
 }
 
@@ -129,22 +183,79 @@ export function findProfile(
 }
 
 /**
- * Every profile that is — or once was — the host running inside this client.
+ * The stored profile for a host reached over a tunnel, matched by where the
+ * tunnel *goes*.
  *
- * `origin` says so outright for anything this version wrote. Older versions
- * recorded nothing that distinguished the embedded host from a host someone
- * typed in, so the second clause recognises them by the signature the bug left
- * behind: the label this client gives its own host, at a loopback address.
+ * The address cannot do it. A tunnel binds an ephemeral loopback port, so
+ * `http://127.0.0.1:49221` is this launch's address for this host and nobody's
+ * address next launch — matching on it would mint a fresh id every run and
+ * orphan the tour state, the last-read channel and the mail draft with it,
+ * which is issue #615 reached through a different connector.
+ *
+ * The target is the durable identity, and the three fields compared here are
+ * the same three the shell keys its tunnel roster on (`SshTarget::key` in
+ * `ssh.rs`): two connections to one machine on one port are one host.
+ */
+export function findSshProfile(target: SshTarget): ConnectionProfile | undefined {
+  return readProfiles().find((p) => {
+    const connector = connectorOf(p);
+    return (
+      connector.kind === "ssh" &&
+      connector.target.destination === target.destination &&
+      (connector.target.port ?? 22) === (target.port ?? 22) &&
+      connector.target.remotePort === target.remotePort
+    );
+  });
+}
+
+/**
+ * Every profile that is — or once was — a host running inside this client.
+ *
+ * {@link connectorOf} decides, which is where every vintage of this store is
+ * read forward — including the oldest, which recorded nothing distinguishing
+ * the embedded host from a host someone typed in and is recognised only by the
+ * signature the bug left behind: the label this client gives its own host, at a
+ * loopback address.
  *
  * Narrow on purpose, because the consequence of a false positive is deleting a
  * connection an operator added. A host added by hand is labelled by `hostLabel`
  * — `127.0.0.1:8080`, never this string — and only a profile carrying *neither*
  * new field is old enough to need guessing about at all.
+ *
+ * An `ssh` profile is deliberately **not** here despite also being addressed at
+ * loopback. Its host is somebody else's machine: the local roster knows nothing
+ * about it, so pruning it against that roster would delete it on every launch.
  */
-export function embeddedProfiles(): ConnectionProfile[] {
-  return readProfiles().filter(
-    (p) => p.origin === "embedded" || isLegacyEmbedded(p),
-  );
+export function localProfiles(): ConnectionProfile[] {
+  return readProfiles().filter((p) => connectorOf(p).kind === "local");
+}
+
+/**
+ * Which connector a stored profile describes, including the ones written
+ * before connectors existed.
+ *
+ * Three vintages, read in order of how much they said about themselves:
+ *
+ * 1. a `connector`, which is what this version writes;
+ * 2. `origin: "embedded"`, the one marker the version before it wrote, naming
+ *    what is now `local`;
+ * 3. nothing at all, where {@link isLegacyEmbedded} is the only evidence there
+ *    is.
+ *
+ * Anything else is a url someone typed, which is `remote`.
+ *
+ * The reading is durable, not repeated: the first save after a restore writes
+ * a real `connector`, so the guesswork in the third case happens once per
+ * profile and never again. That is also why it lives here rather than beside
+ * the type — the heuristic is about what a past version *stored*, and it needs
+ * this module's `EMBEDDED_LABEL` to do it.
+ */
+export function connectorOf(profile: ConnectionProfile): Connector {
+  if (profile.connector) return profile.connector;
+  if (profile.origin === "embedded" || isLegacyEmbedded(profile)) {
+    return { kind: "local" };
+  }
+  return DEFAULT_CONNECTOR;
 }
 
 /** `http://127.0.0.1:<port>`, the only address the embedded host ever had. */
@@ -152,6 +263,7 @@ const LOOPBACK_URL = /^http:\/\/127\.0\.0\.1:\d+$/;
 
 function isLegacyEmbedded(profile: ConnectionProfile): boolean {
   return (
+    profile.connector === undefined &&
     profile.origin === undefined &&
     profile.instanceId === undefined &&
     profile.label === EMBEDDED_LABEL &&

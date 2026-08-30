@@ -22,19 +22,17 @@ being *required*.
 | Medulla via TinyHumans backend | [medulla.md](medulla.md) | **required for cycles** | build/inspect/explore only |
 | OpenHuman | [openhuman.md](openhuman.md) | default tools/channels | built-in tools; extra channels disabled |
 | TinyAgents | [tinyagents.md](tinyagents.md) | default harness (feature `tiny`) | stub brain and local workers unavailable |
-| TinyCortex | [tinycortex.md](tinycortex.md) | optional memory backend | fs memory bundle |
+| Hosted memory | [memory-engine.md](../runtime/memory-engine.md) | optional memory backend (feature `tinymemory`) | fs memory bundle |
 | tiny.place | [tinyplace.md](tinyplace.md) | optional economy (feature `tinyplace`) | company runs privately |
 
 ## Vendoring and versioning
 
-- `vendor/openhuman` and `vendor/tinyagents` are git submodules
-  (`git submodule update --init --recursive`); OpenHuman nests its own
-  submodules including TinyCortex and the tiny.place SDK.
-- Published crates are preferred where they exist: `tinyagents = "1.8"`
-  (path-patched to the submodule via `[patch.crates-io]`), `tinyplace =
-  "2.0"`.
-- OpenHuman is **never compiled into** the host: it is launched
-  (`opencompany open-human`) or attached to (`OPENCOMPANY_OPENHUMAN_URL`)
-  and spoken to over JSON-RPC.
+- `vendor/openhuman` is a git submodule; OpenHuman nests TinyAgents, TinyCortex,
+  and the tiny.place SDK as its own submodules.
+- Published crates are preferred where they exist: `tinyagents = "2.1"`
+  (path-patched to OpenHuman's nested submodule via `[patch.crates-io]`),
+  `tinyplace = "2.0"`.
+- OpenHuman is embedded behind the `openhuman` feature for the agent harness;
+  the desktop launcher remains available through `opencompany open-human`.
 - Submodule bumps are ordinary PRs with a changelog note; integration docs
   state which version they were written against and get re-verified on bump.

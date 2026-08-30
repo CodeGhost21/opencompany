@@ -9,11 +9,13 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Coins, CreditCard, Gauge, Plug, Search, Zap } from "lucide-react";
+import { Coins, CreditCard, Gauge, Plug, Search, TriangleAlert, Zap } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CapabilityStatusDto, UsageDto } from "@/api/types";
+import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Card,
   CardContent,
@@ -37,16 +39,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { formatUsdCost } from "@/lib/cost";
 
 /** Compact token/number formatting: 1.2M, 340K, 5.1K. */
 function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1)}K`;
   return `${n}`;
-}
-
-function usd(n: number): string {
-  return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: n < 100 ? 2 : 0 });
 }
 
 const RANGES: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
@@ -61,7 +60,7 @@ const RANGE_LABELS: Record<string, string> = { "7d": "Last 7 days", "30d": "Last
  * token deletes the duplication and the drift: a palette change now reaches
  * this chart without anyone remembering it exists.
  *
- * Slot order is the system's: indigo leads, cyan follows. See
+ * Slot order is the system's: violet leads, cyan follows. See
  * docs/design-system/color.md.
  */
 const chartConfig = {
@@ -76,9 +75,8 @@ interface Props {
   company: string | null;
 }
 
-// The empty usage read — shown before the first fetch resolves and as the
-// fallback when a host doesn't expose the surface yet (404). Real-or-zero: an
-// empty series renders flat rather than inventing numbers.
+// A successful usage read with no activity. Failed reads deliberately do not
+// use this shape: zero is a fact about spend, not a fallback for an unknown.
 const EMPTY_USAGE: UsageDto = {
   series: [],
   byAgent: [],
@@ -97,38 +95,43 @@ const EMPTY_USAGE: UsageDto = {
 /** In-depth usage: token burn over time, by agent, and OAuth calls by provider. */
 export function UsageView({ client, company }: Props) {
   const [range, setRange] = useState("30d");
-  const [data, setData] = useState<UsageDto>(EMPTY_USAGE);
+  const [data, setData] = useState<UsageDto | null>(null);
+  const [usageFailed, setUsageFailed] = useState(false);
   useEffect(() => {
     let alive = true;
+    setData(null);
+    setUsageFailed(false);
     client
       .usage(range, company)
       .then((usage) => {
         if (alive) setData(usage);
       })
-      // Hosts without the surface (older builds) 404 — show the empty state
-      // rather than fabricating a series.
       .catch(() => {
-        if (alive) setData(EMPTY_USAGE);
+        if (alive) setUsageFailed(true);
       });
     return () => {
       alive = false;
     };
   }, [client, company, range]);
-  const { totals } = data;
+  const displayedData = data ?? EMPTY_USAGE;
+  const { totals } = displayedData;
 
   // Capability budgets (issue #108) — the one live-wired card on this view.
   const [caps, setCaps] = useState<CapabilityStatusDto | null>(null);
   const [capsLoaded, setCapsLoaded] = useState(false);
+  const [capsFailed, setCapsFailed] = useState(false);
   useEffect(() => {
     let alive = true;
+    setCaps(null);
+    setCapsLoaded(false);
+    setCapsFailed(false);
     client
       .capabilityStatus(company)
       .then((status) => {
         if (alive) setCaps(status);
       })
-      // Hosts without the surface (older builds) 404 — treat as unconfigured.
       .catch(() => {
-        if (alive) setCaps({ configured: false });
+        if (alive) setCapsFailed(true);
       })
       .finally(() => {
         if (alive) setCapsLoaded(true);
@@ -139,17 +142,19 @@ export function UsageView({ client, company }: Props) {
   }, [client, company]);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Usage</h2>
-            <p className="text-sm text-muted-foreground">
-              What your company is burning — tokens and OAuth calls.
-            </p>
-          </div>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Usage"
+        width="6xl"
+        description={
+          <>
+            What your company is burning — tokens and OAuth calls.
+          </>
+        }
+        actions={
+          <>
           <Select value={range} onValueChange={(v) => v && setRange(v)} items={RANGE_LABELS}>
-            <SelectTrigger className="w-40">
+            <SelectTrigger className="w-40" aria-label="Usage date range">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -160,18 +165,40 @@ export function UsageView({ client, company }: Props) {
               ))}
             </SelectContent>
           </Select>
-        </div>
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+        {usageFailed ? (
+          <Alert data-testid="usage-load-error">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              Couldn&apos;t check usage. Totals and charts are unavailable; reload to try again.
+            </AlertDescription>
+          </Alert>
+        ) : null}
 
         {/* KPIs */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-          <Kpi icon={Coins} label="Total tokens" value={compact(totals.tokens)} hint={`${compact(totals.inputTokens)} in · ${compact(totals.outputTokens)} out`} />
-          <Kpi icon={CreditCard} label="Est. cost" value={usd(totals.costUsd)} hint="Tokens plus metered calls" />
-          <Kpi icon={Zap} label="OAuth calls" value={compact(totals.oauthCalls)} hint={`Across ${totals.connections} providers`} />
-          <Kpi icon={Plug} label="Connections" value={String(totals.connections)} hint="Active integrations" />
+          <Kpi icon={Coins} label="Total tokens" value={data ? compact(totals.tokens) : "—"} hint={data ? `${compact(totals.inputTokens)} in · ${compact(totals.outputTokens)} out` : "—"} />
+          <Kpi
+            icon={CreditCard}
+            label="Cost"
+            value={
+              !data
+                ? "—"
+                : data.costHidden
+                ? "Cost hidden"
+                : formatUsdCost({ amountUsd: totals.costUsd }, "total") ?? "$0.00"
+            }
+            hint={data ? "Source USD · tokens plus metered calls" : "—"}
+          />
+          <Kpi icon={Zap} label="OAuth calls" value={data ? compact(totals.oauthCalls) : "—"} hint={data ? `Across ${totals.connections} providers` : "—"} />
+          <Kpi icon={Plug} label="Connections" value={data ? String(totals.connections) : "—"} hint={data ? "Active integrations" : "—"} />
           {/* Issue #238. Its own KPI rather than a line inside "OAuth calls":
               a search is a priced call on the managed platform, not a connected
               account, and folding it in would overstate integrations. */}
-          <Kpi icon={Search} label="Web searches" value={compact(totals.searchCalls ?? 0)} hint="Billed per search" />
+          <Kpi icon={Search} label="Web searches" value={data ? compact(totals.searchCalls ?? 0) : "—"} hint={data ? "Billed per search" : "—"} />
         </div>
 
         {/* Tokens over time */}
@@ -182,7 +209,7 @@ export function UsageView({ client, company }: Props) {
           </CardHeader>
           <CardContent>
             <ChartContainer config={chartConfig} className="h-64 w-full">
-              <AreaChart data={data.series} margin={{ left: 4, right: 8, top: 4 }}>
+              <AreaChart data={displayedData.series} margin={{ left: 4, right: 8, top: 4 }}>
                 <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="date"
@@ -211,7 +238,7 @@ export function UsageView({ client, company }: Props) {
             </CardHeader>
             <CardContent>
               <ChartContainer config={chartConfig} className="h-64 w-full">
-                <BarChart data={data.byAgent} layout="vertical" margin={{ left: 8, right: 40 }}>
+                <BarChart data={displayedData.byAgent} layout="vertical" margin={{ left: 8, right: 40 }}>
                   <XAxis type="number" dataKey="tokens" hide />
                   <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={96} />
                   <ChartTooltip content={<ChartTooltipContent formatter={(v) => `${compact(Number(v))} tokens`} />} />
@@ -220,6 +247,18 @@ export function UsageView({ client, company }: Props) {
                   </Bar>
                 </BarChart>
               </ChartContainer>
+              <div className="mt-3 divide-y rounded-md border">
+                {displayedData.byAgent.map((agent) => (
+                  <div key={agent.name} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                    <span className="min-w-0 truncate">{agent.name}</span>
+                    <span className="shrink-0 font-medium tabular-nums">
+                      {displayedData.costHidden
+                        ? "Cost hidden"
+                        : formatUsdCost({ amountUsd: agent.costUsd }, "total") ?? "$0.00"}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </CardContent>
           </Card>
 
@@ -231,7 +270,7 @@ export function UsageView({ client, company }: Props) {
             </CardHeader>
             <CardContent>
               <ChartContainer config={chartConfig} className="h-64 w-full">
-                <BarChart data={data.byProvider} layout="vertical" margin={{ left: 8, right: 40 }}>
+                <BarChart data={displayedData.byProvider} layout="vertical" margin={{ left: 8, right: 40 }}>
                   <XAxis type="number" dataKey="calls" hide />
                   <YAxis type="category" dataKey="provider" tickLine={false} axisLine={false} width={96} />
                   <ChartTooltip content={<ChartTooltipContent formatter={(v) => `${compact(Number(v))} calls`} />} />
@@ -258,6 +297,14 @@ export function UsageView({ client, company }: Props) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {capsFailed ? (
+              <Alert data-testid="usage-capabilities-load-error">
+                <TriangleAlert className="size-4" />
+                <AlertDescription>
+                  Couldn&apos;t check capability status. Grants and budgets are unavailable; reload to try again.
+                </AlertDescription>
+              </Alert>
+            ) : null}
             {/* Plan-level total token ceiling (issue #188): a HARD stop — once
                 spend crosses it the harness refuses to dispatch further turns,
                 unlike the soft per-namespace bars below. Rendered first, and on
@@ -271,7 +318,7 @@ export function UsageView({ client, company }: Props) {
                   <CapabilityRow key={tier.namespace} tier={tier} />
                 ))}
               </div>
-            ) : capsLoaded && caps?.configured && caps.total ? null : (
+            ) : capsLoaded && caps?.configured && caps.total ? null : capsFailed ? null : (
               <p className="py-2 text-sm text-muted-foreground">
                 {capsLoaded ? "No token plan configured." : "Loading budgets…"}
               </p>
@@ -285,6 +332,10 @@ export function UsageView({ client, company }: Props) {
             {/* Metered web search (issue #238): opt-in, managed-credential-gated,
                 and capped per day — its own status row like media/composio. */}
             {capsLoaded && caps ? <SearchStatusRow caps={caps} /> : null}
+            {/* Publishing (issue #244, panel half #1192): opt-in per tool grant
+                like the three above, but with no credential and no store toggle
+                — so two rungs rather than three. */}
+            {capsLoaded && caps ? <PublishStatusRow caps={caps} /> : null}
           </CardContent>
         </Card>
       </div>
@@ -309,8 +360,8 @@ export type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 /**
  * The media-generation capability (issue #109) is opt-in per tool grant and
  * gated on a managed platform credential, so it gets its own status row rather
- * than a token-budget bar. Four states: not compiled into this build, not
- * granted, granted-but-awaiting-credential, and active. A `media` token budget,
+ * than a token-budget bar. Five states: not compiled into this build, unknown,
+ * not granted, granted-but-awaiting-credential, and active. A `media` token budget,
  * if set, still surfaces as its own bar above via the tiers loop.
  */
 function MediaStatusRow({ caps }: { caps: CapabilityStatusDto }) {
@@ -331,9 +382,10 @@ function MediaStatusRow({ caps }: { caps: CapabilityStatusDto }) {
   );
 }
 
-function mediaStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
+export function mediaStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
   if (caps.mediaInBuild === false) return { label: "Not in this build", variant: "outline" };
-  if (!caps.mediaGranted) return { label: "Not granted", variant: "secondary" };
+  if (caps.mediaGranted === undefined) return { label: "Couldn't check", variant: "outline" };
+  if (caps.mediaGranted === false) return { label: "Not granted", variant: "secondary" };
   if (!caps.mediaCredentialConfigured)
     return { label: "Awaiting credential", variant: "destructive" };
   return { label: "Active", variant: "default" };
@@ -385,7 +437,8 @@ export function composioStatus(caps: CapabilityStatusDto): {
   variant: BadgeVariant;
 } {
   if (caps.composioInBuild === false) return { label: "Not in this build", variant: "outline" };
-  if (!caps.composioGranted) return { label: "Not granted", variant: "secondary" };
+  if (caps.composioGranted === undefined) return { label: "Couldn't check", variant: "outline" };
+  if (caps.composioGranted === false) return { label: "Not granted", variant: "secondary" };
   if (caps.composioCredentialSource === undefined)
     return { label: "Couldn't check", variant: "outline" };
   if (caps.composioCredentialSource === "none")
@@ -403,16 +456,23 @@ export function composioStatus(caps: CapabilityStatusDto): {
 function SearchStatusRow({ caps }: { caps: CapabilityStatusDto }) {
   const { label, variant } = searchStatus(caps);
   const cap = caps.searchDailyCallCap;
+  // A company searching through its own provider is billed by that provider, so
+  // neither the managed-credential sentence nor the daily cap describes it —
+  // both would be numbers about somebody else's bill.
+  const ownProvider = Boolean(caps.searchProvider && caps.searchProvider !== "managed");
   return (
     <div className="flex items-center justify-between gap-3 border-t pt-4 text-sm">
       <div className="space-y-0.5">
         <span className="font-medium">Web search</span>
         <p className="text-xs text-muted-foreground">
-          Source discovery for research — opt-in, runs on the managed platform credential, and
-          billed per search.{" "}
-          {typeof cap === "number"
-            ? `Capped at ${cap} searches per day; past that the tool refuses rather than returning nothing.`
-            : "Capped per day; past that the tool refuses rather than returning nothing."}
+          {ownProvider
+            ? `Source discovery for research — running on this company's own ${caps.searchProvider} account, billed there rather than here, so the daily cap does not apply.`
+            : "Source discovery for research — opt-in, runs on the managed platform credential, and billed per search."}{" "}
+          {ownProvider
+            ? ""
+            : typeof cap === "number"
+              ? `Capped at ${cap} searches per day; past that the tool refuses rather than returning nothing.`
+              : "Capped per day; past that the tool refuses rather than returning nothing."}
         </p>
       </div>
       <Badge variant={variant} className="shrink-0">
@@ -422,14 +482,76 @@ function SearchStatusRow({ caps }: { caps: CapabilityStatusDto }) {
   );
 }
 
-function searchStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
+export function searchStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
   if (caps.searchInBuild === false) return { label: "Not in this build", variant: "outline" };
-  if (!caps.searchGranted) return { label: "Not granted", variant: "secondary" };
+  if (caps.searchGranted === undefined) return { label: "Couldn't check", variant: "outline" };
+  if (caps.searchGranted === false) return { label: "Not granted", variant: "secondary" };
+  // A company on its own provider is working whatever the host's managed
+  // credential says, and the daily cap below does not apply to it — that cap
+  // bounds the platform's bill, and this company is paying its own. Checked
+  // before both, or a self-hosted instance with no platform credential would
+  // badge a working search "Awaiting credential".
+  if (caps.searchProvider && caps.searchProvider !== "managed")
+    return { label: "Own provider", variant: "default" };
   if (!caps.searchCredentialConfigured)
     return { label: "Awaiting credential", variant: "destructive" };
   // A zero cap leaves the grant in place but spends nothing — say so rather
   // than reporting "Active" for a tool that will refuse every call.
   if (caps.searchDailyCallCap === 0) return { label: "Paused (cap 0)", variant: "destructive" };
+  return { label: "Active", variant: "default" };
+}
+
+/**
+ * Publishing (issue #244) is opt-in per tool grant like media/composio/search,
+ * so it gets its own status row — but it is the one capability on this card with
+ * **no third rung**. There is no credential to configure and no store to switch
+ * on: the artifact store is always wired, so a "store configured" badge could
+ * only ever read green. States: not compiled into this build, unknown, not
+ * granted, active — see {@link publishStatus}.
+ */
+function PublishStatusRow({ caps }: { caps: CapabilityStatusDto }) {
+  const { label, variant } = publishStatus(caps);
+  return (
+    <div className="flex items-center justify-between gap-3 border-t pt-4 text-sm">
+      <div className="space-y-0.5">
+        <span className="font-medium">Publishing deliverables</span>
+        <p className="text-xs text-muted-foreground">
+          Handing a file a teammate wrote to the board as a deliverable — the only way work in a
+          teammate&apos;s sandbox becomes something you can open. It rides the same{" "}
+          <code className="font-mono">files</code> / <code className="font-mono">docs</code> grant
+          as their file tools: add one of those to{" "}
+          <code className="font-mono">[tools].allow</code> in the company manifest. Unlike{" "}
+          <code className="font-mono">repo</code>, a broad <code className="font-mono">*</code>{" "}
+          <em>does</em> confer it — publishing spends nothing and reaches nothing outside this
+          company&apos;s own board.
+        </p>
+      </div>
+      <Badge variant={variant} className="shrink-0">
+        {label}
+      </Badge>
+    </div>
+  );
+}
+
+/**
+ * The publishing row's four states, in order (issue #1192).
+ *
+ * The `undefined` rung takes {@link composioStatus}'s stricter shape and NOT
+ * {@link mediaStatus}'s: media collapses "absent" into `!granted` and paints an
+ * older host — or one that did not answer — as a definite "Not granted", which
+ * is the #886 lie in miniature. An unanswered host is unknown, and unknown is
+ * shown as unknown.
+ *
+ * There is no credential rung below these. Publishing has no credential and no
+ * store toggle, so `granted && inBuild` is the whole of the verdict.
+ */
+export function publishStatus(caps: CapabilityStatusDto): {
+  label: string;
+  variant: BadgeVariant;
+} {
+  if (caps.publishInBuild === false) return { label: "Not in this build", variant: "outline" };
+  if (caps.publishGranted === undefined) return { label: "Couldn't check", variant: "outline" };
+  if (caps.publishGranted === false) return { label: "Not granted", variant: "secondary" };
   return { label: "Active", variant: "default" };
 }
 
@@ -536,7 +658,7 @@ function Kpi({
 }) {
   return (
     <Card>
-      <CardContent className="space-y-2 py-5">
+      <CardContent className="space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium text-muted-foreground">{label}</span>
           <Icon className="size-4 text-muted-foreground" />

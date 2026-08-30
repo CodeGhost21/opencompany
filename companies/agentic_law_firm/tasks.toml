@@ -1,0 +1,57 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a law firm is defined by — the flow
+# it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-matter-intake"
+title = "Set up the matter intake"
+priority = "high"
+note = """
+Make the intake real: what is captured when a client asks for something, \
+and the rule that nothing substantive happens on a `matters` row until the \
+conflict check has run.
+
+Conflicts before content is the one place in this firm where the correct \
+action is to stop, and a stop that is not built into intake is one that \
+gets skipped when someone is busy.
+
+Done when `playbooks/intake-checklist.md` states the sequence and the open \
+matters have rows with a conflicts status.\
+"""
+
+[[task]]
+id = "set-up-the-deadline-docket"
+title = "Set up the deadline docket"
+priority = "high"
+note = """
+Open a `deadlines` row for every statutory, contractual and court-imposed \
+date currently live, each with its owner and the rule that imposes it.
+
+Missing one is not a late deliverable, it is a lost right. Every working \
+session is supposed to start by reading this, which only works if it is \
+complete.
+
+Done when every live date is on the docket with an owner.\
+"""
+
+[[task]]
+id = "set-up-the-position-library"
+title = "Set up the position library"
+priority = "medium"
+note = """
+Record on `positions` what this firm has concluded about the questions it \
+answers repeatedly, each with its authority and its jurisdiction.
+
+Research starts here — the cheapest research is the research already done \
+— and a position with neither authority nor jurisdiction is an opinion in \
+a citation style.
+
+Done when the recurring questions have rows carrying both.\
+"""

@@ -11,7 +11,7 @@ The demand ledger replaces the kanban board as the work model. The board's
 columns survive as a projection of demand state.
 
 Terms: [glossary](../../glossary.md). Depends on
-[`CLAIMS.md`](alignment.md#claimsmd--the-evidence-ledger), which is what closes a
+[`claims.md`](alignment.md#claimsmd--the-evidence-ledger), which is what closes a
 demand.
 
 ---

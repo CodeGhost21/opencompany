@@ -4,11 +4,21 @@ The attempt record behind the Task Detail **Attempts** tab. Part of the port
 contracts indexed by [ports.md](ports.md); the console-surface stores it sits
 alongside are in [ports-console.md](ports-console.md).
 
-One attempt at a task, and its trace (`src/ports/runs.rs`). A `RunRecord`
-carries the task and agent it belongs to, its 1-based `attempt` ordinal, a
-status, the cost it accrued, and — on failure — why. A `RunStepRecord` is one
-entry of its trace, keyed `(run_id, step_seq)` on a run-scoped dense counter
-rather than an `EventSeq`.
+One attempt at work, and its trace (`src/ports/runs.rs`). A `RunRecord`
+carries the agent it belongs to, its 1-based `attempt` ordinal, a status, the
+cost it accrued, and — on failure — why. A `RunStepRecord` is one entry of its
+trace, keyed `(run_id, step_seq)` on a run-scoped dense counter rather than an
+`EventSeq`.
+
+Since issue #983 the **card is optional** (`task_id: Option<String>`) and a
+`chat_id` sits beside it, because a chat turn is an attempt at work that
+frequently opens no card. A card-less run is always `attempt` 1 — with no card
+there is nothing for a second attempt to be the second of — and it never answers
+a per-card filter, which is what keeps the Attempts tab honest (see below). Both
+fields are `#[serde(default, skip_serializing_if = "Option::is_none")]`, so a row
+written before them loads and a dispatch row serializes byte-identically; the
+sqlite mirror column needed a table rebuild to drop its `NOT NULL`, run
+idempotently on open.
 
 ```rust
 pub trait RunStore: Send + Sync {
@@ -133,13 +143,45 @@ Old `RunRecord`s are never synthesised from historical `AgentReply` events:
 fabricating identity for attempts nobody recorded would be worse than a
 pre-existing card honestly showing zero of them.
 
+### A chat turn does get a row — and still not a card's attempt (#806, #983)
+
+Issue #806 refused to synthesise a run **for a card**, so that a turn which
+authored something inline (`create_workflow`, say) could hang a `TaskOutput` off
+it. That would have made the Attempts tab claim work was attempted at a card
+when none was. `TaskOutput` names *what produced it* as a closed set instead —
+`TaskOutputSource::Run` or `TaskOutputSource::ChatTurn` — which keeps "every card
+in Done links to what it produced" (#339) true without weakening what a run
+means.
+
+Issue #983 mints a row for the **turn itself**, prospectively, and that is a
+different claim: the turn *is* a work attempt, it has a status worth reading, and
+before this nothing durable recorded that one was owed — so a turn killed with
+the pod left no trace at all. The two coexist because the row names no card:
+`RunFilter::for_task` does not match an absent `task_id`, so a chat turn never
+appears in `GET …/tasks/{task_id}` → `runs[]` and the Attempts tab is exactly
+what #806 left it as. The turn is reachable through the company-wide
+`GET …/runs`, and by desk through its `chat_id`.
+
+`create_run` at accept, `begin_run` once the cycle holds the per-company serial
+lock, `finish_run` when the turn settles. That placement is deliberate: `Pending`
+therefore means *queued behind other turns* and `Running` means *owns the lock*,
+which is the distinction an operator on a busy company needs. Reusing this store
+is what makes the feature small — transition legality, the step trace,
+`list_stale_active` and `reap_orphaned_runs` all apply unchanged, and the boot
+reaper's proof (a turn is a process-local spawn, one process owns the journal,
+turns serialise on one mutex) holds for a chat turn verbatim.
+
+Old `RunRecord`s are still never synthesised from historical events. See
+[ports-state.md](ports-state.md) for the task record itself; a card a chat turn
+opens now carries that turn's id in `origin_run_id`.
+
 ## Reading runs back
 
 Three surfaces, all in `src/server/ops/runs.rs`, under both scope forms:
 
 | Route | Answers |
 |---|---|
-| `GET …/runs?task=&status=&limit=` | the company's attempts, newest first |
+| `GET …/runs?task=&agent=&status=&limit=` | the company's attempts, newest first |
 | `GET …/runs/{run_id}` | one attempt plus its full persisted step trace |
 | `GET …/tasks/{task_id}` → `runs[]` | the card's attempts, additive on the task detail read |
 
@@ -149,6 +191,33 @@ an event, and the sibling `GET …/workflows/runs` (which does fold, and says so
 is the cost being avoided. `?status=` takes a comma-separated list and refuses
 an unknown word with a `400`, because a typo'd filter answering `[]` is
 indistinguishable from "nothing matched".
+
+`?agent=` (issue #1573) narrows to one desk, and is what the console's
+per-teammate run history reads. It is a **store** predicate rather than a slice
+of a fetched page for the reason `limit` makes unavoidable: filtering in the
+console would make `limit` mean "the newest N attempts in the *company*, of
+which some happen to be this desk's", so a teammate who had been quiet while
+the rest of the company was busy would render as one who had never run. Unlike
+`?status=` it is not validated against the roster — a teammate can be removed
+while its attempts remain, and refusing to show that history would erase the
+record of work that did happen; an id nobody ran simply answers `[]`.
+
+Both indexed backends push it down, and both had to **backfill** to do so
+honestly. `agent_id` is a mirror of a field that has always been inside the
+stored record, so every row written before the column existed carries the desk
+in its blob and `NULL`/absent in its index — and a `NULL` never matches. Left
+alone, the new filter would have silently omitted precisely the history an
+operator opening a teammate for the first time most wants. sqlite copies it
+across in `heal_runs_agent_id` (an `ALTER`, one `UPDATE … WHERE agent_id IS
+NULL`, then the index — idempotent, and matching nothing on every open after
+the first); MongoDB does the same in `backfill_run_agent_ids` at connect,
+document by document, because the desk lives inside a *string* of JSON there
+and the server cannot reach it. The two differ in how a failure lands: sqlite
+runs the heal synchronously in `SqliteStore::from_conn` with a propagated
+error, so a backfill that cannot run prevents store initialization; MongoDB's
+is best-effort at its call site — a company that will not start is worse than
+one whose oldest rows are not yet filterable by desk, and the migration is
+spawned so a slow first boot never sits in front of `/healthz`.
 
 Three things the wire shape refuses to imply, each a state the write path really
 produces:
@@ -176,3 +245,32 @@ field names are the decode contract for already-journaled events.
 Run detail is **refresh-on-read**: steps persist incrementally, so re-reading a
 live attempt shows the progress since. Streaming would widen the harness turn
 stream for something a re-read already answers.
+
+## The workflow-run join
+
+`RunRecord` carries `workflow_run_id` and `node_id`, both optional.
+
+A workflow `agent` node's turn has **neither a card nor a conversation**, so
+before these existed `RunStore` — keyed on exactly those two — could not name the
+attempt at all. It was not that the join column was missing; the *row* was
+missing, because `run_background` took no `RunTraceSink` and the node therefore
+minted nothing. A node was green or red and that was the whole of what could be
+known about it.
+
+Both fields are additive in the same shape `task_id`/`chat_id` took: a row
+written before they existed loads with `None` and re-serializes byte-identically.
+**There is no backfill**, and that is not a shortcut — a pre-existing run
+genuinely belongs to no workflow, so `None` is true rather than tolerated.
+
+`RunFilter::for_workflow_run` selects one run's nodes; `GET {scope}/runs?workflow_run=`
+exposes it over REST, and `Company.agentRuns(workflowRunId:)` over GraphQL.
+
+### `begin_run_untriggered`
+
+`begin_run` stamps the seq of the journal event that drove the attempt. A
+workflow node is activated by the engine walking a graph, not by a
+`TaskDispatched` the journal recorded, so there is no seq to stamp.
+`trigger_event_seq` is already `Option`, so leaving it `None` is the record's own
+way of saying "nothing in the journal drove this" — passing a made-up seq (or
+`0`) would point every workflow attempt at an unrelated event and quietly corrupt
+any reader that follows it. Transition legality is identical.

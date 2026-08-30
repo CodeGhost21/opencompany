@@ -3,6 +3,7 @@
 // the wire) and runs one via `…/workflows/{wid}/run`. Replaces the client-side
 // `workflow-sample` illustrative data.
 
+import type { ArtifactKind } from "./artifacts";
 import type { OpenCompanyClient } from "./client";
 
 /** A one-line workflow entry, as the picker lists it. */
@@ -10,6 +11,17 @@ export interface WorkflowSummary {
   id: string;
   name: string;
   description?: string;
+  /**
+   * The trigger node's 5-field UTC cron. `null` means the current host inspected
+   * the graph and found no schedule; `undefined` means an older host did not
+   * send this summary field, so the console must make no claim either way.
+   */
+  schedule?: string | null;
+  /**
+   * How many steps are in the graph. Absent on hosts predating the widened
+   * summary response; `0` is a real count and must still render.
+   */
+  nodeCount?: number;
   /**
    * Whether this workflow can be edited or deleted through the API (issue
    * #259). `false` for a graph defined by a file in the company source tree,
@@ -68,6 +80,15 @@ export interface WorkflowNode {
   };
   /** Whether the node pauses for a human approval before proceeding. */
   requiresApproval?: boolean;
+  /**
+   * `false` when a continuation must not repeat this node's call — it replays
+   * the result the earlier run recorded instead (issue #850).
+   *
+   * Only meaningful on `tool_call` and `http_request`, the two kinds that make
+   * a call. Absent is the default: the node repeats unless the host already
+   * classifies its call as reaching outside the company.
+   */
+  repeatable?: boolean;
   /** Where an `output` node's report goes when the run finishes. */
   destination?: WorkflowDestination;
 }
@@ -78,8 +99,9 @@ export interface WorkflowNode {
  * `owner` is resolved server-side from the company's admins and carries no
  * target — the graph names nobody, which is what keeps it safe by construction.
  * `email` names an address and only sends when the company grants `email` AND
- * the recipient has already written in. `channel` must name a channel the
- * deployment already wired.
+ * the recipient has already written in. `channel` must name a channel this
+ * company can deliver to — a desk chat or a connected channel, never the
+ * operator surface (issue #981).
  */
 export interface WorkflowDestination {
   kind: "owner" | "email" | "channel";
@@ -135,6 +157,20 @@ export interface WorkflowGraph {
   id: string;
   name: string;
   description?: string;
+  /**
+   * The owning desk (issue #1862 prerequisite) — a desk id or name, resolved
+   * against the company's wired desks host-side. `undefined` for a graph with
+   * no owner (every graph saved before this field existed, or one an author
+   * chose not to assign).
+   *
+   * **No control in this dialog edits it yet** — the create/edit form has no
+   * field for it. It is carried on {@link GraphDraft} and round-tripped
+   * verbatim by {@link assembleGraph} purely so a Save never clears it: a
+   * `PUT` replaces the whole graph, so an edit that omitted this field here
+   * would silently wipe whatever desk an operator (or the workflow-proposal
+   * defaulting) had set (issue #1882 review).
+   */
+  ownerDesk?: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   /** See {@link WorkflowSummary.editable}. Same "only `false` means no" rule. */
@@ -142,16 +178,22 @@ export interface WorkflowGraph {
   /** See {@link WorkflowSummary.enabled}. Same "only `false` means off" rule. */
   enabled?: boolean;
   /**
-   * The opaque optimistic-concurrency token for this graph (issue #259),
-   * present only when `editable`.
+   * The opaque optimistic-concurrency token for this graph (issue #259). Always
+   * serialized by a current host (issue #1013): a `string` when the graph is
+   * `editable`, and `null` when it is not (a source-defined or body-less graph
+   * has nothing to version). It used to be omitted for a non-editable graph,
+   * which read back as `undefined` and let a caller send nothing — silently
+   * overwriting a concurrent save; an explicit `null` is the honest "no token".
    *
-   * **Echo it back, never parse it.** Pass it to {@link updateWorkflow} or
-   * {@link deleteWorkflow} and the host refuses the write with a 409 if the
-   * graph changed since this read — which is what stops one console silently
-   * overwriting another's edit. Absent from a host predating #259, in which case
-   * the write is unconditional and that protection simply does not exist.
+   * **Echo it back, never parse it.** Pass it to {@link updateWorkflow},
+   * {@link deleteWorkflow}, or {@link restoreWorkflowRevision} and the host
+   * refuses the write with a 409 if the graph changed since this read — which is
+   * what stops one console silently overwriting another's edit. A current host
+   * now also refuses the write with a 400 if you send no token at all. `null`
+   * from a non-editable graph is falsy and sends nothing, which the console never
+   * does — those graphs are not editable.
    */
-  version?: string;
+  version: string | null;
 }
 
 /**
@@ -169,9 +211,11 @@ export type DeliveryStatus =
 /**
  * One attempt to route a reached `output` node's report to its destination.
  *
- * This is the ONLY place an operator learns a report was not delivered: a
- * delivery failure never fails the run, so it has nowhere else to surface. An
- * output node the run never reached contributes no row at all.
+ * A delivery failure never fails the run and never moves a node's status, so
+ * these rows — and, since issue #981, the run's own
+ * {@link WorkflowRunVerdict} — are the only places an operator learns a report
+ * was not delivered. The rows are the *reason*; the verdict is the *reading*.
+ * An output node the run never reached contributes no row at all.
  */
 export interface DeliveryReport {
   /** The output node whose report this was. */
@@ -200,6 +244,37 @@ export interface DeliveryReport {
    */
   reason?: string;
 }
+
+/**
+ * What a run adds up to, in one word — **the host's reading, not ours** (issue
+ * #981).
+ *
+ * The console used to own the only definition of "did this run succeed", and a
+ * definition living in one client is a definition every other client has to
+ * guess at. The obvious guess is wrong: delivery happens after the engine
+ * returns, so a run whose report was refused still reports every node `ok`, and
+ * anything folding `nodes[].status` — the QA harness included — scored a
+ * dropped report green.
+ *
+ * The words are unchanged from the ladder this console has always used, in the
+ * same precedence order; only the place they are decided has moved. See
+ * {@link runTone}.
+ *
+ * `stranded` is the one addition (issue #1189): every person the run stopped
+ * for has nothing left to answer, so no decision can move it. It outranks
+ * `blocked` and `awaiting-approval` because it contradicts them — both tell an
+ * operator to go and decide something, and this is the state in which there is
+ * nothing there.
+ */
+export type WorkflowRunVerdict =
+  | "running"
+  | "failed"
+  | "stopped"
+  | "stranded"
+  | "blocked"
+  | "undelivered"
+  | "awaiting-approval"
+  | "ok";
 
 /** The result of a run: the engine's final state and any pending approvals. */
 export interface WorkflowRunResult {
@@ -255,6 +330,22 @@ export interface WorkflowRunResult {
    * never a count of what is still outstanding.
    */
   approvals?: WorkflowRunApprovalRow[];
+  /**
+   * The board writes this run's agent nodes performed (issue #661 / M5) — the
+   * cards it opened or re-owned. Absent when it touched no card, which is
+   * nearly every run. Rendered by the run drawer since issue #1014.
+   */
+  board?: WorkflowRunBoardRow[];
+  /**
+   * What this run adds up to, as the host reads it (issue #981).
+   *
+   * Optional on the type, **never** on the wire from a host that has it: a
+   * response predating #981 carries no key at all, and the reading has to be
+   * derived locally in that case. It is the only field on this body that says a
+   * report did not go out — `nodes[].status` deliberately does not move for a
+   * delivery failure, because the nodes really did run.
+   */
+  verdict?: WorkflowRunVerdict;
 }
 
 /**
@@ -329,6 +420,17 @@ export interface WorkflowRunNode {
   status: "ok" | "error" | "blocked";
   /** Wall-clock duration of the node's execution, in milliseconds. */
   elapsedMs: number;
+  /**
+   * The node's null-resolved config paths (issue #1014) — the engine's own list
+   * of the broken wiring behind this step: every config `=`-expression that
+   * resolved to `null`, as its dotted config **location** (e.g. `args.to`).
+   *
+   * Paths only, never a resolved value: a null resolution has no value, and the
+   * host forwards only the config location — the same no-payload stance
+   * `status`/`elapsedMs` take. Absent (the host omits an empty list) for a node
+   * with no unresolved wiring.
+   */
+  diagnostics?: string[];
 }
 
 /** One node a run blocked on a person (issue #881). */
@@ -345,6 +447,19 @@ export interface WorkflowBlockedNode {
    * operator at Approvals would send them to an empty page. Absent when zero.
    */
   unparkable?: number;
+  /**
+   * How many of `approvalIds` the host no longer holds (issue #1143).
+   *
+   * The same end state as `unparkable`, reached later: the card was opened, so
+   * the run recorded an id for it, but the question did not survive and the
+   * queue has nothing to decide. Pointing the operator at Approvals for these
+   * sends them to an empty page — which is the dead end #1143 was filed for.
+   *
+   * Computed by the host on each read of run history rather than stored, so it
+   * reflects the queue as it is now. Absent when zero, which is every healthy
+   * run.
+   */
+  stranded?: number;
 }
 
 /** What became of one gated tool call a run tried to park (issue #880). */
@@ -366,6 +481,52 @@ export interface WorkflowRunApprovalRow {
   outcome: WorkflowApprovalOutcome;
   /** The card the operator can decide, on the `parked` arm. */
   approvalId?: string;
+}
+
+/**
+ * What a run's node did to the task board, as a closed set (issue #661 / M5).
+ *
+ * The two spawn arms opened (or tried to open) a card; the two assign arms set
+ * (or tried to set) an owner. The `*Failed` arms are NOT run failures — they
+ * record that the store refused a write the node's turn was already told would
+ * happen, the same honesty {@link DeliveryStatus} `failed` gives a report that
+ * did not send. Mirrors the Rust `WorkflowBoardAction` camelCase serde.
+ */
+export type WorkflowBoardAction =
+  | "spawned"
+  | "assigned"
+  | "spawnFailed"
+  | "assignFailed";
+
+/**
+ * One board write a run's agent node performed (issue #661 / M5) — "this run
+ * opened card X", the half the run drawer never rendered (issue #1014).
+ *
+ * Structural only: the action, the ids involved, nothing a model wrote. The
+ * same shape rides all three surfaces — the synchronous run response, the run
+ * history, and the `WorkflowRunFinished` event — so a console reads a run's
+ * board effects identically wherever it finds them. Mirrors the Rust
+ * `WorkflowRunBoardRow` camelCase serde.
+ */
+export interface WorkflowRunBoardRow {
+  /** What was attempted, and whether it landed. */
+  action: WorkflowBoardAction;
+  /**
+   * The card the row is about, so a console can link straight to it. Absent on
+   * a `spawnFailed` row — no card was written, so there is no id to point at.
+   */
+  taskId?: string;
+  /**
+   * The title the node asked for, on the two spawn arms — including
+   * `spawnFailed`, where it is the only thing that explains the failure. Absent
+   * on the assign arms, which name a card by id and carry no title.
+   */
+  title?: string;
+  /**
+   * The owner the node asked for, as it wrote it — the requested name rather
+   * than a resolved roster id. `None` when the node named nobody.
+   */
+  assignee?: string;
 }
 
 /**
@@ -391,6 +552,21 @@ export interface WorkflowRunOutcome {
   deliveries: DeliveryReport[];
   /** Node ids the run left waiting on a human approval. */
   pendingApprovals: string[];
+  /**
+   * How many of `pendingApprovals` have **no live card left in the queue**
+   * (issue #1189) — the gate-shaped sibling of `blockedNodes[].stranded`.
+   *
+   * A gate the engine paused at is parked as a `workflow.approve` card that
+   * records no receipt and no blocked-node row, so #1143's per-node count
+   * cannot describe it: the only join is `(runId, nodeId)`, and only the host
+   * can make it. Absent when zero, and absent entirely from a host predating
+   * this — which the console reads as "not reconciled", never as "nothing is
+   * stranded".
+   *
+   * Derived on each read, like `blockedNodes[].stranded`, so it reflects the
+   * queue as it is now rather than what the run recorded when it stopped.
+   */
+  strandedApprovals?: number;
   /** Set when the run failed outright instead of finishing with rows. */
   error?: string;
   /**
@@ -399,6 +575,26 @@ export interface WorkflowRunOutcome {
    * trail", never "the run did nothing".
    */
   nodes?: WorkflowRunNode[];
+  /**
+   * The nodes this run has *begun* executing, in start order (issue #1010).
+   *
+   * The other half of {@link nodes}, which is written by the finish bracket
+   * only — so before this a run in flight came back listing what was already
+   * over and nothing about the node working right now. Every console that
+   * learns about a run from the history rather than from a live start frame (a
+   * reload, a cron fire, an `EventSource` reconnect, a workflow switch and
+   * back) reads the graph through this.
+   *
+   * A **receipt of what started**, kept once the run settles: an id here with
+   * no matching {@link nodes} row on a settled run is the node the run was
+   * standing on when it was cancelled or lost. So it must ALWAYS be paired
+   * with {@link running} before anything is painted as in flight — see
+   * `statesFromRun`.
+   *
+   * Absent on a host predating #1010 and on a run journaled before #382, so
+   * absent must read as "no start trail", never as "nothing started".
+   */
+  startedNodes?: string[];
   /** When the run started. Absent on a pre-#371 row, whose only time is the finish. */
   startedAtMillis?: number;
   /**
@@ -452,6 +648,22 @@ export interface WorkflowRunOutcome {
    * A receipt of what the run opened, never a count of what is outstanding.
    */
   approvals?: WorkflowRunApprovalRow[];
+  /**
+   * The board writes this run's agent nodes performed (issue #661 / M5) — the
+   * same rows a manual run's response carries, durable in the history. Absent
+   * on a run that touched no card.
+   */
+  board?: WorkflowRunBoardRow[];
+  /**
+   * What this run adds up to, as the host reads it (issue #981).
+   *
+   * **Derived by the host, never journaled**, so a run recorded long before
+   * this field existed still comes back with one — the whole history re-scores
+   * on deploy rather than on a migration. Optional on the type only because a
+   * *host* predating #981 sends no key; when that happens {@link runTone} falls
+   * back to deriving it here, which is where the definition used to live.
+   */
+  verdict?: WorkflowRunVerdict;
 }
 
 export function listWorkflows(
@@ -471,31 +683,60 @@ export function getWorkflow(
   );
 }
 
-/** The `GET …/workflows/tool-slugs` answer (issue #783). */
+/**
+ * One tool this company is granted but that cannot run on this deployment
+ * (issue #874) — reported so the console can tell "not allowed here" from
+ * "allowed, not configured yet".
+ */
+export interface UnwiredWorkflowTool {
+  slug: string;
+  /** `searchBackendNotConfigured` | `capabilityTierFiltered` — new tokens may appear. */
+  reason: string;
+  /** The same reason in prose, safe to show as-is. */
+  detail: string;
+}
+
+/** The `GET …/workflows/tool-slugs` answer (issues #783, #874). */
 interface WorkflowToolSlugsResponse {
   slugs: string[];
+  /** Absent on a host predating issue #874. */
+  unwired?: UnwiredWorkflowTool[];
+}
+
+/** What {@link listWorkflowToolSlugs} resolves to. */
+export interface WorkflowToolSlugs {
+  /** The effective slugs — granted AND wired here. Ground prompts on these. */
+  slugs: string[];
+  /**
+   * Granted but unwired here. Empty on a host predating issue #874, which is
+   * indistinguishable from "everything granted is wired" — both mean there is
+   * nothing extra to warn about, so no caller needs to tell them apart.
+   */
+  unwired: UnwiredWorkflowTool[];
 }
 
 /**
- * The wired, granted `tool_call` slugs the per-workflow copilot may ground a
- * proposal on (issue #783).
+ * The `tool_call` slugs the per-workflow copilot may ground a proposal on
+ * (issue #783), narrowed to the **effective** set by issue #874.
  *
- * Every slug here is one a proposed `tool_call` node would clear at the host's
- * courtesy validation — the route serves the SAME set the create-time copilot
- * grounds on (issue #753), so what the copilot is told it can call and what the
- * host will accept cannot drift. A host predating the route 404s; the caller
- * degrades to an empty list, exactly as it does for the roster read, rather than
- * blocking the copilot.
+ * A slug in `slugs` is granted by `[tools].allow` AND wired on this deployment,
+ * so a proposed node has a chance of running — the route serves the SAME set the
+ * create-time copilot grounds on, so the two cannot drift. Tools the company
+ * holds a grant for but that cannot run here come back under `unwired` instead
+ * of being dropped, so the copilot can be told not to author them and still say
+ * why when asked. A host predating the route 404s; the caller degrades to empty
+ * lists, exactly as it does for the roster read, rather than blocking the
+ * copilot.
  */
 export function listWorkflowToolSlugs(
   client: OpenCompanyClient,
   company: string | null,
-): Promise<string[]> {
+): Promise<WorkflowToolSlugs> {
   return client
     .get<WorkflowToolSlugsResponse>(
       `${client.scopeFor(company)}/workflows/tool-slugs`,
     )
-    .then((r) => r.slugs);
+    .then((r) => ({ slugs: r.slugs, unwired: r.unwired ?? [] }));
 }
 
 /** The `GET …/workflows/wired-channels` answer (issue #813). */
@@ -505,12 +746,21 @@ interface WiredChannelsResponse {
 
 /**
  * The chat channels this running company can deliver to — the real targets an
- * output node's `channel` destination may name (issue #813). `operator` is
- * always present; the rest are the enabled OpenHuman-provider manifest channels.
+ * output node's `channel` destination may name (issue #813): its desk chats and
+ * its enabled OpenHuman-provider manifest channels.
+ *
+ * **`operator` is not one of them** (issue #981). It is an in-memory response
+ * surface with no durable reader, so workflow delivery refuses it by name; the
+ * host used to include it here anyway, which offered authors the one target
+ * guaranteed to fail.
+ *
  * The console reads this to offer a picker instead of a free-text box that only
- * fails at delivery with `ChannelNotWired`. A host predating the route 404s; the
- * caller degrades to an empty list (the picker then falls back to free text)
- * rather than blocking authoring.
+ * fails at delivery with `ChannelNotWired`. An empty list has two causes and the
+ * fallback is the same for both: a host predating the route 404s, and a company
+ * with no desks and no connected channels genuinely has nowhere to deliver. The
+ * caller degrades to an empty list (the picker falls back to free text, and the
+ * save is refused server-side if the target is not deliverable) rather than
+ * blocking authoring.
  */
 export function listWiredChannels(
   client: OpenCompanyClient,
@@ -599,23 +849,62 @@ export function cancelWorkflowRun(
 }
 
 /**
- * The company's finished workflow runs, **newest first** (issue #228).
+ * One page of {@link listWorkflowRuns} (issue #1012).
+ *
+ * `hasMore` says whether an older page exists behind `nextBeforeSeq` — the run
+ * history drawer's "Load older" affordance is gated on it, so a truncated
+ * history never silently reads as the whole thing.
+ */
+export interface WorkflowRunsPage {
+  runs: WorkflowRunOutcome[];
+  hasMore: boolean;
+  /**
+   * The cursor to pass back as `beforeSeq` for the page behind this one — the
+   * page's **lowest** `seq`, which is not in general the last row in display
+   * order.
+   *
+   * Server-issued rather than derived here, and that is the point. The host
+   * cuts a page by `seq` (monotonic, and the key its journal read is bounded
+   * by) and then sorts it for display by `(atMillis, seq)`; `atMillis` is
+   * wall-clock, so a clock regression makes the two orders disagree and
+   * `runs.at(-1)!.seq` is no longer the boundary. Paging off the last
+   * displayed row then skips runs permanently — the very bug #1012 is about.
+   *
+   * **Absent on a host predating this field.** That must fall back to the old
+   * `runs.at(-1)?.seq` derivation, never to "there are no more pages": the
+   * latter would ship this fix as a fresh silent truncation. `hasMore` remains
+   * the only thing that says whether to keep going.
+   */
+  nextBeforeSeq?: number;
+}
+
+/**
+ * The company's finished workflow runs, **newest first** (issue #228) — now
+ * genuinely true of the *displayed* `seq`/`atMillis`, not just the order two
+ * runs started in (issue #1012).
  *
  * `workflow` narrows to one graph's runs; `limit` caps the page (the host
- * defaults to a short recent list and clamps a large ask). A host predating this
- * route answers 404 — callers should treat that as "no history yet" rather than
- * an error, since the console still works without it.
+ * defaults to a short recent list and clamps a large ask). `beforeSeq` pages
+ * further back: pass the previous page's {@link WorkflowRunsPage.nextBeforeSeq}
+ * to fetch the page before it (issue #1012) — `hasMore` says whether one
+ * exists. A host predating this route answers 404 — callers should treat that
+ * as "no history yet" rather than an error, since the console still works
+ * without it.
  */
 export function listWorkflowRuns(
   client: OpenCompanyClient,
   company: string | null,
-  options?: { workflow?: string; limit?: number },
-): Promise<WorkflowRunOutcome[]> {
+  options?: { workflow?: string; limit?: number; beforeSeq?: number },
+): Promise<WorkflowRunsPage> {
   const params = new URLSearchParams();
   if (options?.workflow) params.set("workflow", options.workflow);
   if (options?.limit) params.set("limit", String(options.limit));
+  // `!== undefined`, not truthiness: `0` is a legitimate cursor (the journal's
+  // first row) and a truthy check drops it, silently asking for the newest
+  // page again and looping the caller on the same rows.
+  if (options?.beforeSeq !== undefined) params.set("before_seq", String(options.beforeSeq));
   const query = params.toString();
-  return client.get<WorkflowRunOutcome[]>(
+  return client.get<WorkflowRunsPage>(
     `${client.scopeFor(company)}/workflows/runs${query ? `?${query}` : ""}`,
   );
 }
@@ -626,7 +915,9 @@ export function listWorkflowRuns(
  *
  * `nodes` is the engine's `{ "<node id>": { "items": [ … ] } }` map, bounded for
  * storage; `truncated` says whether any value was clipped to fit the caps, so the
- * inspector can badge it honestly.
+ * inspector can badge it honestly. `partial` says the run FAILED or BLOCKED, so
+ * the map is only what the runner captured from the nodes that finished before
+ * the stop — not a complete outcome (issue #1008).
  */
 export interface WorkflowRunOutputRecord {
   runId: string;
@@ -637,6 +928,13 @@ export interface WorkflowRunOutputRecord {
   nodes: unknown;
   /** Whether any value was clipped to fit the durable size caps. */
   truncated: boolean;
+  /**
+   * Whether this is a partial capture from a run that failed or blocked rather
+   * than a clean settled outcome (issue #1008). Optional so a snapshot written
+   * before this field existed (always a clean settle) reads back as absent,
+   * which the inspector treats as `false`.
+   */
+  partial?: boolean;
 }
 
 /**
@@ -665,6 +963,83 @@ export function workflowRunOutput(
 }
 
 /**
+ * One file a workflow run produced (issue #1684) — a row of the run inspector's
+ * "Files associated" section.
+ *
+ * The host resolves these through the run's provenance chain (`run_id → cards
+ * opened by the run → each card's artifacts`), so a row carries exactly what the
+ * console needs to deep-link the file and nothing more: it is **metadata only**,
+ * never the artifact body. {@link artifactHref} turns `taskId` + `artifactId` +
+ * `latestVersion` into the Artifacts-tab address, and `workspaceNodeId` — when
+ * the file was mirrored into the shared tree — into the second `#/workspace/<id>`
+ * link.
+ */
+export interface RunArtifactRow {
+  /** The card that produced the file — scopes the Artifacts tab the link opens. */
+  taskId: string;
+  /** The artifact's stable id → the tab's open artifact. */
+  artifactId: string;
+  /** The artifact's display title. */
+  title: string;
+  /** What the file holds — `text` | `markdown` | `image` | `file`. */
+  kind: ArtifactKind;
+  /**
+   * The workspace-relative path the agent published (e.g. `specs/launch.md`).
+   * Absent on a legacy record captured before the source path existed (issue
+   * #244); the console labels those rather than hiding them.
+   */
+  source?: string;
+  /** The newest revision number → the version the deep-link pins. */
+  latestVersion: number;
+  /** Epoch-millis of the newest revision — the host's sort key and the row's time. */
+  updatedAtMillis: number;
+  /**
+   * The workspace node the newest revision was mirrored into (issue #552), when
+   * one was → an optional `#/workspace/<id>` link. Absent when nothing mirrored it.
+   */
+  workspaceNodeId?: string;
+  /** The producing card's title, for grouping rows by card. */
+  taskTitle?: string;
+}
+
+/** The `GET …/workflows/runs/{rid}/artifacts` response. A wrapper rather than a
+ * bare array so a run whose file count exceeds the host's defensive cap can say
+ * so instead of the console presenting an incomplete list as exhaustive. */
+export interface RunArtifactsResponse {
+  /** The run's files, newest first (the host's sort). */
+  files: RunArtifactRow[];
+  /**
+   * Whether older rows were cut by the host's cap. `false` for every run in
+   * practice — the cap is a ceiling, not a page size — but when `true` the
+   * console labels the list rather than silently showing a subset.
+   */
+  truncated: boolean;
+}
+
+/**
+ * Fetches the files one past run produced (issue #1684), for the run inspector's
+ * lazy "Files associated" disclosure.
+ *
+ * Lazy per-run by design, exactly like {@link workflowRunOutput}: the history
+ * list stays structural, and only the run an operator expands is fetched.
+ *
+ * **Answers `200 { files: [] }` — never `404` — for a run that produced no
+ * files**, which is the common case (a run that opened no cards, or cards that
+ * published nothing). That is the one contract difference from
+ * `workflowRunOutput`: a fileless run is normal, so callers render the empty
+ * state off an empty array rather than off a caught 404.
+ */
+export function fetchRunArtifacts(
+  client: OpenCompanyClient,
+  company: string | null,
+  runId: string,
+): Promise<RunArtifactsResponse> {
+  return client.get<RunArtifactsResponse>(
+    `${client.scopeFor(company)}/workflows/runs/${encodeURIComponent(runId)}/artifacts`,
+  );
+}
+
+/**
  * Authors a new workflow graph (issues #69, #168): the console's form creator
  * posts the same shape `getWorkflow` returns, and the host persists it on the
  * company record — so this works on every deployment, including a hosted tenant
@@ -679,6 +1054,33 @@ export function createWorkflow(
 ): Promise<WorkflowGraph> {
   return client.post<WorkflowGraph>(
     `${client.scopeFor(company)}/workflows`,
+    graph,
+  );
+}
+
+/**
+ * Asks the host whether Create would accept this graph, **without saving it**
+ * (issue #1074).
+ *
+ * Two of Create's rules cannot be pre-empted by a client without
+ * re-implementing them — node reachability, and the condition branch-label rule
+ * — and a client-side copy of a host rule drifts. So the console asks instead of
+ * mirroring. The host runs the same validation Create runs, so a `200` here and
+ * a refusal there (or the reverse) is not a state the two can be in.
+ *
+ * **A rejection is an `ApiError`, not a return value**, unlike {@link previewCron}
+ * and {@link draftFromDescription}: the body is byte-for-byte the `400` Create
+ * would have answered with, so a caller can render one code path for both. It
+ * does NOT answer id/name uniqueness — that is decided under a write lock at
+ * save time, so a `200` here still permits a `409` there.
+ */
+export function validateWorkflow(
+  client: OpenCompanyClient,
+  company: string | null,
+  graph: WorkflowGraph,
+): Promise<{ valid: boolean }> {
+  return client.post<{ valid: boolean }>(
+    `${client.scopeFor(company)}/workflows/validate`,
     graph,
   );
 }
@@ -822,14 +1224,16 @@ export function fixWorkflowFromRun(
  * rename is a create plus a delete.
  *
  * Pass `expectedVersion` — the `version` from the {@link getWorkflow} this edit
- * was based on — to make the write conditional. If the graph moved in between,
- * the host answers `409` and **nothing is written**; surface that to the
- * operator with a reload rather than retrying without the token, which is the
- * silent-overwrite the guard exists to prevent.
+ * was based on — to make the write conditional. It is **required** (issue
+ * #1013): a `null`/absent token makes the host answer `400` rather than writing
+ * unconditionally, which is what stops a stale editor silently clobbering a
+ * concurrent save. If the graph moved in between, the host answers `409` and
+ * **nothing is written**; surface either as a reload rather than retrying, which
+ * is the silent-overwrite the guard exists to prevent.
  *
  * Other rejections carry the same prosumer-language `ApiError` a create does:
- * `400` for a bad graph, `404` for an unknown id, `409` for a source-defined
- * workflow or a display name already taken.
+ * `400` for a bad graph or a missing token, `404` for an unknown id, `409` for a
+ * source-defined workflow or a display name already taken.
  *
  * Returns the stored graph with a **fresh** `version`, so a second save needs no
  * intervening read.
@@ -839,7 +1243,7 @@ export function updateWorkflow(
   company: string | null,
   wid: string,
   graph: WorkflowGraph,
-  expectedVersion?: string,
+  expectedVersion?: string | null,
 ): Promise<WorkflowGraph> {
   return client.put<WorkflowGraph>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}`,
@@ -855,9 +1259,11 @@ export function updateWorkflow(
  * **Past runs are kept.** They record what the workflow did, which stays true
  * after it is gone; {@link listWorkflowRuns} keeps serving them.
  *
- * `expectedVersion` makes the delete conditional in exactly the sense the
- * operator means by clicking Delete on a graph they are looking at: if it
- * changed underneath them, the host answers `409` and removes nothing.
+ * `expectedVersion` is **required** (issue #1013) and makes the delete
+ * conditional in exactly the sense the operator means by clicking Delete on a
+ * graph they are looking at: a `null`/absent token is a `400` rather than an
+ * unconditional delete, and if the token changed underneath them the host
+ * answers `409` and removes nothing.
  *
  * Follows the same runtime-vs-source contract as `deleteDesk`: a workflow
  * defined by a file in the company source tree cannot be removed from the
@@ -867,7 +1273,7 @@ export function deleteWorkflow(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
-  expectedVersion?: string,
+  expectedVersion?: string | null,
 ): Promise<void> {
   const query = expectedVersion
     ? `?expectedVersion=${encodeURIComponent(expectedVersion)}`
@@ -968,18 +1374,20 @@ export async function listWorkflowRevisions(
  * review (issue #276) — read `enabled` on the result to reflect that.
  *
  * Pass `expectedVersion` — the `version` of the graph the operator was looking
- * at — to make the restore conditional. On a `409` the graph moved underneath
- * them: **reload and let them re-choose, do not retry** without the token, which
- * is the silent-overwrite the guard exists to prevent. Other rejections carry
- * the host's prosumer-language message: `404` for an unknown workflow or
- * revision, `409` for a source-defined / body-less workflow or a name collision.
+ * at — to make the restore conditional. It is **required** (issue #1013): a
+ * `null`/absent token is a `400` rather than an unconditional restore. On a `409`
+ * the graph moved underneath them: **reload and let them re-choose, do not
+ * retry** without the token, which is the silent-overwrite the guard exists to
+ * prevent. Other rejections carry the host's prosumer-language message: `400` for
+ * a missing token, `404` for an unknown workflow or revision, `409` for a
+ * source-defined / body-less workflow or a name collision.
  */
 export function restoreWorkflowRevision(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
   revisionId: string,
-  expectedVersion?: string,
+  expectedVersion?: string | null,
 ): Promise<WorkflowGraph> {
   return client.post<WorkflowGraph>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/revisions/${encodeURIComponent(
@@ -1051,7 +1459,13 @@ export function previewCron(
   );
 }
 
-export const CREATABLE_NODE_KINDS: { value: string; label: string }[] = [
+/**
+ * Every workflow node kind the host accepts, paired with its operator-facing
+ * label. This is the console's single vocabulary for authoring and display:
+ * consumers that need only the wire values derive them below rather than
+ * maintaining another list that can drift.
+ */
+export const NODE_KINDS: readonly { value: string; label: string }[] = [
   { value: "trigger", label: "Trigger — starts the workflow" },
   { value: "agent", label: "Agent — a teammate performs a step" },
   { value: "condition", label: "Condition — branches on something" },
@@ -1061,32 +1475,32 @@ export const CREATABLE_NODE_KINDS: { value: string; label: string }[] = [
   { value: "tool_call", label: "Tool call — runs a tool by slug" },
   { value: "http_request", label: "HTTP request — calls a URL" },
   { value: "switch", label: "Switch — routes to a labeled branch" },
+  { value: "split_out", label: "Split out — sends each item down the next step" },
   { value: "output_parser", label: "Output parser — coerces to a schema" },
   { value: "sub_workflow", label: "Sub-workflow — runs another workflow" },
 ];
 
 /**
+ * A readable node-kind label, including for a kind introduced by a newer host.
+ * The fallback deliberately humanises separators instead of exposing a raw
+ * snake_case machine token as the primary label.
+ */
+export function nodeKindLabel(kind: string): string {
+  const known = NODE_KINDS.find((candidate) => candidate.value === kind)?.label;
+  if (known) return known.split(" — ", 1)[0];
+
+  const words = kind.trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (!words) return "Unknown node kind";
+  return words.replace(/^\p{L}/u, (letter) => letter.toLocaleUpperCase());
+}
+
+/**
  * Every node kind the host accepts in a saved graph — the OpenCompany authoring
  * contract, mirroring `WORKFLOW_NODE_KINDS` in `src/company/workflow_file.rs`.
  *
- * Broader than {@link CREATABLE_NODE_KINDS} on purpose: the palette omits
- * `split_out` (it has no create control yet), but a graph may legitimately
- * contain one, so a copilot proposal that adds one must not be refused. This is
- * the set the proposal validator checks a proposed `kind` against — a kind the
- * host would reject on write is caught here, before the operator is shown a diff
- * for a step that cannot be applied.
+ * Derived from {@link NODE_KINDS}, so the authoring palette, inspector labels,
+ * and proposal validation cannot disagree about which kinds are allowed.
  */
-export const WORKFLOW_NODE_KINDS: readonly string[] = [
-  "trigger",
-  "agent",
-  "tool_call",
-  "http_request",
-  "condition",
-  "output",
-  "switch",
-  "merge",
-  "split_out",
-  "transform",
-  "output_parser",
-  "sub_workflow",
-];
+export const WORKFLOW_NODE_KINDS: readonly string[] = NODE_KINDS.map(
+  (kind) => kind.value,
+);

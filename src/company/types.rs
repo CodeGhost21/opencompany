@@ -28,14 +28,51 @@ pub const AUTH_MODES: &[&str] = &["email", "wallet", "none"];
 
 /// Inference providers selectable in `[inference].provider` (issue #56 — BYOK).
 ///
-/// * `managed` — the hosted TinyHumans / Medulla brain (the default path).
-/// * `openrouter` — OpenRouter's OpenAI-compatible aggregator (needs a key +
-///   the `HTTP-Referer` / `X-Title` attribution headers).
+/// * `openrouter` — OpenRouter's OpenAI-compatible aggregator, and the default.
+///   With **no** key it resolves to the platform endpoint and the subscription
+///   pays; with a tenant `sk-or-…` it goes direct to OpenRouter on the tenant's
+///   own account. Either way it carries OpenRouter's `HTTP-Referer` / `X-Title`
+///   attribution headers.
 /// * `openai_compatible` — any OpenAI-compatible endpoint the tenant runs
 ///   (needs a `base_url`, usually a key).
 /// * `ollama` — a local Ollama server's OpenAI-compatible surface (needs a
 ///   `base_url`; no key).
-pub const INFERENCE_PROVIDERS: &[&str] = &["managed", "openrouter", "openai_compatible", "ollama"];
+///
+/// `managed` was removed: OpenCompany no longer exposes its own model SKUs, so
+/// there is nothing for a distinct managed kind to name. A manifest or stored
+/// runtime blob still saying `managed` aliases to `openrouter` — see
+/// [`inference::LEGACY_MANAGED`](crate::company::inference::LEGACY_MANAGED).
+pub const INFERENCE_PROVIDERS: &[&str] = &["openrouter", "openai_compatible", "ollama"];
+
+/// Harness kinds selectable in `[[harness]].kind`.
+///
+/// * `built_in` — the embedded OpenHuman loop, in this process, against the
+///   inference provider the harness itself declares.
+/// * `acp` — an external agent driven over the Agent Client Protocol. Runs on
+///   whatever credential *it* holds, so it needs no `[harness.inference]`.
+pub const HARNESS_KINDS: &[&str] = &["built_in", "acp"];
+
+/// The default harness kind, used for the implicit harness a company with no
+/// `[[harness]]` block gets.
+pub const DEFAULT_HARNESS_KIND: &str = "built_in";
+
+/// The id given to the implicit harness synthesized for a company that declares
+/// no `[[harness]]` block.
+pub const IMPLICIT_HARNESS_ID: &str = "default";
+
+/// Transports selectable in `[harness.acp].transport`.
+///
+/// A remote runner is a *transport*, not a third harness kind: `RunnerDispatch`
+/// already implements the same `AcpAgent` port the local subprocess does, so the
+/// only thing that differs is how bytes reach the agent.
+pub const ACP_TRANSPORTS: &[&str] = &["local", "runner"];
+
+/// ACP agents selectable in `[harness.acp].agent`, for `transport = "local"`.
+///
+/// Kept in step with the desktop's own `ACP_HARNESSES` catalogue, which encodes
+/// how to put each one into ACP mode — guessing those arguments wrong spawns a
+/// process that hangs waiting for interactive input.
+pub const ACP_AGENTS: &[&str] = &["claude", "codex"];
 
 /// The abstract cognition tiers the tenant `[inference].models` table maps to
 /// concrete provider model ids. These are the workload names the harness
@@ -74,7 +111,7 @@ pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 pub const PROVISIONED_POLICY_MODE: &str = "auto";
 
 /// Channels the runtime knows how to enable under `[channels.*]`.
-pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
+pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web"];
 
 /// Effect kinds gated for approval by default — **empty on purpose** (issue
 /// #684).
@@ -123,8 +160,8 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// maps individual tools onto these namespaces. A `[plan].token_budgets` key
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
-pub const GATEABLE_NAMESPACES: [&str; 8] = [
-    "shell", "code", "web", "subagent", "media", "composio", "search", "repo",
+pub const GATEABLE_NAMESPACES: [&str; 7] = [
+    "shell", "code", "web", "subagent", "media", "composio", "search",
 ];
 
 /// Whether a tool-grant list **explicitly** grants the real-money `media`
@@ -159,6 +196,108 @@ pub fn grants_composio_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "composio" || grant.starts_with("composio."))
 }
 
+/// Whether a tool-grant list **explicitly** grants the `chargebee` billing
+/// namespace (issue #788).
+///
+/// Like [`grants_composio_explicit`], the catch-all `*` does **not** grant it:
+/// these tools send invoices to real customers of a real business, so they are
+/// opted into by name rather than ridden in on a wildcard a company set for its
+/// file and shell tools. Lives here (always compiled) so the feature-gated
+/// harness wiring and the always-compiled console capability route key off one
+/// source of truth.
+pub fn grants_chargebee_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "chargebee" || grant.starts_with("chargebee."))
+}
+
+/// Whether a tool-grant list **explicitly** grants the `hosting` namespace.
+///
+/// Like its siblings, the catch-all `*` does **not** confer it. These tools
+/// publish a company's files to the public internet under its own name and can
+/// provision a managed database it is billed for, so they are opted into by
+/// name rather than ridden in on a wildcard a company set for its file and
+/// shell tools.
+pub fn grants_hosting_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "hosting" || grant.starts_with("hosting."))
+}
+
+/// The grant list a teammate created with **no stated `tools`** should receive.
+///
+/// An omitted `tools` line means "the company's standard grant", and the
+/// standard grant is the whole of `[tools].allow`. That is the right default
+/// for the belt a company runs on — issue #1674 made it wider on purpose,
+/// because a teammate minted from three sentences in a wizard reporting its
+/// own tools as "not enabled" is the worse failure. It is the wrong default
+/// for a namespace `*` deliberately refuses to confer: a company that added
+/// `chargebee` by name so that ONE teammate could invoice should not hand
+/// billing to the next teammate an operator types into the console.
+///
+/// So this withholds exactly the **BYO real-money** namespaces — the ones a
+/// company only ever holds because somebody named them, and that reach a real
+/// business's customers, wallet, or public identity. `media`, `composio` and
+/// `search` are deliberately NOT withheld: they ship in the default belt, so
+/// withholding them would re-create the #1674 complaint for every new
+/// teammate.
+///
+/// Returns **empty** when nothing is withheld, preserving the "empty means the
+/// standard company grant" contract for the overwhelming majority of companies
+/// that grant none of these. A non-empty return is the allow-list minus the
+/// withheld namespaces, materialised so the stored teammate carries its own
+/// narrowed line rather than inheriting a ceiling that later widens.
+pub fn creation_default_grants(allow: &[String]) -> CreationGrant {
+    let withheld = |grant: &String| {
+        let one = std::slice::from_ref(grant);
+        grants_chargebee_explicit(one)
+            || grants_paypal_explicit(one)
+            || grants_hosting_explicit(one)
+    };
+    if !allow.iter().any(withheld) {
+        return CreationGrant::Standard;
+    }
+    let kept: Vec<String> = allow.iter().filter(|g| !withheld(g)).cloned().collect();
+    if kept.is_empty() {
+        return CreationGrant::NothingLeft;
+    }
+    CreationGrant::Narrowed(kept)
+}
+
+/// What [`creation_default_grants`] decided for a teammate created with no
+/// stated `tools`.
+///
+/// Three cases rather than a `Vec`, because a `Vec` cannot express the third
+/// one: an empty list is already spoken for — it means "the standard company
+/// grant" — so returning the filtered-to-nothing result as `vec![]` would hand
+/// back the exact capability the filter just removed. The orchestrator's
+/// `add_agent` refuses on the same reasoning when narrowing a requested scope
+/// yields nothing, and this mirrors it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CreationGrant {
+    /// Nothing was withheld. Store an empty line, which keeps tracking
+    /// `[tools].allow` the way an unstated grant always has.
+    Standard,
+    /// Store this narrowed line: the allow-list minus the withheld namespaces.
+    Narrowed(Vec<String>),
+    /// The company's whole belt is withheld namespaces (`allow = ["chargebee"]`
+    /// and nothing else). There is no safe line to store — empty would read
+    /// back as inheritance — so the caller refuses and asks for an explicit
+    /// grant instead.
+    NothingLeft,
+}
+
+/// Whether a tool-grant list **explicitly** grants the `paypal` namespace
+/// (issue #789).
+///
+/// Like its siblings, the catch-all `*` does **not** grant it. These tools read
+/// a real business's wallet, so they are opted into by name.
+pub fn grants_paypal_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "paypal" || grant.starts_with("paypal."))
+}
+
 /// Whether a tool-grant list **explicitly** grants the metered `search`
 /// namespace (issue #238).
 ///
@@ -176,52 +315,51 @@ pub fn grants_search_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "search" || grant.starts_with("search."))
 }
 
-/// Whether a tool-grant list **explicitly** grants the bound-repository `repo`
-/// namespace (issue #245, agent half).
+/// Whether a tool-grant list confers the **publishing** capability (issue #244)
+/// — the `files`/`docs` namespace on which both an agent's file tools and
+/// `publish_artifact` ride.
 ///
-/// Like [`grants_media_explicit`], [`grants_composio_explicit`] and
-/// [`grants_search_explicit`], the catch-all `*` does **not** confer it, and the
-/// reason is sharper here than for any of them: `repo_checkout` materializes a
-/// third party's source — and, through `repo_pr`, a third party's patch — inside
-/// an agent's sandbox, where the same agent may also hold `shell`. That is a
-/// company deciding to let its agents read real code under an operator-installed
-/// credential, and a decision of that size is made by name rather than inherited
-/// from a wildcard set for file and shell tools.
+/// # This is deliberately NOT a member of the `_explicit` family above
 ///
-/// Matches the bare `repo` grant or any `repo.*` sub-grant. Lives here (always
-/// compiled) so both the feature-gated harness wiring (`build::build_agent`) and
-/// the always-compiled console capability route key off one source of truth.
-pub fn grants_repo_explicit(grants: &[String]) -> bool {
-    grants
-        .iter()
-        .any(|grant| grant == "repo" || grant.starts_with("repo."))
-}
-
-/// Whether a tool-grant list **explicitly** grants the repository *write* tier
-/// (issue #734) — the tier under which an agent's work can be pushed to a real
-/// remote and opened as a pull request.
+/// Read that first, because the naming invites exactly the wrong edit. Every
+/// `grants_*_explicit` sibling guards a surface that spends real money or
+/// reaches a third party, and for those the catch-all `*` confers **nothing**:
+/// a decision that size is made by name. Publishing is the opposite case. It
+/// spends nothing and reaches nothing outside the company's own board, so it
+/// rides the ordinary namespace rule and **a bare `*` DOES confer it** — which
+/// is what `build_agent`'s own gate has always done.
 ///
-/// This is the tightest predicate on this surface, and deliberately tighter than
-/// **both** of its neighbours. Do not "harmonise" it back toward either shape:
+/// So do not "harmonise" this into the `_explicit` shape. The overwhelming
+/// majority of shipped manifests grant `*`; renaming this predicate into that
+/// family would silently revoke publishing for all of them, and the only
+/// symptom would be agents that can write files and quietly cannot deliver
+/// them.
 ///
-/// * Unlike [`grants_repo_explicit`], a **bare `repo` grant confers nothing
-///   here.** Every company adopting the read tier writes bare `repo`; if that
-///   silently carried push, a company that asked for agents *reading* code would
-///   get agents *pushing* it — exactly the outcome issue #247's write tier exists
-///   to prevent. Read and write are separate decisions, so they are separate
-///   grants. Widening this to the `repo` / `repo.*` shape reintroduces that
-///   footgun.
-/// * Unlike [`grants_workspace_write_explicit`], not even a *bare namespace*
-///   token confers it: only the **exact** string `repo.write` does. `repo`,
-///   `repo.read`, any other `repo.*` sub-grant, and the catch-all `*` all confer
-///   nothing. Matching a `repo.write` *prefix* (`starts_with`) would let a stray
-///   `repo.writer` slip through; the exact-string match is the point.
+/// # One derivation, two callers
 ///
-/// Lives here (always compiled) so the feature-gated harness wiring
-/// (`build::build_agent`) and always-compiled tooling share one source of truth,
-/// as with the read predicate above.
-pub fn grants_repo_write_explicit(grants: &[String]) -> bool {
-    grants.iter().any(|grant| grant == "repo.write")
+/// [`build_agent`](crate::harness::build::build_agent)'s `wants_files` gate —
+/// which decides whether `publish_artifact` (and the file belt) is wired at all
+/// — and the always-compiled console capability route both call this. That is
+/// the point: a second copy of the rule is how the panel comes to report a
+/// capability the toolbelt does not actually wire (issue #886), and a
+/// hand-rolled `starts_with` here would additionally re-fork the boundary rule
+/// issue #461 de-forked.
+///
+/// Lives in this module rather than in `harness::build` because `harness` is
+/// behind the `openhuman` feature and the console route is not.
+///
+/// A caller of
+/// [`extends_on_boundary`](crate::runtime::tools::extends_on_boundary) over the
+/// grant separator set, so `docs`, `docs.read`, `files.write` and `*` all
+/// confer it while `documentation` — which a naive prefix test would accept —
+/// does not.
+pub fn grants_files_or_docs(grants: &[String]) -> bool {
+    use crate::runtime::tools::{NAMESPACE_SEPARATORS, extends_on_boundary};
+    grants.iter().any(|grant| {
+        grant == "*"
+            || extends_on_boundary(grant, "files", NAMESPACE_SEPARATORS)
+            || extends_on_boundary(grant, "docs", NAMESPACE_SEPARATORS)
+    })
 }
 
 /// Whether a tool-grant list **explicitly** grants writes to the company
@@ -324,6 +462,15 @@ pub struct CompanyManifest {
     /// Brain selection.
     #[serde(default)]
     pub brain: Brain,
+    /// The named execution engines this company's agents run on. Renamed from
+    /// the `[[harness]]` array-of-tables.
+    ///
+    /// Empty (the default) means one implicit `built_in` harness on the
+    /// company-level [`inference`](Self::inference) — resolve through
+    /// [`effective_harnesses`](Self::effective_harnesses) rather than reading
+    /// this field, so the implicit case is never forgotten.
+    #[serde(default, rename = "harness")]
+    pub harnesses: Vec<Harness>,
     /// Per-tenant Bring-Your-Own-Key inference routing (issue #56). Declarative
     /// intent — a provider kind, an OpenAI-compatible `base_url`, an optional
     /// *named* secret key (`api_key_secret`), and an abstract-tier → model map.
@@ -356,6 +503,33 @@ pub struct CompanyManifest {
     /// Cron-driven prompts. Renamed from the `[[schedule]]` array-of-tables.
     #[serde(default, rename = "schedule")]
     pub schedules: Vec<Schedule>,
+    /// How this company relates to the global baseline ([`crate::globals`]).
+    #[serde(default)]
+    pub globals: Globals,
+}
+
+/// `[globals]` — this company's relationship to the global baseline.
+///
+/// The roster, workflows and skills are a floor every company gets whichever
+/// vertical it started from, so the only thing left to configure for those is
+/// what this company does *not* want. Replacing a global needs no entry here:
+/// a company definition of the same id supersedes the global one on its own.
+///
+/// The tool belt (`[tools].default_allow`) is the one part of the baseline
+/// that is a *default*, not a floor: it is what a company with no `[tools]`
+/// section of its own starts with, never a minimum re-granted underneath one
+/// — see [`crate::globals`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Globals {
+    /// Globals this company drops outright, as `<kind>:<id>` keys — e.g.
+    /// `agent:researcher`, `workflow:weekly_review`, `skill:meeting-brief`.
+    ///
+    /// Validated against what the baseline actually carries: an entry naming
+    /// nothing is a manifest error, because the alternative is an opt-out the
+    /// operator wrote, believed, and silently never got. The kinds are
+    /// [`crate::globals::DISABLE_KINDS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disable: Vec<String>,
 }
 
 /// `[company]` — the seed of the Charter.
@@ -372,6 +546,9 @@ pub struct Company {
     /// tiny.place `@handle`; only used when `[place].discoverable = true`.
     #[serde(default)]
     pub handle: Option<String>,
+    /// Company logo as a self-contained data:image/... URL (issue: operator-set brand logo).
+    #[serde(default)]
+    pub logo_url: Option<String>,
 }
 
 /// A `[[agent]]` roster entry.
@@ -381,15 +558,72 @@ pub struct Agent {
     pub id: String,
     /// Human-readable job title.
     pub role: String,
+    /// The display name an operator gave this teammate, when it has one
+    /// (issue #1105).
+    ///
+    /// Set only for an operator-added (overlay) teammate, whose name the
+    /// console shows on the DM header, subtitle and composer; a manifest
+    /// `[[agent]]` is addressed by its role and leaves this `None`. Carried
+    /// here so [`persona_prompt`](crate::company::prompt::persona_prompt) can tell the
+    /// model the name the interface is already calling it — without it the
+    /// agent denies being the person the console names.
+    ///
+    /// `#[serde(skip)]` deliberately: this is an in-memory carrier filled by
+    /// the roster build, not a manifest key. Making it authorable would mean
+    /// adding it to `AgentFile` too (`crate::company::agent_file`), or a
+    /// `name` written in an `agents/*.toml` would be silently ignored while
+    /// the same key worked in `company.toml`.
+    #[serde(skip)]
+    pub name: Option<String>,
     /// What this agent does.
     #[serde(default)]
     pub description: Option<String>,
     /// Cognition tier hint; never selects a model.
     #[serde(default)]
     pub tier: Option<String>,
-    /// Tool grant globs, intersected with `[tools].allow`.
+    /// Which `[[harness]]` this agent runs its turns on, by id.
+    ///
+    /// `None` means the harness marked `default = true`. Deliberately separate
+    /// from [`tier`](Self::tier): a tier names a *workload* and is resolved
+    /// against whatever provider the harness turns out to use, whereas this
+    /// picks the engine and the credential. An agent can keep its tier while
+    /// moving between harnesses.
     #[serde(default)]
-    pub tools: Vec<String>,
+    pub harness: Option<String>,
+    /// A model hint forwarded to this agent's ACP harness for this agent's
+    /// own turns, overriding that `[[harness]].acp.model` when both are set
+    /// (issue #1245's per-agent follow-up).
+    ///
+    /// Not a credential, for the same reason [`AcpHarness::model`] is not
+    /// one — the ACP agent already holds its own. Meaningful only when this
+    /// agent resolves to an `acp` harness with `transport = "local"`;
+    /// validation rejects it on a `built_in`-harness agent rather than
+    /// silently ignoring it, matching the harness-level field's own
+    /// doctrine. Two agents sharing one `local` acp harness process still
+    /// share the subprocess — the override steers that agent's own ACP
+    /// *session* (`session/set_config_option`), not the process env.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Tool grant globs, intersected with `[tools].allow`.
+    ///
+    /// Three distinct states, made representable by issue #1804 (epic #1817,
+    /// Rung 2 — a standing grant that is real and explicit):
+    ///
+    /// * `None` — **inherit** the company's standard grant (the full
+    ///   `[tools].allow`). This is the default, and how every record written
+    ///   before #1804 (which had no `tools` key, or a `tools = []`) deserializes,
+    ///   so promoting the field changes nothing for an existing manifest.
+    /// * `Some(vec![])` — an **explicit, deliberate no-tools** grant: this
+    ///   teammate reaches nothing. Newly reachable in #1804; before it, an empty
+    ///   list was indistinguishable from an absent one and both meant "standard".
+    /// * `Some(globs)` — **narrow** to the listed globs, intersected with
+    ///   `[tools].allow` at roster-build time (narrow-only, never a widen).
+    ///
+    /// `skip_serializing_if = "Option::is_none"` keeps a standard-grant teammate
+    /// serializing exactly as it did before this field was optional (no `tools`
+    /// key), so no existing on-disk record moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     /// Desks this agent may hand work on to (issue #176).
     ///
     /// Empty (the default) means **no delegation tools at all** — the behaviour
@@ -447,8 +681,13 @@ pub struct Agent {
     /// `harness::context_routing` before the (synchronous) agent build, and a
     /// change to one moves the roster fingerprint so it reaches the next turn
     /// rather than the next restart.
+    ///
+    /// An entry is either a bare path (routes the document into the prompt,
+    /// read-only — the pre-existing shorthand) or `{ path, access = "write" }`,
+    /// which additionally grants this agent `workspace_write`/`workspace_create`
+    /// on that path. See [`ContextEntry`] and [`Agent::write_scope`].
     #[serde(default)]
-    pub context: Option<Vec<String>>,
+    pub context: Option<Vec<ContextEntry>>,
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,
@@ -506,6 +745,179 @@ pub struct Agent {
     /// here rather than having it guessed from the free-text `role`.
     #[serde(default)]
     pub classes: Vec<String>,
+    /// Declared ledgers this agent may reach through the ledger tools, with
+    /// per-ledger read/record access.
+    ///
+    /// `None` (the default, omitted key) means **unrestricted** — every ledger
+    /// the company has, at `record` access — which is the tool surface every
+    /// agent had before this field existed, so adding it is a no-op for an
+    /// existing company. `Some(vec![])` restricts the agent to no ledgers at
+    /// all, distinct from taking the default; `Option<Vec<LedgerGrant>>` rather
+    /// than a defaulted `Vec` is what makes that distinction representable, the
+    /// same reasoning as [`context`](Self::context).
+    ///
+    /// This is the **visibility and read/record** half of ledger access.
+    /// [`LedgerSpec::writers`](crate::ledger::LedgerSpec::writers) stays the
+    /// authoritative check for whether a `record`/`close` call actually lands —
+    /// declaring `access = "record"` here for a built-in ledger whose writers
+    /// exclude this agent is a manifest validation error (the two must not
+    /// silently disagree); for a company-declared ledger, which may not exist
+    /// yet when the manifest is validated, the same conflict surfaces as an
+    /// ordinary tool refusal at call time.
+    #[serde(default)]
+    pub ledgers: Option<Vec<LedgerGrant>>,
+    /// Whether this agent may declare a new ledger with `define_ledger`.
+    ///
+    /// Defaults to `true` — declaring an axis a company discovers it needs
+    /// while running is deliberately unrestricted by default (see
+    /// `docs/spec/runtime/ledgers.md`), and every manifest written before this
+    /// field existed relied on that. Set `false` to keep a narrow role from
+    /// growing the company's ledger registry.
+    #[serde(default = "default_true")]
+    pub can_declare_ledgers: bool,
+    /// Whether this teammate came from the global baseline ([`crate::globals`])
+    /// rather than the company's own roster.
+    ///
+    /// Provenance, not configuration: no author writes it, and the merge sets it
+    /// on every teammate it appends. It exists because a manifest is serialized
+    /// back into the store with the merged roster in it, so without a marker a
+    /// global teammate becomes indistinguishable from one the company wrote —
+    /// and the baseline could then never be updated, retired, or opted out of
+    /// for that company again. With it,
+    /// [`apply_globals`](CompanyManifest::apply_globals) is idempotent: it drops
+    /// every previously-merged global and re-appends the current baseline, so a
+    /// company picks up baseline changes and honours `[globals].disable` on the
+    /// very next read.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub global: bool,
+}
+
+/// `#[serde(skip_serializing_if)]` predicate: keeps `global = false` — which is
+/// every hand-authored teammate — out of the serialized manifest.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// One [`Agent::context`] entry.
+///
+/// A bare TOML string (`"brand/Voice.md"`) deserializes as [`Self::Path`], read
+/// access, matching every manifest written before write access existed. The
+/// table form (`{ path = "...", access = "write" }`) is [`Self::Detailed`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ContextEntry {
+    /// Read access, the pre-existing shorthand.
+    Path(String),
+    /// Explicit access, most commonly `write`.
+    Detailed {
+        path: String,
+        #[serde(default)]
+        access: ContextAccess,
+    },
+}
+
+impl ContextEntry {
+    /// The workspace-relative path, whichever form declared it.
+    pub fn path(&self) -> &str {
+        match self {
+            ContextEntry::Path(path) => path,
+            ContextEntry::Detailed { path, .. } => path,
+        }
+    }
+
+    /// This entry's access — `Read` unless a `Detailed` form says otherwise.
+    pub fn access(&self) -> ContextAccess {
+        match self {
+            ContextEntry::Path(_) => ContextAccess::Read,
+            ContextEntry::Detailed { access, .. } => *access,
+        }
+    }
+}
+
+impl From<&str> for ContextEntry {
+    fn from(path: &str) -> Self {
+        ContextEntry::Path(path.to_string())
+    }
+}
+
+impl From<String> for ContextEntry {
+    fn from(path: String) -> Self {
+        ContextEntry::Path(path)
+    }
+}
+
+/// Whether a routed [`ContextEntry`] is read-only or additionally writable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextAccess {
+    /// Routed into the prompt; no write grant on this path.
+    #[default]
+    Read,
+    /// Routed into the prompt, and this exact path is in the agent's
+    /// `workspace_write`/`workspace_create` scope.
+    Write,
+}
+
+/// One [`Agent::ledgers`] entry: a ledger slug and this agent's access to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LedgerGrant {
+    /// The ledger's slug, as declared or built in — not validated against the
+    /// registry at manifest-load time, since a company-declared ledger may not
+    /// exist yet (the same reasoning as `Agent::context`'s missing-document
+    /// rule).
+    pub name: String,
+    /// This agent's access to it.
+    #[serde(default)]
+    pub access: LedgerAccess,
+}
+
+/// Read or record access to one ledger.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerAccess {
+    /// `list_ledgers` and `read_ledger` only.
+    #[default]
+    Read,
+    /// Read, plus `record_entry` and `close_entry` — still subject to
+    /// [`LedgerSpec::writers`](crate::ledger::LedgerSpec::writers).
+    Record,
+}
+
+impl Agent {
+    /// This agent's `workspace_write`/`workspace_create` scope.
+    ///
+    /// `None` means **unconfined** — every path in the company's tree, which is
+    /// the behaviour every agent had before per-path write access existed (see
+    /// `src/harness/workspace_tools.rs`), so a manifest that declares no
+    /// `access = "write"` entry is unaffected by this field's existence.
+    /// `Some(paths)` — returned as soon as `context` names at least one write
+    /// entry — confines `workspace_write`/`workspace_create` to exactly those
+    /// paths, plus this agent's own `agents/<id>/` home, which the workspace
+    /// tools always allow regardless of this scope.
+    pub fn write_scope(&self) -> Option<Vec<String>> {
+        let entries = self.context.as_ref()?;
+        let paths: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry.access() == ContextAccess::Write)
+            .map(|entry| entry.path().to_string())
+            .collect();
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    /// This agent's declared access to ledger `slug`, or `None` if it may not
+    /// reach it at all.
+    ///
+    /// An omitted `ledgers` key answers `Some(Record)` for every slug —
+    /// unrestricted, matching the tool surface before this field existed.
+    pub fn ledger_access(&self, slug: &str) -> Option<LedgerAccess> {
+        match &self.ledgers {
+            None => Some(LedgerAccess::Record),
+            Some(grants) => grants
+                .iter()
+                .find(|grant| grant.name.eq_ignore_ascii_case(slug.trim()))
+                .map(|grant| grant.access),
+        }
+    }
 }
 
 /// The `[[agent]].tier` value that marks a roster's orchestrator.
@@ -620,6 +1032,16 @@ pub struct McpServer {
     /// Exact remote tool names to always hide/block (takes precedence).
     #[serde(default)]
     pub disallowed_tools: Vec<String>,
+    /// Exact remote tool names on this server the operator declares **read-only**
+    /// (issue #1124): they read and change nothing, so a bridge call to one need
+    /// not park under `auto` the way calling *through* a server otherwise does.
+    ///
+    /// This is an operator declaration, not a claim read off the remote — there
+    /// is no client-side annotation to trust — so an undeclared tool always
+    /// gates. Independent of `allowed_tools`/`disallowed_tools`: it says nothing
+    /// about whether a tool is *exposed*, only how a call to it is priced.
+    #[serde(default)]
+    pub read_only_tools: Vec<String>,
     /// Per-request timeout in seconds.
     #[serde(default = "default_mcp_timeout_secs")]
     pub timeout_secs: u64,
@@ -635,7 +1057,7 @@ pub struct McpServer {
 }
 
 fn default_mcp_timeout_secs() -> u64 {
-    30
+    super::mcp::DEFAULT_TIMEOUT_SECS
 }
 
 fn default_true() -> bool {
@@ -770,6 +1192,152 @@ fn default_brain_mode() -> String {
     "hosted".to_string()
 }
 
+/// A `[[harness]]` entry — one named execution engine the company's agents may
+/// run their turns on.
+///
+/// A company declares a set of these and binds each agent to one with
+/// [`Agent::harness`], so a single roster can span a cheap model, an expensive
+/// one, and the operator's own Claude Code — the last needing no credential from
+/// us at all.
+///
+/// Like [`McpServer`] and [`Inference`], this is declarative intent and **never**
+/// carries a token: a `built_in` harness's credential is named by
+/// `[harness.inference].api_key_secret`, and an `acp` harness holds its own.
+///
+/// The TOML shape is an array-of-tables with sub-tables:
+///
+/// ```toml
+/// [[harness]]
+/// id      = "embedded"
+/// kind    = "built_in"
+/// default = true
+///
+/// [harness.inference]      # attaches to the entry above
+/// provider = "openrouter"
+/// ```
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Harness {
+    /// snake_case, unique within the company. Agents name this.
+    pub id: String,
+    /// One of [`HARNESS_KINDS`].
+    #[serde(default = "default_harness_kind")]
+    pub kind: String,
+    /// Whether agents naming no harness run here. Exactly one entry must set
+    /// it, whenever any `[[harness]]` is declared.
+    #[serde(default)]
+    pub default: bool,
+    /// This harness's own inference routing. `built_in` only. Absent falls back
+    /// to the company-level `[inference]` section.
+    #[serde(default)]
+    pub inference: Option<Inference>,
+    /// How to reach the external agent. `acp` only.
+    #[serde(default)]
+    pub acp: Option<AcpHarness>,
+}
+
+fn default_harness_kind() -> String {
+    DEFAULT_HARNESS_KIND.to_string()
+}
+
+impl Harness {
+    /// The implicit harness a company with no `[[harness]]` block runs on: one
+    /// `built_in` entry, marked default, inheriting the company-level
+    /// `[inference]`.
+    ///
+    /// Synthesized rather than required in every manifest so that adding named
+    /// harnesses changes nothing for a company that never asked for them —
+    /// every bundle under `companies/` lands here.
+    pub fn implicit() -> Self {
+        Self {
+            id: IMPLICIT_HARNESS_ID.to_string(),
+            kind: DEFAULT_HARNESS_KIND.to_string(),
+            default: true,
+            inference: None,
+            acp: None,
+        }
+    }
+
+    /// The harness a teammate gets by naming a coding CLI this build knows how
+    /// to drive, without any `[[harness]]` declaring it (issue #1245's
+    /// detected-harness follow-up).
+    ///
+    /// A local ACP harness is a property of the **machine**, not of the
+    /// company: whether `claude-agent-acp` is installed and signed in is
+    /// answered by the desktop's own `acp::discovery` survey, and a
+    /// version-controlled `company.toml` is the wrong place to record it —
+    /// the same manifest is opened from a machine where the answer differs.
+    /// So the manifest vocabulary ([`ACP_AGENTS`]) is treated as a set of ids
+    /// that are *bindable without being declared*, and this synthesizes the
+    /// harness a binding to one resolves to.
+    ///
+    /// Deliberately **never** `default`: which harness an unbound teammate
+    /// runs on stays a blueprint decision, so nothing a machine happens to
+    /// have installed can silently redirect a company's whole roster.
+    ///
+    /// Synthesized on demand rather than folded into
+    /// [`effective_harnesses`](crate::company::CompanyManifest::effective_harnesses):
+    /// a company that references none of these must produce **no** extra lanes
+    /// and **no** extra `unavailable` entries, because
+    /// `brain.rs` returns the plain engine when both are empty — and adding
+    /// three phantom entries to every company would skip that path for all of
+    /// them.
+    ///
+    /// A declared `[[harness]]` of the same id always wins; this is only ever
+    /// the fallback for an id nothing declares.
+    pub fn implicit_local(agent: &str) -> Self {
+        Self {
+            id: agent.to_string(),
+            kind: "acp".to_string(),
+            default: false,
+            inference: None,
+            acp: Some(AcpHarness {
+                transport: "local".to_string(),
+                agent: Some(agent.to_string()),
+                runner: None,
+                model: None,
+            }),
+        }
+    }
+
+    /// Whether `id` names a coding CLI this build can drive locally, and so is
+    /// bindable even when no `[[harness]]` declares it. See
+    /// [`implicit_local`](Self::implicit_local).
+    pub fn is_implicit_local_id(id: &str) -> bool {
+        ACP_AGENTS.contains(&id)
+    }
+
+    /// Whether this is the embedded loop — the only kind that consults
+    /// `[inference]`.
+    pub fn is_built_in(&self) -> bool {
+        self.kind == "built_in"
+    }
+}
+
+/// `[harness.acp]` — how to reach an external ACP agent.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AcpHarness {
+    /// One of [`ACP_TRANSPORTS`].
+    #[serde(default)]
+    pub transport: String,
+    /// Which agent to spawn, one of [`ACP_AGENTS`]. `local` transport only.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Which registered runner holds this scope. `runner` transport only.
+    #[serde(default)]
+    pub runner: Option<String>,
+    /// A model hint forwarded to the agent's own startup lever, when this
+    /// build knows one for `agent` (issue #1245).
+    ///
+    /// Not a credential — the ACP agent already holds its own, which is the
+    /// whole point of this harness kind — so this does not join
+    /// `[harness.inference]`'s prohibition on `acp` harnesses. `local`
+    /// transport only for now: the `runner` wire protocol does not carry it
+    /// yet, so validation rejects it there rather than accepting and silently
+    /// dropping it.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 /// `[inference]` — per-tenant Bring-Your-Own-Key inference routing (issue #56).
 ///
 /// This is declarative intent, shaped like [`McpServer`]: it names a provider
@@ -827,7 +1395,11 @@ pub struct ChannelConfig {
 }
 
 /// `[tools]` — company-wide tool grants.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `PartialEq` so `runtime::builder::carry_tool_grants_override` can ask the one
+/// question the seed-wins rule turns on: did version control speak about
+/// `[tools]` since the operator's console grant was written (issue #1796)?
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tools {
     /// `openhuman` (default) | `builtin`.
     #[serde(default = "default_tool_provider")]
@@ -916,7 +1488,7 @@ pub const DEFAULT_MAX_DELEGATION_DEPTH: u8 = 2;
 pub const MAX_DELEGATION_DEPTH_BOUNDS: std::ops::RangeInclusive<u8> = 1..=4;
 
 /// `[tools.composio]` — the per-tenant Composio toolkit allowlist (issue #110).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ComposioTools {
     /// Toolkit slugs the agent may target (e.g. `gmail`, `slack`, `github`).
     /// Empty defers to the backend's server-enforced allowlist (open mode);
@@ -930,16 +1502,17 @@ impl Default for Tools {
         Self {
             provider: default_tool_provider(),
             // Grant the full tool belt by default: `*` covers files/docs/shell/
-            // code/web/subagent, and `media`/`composio` are listed literally
-            // because the `*` wildcard deliberately excludes those two
-            // (real-money + per-tenant-credential) namespaces. A company that
-            // wants a narrower belt overrides `[tools].allow` explicitly.
+            // code/web/subagent, while `workspace.*` and the explicit
+            // `workspace.write` grant cover the workspace read/write surface.
+            // `media`/`composio` are listed literally because the `*` wildcard
+            // deliberately excludes those two (real-money + per-tenant-
+            // credential) namespaces. A company that wants a narrower belt
+            // overrides `[tools].allow` explicitly.
             //
-            // `search` (issue #238) is deliberately NOT in this list, unlike
-            // `media`/`composio`: the #188 sign-off admitted it **opt-in**, so a
-            // company that never asked for web search never spends on it.
-            // Making it default-on is a one-word change here.
-            allow: vec!["*".into(), "media".into(), "composio".into()],
+            // `search` is now part of the authored default belt so the
+            // first-run setup flow can search without each generated agent
+            // having to rediscover the capability.
+            allow: crate::globals::default_tool_allow(),
             web_allowed_domains: Vec::new(),
             composio: ComposioTools::default(),
             search_daily_calls: None,
@@ -1000,6 +1573,30 @@ pub struct Policy {
     /// Spends strictly under this many USD skip approval.
     #[serde(default)]
     pub auto_approve_under_usd: Option<f64>,
+    /// How many hours a parked approval waits before it default-denies
+    /// (issue #971). `None` takes the gate's
+    /// [`DEFAULT_TTL_MILLIS`](crate::policy::DEFAULT_TTL_MILLIS), 24 hours.
+    ///
+    /// **Deliberately a bare `Option` with no serde default, and the absence is
+    /// load-bearing.** The obvious alternative — `#[serde(default = "…")]`
+    /// resolving to `Some(24)` at parse — walks straight into the trap
+    /// documented on [`mode`](Self::mode) above. The persisted record stores
+    /// the *defaulted* value, and `carry_policy_override` in
+    /// [`crate::runtime::builder`] is `previous_seed == next_seed` over this
+    /// whole block; so the day this default moves, every company with a silent
+    /// manifest gets a seed that changed under it, and the rebuild discards the
+    /// operator's console `[policy]` override as though version control had
+    /// spoken. Nobody edited anything, and the feature that breaks is not this
+    /// one.
+    ///
+    /// So `None` means "not configured" all the way through parse and persist,
+    /// and the default is resolved exactly once, at
+    /// [`ManifestApprovalGate::new`](crate::policy::ManifestApprovalGate::new).
+    ///
+    /// Skipped when absent so a manifest that never mentioned the knob
+    /// serializes byte-identically to before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_ttl_hours: Option<u64>,
 }
 
 impl Default for Policy {
@@ -1008,6 +1605,7 @@ impl Default for Policy {
             mode: default_policy_mode(),
             always_approve: default_always_approve(),
             auto_approve_under_usd: None,
+            approval_ttl_hours: None,
         }
     }
 }
@@ -1137,6 +1735,64 @@ pub struct Schedule {
 mod test {
     use super::*;
 
+    /// **T10 (issue #971).** A manifest that never mentions
+    /// `approval_ttl_hours` parses to `None` and serializes without the key —
+    /// byte-identical to a build that predates the field.
+    ///
+    /// This is not a serde-formatting nicety, it is the guard on
+    /// `carry_policy_override`. That rule is `previous_seed == next_seed` over
+    /// the whole `[policy]` block, so any value this field acquires at parse
+    /// becomes part of the identity of a block nobody wrote — and the day the
+    /// default moves, every silent manifest's seed changes under it and the
+    /// operator's console `[policy]` override is discarded as though version
+    /// control had spoken. The absence has to survive parse, persist and
+    /// reload for that not to happen. See the field's own note.
+    #[test]
+    fn a_manifest_without_an_approval_ttl_round_trips_unchanged() {
+        let silent: Policy = toml::from_str(
+            r#"
+            mode = "supervised"
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(silent.approval_ttl_hours, None);
+
+        // Byte-identical: the key is absent from the wire, not `null`.
+        let json = serde_json::to_string(&silent).expect("serialize");
+        assert!(
+            !json.contains("approval_ttl_hours"),
+            "a silent manifest must not gain the key on the wire: {json}"
+        );
+
+        // And the reload is `==` to the parse, which is the comparison
+        // `carry_policy_override` actually runs.
+        let back: Policy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, silent);
+        assert_eq!(
+            serde_json::to_string(&back).expect("serialize"),
+            json,
+            "a persist/reload cycle must be a fixed point"
+        );
+
+        // A manifest that DOES configure it keeps the value across the same
+        // cycle — the absence is meaningful, so presence must be too.
+        let configured: Policy = toml::from_str(
+            r#"
+            mode = "supervised"
+            approval_ttl_hours = 72
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(configured.approval_ttl_hours, Some(72));
+        let json = serde_json::to_string(&configured).expect("serialize");
+        let back: Policy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, configured);
+
+        // The two are NOT equal, which is what makes the seed comparison able
+        // to tell "operator configured a deadline" from "nobody said anything".
+        assert_ne!(silent, configured);
+    }
+
     /// Real-money `media` (issue #109) is granted ONLY by an explicit `media` /
     /// `media.*` grant — never by the catch-all `*`. This wildcard exclusion is
     /// the security property that keeps a broadly-permissioned company from
@@ -1172,63 +1828,6 @@ mod test {
         assert!(!grants_composio_explicit(&[]));
         // A substring match must not count as the composio namespace.
         assert!(!grants_composio_explicit(&["composiotools".into()]));
-    }
-
-    /// Bound repositories (issue #245, agent half) are granted ONLY by an
-    /// explicit `repo` / `repo.*` grant — never by the catch-all `*`. A
-    /// `repo_checkout` puts a third party's source inside a sandbox an agent may
-    /// also hold `shell` over, so a wildcard set for file and shell tools must
-    /// not carry it in.
-    #[test]
-    fn repo_grant_requires_explicit_namespace_not_wildcard() {
-        assert!(grants_repo_explicit(&["repo".into()]));
-        assert!(grants_repo_explicit(&["repo.checkout".into()]));
-        assert!(grants_repo_explicit(&["web.*".into(), "repo".into()]));
-        // The catch-all `*` must NOT grant repo.
-        assert!(!grants_repo_explicit(&["*".into()]));
-        assert!(!grants_repo_explicit(&["web.*".into()]));
-        assert!(!grants_repo_explicit(&[]));
-        // A substring match must not count as the repo namespace.
-        assert!(!grants_repo_explicit(&["reporting".into()]));
-        assert!(!grants_repo_explicit(&["repository".into()]));
-    }
-
-    /// The repository *write* tier (issue #734) is conferred ONLY by the exact
-    /// string `repo.write` — never a bare `repo`, never a `repo.write` prefix,
-    /// never the catch-all `*`. Read and write are separate decisions.
-    #[test]
-    fn repo_write_is_conferred_only_by_the_exact_grant() {
-        assert!(grants_repo_write_explicit(&["repo.write".into()]));
-        assert!(grants_repo_write_explicit(&[
-            "web.*".into(),
-            "repo.write".into()
-        ]));
-        // The catch-all `*` must NOT grant write.
-        assert!(!grants_repo_write_explicit(&["*".into()]));
-        // A read grant is genuinely read-only.
-        assert!(!grants_repo_write_explicit(&["repo.read".into()]));
-        assert!(!grants_repo_write_explicit(&["repo.checkout".into()]));
-        assert!(!grants_repo_write_explicit(&[]));
-        // A prefix match must not count: `repo.writer` is not `repo.write`.
-        assert!(!grants_repo_write_explicit(&["repo.writer".into()]));
-    }
-
-    /// **The regression this predicate exists to prevent.** Every company
-    /// adopting the read tier writes bare `repo`; that must confer read tools
-    /// (`grants_repo_explicit`) and **not** push (`grants_repo_write_explicit`),
-    /// so a company reading code never silently gains agents pushing it. Named so
-    /// its purpose survives a refactor that "harmonises" the two predicates.
-    #[test]
-    fn bare_repo_confers_read_but_not_write() {
-        assert!(grants_repo_explicit(&["repo".into()]));
-        assert!(!grants_repo_write_explicit(&["repo".into()]));
-    }
-
-    /// `repo` is a budgetable namespace, so a `[plan].token_budgets` key of
-    /// that name is accepted rather than rejected as unknown.
-    #[test]
-    fn repo_is_a_gateable_namespace() {
-        assert!(GATEABLE_NAMESPACES.contains(&"repo"));
     }
 
     /// The `[tools.composio]` sub-section parses its toolkit allowlist and an
@@ -1327,13 +1926,16 @@ mod test {
             r#"
             id = "critic"
             role = "Critic"
-            context = ["GOAL.md", "CLAIMS.md"]
+            context = ["GOAL.md", "claims.md"]
             "#,
         )
         .expect("parse toml");
         assert_eq!(
             populated.context,
-            Some(vec!["GOAL.md".to_string(), "CLAIMS.md".to_string()])
+            Some(vec![
+                ContextEntry::from("GOAL.md"),
+                ContextEntry::from("claims.md")
+            ])
         );
 
         // The distinction survives a JSON round-trip too, since the routing
@@ -1341,6 +1943,90 @@ mod test {
         let json = serde_json::to_string(&omitted).expect("serialize");
         let back: Agent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.context, None);
+    }
+
+    /// A bare `context` string is `Read`; `{ path, access = "write" }` is the
+    /// only way to grant `Write`. `write_scope` collects exactly the write
+    /// entries, and `None` — either an omitted `context` key or a `context`
+    /// with no write entry — is unconfined, not "confined to nothing".
+    #[test]
+    fn write_scope_is_none_unless_a_context_entry_declares_write() {
+        let omitted: Agent = toml::from_str("id = \"critic\"\nrole = \"Critic\"\n").unwrap();
+        assert_eq!(
+            omitted.write_scope(),
+            None,
+            "an omitted context key is unconfined"
+        );
+
+        let read_only: Agent =
+            toml::from_str("id = \"critic\"\nrole = \"Critic\"\ncontext = [\"brand/Voice.md\"]\n")
+                .unwrap();
+        assert_eq!(
+            read_only.write_scope(),
+            None,
+            "a read-only context list is unconfined, not confined to nothing"
+        );
+
+        let write_entry: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = ["brand/Voice.md", { path = "agents/critic/notes.md", access = "write" }]
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            write_entry.write_scope(),
+            Some(vec!["agents/critic/notes.md".to_string()]),
+            "only the declared write entry is in scope, not the read one"
+        );
+    }
+
+    /// An omitted `ledgers` key is unrestricted `Record` access to every slug
+    /// — the tool surface every agent had before this field existed. A
+    /// declared list answers only for the slugs it names.
+    #[test]
+    fn ledger_access_defaults_to_unrestricted_record() {
+        let unrestricted: Agent = toml::from_str("id = \"critic\"\nrole = \"Critic\"\n").unwrap();
+        assert_eq!(
+            unrestricted.ledger_access("tasks"),
+            Some(LedgerAccess::Record)
+        );
+        assert_eq!(
+            unrestricted.ledger_access("anything"),
+            Some(LedgerAccess::Record)
+        );
+
+        let scoped: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            ledgers = [
+                { name = "tasks", access = "record" },
+                { name = "decisions", access = "read" },
+            ]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(scoped.ledger_access("tasks"), Some(LedgerAccess::Record));
+        assert_eq!(scoped.ledger_access("DECISIONS"), Some(LedgerAccess::Read));
+        assert_eq!(
+            scoped.ledger_access("goals"),
+            None,
+            "an undeclared slug is unreachable"
+        );
+    }
+
+    /// A bare `{ name = "tasks" }` grant, with no `access` key, defaults to
+    /// `Read` — the safer of the two, so declaring a `ledgers` list without
+    /// stating an access level does not silently hand out write access.
+    #[test]
+    fn a_ledger_grant_with_no_access_key_defaults_to_read() {
+        let agent: Agent = toml::from_str(
+            "id = \"critic\"\nrole = \"Critic\"\nledgers = [{ name = \"tasks\" }]\n",
+        )
+        .unwrap();
+        assert_eq!(agent.ledger_access("tasks"), Some(LedgerAccess::Read));
     }
 
     /// The `[plan]` section (issue #108) survives a TOML → struct → JSON → struct
@@ -1391,5 +2077,78 @@ mod test {
         assert_eq!(manifest.plan.total_tokens, Some(1000));
         assert!(manifest.plan.name.is_none());
         assert!(manifest.plan.token_budgets.is_empty());
+    }
+
+    /// Helper: the grant list shape every predicate here takes.
+    fn grants(list: &[&str]) -> Vec<String> {
+        list.iter().map(|g| g.to_string()).collect()
+    }
+
+    /// **The asymmetry, pinned.** A bare `*` confers publishing and does NOT
+    /// confer `repo`.
+    ///
+    /// This test exists to stop a future tidy-up, not to describe a subtlety.
+    /// `grants_files_or_docs` sits in a file of `grants_*_explicit` siblings
+    /// that all reject `*`, and folding it into that family is the obvious
+    /// "consistency" edit. It would be a silent revocation: most shipped
+    /// manifests grant `*` and nothing else, so publishing would switch off for
+    /// them with no error anywhere — agents that can still write files and can
+    /// no longer deliver one.
+    #[test]
+    fn a_bare_wildcard_confers_publishing() {
+        let wildcard = grants(&["*"]);
+        assert!(
+            grants_files_or_docs(&wildcard),
+            "a bare `*` must confer publishing — it is what most shipped manifests grant"
+        );
+        // The ordinary namespace forms confer it too.
+        for grant in ["files", "docs", "files.write", "docs.read"] {
+            assert!(
+                grants_files_or_docs(&grants(&[grant])),
+                "`{grant}` must confer publishing"
+            );
+        }
+    }
+
+    /// The boundary rule, pinned against a naive `starts_with`.
+    ///
+    /// A documentation-flavoured grant is not a grant on `docs`, and a
+    /// filesystem-flavoured one is not a grant on `files`. `docsy` and
+    /// `filesystem` are the cases a bare prefix test actually gets wrong: both
+    /// extend the namespace without stopping on a separator, so `starts_with`
+    /// accepts them and would hand `publish_artifact` (and, through the shared
+    /// `wants_files` gate, the whole file belt) to an agent the manifest never
+    /// granted it to. Issue #461 removed this class of disagreement by routing
+    /// every grant match through `extends_on_boundary`; this asserts the
+    /// publishing predicate is on that side of it.
+    #[test]
+    fn documentation_grant_does_not_confer_publishing() {
+        for grant in [
+            "documentation",
+            "documentation.read",
+            "docsy",
+            "filesystem",
+            "filesystem.wipe",
+            "web",
+            "shell",
+        ] {
+            assert!(
+                !grants_files_or_docs(&grants(&[grant])),
+                "`{grant}` is not a grant on the files/docs namespace"
+            );
+        }
+
+        // …and the real `e2e_harness` allow list, which grants no file family,
+        // confers nothing either.
+        assert!(
+            !grants_files_or_docs(&grants(&[
+                "composio",
+                "mcp:*",
+                "workspace",
+                "workspace.*",
+                "web"
+            ])),
+            "the shipped e2e_harness grants confer no publishing"
+        );
     }
 }

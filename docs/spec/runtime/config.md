@@ -121,6 +121,7 @@ that does and does not imply.
 | `OPENCOMPANY_INFERENCE_KEY` | `TINYHUMANS_API_KEY` | Harness-brain credential (`openhuman` feature). Deploy-time default only — a company key set through the console (`PUT …/inference`) outranks both names |
 | `OPENCOMPANY_INFERENCE_URL` | `https://api.tinyhumans.ai/openai/v1` | Harness-brain OpenAI-compatible endpoint (`openhuman` feature) |
 | `OPENCOMPANY_INFERENCE_MODEL` | `chat-v1` | Roster-wide default model/tier for the harness brain (`openhuman` feature) |
+| `OPENCOMPANY_CONTEXT_WINDOW` | `240000` | Context window the managed inference profile advertises, in tokens (`openhuman` feature). Compression and deterministic trimming engage at 90% of it; set it to a smaller model's advertised window (with an estimation margin) or `off`/`0` to restore unbounded intra-turn history — see [harness history protection](providers.md#history-protection) |
 | `TINYPLACE_API_URL` | `https://api.tiny.place` | tiny.place base (staging/local override) |
 | `GITHUB_TOKEN` | — | Only for the feedback→issue flow; without it, feedback is stored locally and a prefilled "file it yourself" link is shown |
 | `OPENCOMPANY_MAIL_PROVIDER` | `smtp` when any `OPENCOMPANY_MAIL_*` is set | Host-level outbound mail transport. Supported: `smtp` |
@@ -130,9 +131,33 @@ that does and does not imply.
 | `OPENCOMPANY_MAIL_SECURITY` | `starttls` | `none` \| `starttls` \| `ssl` |
 | `OPENCOMPANY_MAIL_USERNAME` / `_PASSWORD` | — | SMTP auth. Redacted from `Debug` and never logged |
 | `OPENCOMPANY_MAIL_FROM_NAME` | — | Display name on the `From` header |
+| `OPENCOMPANY_SHUTDOWN_GRACE_SECONDS` | `25` | How long a SIGTERM/SIGINT waits for in-flight turns before exiting anyway. `0` exits as soon as the companies are quiesced. Must stay at least 2s below the pod's `terminationGracePeriodSeconds` (the 2s is the connection-grace overhead at the end of the drain) — see [shutdown](lifecycle.md#shutdown) |
 | `OPENCOMPANY_CORS_ORIGINS` | — (CORS off) | Comma-separated exact origins allowed to make credentialed cross-origin requests, e.g. `http://localhost:5173` for a Vite dev server or `https://app.example.com` for a [hub console](hub-console.md). `*` is refused: a wildcard is illegal with credentials |
 | `OPENCOMPANY_PLATFORM_TOKEN` | — (no machine credential) | The shared platform secret. A bearer equal to it is the `tenant:platform` principal, with the `platform` scope |
 | `OPENCOMPANY_PLATFORM_JWT_SECRET` | — (signed tenant tokens not accepted) | HS256 secret that signs tenant-scoped machine tokens. No shipped literal and no fallback: unset means the path does not exist. Set on a build without `platform-jwt` (in the default feature set) and the host **refuses to boot** |
+
+### The `[memory]` section
+
+The memory engine is the one host-level choice the **console** can write, and
+it is the ordinary `env ⟵ config.toml` precedence rather than an exception to
+it:
+
+```toml
+[memory]
+backend = "remote"          # store | embedded | remote | null
+driver  = "supermemory"     # supermemory | mem0 | cognee | namespace
+url     = "https://api.supermemory.ai"
+api_key = "sk-…"
+```
+
+`OPENCOMPANY_MEMORY` **set at all** — whatever it names — makes this section
+inert and the console read-only, because a hosted tenant's control plane
+injects those variables and a picker that wrote a file the next boot ignores
+would be the silently-ignored-configuration failure the setup flow refuses for
+the same reason. Unset, this section is what boot binds, and
+`PUT …/memory/engine` is what writes it — probing the engine first, then
+rebinding it live so the choice does not wait for a restart. See
+[the memory engine](memory-engine.md#choosing-an-engine-from-the-console).
 
 ### Outbound mail
 

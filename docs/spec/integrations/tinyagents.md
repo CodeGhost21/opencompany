@@ -1,7 +1,8 @@
 # TinyAgents
 
-TinyAgents (vendored at `vendor/tinyagents`, crate `tinyagents = "1.8"`,
-Rust 2024) is the recursive language-model harness: durable typed state
+TinyAgents (inherited from OpenHuman at
+`vendor/openhuman/vendor/tinyagents`, crate `tinyagents = "2.1"`, Rust 2024)
+is the recursive language-model harness: durable typed state
 graphs (checkpoints, interrupts, `Send` fan-out, subgraphs), a
 provider-neutral model harness (typed tools, middleware, structured output,
 streaming, usage/cost), a capability registry, the `.rag`/`.ragsh` surfaces,

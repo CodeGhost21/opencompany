@@ -1,5 +1,13 @@
-import { useEffect, useState } from "react";
-import { ArrowRight, Building2, Loader2, MailCheck, Monitor, Wallet } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowRight,
+  Building2,
+  Loader2,
+  MailCheck,
+  Monitor,
+  TriangleAlert,
+  Wallet,
+} from "lucide-react";
 
 import {
   fetchAuthConfig,
@@ -14,6 +22,8 @@ import {
   type SignIn,
 } from "@/api/auth";
 import { connectWallet, hasWallet, NoWalletError, signMessage } from "@/lib/wallet";
+import { resendLabel, secondsUntilResend } from "@/views/login/resend";
+import { arrivedViaSetupHandoff, SETUP_HANDOFF_FRAGMENT } from "@/setup/state";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -31,30 +41,22 @@ const PRIVACY_POLICY_URL = "https://tinyhumans.gitbook.io/openhuman/legal/privac
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
-  /** The company's display name, when the host would tell us before sign-in. */
-  companyName?: string;
   /**
    * Why they landed here, when it was not simply "not signed in yet".
    *
-   * Set after a refused ecosystem sign-in. Without it a rejected or ineligible
-   * sign-in renders an ordinary form and looks like the click did nothing — the
-   * one failure mode most likely to be reported as "the button is broken". It
-   * never names an address, so it cannot become the membership oracle the rest
-   * of this view refuses to be.
+   * Set after a refused ecosystem sign-in *or* a magic link that would not
+   * redeem — the expired-or-spent link being by far the commonest of the two,
+   * since every email-mode sign-in is one and they last fifteen minutes.
+   * Without it a rejected or ineligible sign-in renders an ordinary form and
+   * looks like the click did nothing — the one failure mode most likely to be
+   * reported as "the button is broken" (issue #1305). It never names an
+   * address, so it cannot become the membership oracle the rest of this view
+   * refuses to be.
+   *
+   * A notice is also what puts the caret in the email field below, so that
+   * "request a new one" is a keystroke rather than a hunt.
    */
   notice?: string;
-  /**
-   * An address to start the form with, when the caller knows one.
-   *
-   * Only the desktop's embedded host does: a packaged install admits one
-   * standing local operator and mails nothing, so a blank field asked a person
-   * to guess an address they have never seen, and every guess came back as the
-   * same silent acknowledgement (#632).
-   *
-   * A suggestion, not a lock — it seeds the field and the person can replace
-   * it, which matters as soon as they invite anyone else to their own host.
-   */
-  suggestedEmail?: string;
   /**
    * Reports a completed sign-in.
    *
@@ -72,9 +74,12 @@ type Mode = "link" | "password";
  *
  * `email` because that is what every company did before the mode was
  * configurable, so an older host — which has no `/auth/config` route — renders
- * exactly the screen it always did.
+ * exactly the screen it always did. `magicLink` is assumed to work for the same
+ * reason: a host that has not told us otherwise is one that either mails links
+ * or echoes them, and starting from false would blank the form on every
+ * deployment for the length of one fetch.
  */
-const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true };
+const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true, magicLink: true };
 
 /**
  * The sign-in view: magic link by default, password for anyone who set one.
@@ -89,14 +94,7 @@ const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true };
  *    keeps; there is nothing to put in localStorage and nothing for an XSS to
  *    steal.
  */
-export function Login({
-  client,
-  company,
-  companyName,
-  notice,
-  suggestedEmail,
-  onSignedIn,
-}: Props) {
+export function Login({ client, company, notice, onSignedIn }: Props) {
   const [mode, setMode] = useState<Mode>("link");
   /**
    * The ecosystem sign-in buttons this host offers, or `[]` if it offers none.
@@ -116,25 +114,34 @@ export function Login({
    * of them should be offered a wallet button.
    */
   const [authConfig, setAuthConfig] = useState<AuthConfig>(ASSUMED_CONFIG);
-  const [email, setEmail] = useState(suggestedEmail ?? "");
-  // The suggestion usually arrives *after* this mounts. A relaunch restores the
-  // embedded connection from its remembered profile immediately, while the
-  // address and the operator come over IPC a moment later — so on every launch
-  // but the first, seeding the initial state alone would leave the field blank.
-  //
-  // Only into an empty field: a suggestion must never overwrite what somebody
-  // has typed, and clearing the prefilled address on purpose (to sign in as
-  // someone else) must not be undone — this runs when the *suggestion* changes,
-  // which it does once.
-  useEffect(() => {
-    if (suggestedEmail) setEmail((current) => (current === "" ? suggestedEmail : current));
-  }, [suggestedEmail]);
+  // Always blank. The desktop used to prefill a synthetic
+  // `operator@opencompany.local` here, because a packaged install admitted that
+  // one address and mailed nothing, so a blank field asked a person to guess a
+  // credential they had never seen (#632). The desktop now runs `none` mode and
+  // has no address at all, and it was the only caller that ever knew one — so
+  // there is nothing left to suggest, and a form on any other host is a form
+  // where the person genuinely knows their own address.
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
   // Only ever set on a host with no mail transport (local dev).
   const [devCode, setDevCode] = useState<string | null>(null);
+  /**
+   * When the last link was asked for, or `null` if none has been.
+   *
+   * Stamped from the *response*, not the submit: the host's window opens when
+   * it mints the code, which is fractionally earlier, and a clock started late
+   * can only ever be conservative. Started early it would let the resend fire
+   * into a throttle that answers `202` regardless — a button that reports a
+   * send which did not happen, which is worse than no button.
+   */
+  const [linkSentAt, setLinkSentAt] = useState<number | null>(null);
+  /** Ticks the countdown. Only advanced while there is one to render. */
+  const [now, setNow] = useState(() => Date.now());
+  /** Set when a *re*send lands, so the second press is acknowledged as one. */
+  const [resent, setResent] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -158,9 +165,40 @@ export function Login({
     if (!authConfig.passwords && mode === "password") setMode("link");
   }, [authConfig.passwords, mode]);
 
+  /**
+   * A host in `email` mode that can deliver nothing.
+   *
+   * Not the same as "no email sign-in": hub OAuth and passwords never touch a
+   * mailbox, so this company still signs people in exactly as it says it does.
+   * What is dead is the *link*, and only the host knows that — `auth/request`
+   * answers `sent: true` here precisely as it does where the mail went out.
+   */
+  const linkGoesNowhere = authConfig.mode === "email" && !authConfig.magicLink;
+
+  /**
+   * Step out of link mode once, on such a host, when there is somewhere to step.
+   *
+   * Once, deliberately: someone may switch back on purpose — an operator who
+   * has just configured a transport behind this very screen is the likeliest
+   * visitor here — and a rule that re-applied itself would make the toggle
+   * beneath the form unusable rather than merely mistaken.
+   */
+  const demotedLink = useRef(false);
+  useEffect(() => {
+    if (demotedLink.current || !linkGoesNowhere || !authConfig.passwords) return;
+    demotedLink.current = true;
+    setMode("password");
+  }, [linkGoesNowhere, authConfig.passwords]);
+
   useEffect(() => {
     let cancelled = false;
-    fetchHubProviders(client, company)
+    // A dead setup hand-off link keeps its marker in the hash while it falls
+    // back to this form, so an ecosystem button asked for from here must land on
+    // the same destination the link promised — the host carries it on the
+    // sign-in's return URI (`from=setup`), which survives the OAuth round trip
+    // the way a fragment cannot. Absent for any other sign-in, which lands
+    // wherever it always did.
+    fetchHubProviders(client, company, arrivedViaSetupHandoff() ? "setup" : undefined)
       .then((providers) => {
         if (!cancelled) setHubProviders(providers);
       })
@@ -173,17 +211,75 @@ export function Login({
     };
   }, [client, company]);
 
+  /**
+   * Seconds before the host would mail another link to this address.
+   *
+   * Derived, never stored: a stored counter and a re-render disagree the moment
+   * a tab is backgrounded, and `setInterval` is throttled to a crawl there.
+   * Recomputing from two timestamps means a tab woken after ten minutes renders
+   * a ready button on its first frame rather than counting the rest of the way
+   * down from where it fell asleep.
+   */
+  const secondsLeft = linkSentAt === null ? 0 : secondsUntilResend(linkSentAt, now);
+  const waitingToResend = secondsLeft > 0;
+
+  /** The line under the heading. Empty means the heading stands alone. */
+  const headingNote = subtitle(authConfig, mode, sent);
+
+  // Four ticks a second, and only while something is counting. The label is in
+  // whole seconds, so a 1s interval would show each number for anywhere between
+  // 0 and 1s depending on when the send landed relative to the tick.
+  useEffect(() => {
+    if (!waitingToResend) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [waitingToResend]);
+
   async function sendLink(e: React.FormEvent) {
     e.preventDefault();
+    setResent(false);
+    await askForLink();
+  }
+
+  /**
+   * Asks for another link from the sent screen.
+   *
+   * The whole reason this exists: the sent card is the terminal screen of the
+   * primary sign-in path and the one people stare at when nothing arrives, and
+   * until #1333 its only control cleared the form. "Retype the address you just
+   * typed" is not a recovery path — it gives no sign it is a *re*send, and no
+   * sign of the minute the host makes you wait.
+   */
+  async function resendLink() {
+    setResent(false);
+    if (await askForLink()) setResent(true);
+  }
+
+  /** The one request both paths make. Reports whether the host acknowledged it. */
+  async function askForLink(): Promise<boolean> {
     setBusy(true);
     setError(null);
     try {
-      const result = await requestCode(client, company, email);
+      const result = await requestCode(
+        client,
+        company,
+        email,
+        // A dead setup hand-off link keeps the address while it falls back to
+        // this form (`#/company?from=setup` survives in the hash), so a link
+        // asked for from here must carry the same destination the original did
+        // — otherwise following the replacement lands on Overview and can show
+        // the tour welcome instead of the roster setup just built. Absent for
+        // any other sign-in, which lands wherever it always did.
+        arrivedViaSetupHandoff() ? SETUP_HANDOFF_FRAGMENT : undefined,
+      );
       // Always the same acknowledgement, whoever they are.
       setSent(true);
       setDevCode(result.dev_code ?? null);
+      setLinkSentAt(Date.now());
+      return true;
     } catch (err) {
       setError(friendly(err));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -238,9 +334,27 @@ export function Login({
     }
   }
 
+  const heading = headingFor(authConfig);
+
   return (
-    <div className="min-h-svh bg-background">
-      <header className="flex items-center justify-between border-b px-6 py-4">
+    /*
+      The box that owns the viewport height has to be the flex container too.
+
+      `justify-center` distributes free space along its *own* main axis, so on a
+      `main` whose parent is a plain block it is inert: that `main` is exactly as
+      tall as its content and has no free space to distribute. The height lived
+      on this div and the centring lived on `main`, and neither reached the
+      other — the card sat pinned under the header with half the viewport empty
+      below it (#1332). `flex flex-col` here plus `flex-1` there hands `main`
+      the height the header left over, which is what the `justify-center` below
+      was always reaching for.
+
+      `flex-1` cannot clip the taller variants: a flex item's `min-height: auto`
+      floors it at its content height, so on a short viewport `main` grows past
+      its share, the page grows past `min-h-svh`, and the document scrolls.
+    */
+    <div className="flex min-h-svh flex-col bg-background">
+      <header className="flex shrink-0 items-center justify-between border-b px-6 py-4">
         <div className="flex items-center gap-2">
           <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <Building2 className="size-4" />
@@ -250,20 +364,54 @@ export function Login({
         <ThemeToggle />
       </header>
 
-      <main className="mx-auto flex w-full max-w-md flex-col justify-center px-6 py-16">
+      <main className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-6 py-16">
+        {/*
+          The refusal, above the heading, where the eye lands first.
+
+          Given the icon and full-strength text on purpose. `Alert`'s default
+          variant is card-coloured with a muted description, which on this page
+          sits on a card-coloured form — so an unadorned notice reads as chrome
+          and gets skimmed past, which is barely better than the nothing it
+          replaced (#1305). Not `destructive`: an expired link is the ordinary
+          fate of one left in a mailbox overnight, not an error someone made.
+        */}
         {notice && (
-          <Alert className="mb-6">
-            <AlertDescription>{notice}</AlertDescription>
+          <Alert className="mb-6" data-testid="login-notice">
+            <TriangleAlert className="size-4" />
+            <AlertDescription className="text-foreground">{notice}</AlertDescription>
           </Alert>
         )}
 
-        <div className="mb-6 space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {authConfig.mode === "none" ? "" : "Sign in"}
-            {companyName ? (authConfig.mode === "none" ? companyName : ` to ${companyName}`) : ""}
-          </h1>
-          <p className="text-sm text-muted-foreground">{subtitle(authConfig, mode)}</p>
-        </div>
+        {/*
+          Rendered only when there is something to say. Both lines are empty in
+          `none` mode on a host too old to report a name, and the block used to
+          render regardless — an empty `h1` above an empty `p`, which is a
+          visible gap, a page with no heading text for a screen reader, and a
+          hole in the document outline (issue #1334).
+        */}
+        {heading || headingNote ? (
+          <div className="mb-6 space-y-1">
+            {heading ? (
+              /*
+                Long names wrap rather than truncate — the whole point of
+                naming the company here is that someone can confirm it, and
+                half a name confirms nothing. `break-words` keeps a name
+                with no space in it inside the `max-w-md` column instead of
+                pushing the page sideways, and `line-clamp-3` is the
+                backstop past which a name is no longer a heading: three lines
+                of it, then an ellipsis, with `title` holding the rest.
+              */
+              <h1
+                className="line-clamp-3 text-2xl font-semibold tracking-tight break-words"
+                title={heading}
+                data-testid="login-heading"
+              >
+                {heading}
+              </h1>
+            ) : null}
+            {headingNote ? <p className="text-sm text-muted-foreground">{headingNote}</p> : null}
+          </div>
+        ) : null}
 
         {/*
           A company with no sign-in. Reaching this screen at all means the
@@ -349,7 +497,11 @@ export function Login({
               {hubProviders.map((provider) => (
                 <a
                   key={provider.id}
-                  href={provider.startUrl}
+                  href={
+                    arrivedViaSetupHandoff()
+                      ? `${provider.startUrl}${provider.startUrl.includes("?") ? "&" : "?"}from=setup`
+                      : provider.startUrl
+                  }
                   className={cn(buttonVariants({ variant: "outline", size: "lg" }), "w-full")}
                 >
                   Continue with {provider.label}
@@ -387,6 +539,27 @@ export function Login({
           </div>
         )}
 
+        {/*
+          Said here because it is the last place it can be said. Every other
+          surface reports a link as sent, so an operator who is never told will
+          type an address, be thanked, and wait for a message no process on this
+          host will ever produce. The form stays below regardless: mail can be
+          configured without restarting this console, and a person who knows a
+          link is coming should still be able to ask for one.
+        */}
+        {linkGoesNowhere && (
+          <Alert className="mb-4" data-testid="login-no-mail">
+            <TriangleAlert className="size-4" />
+            <AlertDescription className="text-foreground">
+              {hubProviders.length > 0
+                ? `This host can't send mail, so a sign-in link won't arrive. Use one of the buttons above${authConfig.passwords ? ", or the password you set for this company." : "."}`
+                : authConfig.passwords
+                  ? "This host can't send mail, so a sign-in link won't arrive. Sign in with the password you set for this company — an admin can issue you one if you have none."
+                  : "This host can't send mail, so a sign-in link won't arrive. Whoever runs it needs to configure a mail transport before this screen can sign anyone in."}
+            </AlertDescription>
+          </Alert>
+        )}
+
         {authConfig.mode === "email" ? (
         <Card className="p-6">
           {sent && mode === "link" ? (
@@ -417,16 +590,61 @@ export function Login({
                 </Alert>
               ) : null}
 
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setSent(false);
-                  setDevCode(null);
-                }}
-              >
-                Use a different address
-              </Button>
+              {/*
+                The error alert has to be repeated here rather than lifted out
+                of the form below: until #1333 the only request this screen
+                could make was made from the form, so an alert rendered only
+                inside the form was sufficient. A resend that fails on a screen
+                with no error slot would fail invisibly — the counter would
+                restart and nothing else would change.
+              */}
+              {error ? (
+                <Alert variant="destructive">
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              ) : null}
+
+              {resent && !error ? (
+                <p className="text-sm text-muted-foreground" data-testid="login-resent">
+                  Sent again. The newest link is the one that works.
+                </p>
+              ) : null}
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/*
+                  The card's own action, and the strongest thing on it: this is
+                  the screen someone is looking at *because* the mail has not
+                  arrived. Disabled for the host's minute rather than hidden, so
+                  the wait is a visible fact rather than a missing control.
+                */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={resendLink}
+                  disabled={busy || waitingToResend}
+                  data-testid="login-resend"
+                >
+                  {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+                  {resendLabel(secondsLeft)}
+                </Button>
+
+                {/* Demoted below the resend, but still underlined-on-hover
+                    primary text rather than the unadorned `ghost` label it was
+                    — which, as the only control in the state, did not read as
+                    a control at all. */}
+                <Button
+                  variant="link"
+                  size="sm"
+                  onClick={() => {
+                    setSent(false);
+                    setDevCode(null);
+                    setResent(false);
+                    setError(null);
+                  }}
+                >
+                  Use a different address
+                </Button>
+              </div>
             </div>
           ) : (
             <form
@@ -439,27 +657,18 @@ export function Login({
                   id="email"
                   type="email"
                   autoComplete="username"
+                  // Only when something was refused. Whoever is reading a
+                  // notice has one thing left to do — ask for another link —
+                  // and this makes it a keystroke instead of a hunt for the
+                  // field. A cold visit is left alone: stealing focus on an
+                  // ordinary page load moves the viewport for anyone using a
+                  // screen reader or a zoomed browser, for no reason.
+                  autoFocus={Boolean(notice)}
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@company.com"
-                  aria-describedby={
-                    suggestedEmail && email === suggestedEmail ? "email-hint" : undefined
-                  }
                 />
-                {suggestedEmail && email === suggestedEmail ? (
-                  // Otherwise the prefilled address reads as somebody else's,
-                  // and the natural move is to clear it — which is the one
-                  // address this host will not answer for.
-                  <p
-                    id="email-hint"
-                    className="text-xs text-muted-foreground"
-                    data-testid="suggested-email-hint"
-                  >
-                    The operator account on this computer. Nothing is mailed —
-                    the link comes back here.
-                  </p>
-                ) : null}
               </div>
 
               {mode === "password" ? (
@@ -492,7 +701,15 @@ export function Login({
         </Card>
         ) : null}
 
-        {authConfig.mode === "email" && authConfig.passwords ? (
+        {/*
+          Hidden while the link is out. Offering a different credential type as
+          a peer of "go look in your mailbox" muddles a screen whose whole job
+          at that moment is the mailbox — and pressing it silently threw the
+          link away, since the handler clears `sent` with no acknowledgement
+          (issue #1333). "Use a different address" is the way back to the form,
+          and this returns with it.
+        */}
+        {authConfig.mode === "email" && authConfig.passwords && !(sent && mode === "link") ? (
         <div className="mt-4 text-center">
           <Button
             variant="link"
@@ -518,10 +735,36 @@ export function Login({
   );
 }
 
+/**
+ * What this screen is a sign-in *to*.
+ *
+ * The name comes from `/auth/config` — the one thing the host tells the console
+ * before anybody has a credential — so on a host too old to report it this is
+ * the bare "Sign in" every deployment showed before, not a blank.
+ *
+ * `none` mode gets the name alone: there is no signing in to do there, the card
+ * below says so in full, and "Sign in to Acme" over "There is no sign-in here"
+ * would contradict itself. With no name it gets nothing, and the block that
+ * would have held it is not rendered at all.
+ */
+function headingFor(config: AuthConfig): string {
+  if (config.mode === "none") return config.name ?? "";
+  return config.name ? `Sign in to ${config.name}` : "Sign in";
+}
+
 /** One line under the heading, saying what this company will actually ask for. */
-function subtitle(config: AuthConfig, mode: Mode): string {
+function subtitle(config: AuthConfig, mode: Mode, sent: boolean): string {
   if (config.mode === "none") return "";
   if (config.mode === "wallet") return "Prove you hold the wallet. Nothing is emailed.";
+  // Nothing, once the link is gone. Every remaining line here is written in the
+  // future tense about a form that is no longer on screen, and "We'll email you
+  // a link" sitting 20px above "Check your email" is two tenses making two
+  // different claims about the same act (issue #1333). The card carries the
+  // whole message by then, so there is nothing left to add.
+  if (sent && mode === "link") return "";
+  // Promising a link from a host with no transport is the one line here that
+  // sends someone away to wait for nothing.
+  if (mode === "link" && !config.magicLink) return "This host can\'t email you a link.";
   return mode === "link"
     ? "We\'ll email you a link. No password needed."
     : "Use the password you set for this company.";

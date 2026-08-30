@@ -1,0 +1,105 @@
+# Problems customers are hitting that support cannot fix.
+#
+# The axis a ticket queue destroys. Fifty tickets about one broken export are
+# fifty tickets, each answered separately by whoever picked it up, each with a
+# slightly different account of the cause and a different promise about when it
+# will be fixed. One known-issue row is the shared answer — and, crucially, the
+# shared list of who is waiting to be told when it lands.
+
+title = "Known issues"
+purpose = """
+Every problem customers are hitting that support cannot resolve on its own: \
+what it is, the workaround, who is waiting to hear, and what was actually \
+promised. Read it before answering any ticket — the answer is usually already \
+here, and it is the *agreed* answer.\
+"""
+written_by = "`record_entry` to open or update a known issue, `close_entry` when it is fixed or withdrawn"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "issue"
+role = "title"
+required = true
+description = "What customers experience, in their words rather than the engineering diagnosis."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "workaround"
+role = "prose"
+description = "What a customer can do meanwhile. `none` is an honest and important value."
+
+[[field]]
+name = "agreed_answer"
+role = "prose"
+required = true
+description = "What support says about this, so five agents do not give five accounts. Changing it is a decision, not a rewording."
+
+[[field]]
+name = "waiting"
+role = "prose"
+description = "Who has asked and must be told when it is fixed. The field that makes a fix worth something to the people who reported it."
+
+[[field]]
+name = "reported_count"
+role = "number"
+description = "How many customers have hit it. What turns a low-priority bug into a high-priority one."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — fixed and who was told, or withdrawn. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "The bug report, and the tickets that raised it."
+
+[[status]]
+name = "confirmed"
+
+[[status]]
+name = "reported"
+label = "Reported to engineering"
+
+[[status]]
+name = "fix_pending"
+label = "Fix pending"
+
+[[status]]
+name = "fixed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "wont_fix"
+label = "Won't fix"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Live"
+blurb = "Customers are hitting these now. Read before answering anything."
+statuses = ["confirmed", "reported", "fix_pending"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Fixed or won't-fix, each with the reason and who was told. A fix nobody \
+announced to the people in `waiting` is a fix those customers do not have.\
+"""
+statuses = ["fixed", "wont_fix"]
+cap = 20

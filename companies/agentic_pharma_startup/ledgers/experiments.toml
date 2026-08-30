@@ -1,0 +1,112 @@
+# Every assay, screen and simulation, with its result — including the ones that
+# did not work.
+#
+# Discovery is mostly negative results, and negative results are what nobody
+# records. The consequence is specific and expensive: the same compound is
+# re-tested, the same assay is re-run with the same artefact, and the
+# organization's confidence in a target rests on a set of experiments nobody can
+# enumerate.
+
+title = "Experiments"
+purpose = """
+Every experiment run: what was asked, how it was run, what came back, and \
+whether it was believable. Read it before designing anything — including for \
+the negative results, which are most of the value here.\
+"""
+written_by = "`record_entry` to register or update an experiment, `close_entry` when it concludes"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "experiment"
+role = "title"
+required = true
+description = "The question, as an experiment rather than a topic."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "program"
+role = "refs"
+description = "The program this belongs to."
+
+[[field]]
+name = "design"
+role = "prose"
+required = true
+description = "Assay, model, conditions, controls. An experiment with no stated control cannot be interpreted."
+
+[[field]]
+name = "prediction"
+role = "prose"
+description = "What was expected, recorded before the run. This is what makes a surprising result surprising rather than expected in hindsight."
+
+[[field]]
+name = "result"
+role = "prose"
+description = "What came back, including when nothing did."
+
+[[field]]
+name = "confidence"
+role = "prose"
+description = "Replicates, effect size, and whether an artefact could explain it."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it concluded — supported, contradicted, or inconclusive. Required when it closes."
+
+[[status]]
+name = "designed"
+
+[[status]]
+name = "running"
+
+[[status]]
+name = "supported"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "contradicted"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "inconclusive"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Running"
+blurb = "In flight. Predictions are recorded before results, not after."
+statuses = ["running"]
+order = "recent"
+
+[[section]]
+heading = "Designed"
+blurb = "Specified, not started. Each should already name its controls."
+statuses = ["designed"]
+order = "recent"
+
+[[section]]
+heading = "Concluded"
+blurb = """
+Supported, contradicted, or inconclusive. The negative and inconclusive rows are \
+most of the value: without them the same compound is re-tested and the same \
+assay artefact is rediscovered, at full cost, by somebody who never heard about \
+the first time.\
+"""
+statuses = ["supported", "contradicted", "inconclusive"]
+cap = 20

@@ -107,16 +107,16 @@ fn operator_request() -> CycleRequest {
         cycle_id: "unused".into(),
         company_id: CompanyId::new("acme"),
         events: vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }],
         event_seqs: Vec::new(),
-        compressed_history: Vec::new(),
-        roster: Vec::new(),
-        context_index: Vec::new(),
+        policy: None,
     }
 }
 
@@ -510,11 +510,13 @@ async fn e2e_inference_then_gated_send_dm_drives_a_channel_response() {
 
     let report = rt
         .run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "how are we doing".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();
@@ -566,11 +568,13 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
 
     let report = rt
         .run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "file it".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         }])
         .await
         .unwrap();

@@ -12,9 +12,10 @@ A card reaches Planning two ways (issue #576):
 1. **The prompt box opens it there.** An actionable message typed by a person
    opens its card directly in Planning, with no drag. This is epic #183's spine
    — prompt in, deliverable out — and it is the common path.
-2. **A person drags it there**, from To-do. This is how a card that was entered
-   by hand, or returned to To-do by a failed pass or a rejected proposal, gets
-   planned.
+2. **A person asks for it**, with the card's *Plan first* control (issue
+   #1512; it was a drag into the Planning column until the board collapsed to
+   three phases). This is how a card that was entered by hand, or returned to
+   Pending by a failed pass or a rejected proposal, gets planned.
 
 Both are the same transition and buy exactly one pass; see
 [the contract table](#the-contract-in-one-table).
@@ -33,7 +34,7 @@ plan and proposes a graph for review. This document is only the planning half.
 
 | | |
 |---|---|
-| **Trigger** | the transition *into* `planning`, edge-fired in `CompanyRuntime::upsert_task` |
+| **Trigger** | the transition *into* the `planning` stage, edge-fired in `CompanyRuntime::upsert_task` |
 | **Work done** | exactly one model call, no tools, no retry |
 | **Deadline** | 120s, hard |
 | **Cost** | one `SampleKind::PlanningCall` sample, charged to the company |
@@ -47,6 +48,7 @@ plan and proposes a graph for review. This document is only the planning half.
 |---|---|---|
 | planned, nothing blocking, a valid assignee | `in_progress` | the plan; the dispatch edge fires |
 | planned, a hard prerequisite missing (or no valid assignee) | `todo` | the plan **and** the named gap |
+| planned, but **more than one** teammate could own it | `todo` | the plan **and** the candidates, with a reason each |
 | the pass failed (model error, timeout, unparseable output) | `todo` | the reason only — **no** plan |
 
 A failed pass writes no partial brief on purpose. A plan half-produced by a
@@ -66,19 +68,28 @@ exists to remove, and would leave every planned card waiting on a person who
 has already said what they want. The operator's levers are all still there:
 
 - entry into Planning is **per card**, and only ever from a person — either the
-  drag, or an actionable message they typed into the prompt box (issue #576);
-- `todo → in_progress` still dispatches unplanned, so planning is never
+  card's *Plan first* control, or an actionable message they typed into the
+  prompt box (issue #576);
+- a drop into Working still dispatches unplanned, so planning is never
   compulsory;
 - a missing prerequisite stops the walk **before** any dispatch spend;
 - the run still stops in In Review, so nothing reaches Done without a person.
 
 The cost this accepts: entering Planning can spend the assignee's budget
-without a second confirmation. Entry is informed consent — the drag is a
+without a second confirmation. Entry is informed consent — *Plan first* is a
 deliberate act and the console says what it costs, and the prompt box is a
 person asking the company to do the thing — the per-agent cap from #304 still
 gates the dispatch turn, and the run still stops for review.
 
-**A card opened by anything other than a person still lands in To-do**
+**Planning stopped being a column in issue #1512.** The board now renders three
+phases — `pending`, `working`, `done` — and `planning` is one of the four stages
+that read as Working, so there is no column to drag into. Nothing about the pass
+changed: the same transition into the same stage fires the same single call, and
+the gesture that causes it is the card's *Plan first* button. What moved is only
+where a person expresses the intent, and a control expresses an *act* better
+than a column expressed a *state* somebody had to drag through.
+
+**A card opened by anything other than a person still lands in Pending**
 (issue #576). The prompt box is a human surface, but it is not only a human
 surface: the chat route also accepts machine credentials, and an agent whose
 card self-promoted would buy a planning pass, whose pass can open further
@@ -135,7 +146,7 @@ The host stamps every verdict:
 
 | Kind | Checked against | `missing` reads as |
 |---|---|---|
-| `connection` | the `GET …/connections` projection | "GitHub is not connected — connect it from the Connections tab" |
+| `connection` | the `GET …/connections` projection | "Notion is not connected — connect it from the OAuth page" |
 | `composio` | the same projection's `via`, plus token presence | "no Composio account is connected for this" |
 | `mcp` | manifest ∪ runtime index — **both** halves; a disabled server is its own verdict | the named server is in neither |
 | `credential` | presence only — the mail handle, or a secret key that exists | "no outbound email is configured" |
@@ -161,7 +172,7 @@ Two deliberate looseness choices, both erring toward *not blocking*, because a
 false refusal is the expensive way to be wrong here:
 
 - **`file` matches on the trailing segment**, case-insensitively. A model writes
-  `Standards/Tone.md` or `Tone.md` for the same note; a path-shape mismatch that
+  `standards/Tone.md` or `Tone.md` for the same note; a path-shape mismatch that
   blocked a card would be a false refusal. Two same-named files in different
   folders can therefore satisfy the check.
 - **`permission` reads the manifest only** — the tool allow-list, the agent's
@@ -178,6 +189,45 @@ chose. The operator's routing decision is not the planner's to overrule; a
 proposal is still recorded on the brief either way, so the suggestion is visible
 without being applied. A proposal the roster does not recognise is dropped
 rather than shown.
+
+### Ambiguous ownership (issue #1106)
+
+The pass answers with **candidates**, not a single name: every teammate or desk
+that could genuinely take the card, best first, capped at three. What happens
+next is a function of how many survive resolution — and of nothing else. Who
+authored a teammate's profile does not enter into it, and neither does which of
+the four roster sources it came from.
+
+| Resolved candidates | Card assigned? | Outcome |
+|---|---|---|
+| any number | yes | dispatches — an assignee a person set is never second-guessed |
+| 0 | no | `todo`, with the existing "nobody on the roster" reason |
+| 1 | no | applied as `proposedAssignee`, dispatches — the pre-#1106 behaviour |
+| 2 or 3 | no | `todo`, **candidates on the brief**, nothing assigned |
+
+Two or more is a question, not a proposal, so `proposedAssignee` stays empty and
+`assigneeCandidates` carries the list instead — the two are never both set. The
+console renders the candidates as a chooser and one click assigns, through the
+same `PATCH …/tasks/{id}` the reassign row uses.
+
+**The dedup is load-bearing.** Candidates are deduplicated by their *canonical*
+id, not by the string the model wrote, and only then counted. A model that names
+one teammate twice — by id and again by display name, or in two casings —
+resolves to one key both times, and without the dedup that card would park
+asking a person to choose between a teammate and itself.
+
+**No fuzzy matching**, here or anywhere below it: candidates go through the same
+exact-match `runtime::assignee::resolve` the write boundary uses, so anything the
+roster does not carry is dropped rather than approximated. The model proposes;
+the host only enforces that each name is real. That is the same split the
+workflow copilot's grounding takes.
+
+**Why ask rather than pick.** A roster has four sources — the global baseline,
+the company blueprint, the console's `POST …/team`, and the orchestrator's own
+`add_agent` — and only one of them is the operator. Descriptions are thinnest
+exactly where two roles overlap most, and a card's owner may have been added by
+an agent the operator never configured. Recording a pick for them to correct
+assumes they would recognise a wrong one; asking does not.
 
 ---
 
@@ -221,7 +271,7 @@ money.
 There is no run row for the boot reaper to find, so a host that dies mid-pass
 would otherwise leave a card in Planning that nothing will ever re-drive — the
 trigger already fired. `runtime::advance::sweep_stranded_planning` reads the
-board directly at boot and returns every Planning card to To-do with the
+board directly at boot and returns every Planning card to Pending with the
 restart reason on its note.
 
 It is sound because Planning is **transient by construction**: every

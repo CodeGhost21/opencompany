@@ -1,3 +1,21 @@
+# Issue #1298. An EXPLICIT version, never "stable".
+#
+# This file used to say `channel = "stable"`, and CI installed `stable` too, so
+# both resolved to whatever stable happened to be at run time. On 2026-08-18
+# rustc 1.98.0 shipped, `clippy::result_large_err` started firing across
+# `src/server/**`, and every open PR in the repo went red — including PRs that
+# touched no Rust at all. Nothing in the tree changed; the compiler did. Anyone
+# still on 1.97.x passed `cargo clippy` locally and could not reproduce it.
+#
+# A floating channel makes an upstream release a repo-wide outage with nothing
+# in any diff to explain it. A pin makes the same release a PR: one that bumps
+# this number, absorbs whatever new lints came with it, and is reviewed on its
+# own — which is where that work belongs.
+#
+# `scripts/ci/assert-toolchain-pin.sh` asserts that every
+# `dtolnay/rust-toolchain` call site in `.github/workflows/` passes this exact
+# version, so the workflows and this file cannot drift apart. Bump here, run
+# that script, and it will name any call site you missed.
 [toolchain]
-channel = "stable"
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]

@@ -1,8 +1,6 @@
-// Issue #302: unmounted from the console — hidden, not retired. The host's
-// `/memory` routes, FactStore and tests are unchanged, and agents keep reading
-// and writing memory; only the operator-facing Brain tab is gone. Re-listing
-// "memory" in `app-shell.tsx`'s `View`/`NAV` brings it back. Do not delete it
-// as dead code.
+// Brain lives under Settings (issue #1416): the memory browser and its engine
+// controls belong together, while the sidebar keeps its scarce permanent rows
+// for surfaces an operator works from every day.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -11,18 +9,24 @@ import {
   CONTEXT_ORIGINS,
   createMemory,
   deleteMemory,
+  documentSlug,
+  forgetDocument,
   KIND_STYLES,
   listMemory,
   MEMORY_KINDS,
   memoryStats,
   ORIGIN_LABELS,
   ORIGIN_STYLES,
+  type MemoryEngineState,
   type MemoryEntry,
   type MemoryKind,
   type MemoryStats,
 } from "@/api/memory";
 import type { OpenCompanyClient } from "@/api/client";
+import { DropZone } from "@/views/memory/DropZone";
+import { EngineSection } from "@/views/memory/EngineSection";
 import { Markdown } from "@/components/markdown";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -109,6 +113,12 @@ function formatUpdated(ms: number): string {
 export function MemoryView({ client, company }: Props) {
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
+  // The truncation metadata that rode in with the last list read, kept beside
+  // `entries` because the banner's "newest N of M" must describe the SAME read
+  // as the rows it counts — a write between two requests would let N and M
+  // silently disagree.
+  const [totalContext, setTotalContext] = useState(0);
+  const [contextTruncated, setContextTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -123,12 +133,14 @@ export function MemoryView({ client, company }: Props) {
       const mine = ++gen.current;
       if (!opts?.silent) setLoading(true);
       try {
-        const [rows, s] = await Promise.all([
+        const [list, s] = await Promise.all([
           listMemory(client, company),
           memoryStats(client, company),
         ]);
         if (mine !== gen.current) return;
-        setEntries(rows);
+        setEntries(list.items);
+        setTotalContext(list.totalContext);
+        setContextTruncated(list.contextTruncated);
         setStats(s);
         setError(null);
       } catch (e) {
@@ -143,12 +155,23 @@ export function MemoryView({ client, company }: Props) {
 
   useEffect(() => {
     setEntries([]);
+    setTotalContext(0);
+    setContextTruncated(false);
     setStats(null);
     void load();
     return () => {
       gen.current++;
     };
   }, [load]);
+
+  // The bound memory engine, from the engine route rather than `/spec`.
+  //
+  // One source, because the two can now disagree: `/spec`'s snapshot is what
+  // boot bound, and an operator who switches engines from the section below
+  // changes what is bound without restarting. A header badge naming the
+  // previous engine would be the most confusing possible answer to "did my
+  // change take".
+  const [engine, setEngine] = useState<MemoryEngineState | null>(null);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -168,17 +191,44 @@ export function MemoryView({ client, company }: Props) {
     return counts;
   }, [entries]);
 
+  const listedContextItems = useMemo(
+    () => entries.filter((entry) => entry.origin !== "fact").length,
+    [entries],
+  );
+
+  // The one engine state the *writing* half of this page has to respect: the
+  // null engine takes every write and throws it away, so a live "New memory"
+  // button beside that warning invites work the host will silently drop
+  // (issue #1410). The panel's health dot already refuses to go green here for
+  // the same reason.
+  const discarding = engine?.active === "null";
+
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
-    await load({ silent: true });
+    // Close the moment the write is confirmed, then reload in the background.
+    // The dialog's catch owns the "could not save the memory" toast, so only
+    // createMemory — an actual save failure — may reach it. Awaiting the reload
+    // here instead would route a reload failure into that same catch (a false
+    // save error) and skip this close, stranding the dialog open so the operator
+    // retries and writes a duplicate. `void load` is fire-and-forget: load
+    // handles its own errors via the page banner and never leaks a rejection.
     setAddOpen(false);
+    void load({ silent: true });
   }
 
   async function remove(entry: MemoryEntry) {
     // Optimistic: drop the card immediately, then reconcile counts from the host.
     setEntries((all) => all.filter((x) => x.id !== entry.id));
     try {
-      await deleteMemory(client, company, entry.id);
+      if (entry.origin === "document") {
+        // A document is many chunks under one slug, so forgetting it is one
+        // call against the document — deleting the card's own chunk would
+        // leave the rest of the file in memory, which is worse than not
+        // offering a delete at all.
+        await forgetDocument(client, company, documentSlug(entry.source));
+      } else {
+        await deleteMemory(client, company, entry.id);
+      }
       await load({ silent: true });
     } catch (e) {
       // Re-insert only this entry on failure (no whole-list rollback).
@@ -188,20 +238,89 @@ export function MemoryView({ client, company }: Props) {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl space-y-5 px-4 py-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Brain</h2>
-            <p className="text-sm text-muted-foreground">
-              What your company remembers — facts, people, projects, and preferences your agents can
-              recall.
-            </p>
-          </div>
-          <Button onClick={() => setAddOpen(true)} data-testid="memory-add">
-            <Plus className="size-4" /> New memory
-          </Button>
-        </div>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Brain"
+        width="5xl"
+        description={
+          <>
+            What your company remembers — facts, people, projects, and preferences your
+            teammates can recall.
+          </>
+        }
+        actions={
+          <>
+            {engine && (
+              <span
+                className={cn(
+                  "rounded-full border px-3 py-1 text-xs",
+                  // A capability count in the calm register, inches above an
+                  // alert saying every write is discarded, reads as a fact
+                  // about a working engine. Amber, like the dot (issue #1410).
+                  discarding
+                    ? "border-status-blocked/40 text-status-blocked-text"
+                    : "text-muted-foreground",
+                )}
+                title={
+                  discarding
+                    ? "This engine discards every write — nothing saved here is retained."
+                    : engine.capabilities.length
+                      ? `Capability families: ${engine.capabilities.join(", ")}`
+                      : "Capabilities not negotiated"
+                }
+                data-testid="memory-engine-badge"
+              >
+                engine: {engine.active}
+                {engine.capabilities.length > 0 && (
+                  <> · {engine.capabilities.length} families</>
+                )}
+              </span>
+            )}
+            {/*
+              The reason rides on the wrapper, not the button: `Button` carries
+              `disabled:pointer-events-none`, so a `title` on a disabled button
+              never surfaces — the span still takes the hover and shows it.
+            */}
+            <span
+              title={
+                discarding
+                  ? "This engine discards every write — nothing saved here is retained."
+                  : undefined
+              }
+            >
+              <Button
+                onClick={() => setAddOpen(true)}
+                disabled={discarding}
+                // Rendered, not hidden: the operator should see that writing is
+                // the thing this engine cannot do, not find the control missing.
+                data-testid="memory-add"
+              >
+                <Plus className="size-4" /> New memory
+              </Button>
+            </span>
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-5 overflow-y-auto px-4 py-6">
+
+        <EngineSection
+          client={client}
+          company={company}
+          onApplied={(next) => {
+            setEngine(next);
+            // The new engine's memory is a different set of rows — often an
+            // empty one, since nothing migrates between engines — so the list
+            // has to be re-read rather than left showing the old engine's.
+            void load({ silent: true });
+          }}
+        />
+
+        <DropZone
+          client={client}
+          company={company}
+          discarding={discarding}
+          onIngested={() => void load({ silent: true })}
+        />
 
         {error && (
           <Alert variant="destructive">
@@ -209,7 +328,14 @@ export function MemoryView({ client, company }: Props) {
           </Alert>
         )}
 
-        <HealthStrip loading={loading} stats={stats} total={entries.length} perType={perType} />
+        <HealthStrip loading={loading} stats={stats} perType={perType} />
+        {contextTruncated && (
+          <Alert>
+            <AlertDescription>
+              Showing the newest {listedContextItems} of {totalContext} context memory items.
+            </AlertDescription>
+          </Alert>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 sm:max-w-xs">
@@ -217,12 +343,13 @@ export function MemoryView({ client, company }: Props) {
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search memory"
               placeholder="Search memory…"
               className="pl-8"
             />
           </div>
           <Select value={kind} onValueChange={(v) => v && setKind(v)} items={TYPE_FILTER_LABELS}>
-            <SelectTrigger className="w-40">
+            <SelectTrigger className="w-40" aria-label="Filter by memory type">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -260,28 +387,28 @@ export function MemoryView({ client, company }: Props) {
 function HealthStrip({
   loading,
   stats,
-  total,
   perType,
 }: {
   loading: boolean;
   stats: MemoryStats | null;
-  total: number;
   perType: Record<string, number>;
 }) {
   if (loading && !stats) {
     return <Skeleton className="h-16 rounded-xl" />;
   }
   const tiles: { label: string; value: string }[] = [
-    { label: "Total items", value: String(total) },
-    { label: "Agent memory", value: String(stats?.agentChunks ?? 0) },
+    { label: "Total items", value: String(stats?.totalItems ?? 0) },
+    { label: "Operator facts", value: String(stats?.facts ?? 0) },
+    { label: "Teammate memory", value: String(stats?.teammateMemory ?? 0) },
+    { label: "Document chunks", value: String(stats?.documentMemory ?? 0) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
-    // Across every memory source, not just operator facts — agents write only
+    // Across every memory source, not just operator facts — teammates write only
     // context chunks, so a facts-only figure left this stat at "—" forever.
     { label: "Last updated", value: formatUpdated(stats?.lastUpdatedAtMillis ?? 0) },
   ];
   return (
     <Card data-testid="memory-health">
-      <CardContent className="flex flex-wrap items-center gap-x-8 gap-y-3 py-4">
+      <CardContent className="flex flex-wrap items-center gap-x-8 gap-y-3">
         {tiles.map((t) => (
           <div key={t.label} className="space-y-0.5">
             <p className="text-xs text-muted-foreground">{t.label}</p>
@@ -309,7 +436,7 @@ function MemoryCard({ entry, onDelete }: { entry: MemoryEntry; onDelete: () => v
   const badge = entryBadge(entry);
   return (
     <Card className="group" data-testid="memory-card">
-      <CardContent className="space-y-2 py-4">
+      <CardContent className="space-y-2">
         <div className="flex items-start justify-between gap-2">
           <p className="font-medium leading-snug">{entry.title}</p>
           <Badge variant="outline" className={cn("shrink-0 capitalize", badge.style)}>

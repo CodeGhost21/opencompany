@@ -130,12 +130,117 @@ use crate::runtime::workflow_spawn::WorkflowSpawn;
 /// fail silently, which for this kind means an approval nobody acts on.
 pub const WORKFLOW_APPROVE_KIND: &str = "workflow.approve";
 
+/// The prefix a workflow run's continuation turn key carries (issue #978).
+///
+/// Namespaced rather than the bare run id because the turn key space is shared
+/// with the cycle ids a chat turn arms
+/// ([`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)), and
+/// the release side has to fork on which kind it is holding — a brain turn is
+/// continued, a workflow run is re-dispatched, and running the wrong one is
+/// silent. The prefix is what makes that question answerable from the key
+/// alone, with no side lookup that could disagree.
+pub const WORKFLOW_TURN_PREFIX: &str = "workflow-run:";
+
+/// The continuation turn key **every gate one workflow run parked** shares
+/// (issue #978).
+///
+/// This is the whole of the fix's accounting change. Before it,
+/// `park_and_journal` recorded no turn key for a workflow gate at all, so
+/// [`approval_cycle`](crate::runtime::journal::RuntimeJournal::approval_cycle)
+/// answered `Some(None)` and every branch of a fan-out believed it was the only
+/// decision outstanding: `decisions_still_awaited` read 0 on all three of three,
+/// and all three re-dispatched. Keying on the **run** rather than the node is
+/// what makes "approving never increases pending approvals" expressible — N
+/// gates of one run are one decision batch, released once.
+///
+/// The run id is already on every parked gate ([`gate_effect`] stamps
+/// `Effect::run_id`), so nothing new has to be threaded to mint this.
+pub fn workflow_turn_key(run_id: &str) -> String {
+    format!("{WORKFLOW_TURN_PREFIX}{run_id}")
+}
+
+/// The run behind a turn key minted by [`workflow_turn_key`], or `None` for a
+/// key that names a brain turn instead (issue #978).
+///
+/// Paired with its writer in one module, deliberately: a reader that rebuilt the
+/// prefix from a literal is a second place for the format to drift, and drift
+/// here does not fail loudly — it reads a workflow key as a brain turn and runs
+/// an agent cycle over a run that then never continues.
+///
+/// An empty remainder is rejected rather than returned: `workflow-run:` with no
+/// run behind it names nothing, and treating it as a run id would spawn a
+/// continuation for a graph that cannot be found.
+pub fn run_id_from_turn(turn: &str) -> Option<&str> {
+    turn.strip_prefix(WORKFLOW_TURN_PREFIX)
+        .filter(|run_id| !run_id.is_empty())
+}
+
+/// The prefix a **blocked agent node's** continuation turn key carries
+/// (issue #899, Stage 1).
+///
+/// # Why a third turn-key namespace, distinct from `workflow-run:`
+///
+/// A `requires_approval` **gate** and a policy-gated call *inside an agent
+/// node's own tool loop* block a run in two structurally different ways, and
+/// they must not share a batch:
+///
+/// * A gate parks a `WORKFLOW_APPROVE_KIND` effect (`agent: None`), and
+///   approving it re-runs the graph with the gate's node id in the trigger's
+///   `approvals` array. That is the `workflow-run:` batch ([`workflow_turn_key`]).
+/// * An agent node's gated call parks a **tool-call-shaped** effect
+///   (`agent: Some`, minted by `ApprovalPolicy::effect_for`), and approving it
+///   mints a grant. Nothing re-dispatches the run — the whole hole this issue
+///   closes. The re-run needs no `approvals` array (the call is not a graph
+///   node); it re-runs from the top and the minted grant lets the identical call
+///   pass ([`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)-armed
+///   at park time, stashed by
+///   [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)).
+///
+/// Keying per **(run, node)** rather than per run is deliberate: one agent node
+/// blocking on several gated calls is one batch owed one continuation (the #469
+/// property), but two agent nodes of one run that each block are two independent
+/// blocks — a continuation of one is not a continuation of the other.
+pub const WORKFLOW_NODE_TURN_PREFIX: &str = "workflow-node:";
+
+/// The continuation turn key **every gated call one blocked agent node parked**
+/// shares (issue #899, Stage 1).
+///
+/// Per (run, node): all of a node's parked calls carry this one key, so the
+/// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue) counts
+/// them as one batch and releases once, when the last decision lands. `node_id`
+/// is the block's resolved node id — the graph node id when the engine gave the
+/// turn one, else the agent ref — so the runner's stash and the parker agree on
+/// the key by construction.
+pub fn workflow_node_turn_key(run_id: &str, node_id: &str) -> String {
+    format!("{WORKFLOW_NODE_TURN_PREFIX}{run_id}:{node_id}")
+}
+
+/// Whether `turn` names a blocked agent node minted by [`workflow_node_turn_key`]
+/// (issue #899, Stage 1).
+///
+/// What `continue_turn` forks on to route a released batch to a workflow-run
+/// continuation rather than a brain cycle. The full key is the
+/// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue) stash
+/// key, so nothing here parses the run/node back out — the prefix test is the
+/// whole question, and it is disjoint from `workflow-run:` so the gate fork
+/// ([`run_id_from_turn`]) never misfires on it.
+pub fn is_node_turn(turn: &str) -> bool {
+    turn.strip_prefix(WORKFLOW_NODE_TURN_PREFIX)
+        .is_some_and(|rest| !rest.is_empty())
+}
+
 /// The payload key holding the workflow whose run paused.
 pub const PAYLOAD_WORKFLOW_ID: &str = "workflow_id";
 /// The payload key holding the gate node awaiting sign-off.
 pub const PAYLOAD_NODE_ID: &str = "node_id";
 /// The payload key holding the trigger input the paused run was started with.
 pub const PAYLOAD_INPUT: &str = "input";
+/// The payload key holding the [`StartedBy`](crate::ports::types::StartedBy)
+/// of the run that paused (issue #1862 prerequisite) — read back by
+/// [`started_by_of`] so a continuation carries the same attribution rather
+/// than resetting to the `scheduled`-derived default every resumed run's
+/// `scheduled` (always `false`, issue #542) would otherwise stamp.
+pub const PAYLOAD_STARTED_BY: &str = "started_by";
 /// The payload key holding this lineage's delivery ledger (issue #438) — the
 /// reports a continuation must NOT send again.
 pub const PAYLOAD_DELIVERED: &str = "delivered";
@@ -148,6 +253,22 @@ pub const PAYLOAD_DELIVERED: &str = "delivered";
 /// guarded a `send` / `publish` / `repo_publish` the graph made as a node of its
 /// own. See [`PerformedCall`].
 pub const PAYLOAD_PERFORMED: &str = "performed";
+/// The payload key holding this lineage's **denial** ledger (issue #978) — the
+/// gate nodes an operator has refused, so a continuation neither runs them nor
+/// asks about them again.
+///
+/// The third ledger, and the one that makes a *mixed* verdict safe. A run that
+/// fans out to three gates and is approved twice and denied once re-dispatches
+/// once, carrying two approvals; the denied node is not in that set, so without
+/// this the replay would reach it, pause on it, and park a **new** card — an
+/// approval round that cleared three and created one, which is the invariant
+/// this issue exists to restore. Listed here, `park_pending_gates` skips it: the
+/// refusal is final, and the branch below it simply never completes.
+///
+/// Accumulates down the lineage exactly as [`PAYLOAD_DELIVERED`] and
+/// [`PAYLOAD_PERFORMED`] do — a two-gate graph must not forget the first gate's
+/// denial when it parks the second.
+pub const PAYLOAD_DENIED: &str = "denied";
 /// The payload key holding the plain-prose statement of what approving costs.
 pub const PAYLOAD_NOTE: &str = "note";
 /// The payload key holding the verbatim output of the gate's upstream nodes —
@@ -228,6 +349,17 @@ pub const CONTINUATION_DELIVERED_KEY: &str = "__opencompany_delivered";
 /// already happened, not what is being decided, so counting it would make every
 /// continuation gate read as a new decision and stack a duplicate card.
 pub const CONTINUATION_PERFORMED_KEY: &str = "__opencompany_performed";
+
+/// The reserved trigger-input key the **denial** ledger rides into a
+/// continuation run under (issue #978).
+///
+/// Reserved on exactly [`CONTINUATION_DELIVERED_KEY`]'s terms: host-written,
+/// host-read, never authored and opaque to the engine. Stripped before two
+/// parked gates are compared ([`is_same_gate`]) for the same reason both its
+/// siblings are — it records what has already been decided, not what is being
+/// decided, so counting it would make every continuation's gate read as a new
+/// question and stack a duplicate card.
+pub const CONTINUATION_DENIED_KEY: &str = "__opencompany_denied";
 
 /// What approving a workflow gate actually does, in the operator's own terms.
 ///
@@ -342,6 +474,124 @@ pub fn delivered_in_input(input: &Value) -> Vec<DeliveredReport> {
         .unwrap_or_default()
 }
 
+/// The gate nodes this lineage has already refused, read off a trigger input
+/// (issue #978).
+///
+/// Tolerant on [`delivered_in_input`]'s terms and for its reason: a missing key,
+/// a non-array or a non-string row yields "nothing known to be denied", which is
+/// the pre-#978 behaviour (ask about it). Being wrong in the other direction —
+/// inventing a denial — would silently strand a branch the operator never
+/// refused.
+pub fn denied_in_input(input: &Value) -> Vec<String> {
+    input
+        .get(CONTINUATION_DENIED_KEY)
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The gate node a parked [`WORKFLOW_APPROVE_KIND`] effect is asking about, or
+/// `None` for any other effect (issue #978).
+///
+/// The kind is checked as well as the key, so a non-gate effect that happens to
+/// carry a `node_id` payload cannot be mistaken for one. This is what the
+/// run-scoped stash keys its batch on — see
+/// [`WorkflowGateQueue`](crate::runtime::workflow_gates::WorkflowGateQueue).
+pub fn gate_node_id(effect: &Effect) -> Option<&str> {
+    if effect.kind != WORKFLOW_APPROVE_KIND {
+        return None;
+    }
+    effect
+        .payload
+        .get(PAYLOAD_NODE_ID)
+        .and_then(Value::as_str)
+        .filter(|node| !node.trim().is_empty())
+}
+
+/// The workflow a parked [`WORKFLOW_APPROVE_KIND`] effect belongs to, or `None`
+/// for any other effect (issue #1098).
+///
+/// The subject half of a workflow standing permission, read off the payload the
+/// park already writes. Kind-checked for the same reason [`gate_node_id`] is: a
+/// non-gate effect carrying a `workflow_id` must not be mistaken for one.
+pub fn gate_workflow_id(effect: &Effect) -> Option<&str> {
+    if effect.kind != WORKFLOW_APPROVE_KIND {
+        return None;
+    }
+    effect
+        .payload
+        .get(PAYLOAD_WORKFLOW_ID)
+        .and_then(Value::as_str)
+        .filter(|workflow| !workflow.trim().is_empty())
+}
+
+/// The [`StartedBy`](crate::ports::types::StartedBy) of the run a parked
+/// [`WORKFLOW_APPROVE_KIND`] effect belongs to (issue #1862 prerequisite).
+///
+/// Falls back to [`StartedBy::from_scheduled(false)`](crate::ports::types::StartedBy::from_scheduled)
+/// — the same coarse default [`WorkflowRunContext::new`](crate::ports::WorkflowRunContext::new)
+/// uses — for a card parked before this field existed, or one whose payload
+/// value fails to parse. Not kind-checked like [`gate_node_id`]/
+/// [`gate_workflow_id`]: every caller that reaches this already knows it is
+/// holding a gate card, so the fallback exists for the payload shape, not the
+/// effect kind.
+pub fn started_by_of(effect: &Effect) -> crate::ports::types::StartedBy {
+    effect
+        .payload
+        .get(PAYLOAD_STARTED_BY)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_else(|| crate::ports::types::StartedBy::from_scheduled(false))
+}
+
+/// The call a parked [`WORKFLOW_APPROVE_KIND`] effect is stopping — `(tool,
+/// args)` — or `None` for any other effect, and for a gate whose call the host
+/// could not classify (issue #1098).
+///
+/// # Why this exists
+///
+/// A gate's [`kind`](Effect::kind) is the wrapper `workflow.approve`, not the
+/// tool the node is about to call. Anything that classifies an effect by asking
+/// [`consequence_of`](crate::policy::consequence_of) about its `kind` therefore
+/// asks about a name the declaration table has never heard of, and gets the
+/// undeclared fallback rather than an answer about the real call. That is
+/// correct as a default — an unknown name must fail closed — but it means the
+/// classifier never sees the `web_fetch` the operator is actually looking at.
+///
+/// The call itself is already on the payload: issue #846 wrote
+/// [`PAYLOAD_TOOL`] / [`PAYLOAD_ARGS`] so a workflow card could say *which*
+/// call it is stopping instead of naming a node id. This reads the same two
+/// keys back, so the thing classified is the thing the card showed.
+///
+/// # Absent arguments are `Null`, not an error
+///
+/// [`PAYLOAD_ARGS`] is written only when the node had arguments to write, so a
+/// tool present with no args is an ordinary shape rather than a broken one. It
+/// answers `Value::Null`, which every argument-aware classifier reads as "no
+/// argument I can place" and resolves in the cautious direction — a `web_fetch`
+/// with no readable host is [`Standing::PerCall`](crate::policy::Standing), not
+/// an unscoped permission. Node arguments may also still be unresolved
+/// `=`-expressions at gate time, which lands in the same place for the same
+/// reason.
+pub fn gate_inner_call(effect: &Effect) -> Option<(&str, &Value)> {
+    if effect.kind != WORKFLOW_APPROVE_KIND {
+        return None;
+    }
+    let tool = effect
+        .payload
+        .get(PAYLOAD_TOOL)
+        .and_then(Value::as_str)
+        .filter(|tool| !tool.trim().is_empty())?;
+    // `'static` rather than `&Value::Null`: the return borrows from `effect`, so
+    // a reference to a temporary would not outlive the call.
+    static NO_ARGS: Value = Value::Null;
+    let args = effect.payload.get(PAYLOAD_ARGS).unwrap_or(&NO_ARGS);
+    Some((tool, args))
+}
+
 /// The ledger a gate parked on this run should carry: what the run just
 /// delivered, unioned with what its own trigger input already listed.
 ///
@@ -441,6 +691,11 @@ pub fn gate_effect(
         PAYLOAD_PERFORMED.to_string(),
         json!(performed_ledger(input, performed)),
     );
+    // Issue #978: what must NOT be *asked about* again when this card is
+    // approved. Purely inherited — a denial is made at resolve time, never at
+    // park time — but it has to ride the card, or a two-gate graph forgets the
+    // first gate's refusal the moment it parks the second.
+    payload.insert(PAYLOAD_DENIED.to_string(), json!(denied_in_input(input)));
     // What approving costs, in the operator's own terms.
     payload.insert(PAYLOAD_NOTE.to_string(), json!(CONTINUATION_NOTE));
     // Issue #460: which call the policy stopped, and why. The keys are ABSENT
@@ -557,9 +812,11 @@ pub fn attach_upstream_content(
 /// `run_id` is deliberately **not** part of it: it differs by construction on
 /// every re-run, so including it would make the dedupe a no-op. Neither is the
 /// [`PAYLOAD_DELIVERED`] ledger, nor the [`CONTINUATION_DELIVERED_KEY`] the
-/// input carries it under (issue #438) — both differ by construction between a
-/// paused run and the continuation it started, and both describe what has
-/// *already happened* rather than what is being decided. Counting either would
+/// input carries it under (issue #438), nor either of their siblings — the
+/// outward-call ledger (#846) and the denial ledger (#978). All of them differ
+/// by construction between a paused run and the continuation it started, and
+/// all describe what has *already happened* rather than what is being decided
+/// (a decision already made is the clearest case of that). Counting any would
 /// make every continuation gate read as a new decision, which is precisely the
 /// duplicate-card failure this function exists to prevent.
 fn is_same_gate(a: &Effect, b: &Effect) -> bool {
@@ -584,13 +841,16 @@ fn decided_input(effect: &Effect) -> Option<Value> {
 /// `input` with the reserved host-threaded ledger keys removed. A non-object
 /// input is returned as-is — there is nothing to strip.
 ///
-/// Both keys, and neither is optional: a continuation's input differs from the
-/// paused run's by exactly these, so letting either difference count would make
-/// every continuation gate a "new" decision and stack a duplicate card.
+/// All three keys, and none is optional: a continuation's input differs from
+/// the paused run's by exactly these — the delivery ledger (#438), the
+/// outward-call ledger (#846) and the denial ledger (#978) — so letting any of
+/// those differences count would make every continuation gate a "new" decision
+/// and stack a duplicate card.
 fn without_ledger(mut input: Value) -> Value {
     if let Value::Object(map) = &mut input {
         map.remove(CONTINUATION_DELIVERED_KEY);
         map.remove(CONTINUATION_PERFORMED_KEY);
+        map.remove(CONTINUATION_DENIED_KEY);
     }
     input
 }
@@ -625,8 +885,128 @@ pub fn already_parked(journal: &crate::runtime::journal::RuntimeJournal, effect:
 /// watching for a run that will never appear. Same stance the `email.send` arm
 /// beside it takes.
 pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Result<()> {
-    let workflow_id = required_str(effect, PAYLOAD_WORKFLOW_ID)?;
     let node_id = required_str(effect, PAYLOAD_NODE_ID)?;
+    // The legacy single-gate shape: one approval, one continuation. Issue #978's
+    // run-scoped path goes through [`resume_run`] and carries the whole batch;
+    // this arm stays exactly as it was for a card with no run turn key.
+    let approved = [node_id.to_string()];
+    spawn_continuation(runtime, effect, &approved, &[]).await
+}
+
+/// Re-dispatches a workflow run **once**, for every gate its batch approved
+/// (issue #978).
+///
+/// The run-scoped replacement for [`resume_from_effect`], and the half of the
+/// fix that stops the amplification rather than merely reporting it correctly.
+/// It is reached from `continue_turn` when the released turn key names a run
+/// (see [`run_id_from_turn`]), which happens exactly once per run — the
+/// continuation queue's counting decides who releases, under one lock.
+///
+/// Three things it does that N independent re-dispatches could not:
+///
+/// * **one run, not N.** The paused run is replayed once, so the run table stops
+///   growing by N per approval round.
+/// * **every approval, not one.** The trigger input carries the whole approved
+///   set, so a sibling gate does not pause the replay and park itself again.
+/// * **refusals are final.** Denied and expired nodes ride the denial ledger, so
+///   the replay neither runs them nor asks about them a second time. Without it
+///   a mixed verdict would still net new cards, which is the invariant this
+///   issue is about.
+///
+/// # Nothing approved
+///
+/// A batch whose every gate was denied or expired starts **no run**, and that is
+/// the complete outcome rather than a gap: the paused run settled long ago, so
+/// there is nothing to cancel, and replaying it would only pause at the first
+/// refused node. The approved work of a *mixed* verdict is not discarded — that
+/// case has a non-empty approved set and runs.
+pub async fn resume_run(runtime: &CompanyRuntime, turn: &str) -> Result<()> {
+    let Some(released) = runtime.workflow_gates().release(turn) else {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "the decisions on `{turn}` are all in, but this host is no longer holding that run's \
+             parked gates, so there is nothing to continue — re-run the workflow"
+        )));
+    };
+    if released.approved.is_empty() {
+        tracing::info!(
+            company = %runtime.id(),
+            %turn,
+            denied = released.denied.len(),
+            "workflow: every gate on this run was refused, so no continuation runs"
+        );
+        return Ok(());
+    }
+    tracing::info!(
+        company = %runtime.id(),
+        %turn,
+        approved = released.approved.len(),
+        denied = released.denied.len(),
+        "workflow: the run's gates are all decided; starting ONE continuation for the batch"
+    );
+    spawn_continuation(
+        runtime,
+        &released.effect,
+        &released.approved,
+        &released.denied,
+    )
+    .await
+}
+
+/// What an approved workflow gate does at the moment its effect is performed
+/// (issue #978).
+///
+/// This is the seam the amplification lived on. `perform_effect` fires once per
+/// approved effect, so spawning here spawned **per approval** — three approvals
+/// on one run meant three runs, each replaying the graph with one usable
+/// approval and re-parking the rest. The spawn therefore moves to the batch
+/// release, and this arm only decides which of the two paths a card is on:
+///
+/// * **run-scoped** — the card's run has a batch armed, so the decision is
+///   banked and the continuation is owed by whichever decision turns out to be
+///   the last. Nothing runs now, and the operator is told so by the
+///   still-waiting receipt.
+/// * **unarmed** — a card parked by a build from before this issue (its journal
+///   line carries no turn key), or one whose batch this process no longer holds.
+///   It re-dispatches immediately, exactly as it always did, because there is no
+///   batch coming to release it and deferring would strand the run forever.
+pub async fn on_gate_approved(runtime: &CompanyRuntime, effect: &Effect) -> Result<()> {
+    if let Some(run_id) = effect.run_id.as_deref() {
+        let turn = workflow_turn_key(run_id);
+        if runtime.workflow_gates().is_armed(&turn) {
+            tracing::debug!(
+                company = %runtime.id(),
+                %run_id,
+                undecided = runtime.workflow_gates().undecided(&turn),
+                "workflow: gate approved; the run continues once its remaining gates are decided"
+            );
+            return Ok(());
+        }
+    }
+    resume_from_effect(runtime, effect).await
+}
+
+/// Starts one continuation run for `effect`'s workflow, with `approved` cleared
+/// and `denied` recorded.
+///
+/// Shared by the legacy per-card path and issue #978's run-scoped one so the two
+/// cannot drift on how a continuation is loaded, spawned or logged.
+///
+/// # Errors
+///
+/// Propagated rather than swallowed, and that is a deliberate choice about who
+/// hears about the failure. `execute_effect_once` has already committed the
+/// approval by the time this runs, so the runtime will never retry it — if the
+/// graph has since been deleted, or this build has no workflow execution, the
+/// operator must be told at the moment they click Approve rather than left
+/// watching for a run that will never appear. Same stance the `email.send` arm
+/// beside it takes.
+async fn spawn_continuation(
+    runtime: &CompanyRuntime,
+    effect: &Effect,
+    approved: &[String],
+    denied: &[String],
+) -> Result<()> {
+    let workflow_id = required_str(effect, PAYLOAD_WORKFLOW_ID)?;
 
     // Through the runtime's own accessor so a build without workflow execution
     // gives an honest error instead of a compile-time edge — this module is in
@@ -654,7 +1034,11 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
             ))
         })?;
 
-    let input = continuation_input(effect)?;
+    let input = continuation_input(effect, approved, denied)?;
+    // Issue #1862 prerequisite: carry the paused run's attribution into the
+    // continuation instead of letting `spawn`'s `scheduled: false` reset it to
+    // `Operator` — see `started_by_of`.
+    let started_by = started_by_of(effect);
     // The handle is dropped on purpose. The task holds its own guard, journals
     // its own outcome and deregisters itself; awaiting it here would hold the
     // approvals request open for the length of a whole workflow run, which is
@@ -662,14 +1046,171 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
     // Issue #542: resuming an approved gate is always a real run — `false`.
     // Issue #401: `spawn` refuses at the concurrency ceiling; propagate it so
     // the approval-resume caller surfaces the same `WorkflowRunLimit` refusal.
+    // Issue #978 sharpens why that must be surfaced rather than logged: a batch
+    // gets ONE spawn attempt, and every card that would have retried it is
+    // already consumed, so a swallowed refusal loses the run with no way back.
     let (run_id, _handle) =
-        WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false)?;
+        WorkflowSpawn::new(runtime, runner).spawn_as(workflow, input, false, false, started_by)?;
     tracing::info!(
         company = %runtime.id(),
         workflow = %workflow_id,
-        node = %node_id,
+        approved = ?approved,
+        denied = ?denied,
         %run_id,
         "workflow: an approved gate started a continuation run; upstream nodes re-execute"
+    );
+    Ok(())
+}
+
+/// Re-dispatches the workflow run a **blocked agent node** belonged to, by
+/// starting a fresh supervised run with the paused run's own trigger input
+/// (issue #899, Stage 1).
+///
+/// # Why this is simpler than [`spawn_continuation`]
+///
+/// A `requires_approval` gate is a graph node, so approving it threads the
+/// node id into the trigger's `approvals` array and the re-run proceeds past it.
+/// A gated call *inside an agent node's tool loop* is not a graph node — there
+/// is nothing to add to `approvals`. The re-run simply runs the graph again from
+/// the top; the grant minted when the operator approved (a shared
+/// [`GrantSet`](crate::runtime::grants::GrantSet), redeemed at the top of the
+/// policy's `check`) lets the identical call through without re-parking. So this
+/// spawns with the input **unchanged** — no ledger transform, no approvals set.
+///
+/// # The honest Stage-1 limit
+///
+/// If the model **diverges** on the re-run (different arguments, or an extra
+/// call), the grant does not match and the new call parks a fresh card. That is
+/// a genuinely new decision rather than a loop, but it is a re-ask — Stage 2's
+/// at-most-once grant capture is what closes it. Re-delivery of any report an
+/// earlier partial run already sent is guarded independently by the durable
+/// #529 delivery ledger the runner folds in, so it is not re-threaded here.
+///
+/// # Errors
+///
+/// Propagated, on [`spawn_continuation`]'s terms: the approval is already
+/// committed, so a graph that has since been deleted or a build with no workflow
+/// execution has to reach the operator at click time, not vanish.
+///
+/// # Marking the dispatch (issue #1825, P1 follow-up)
+///
+/// `turn` is threaded in so the durable
+/// [`BlockedNodeDispatched`](crate::runtime::journal::JournalRecord::BlockedNodeDispatched)
+/// marker can be banked **from inside this function**, between
+/// [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) admitting the
+/// run and [`WorkflowSpawn::spawn_admitted`] actually launching its detached
+/// task — not, as the marker's first cut had it, after this whole function
+/// returns to `resume_blocked_agent_node`. That ordering left the marker
+/// racing the *entire* detached run: `spawn`'s own doc is explicit that the
+/// caller does not await the task it launches, so a crash any time between
+/// launch and the write landing — however long the graph took to run — looked
+/// identical to a strand and could re-dispatch a continuation that had
+/// already finished. `begin` and the write it gates are both on this
+/// function's own stack with no detached task between them yet, so the same
+/// crash window now spans only the synchronous handful of instructions
+/// between the write's `.await` returning and `spawn_admitted` being called —
+/// no further `.await` sits in between for anything to preempt.
+///
+/// **A write that outright fails, as opposed to a crash racing it, is a
+/// different case and gets `?`-propagated rather than warned past.** The
+/// first cut of this fix logged the failure and launched anyway, which broke
+/// the invariant every read of this marker depends on — "absent" must mean
+/// "never launched". A crash between that unmarked launch and
+/// [`BlockedNodeReleased`](crate::runtime::journal::JournalRecord::BlockedNodeReleased)
+/// landing left a run genuinely in flight with nothing durable saying so, and
+/// `reconcile_stranded_blocked_nodes` re-dispatched it a second time at the
+/// next boot. Propagating instead means this attempt is abandoned before
+/// `spawn_admitted` ever runs — `begin`'s guard drops, freeing the
+/// concurrency slot it briefly held — and the caller's own retry
+/// classification (`CompanyRuntime::is_retryable_dispatch_failure`) already
+/// treats this write's error type as retryable, so the stash and its
+/// approval stay exactly as durably recoverable as before this attempt.
+///
+/// The crash-race window above this note is **not** closed by that change,
+/// and is not something a caller can retry its way out of: a crash between
+/// the write landing and `spawn_admitted` running leaves a durable marker for
+/// a run that never actually started, which `reconcile_stranded_blocked_nodes`
+/// reads as "already dispatched" and permanently retires without ever
+/// launching. Closing that fully needs a durable record this single boolean
+/// marker cannot express — something that distinguishes "dispatch attempted"
+/// from "dispatch confirmed", written from inside the launched task itself
+/// rather than by its caller — not a heuristic guess at this call site.
+pub async fn spawn_blocked_node_continuation(
+    runtime: &CompanyRuntime,
+    turn: &str,
+    workflow_id: &str,
+    input: Value,
+    started_by: crate::ports::types::StartedBy,
+) -> Result<()> {
+    let Some(runner) = runtime.workflow_runner().cloned() else {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "approved a blocked step on workflow `{workflow_id}`, but this runtime has no \
+             workflow execution wired, so there is nothing to continue"
+        )));
+    };
+    let overlays = runtime
+        .store()
+        .load(runtime.id())
+        .await?
+        .map(|record| record.overlay_workflows)
+        .unwrap_or_default();
+    let workflow =
+        load_workflow_union(runtime.source_dir(), &overlays, workflow_id)?.ok_or_else(|| {
+            OpenCompanyError::CompanyNotFound(format!(
+                "workflow {workflow_id} (a blocked step was approved, but the graph no longer \
+                 exists)"
+            ))
+        })?;
+    // Issue #401: `begin` refuses at the concurrency ceiling; propagate it so
+    // the caller surfaces the same refusal rather than losing the run
+    // silently. Deliberately split from `spawn_admitted` below (mirroring the
+    // cron scheduler's own begin/claim ordering, issue #661) rather than
+    // calling the combined `WorkflowSpawn::spawn` — admission has to land
+    // (and can still cleanly fail) *before* the dispatch marker is written,
+    // so a refusal here writes no marker for a run that never started.
+    let ws = WorkflowSpawn::new(runtime, runner);
+    let (ctx, guard) = runtime.run_supervisor().begin(&workflow.id, false)?;
+    // Issue #1862 prerequisite: `started_by` is the blocked run's own
+    // attribution, stashed at block-settle by `BlockedNodeQueue::arm` and
+    // handed back on release — stamped onto the admitted context here so it
+    // overrides `begin`'s `scheduled`-derived `Operator` default, the same as
+    // `spawn_as` does for the gate path in `spawn_continuation`. Done on the
+    // already-admitted `ctx` (rather than via `spawn_as`, which owns its own
+    // `begin` call) so this still gets the split-`begin`/dispatch-marker
+    // ordering below.
+    let ctx = ctx.with_started_by(started_by);
+    // Issue #1825 (P1 follow-up): abort rather than launch unmarked. Warning
+    // and proceeding anyway broke the exact invariant `BlockedNodeDispatched`'s
+    // own doc comment depends on — "no marker" must mean "nothing launched",
+    // or `reconcile_stranded_blocked_nodes` can no longer tell a genuine
+    // strand apart from a run this very call already started, and re-spawns a
+    // continuation that is already under way (repeating token spend or
+    // unprotected upstream work). Propagating drops `guard` here, freeing the
+    // concurrency slot without `spawn_admitted` ever running, and this
+    // function's only caller (`resume_blocked_agent_node`) already classifies
+    // a durable-store failure as retryable — the stash and its approval stay
+    // recorded exactly as they were, for a later boot's
+    // `reconcile_stranded_blocked_nodes` to pick back up, instead of this
+    // call quietly deciding on its own that an unmarked launch was fine.
+    // Specifically a *later boot's*: this journal's in-memory
+    // `blocked_node_dispatched` mirror (like every sibling `record_*` on it)
+    // is written before the durable append it guards even runs and is not
+    // rolled back on failure, so calling `reconcile_stranded_blocked_nodes`
+    // again in *this* process would read a stale "dispatched" for `turn` and
+    // retire the stash without ever having launched it. Safe only from a
+    // fresh boot's replay, which correctly excludes a write that never
+    // durably landed.
+    runtime.journal.record_blocked_node_dispatched(turn).await?;
+    // Issue #542: a resumed run is always real (`false`). Nothing here can
+    // fail — `begin`'s ceiling check already ran — so the task exists the
+    // moment this returns, immediately after the write above.
+    let (run_id, _handle) = ws.spawn_admitted(ctx, guard, workflow, input, false);
+    tracing::info!(
+        company = %runtime.id(),
+        workflow = %workflow_id,
+        %run_id,
+        "workflow: an approved agent-node call started a continuation run; the whole graph \
+         re-executes and the minted grant lets the identical call pass"
     );
     Ok(())
 }
@@ -683,8 +1224,18 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
 /// `pub(crate)` so the run-level regression test can build a continuation
 /// exactly the way the approvals path does, rather than reconstructing it and
 /// proving only that the reconstruction works.
-pub(crate) fn continuation_input(effect: &Effect) -> Result<Value> {
-    let node_id = required_str(effect, PAYLOAD_NODE_ID)?;
+pub(crate) fn continuation_input(
+    effect: &Effect,
+    approved: &[String],
+    newly_denied: &[String],
+) -> Result<Value> {
+    if approved.is_empty() {
+        return Err(OpenCompanyError::InvalidRequest(
+            "a workflow continuation was asked for with no approved gate, so the run would \
+             pause again at the node it started for"
+                .to_string(),
+        ));
+    }
     let input = effect
         .payload
         .get(PAYLOAD_INPUT)
@@ -713,10 +1264,57 @@ pub(crate) fn continuation_input(effect: &Effect) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(with_performed(
-        with_delivered(with_approval(input, node_id), &delivered),
-        &performed,
+    // Issue #978: the refusals this lineage has accumulated, plus the ones this
+    // batch just made. Unioned rather than replaced, on `delivery_ledger`'s
+    // reasoning exactly — a two-gate graph must not forget the first gate's
+    // denial when the second is decided.
+    let mut denied: Vec<String> = effect
+        .payload
+        .get(PAYLOAD_DENIED)
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for node in newly_denied {
+        if !denied.contains(node) {
+            denied.push(node.clone());
+        }
+    }
+    Ok(with_denied(
+        with_performed(
+            with_delivered(with_approvals(input, approved), &delivered),
+            &performed,
+        ),
+        &denied,
     ))
+}
+
+/// Writes `denied` onto the trigger input under [`CONTINUATION_DENIED_KEY`],
+/// replacing whatever was there (issue #978).
+///
+/// Replace rather than merge, on [`with_delivered`]'s reasoning: the union was
+/// already taken in [`continuation_input`], so this is the superset and merging
+/// again would be a second place for the rule to drift. An empty ledger writes
+/// nothing, keeping a first run's input shape untouched.
+fn with_denied(input: Value, denied: &[String]) -> Value {
+    if denied.is_empty() {
+        return input;
+    }
+    match input {
+        Value::Object(mut map) => {
+            map.insert(
+                CONTINUATION_DENIED_KEY.to_string(),
+                serde_json::json!(denied),
+            );
+            Value::Object(map)
+        }
+        // `with_approvals` always yields an object, so this is unreachable
+        // through `continuation_input`. Kept total rather than panicking.
+        other => other,
+    }
 }
 
 /// Writes `performed` onto the trigger input under
@@ -777,7 +1375,7 @@ fn with_delivered(input: Value, delivered: &[DeliveredReport]) -> Value {
     }
 }
 
-/// Unions `node_id` into the trigger input's `approvals` array.
+/// Unions `node_ids` into the trigger input's `approvals` array.
 ///
 /// Mirrors `engine::resume`'s own merge, including its tolerances: a non-object
 /// input is replaced by a fresh object carrying just the approvals (there is
@@ -788,7 +1386,7 @@ fn with_delivered(input: Value, delivered: &[DeliveredReport]) -> Value {
 /// Preserving prior approvals is what makes a graph with **two** gates work:
 /// approving the second must not un-approve the first, or the re-run pauses at
 /// the gate the operator already cleared and the workflow can never finish.
-fn with_approval(input: Value, node_id: &str) -> Value {
+fn with_approvals(input: Value, node_ids: &[String]) -> Value {
     let mut approvals: Vec<String> = input
         .get("approvals")
         .and_then(Value::as_array)
@@ -798,8 +1396,13 @@ fn with_approval(input: Value, node_id: &str) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-    if !approvals.iter().any(|id| id == node_id) {
-        approvals.push(node_id.to_string());
+    // Issue #978: **every** gate the run's batch approved, not just the one
+    // whose card happened to be clicked last. Carrying one is what made a
+    // three-way fan-out re-park its two siblings on every continuation.
+    for node_id in node_ids {
+        if !approvals.iter().any(|id| id == node_id) {
+            approvals.push(node_id.clone());
+        }
     }
 
     match input {
@@ -836,8 +1439,147 @@ fn required_str<'e>(effect: &'e Effect, key: &str) -> Result<&'e str> {
 mod tests {
     use super::*;
 
+    /// A continuation for a card's own single gate — the pre-#978 shape these
+    /// tests were written against, kept so they keep asserting what they were
+    /// written to assert. The run-scoped multi-gate form is exercised in
+    /// `crate::workflows::parallel_gate_fanout_test`.
+    fn single_continuation_input(effect: &Effect) -> Result<Value> {
+        let node_id = required_str(effect, PAYLOAD_NODE_ID)?.to_string();
+        continuation_input(effect, std::slice::from_ref(&node_id), &[])
+    }
+
     fn effect(workflow: &str, node: &str, input: Value) -> Effect {
         gate_effect(workflow, node, &input, "run-1", &[], &[], None)
+    }
+
+    /// A gate whose call the host classified — the shape issue #846 writes and
+    /// issue #1098 reads back.
+    fn gate_with_call(tool: &str, args: &Value) -> Effect {
+        gate_effect(
+            "sports_blog",
+            "fetch_bbc",
+            &json!({}),
+            "run-1",
+            &[],
+            &[],
+            Some(GateCall {
+                tool,
+                reason: None,
+                args: Some(args),
+                target: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn gate_inner_call_reads_the_call_the_card_shows() {
+        let args = json!({ "url": "https://www.bbc.co.uk/sport" });
+        let gate = gate_with_call("web_fetch", &args);
+
+        let (tool, read_back) = gate_inner_call(&gate).expect("a classified gate names its call");
+        assert_eq!(tool, "web_fetch");
+        assert_eq!(read_back, &args);
+    }
+
+    /// The wrapper is what a naive classifier sees, and it is not the call. This
+    /// is the whole reason the projection exists.
+    #[test]
+    fn gate_inner_call_is_not_the_effect_kind() {
+        let gate = gate_with_call("web_fetch", &json!({ "url": "https://www.bbc.co.uk" }));
+        assert_eq!(gate.kind, WORKFLOW_APPROVE_KIND);
+        assert_eq!(
+            gate_inner_call(&gate).map(|(tool, _)| tool),
+            Some("web_fetch")
+        );
+    }
+
+    /// A gate the host could not classify has no inner call to offer, and must
+    /// not invent one — it stays per-call, as it always did.
+    #[test]
+    fn gate_inner_call_is_none_when_the_call_was_never_named() {
+        let bare = effect("sports_blog", "fetch_bbc", json!({}));
+        assert!(gate_inner_call(&bare).is_none());
+    }
+
+    /// `args` is written only when the node had some, so tool-without-args is an
+    /// ordinary shape. It answers `Null`, which every argument-aware classifier
+    /// resolves in the cautious direction.
+    #[test]
+    fn gate_inner_call_answers_null_for_a_call_with_no_arguments() {
+        let gate = gate_effect(
+            "sports_blog",
+            "fetch_bbc",
+            &json!({}),
+            "run-1",
+            &[],
+            &[],
+            Some(GateCall {
+                tool: "web_fetch",
+                reason: None,
+                args: None,
+                target: None,
+            }),
+        );
+        assert_eq!(gate_inner_call(&gate), Some(("web_fetch", &Value::Null)));
+    }
+
+    /// Kind-checked for the same reason [`gate_node_id`] is: a teammate's own
+    /// `web_fetch` effect carries a tool name too, and must not be read as a
+    /// gate.
+    #[test]
+    fn gate_inner_call_ignores_a_non_gate_effect() {
+        let mut agent_call = gate_with_call("web_fetch", &json!({ "url": "https://x.test" }));
+        agent_call.kind = "web_fetch".to_string();
+        assert!(gate_inner_call(&agent_call).is_none());
+    }
+
+    /// The second half of why a job card was never grantable, independent of its
+    /// `agent: None`. Classifying the wrapper asks about `workflow.approve`, an
+    /// undeclared name that fails closed; classifying the inner call asks about
+    /// the `web_fetch` the operator is looking at.
+    #[test]
+    fn a_gate_is_classified_by_the_call_it_stops_not_by_its_wrapper() {
+        let gate = gate_with_call(
+            crate::policy::consequence::WEB_FETCH,
+            &json!({ "url": "https://www.bbc.co.uk/sport" }),
+        );
+
+        assert!(
+            !crate::policy::consequence_of(&gate.kind, &gate.payload)
+                .standing
+                .is_grantable(),
+            "the wrapper kind is undeclared and must keep failing closed on its own"
+        );
+        assert!(
+            gate.may_be_granted_standing(),
+            "a BBC fetch is ScopedGrantable, and that is the call the card shows"
+        );
+    }
+
+    /// A gate stopping a per-call tool stays per-call. Reading the inner call
+    /// must widen nothing on its own — the classifier still decides.
+    #[test]
+    fn a_gate_stopping_a_per_call_tool_is_still_not_grantable() {
+        let gate = gate_with_call("shell", &json!({ "command": "echo hi" }));
+        assert!(!gate.may_be_granted_standing());
+    }
+
+    /// No readable host means no scope, and `ScopedGrantable` falls back to
+    /// per-call rather than minting a permission that would admit everything.
+    #[test]
+    fn a_gate_whose_url_names_no_host_is_still_not_grantable() {
+        let gate = gate_with_call(crate::policy::consequence::WEB_FETCH, &json!({}));
+        assert!(!gate.may_be_granted_standing());
+    }
+
+    #[test]
+    fn gate_workflow_id_names_the_permission_subject() {
+        let gate = effect("sports_blog", "fetch_bbc", json!({}));
+        assert_eq!(gate_workflow_id(&gate), Some("sports_blog"));
+
+        let mut not_a_gate = gate.clone();
+        not_a_gate.kind = "web_fetch".to_string();
+        assert!(gate_workflow_id(&not_a_gate).is_none());
     }
 
     /// A delivery row with `status`, as `deliver_outputs` would have returned it.
@@ -903,7 +1645,10 @@ mod tests {
 
     #[test]
     fn approving_a_gate_adds_it_to_the_trigger_inputs_approvals() {
-        let out = with_approval(serde_json::json!({ "request": "topic" }), "gate");
+        let out = with_approvals(
+            serde_json::json!({ "request": "topic" }),
+            &["gate".to_string()],
+        );
         assert_eq!(out["request"], "topic", "the original input is preserved");
         assert_eq!(out["approvals"], serde_json::json!(["gate"]));
     }
@@ -912,15 +1657,18 @@ mod tests {
     fn a_second_gate_does_not_un_approve_the_first() {
         // The two-gate graph. Without the union the re-run pauses at the gate
         // the operator already cleared and the workflow can never finish.
-        let first = with_approval(serde_json::json!({ "request": "topic" }), "gate-a");
-        let second = with_approval(first, "gate-b");
+        let first = with_approvals(
+            serde_json::json!({ "request": "topic" }),
+            &["gate-a".to_string()],
+        );
+        let second = with_approvals(first, &["gate-b".to_string()]);
         assert_eq!(second["approvals"], serde_json::json!(["gate-a", "gate-b"]));
     }
 
     #[test]
     fn approving_the_same_gate_twice_does_not_duplicate_it() {
-        let once = with_approval(serde_json::json!({}), "gate");
-        let twice = with_approval(once, "gate");
+        let once = with_approvals(serde_json::json!({}), &["gate".to_string()]);
+        let twice = with_approvals(once, &["gate".to_string()]);
         assert_eq!(twice["approvals"], serde_json::json!(["gate"]));
     }
 
@@ -937,7 +1685,7 @@ mod tests {
             // A malformed `approvals` starts an empty set rather than erroring.
             serde_json::json!({ "approvals": "gate" }),
         ] {
-            let out = with_approval(input.clone(), "gate");
+            let out = with_approvals(input.clone(), &["gate".to_string()]);
             assert_eq!(
                 out["approvals"],
                 serde_json::json!(["gate"]),
@@ -948,7 +1696,10 @@ mod tests {
 
     #[test]
     fn non_string_entries_in_a_prior_approvals_array_are_dropped() {
-        let out = with_approval(serde_json::json!({ "approvals": ["a", 7, null] }), "b");
+        let out = with_approvals(
+            serde_json::json!({ "approvals": ["a", 7, null] }),
+            &["b".to_string()],
+        );
         assert_eq!(out["approvals"], serde_json::json!(["a", "b"]));
     }
 
@@ -1046,7 +1797,7 @@ mod tests {
             None,
         );
 
-        let input = continuation_input(&card).expect("a well-formed card continues");
+        let input = single_continuation_input(&card).expect("a well-formed card continues");
 
         assert_eq!(input["approvals"], serde_json::json!(["gate"]));
         assert_eq!(
@@ -1079,7 +1830,7 @@ mod tests {
             &[],
             None,
         );
-        let continuation = continuation_input(&first).expect("continues");
+        let continuation = single_continuation_input(&first).expect("continues");
 
         // Run 2 skips the summary (delivering nothing) and pauses on gate-b.
         let second = gate_effect("digest", "gate-b", &continuation, "run-2", &[], &[], None);
@@ -1093,7 +1844,7 @@ mod tests {
         );
 
         // And approving THAT still suppresses it, with both gates approved.
-        let next = continuation_input(&second).expect("continues");
+        let next = single_continuation_input(&second).expect("continues");
         assert_eq!(next["approvals"], serde_json::json!(["gate-a", "gate-b"]));
         assert_eq!(delivered_in_input(&next).len(), 1);
     }
@@ -1131,7 +1882,7 @@ mod tests {
             std::slice::from_ref(&posted),
             None,
         );
-        let continuation = continuation_input(&first).expect("continues");
+        let continuation = single_continuation_input(&first).expect("continues");
         assert_eq!(
             performed_in_input(&continuation),
             vec![posted.clone()],
@@ -1162,7 +1913,7 @@ mod tests {
             std::slice::from_ref(&also_posted),
             None,
         );
-        let next = continuation_input(&second).expect("continues");
+        let next = single_continuation_input(&second).expect("continues");
 
         assert_eq!(
             performed_in_input(&next),
@@ -1223,7 +1974,7 @@ mod tests {
             &[],
             None,
         );
-        let input = continuation_input(&card).expect("continues");
+        let input = single_continuation_input(&card).expect("continues");
         assert!(
             input.get(CONTINUATION_PERFORMED_KEY).is_none(),
             "nothing to suppress must write nothing: {input}"
@@ -1265,7 +2016,7 @@ mod tests {
     #[test]
     fn a_lineage_that_delivered_nothing_threads_no_reserved_key() {
         let card = effect("digest", "gate", serde_json::json!({ "request": "x" }));
-        let input = continuation_input(&card).expect("continues");
+        let input = single_continuation_input(&card).expect("continues");
         assert!(input.get(CONTINUATION_DELIVERED_KEY).is_none(), "{input}");
         assert!(delivered_in_input(&input).is_empty());
     }
@@ -1287,7 +2038,7 @@ mod tests {
         // The same gate, re-reached by the continuation the card started: same
         // input plus the approval… minus the approval, which the gate node
         // consumed. What differs is the ledger key alone.
-        let mut continuation = continuation_input(&paused).expect("continues");
+        let mut continuation = single_continuation_input(&paused).expect("continues");
         continuation
             .as_object_mut()
             .expect("object")
@@ -1459,6 +2210,7 @@ mod decide_tests {
         workflow_id: String,
         input: Value,
         run_id: String,
+        started_by: crate::ports::types::StartedBy,
     }
 
     /// A runner that records every run it is handed and settles immediately.
@@ -1489,6 +2241,7 @@ mod decide_tests {
                     workflow_id: workflow.id.clone(),
                     input,
                     run_id: ctx.run_id.clone(),
+                    started_by: ctx.started_by.clone(),
                 });
             Ok(WorkflowRun {
                 output: json!({ "ok": true }),
@@ -1620,6 +2373,37 @@ mode = "full"
         id
     }
 
+    /// [`park_gate`], stamping the card with `started_by` the way
+    /// `park_pending_gates` does in production (issue #1862 prerequisite) —
+    /// for pinning that a continuation carries it forward.
+    async fn park_gate_started_by(
+        rt: &Arc<crate::company::runtime::CompanyRuntime>,
+        input: Value,
+        started_by: &crate::ports::types::StartedBy,
+    ) -> ApprovalId {
+        let mut effect = gate_effect("gated", "gate", &input, "run-that-paused", &[], &[], None);
+        if let Value::Object(ref mut payload) = effect.payload {
+            payload.insert(PAYLOAD_STARTED_BY.to_string(), json!(started_by));
+        }
+        let id = rt
+            .approvals
+            .park(rt.id(), effect.clone())
+            .await
+            .expect("parks");
+        rt.journal()
+            .record_parked(
+                &id,
+                &effect,
+                crate::ports::now_millis(),
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .expect("journals");
+        id
+    }
+
     /// The resume spawns its run on a detached task, so give it a moment to be
     /// recorded. Bounded so a genuine failure fails rather than hangs.
     async fn wait_for_runs(runner: &Arc<RecordingRunner>, want: usize) -> Vec<StartedRun> {
@@ -1658,6 +2442,68 @@ mode = "full"
         // A new causal root, not the paused run's id.
         assert_ne!(started[0].run_id, "run-that-paused");
         assert!(rt.pending_approvals().is_empty(), "the card is decided");
+    }
+
+    /// Issue #1862 prerequisite (a distinct gap from the trigger-site one
+    /// #1861 owns): approving a gate parked by an agent-triggered run must
+    /// carry that attribution into the continuation, not reset it to
+    /// `Operator`.
+    ///
+    /// `WorkflowSpawn::spawn`'s `scheduled` is always `false` for a resume
+    /// (issue #542), which on its own stamps every continuation
+    /// `StartedBy::Operator` via `WorkflowRunContext::new`'s coarse default —
+    /// regardless of who or what actually started the run that paused. Before
+    /// the fix this assertion reads `Operator` even though the parked card
+    /// says `Agent("ceo")`.
+    #[tokio::test]
+    async fn a_continuation_run_carries_the_paused_runs_attribution() {
+        let home = seed_home();
+        let (rt, runner) = runtime(home.path(), true).await;
+        let id = park_gate_started_by(
+            &rt,
+            json!({ "request": "quarterly numbers" }),
+            &crate::ports::types::StartedBy::Agent("ceo".into()),
+        )
+        .await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .expect("resolves");
+
+        let started = wait_for_runs(&runner, 1).await;
+        assert_eq!(started.len(), 1);
+        assert_eq!(
+            started[0].started_by,
+            crate::ports::types::StartedBy::Agent("ceo".into()),
+            "the continuation must credit the same agent the paused run did: {:?}",
+            started[0].started_by
+        );
+    }
+
+    /// The other half of the same gap: a card parked before this field
+    /// existed carries no `PAYLOAD_STARTED_BY` at all, and must not fail the
+    /// resume — it degrades to the same `Operator` default the pre-fix
+    /// behaviour always produced.
+    #[tokio::test]
+    async fn a_pre_fix_gate_with_no_started_by_resumes_as_operator() {
+        let home = seed_home();
+        let (rt, runner) = runtime(home.path(), true).await;
+        // `park_gate` never stamps `PAYLOAD_STARTED_BY` — a stand-in for a card
+        // parked before this field existed.
+        let id = park_gate(&rt, json!({ "request": "legacy" })).await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .expect("resolves");
+
+        let started = wait_for_runs(&runner, 1).await;
+        assert_eq!(started.len(), 1);
+        assert_eq!(
+            started[0].started_by,
+            crate::ports::types::StartedBy::Operator,
+            "a card with no started_by payload must degrade to the old default, not error: {:?}",
+            started[0].started_by
+        );
     }
 
     /// Issue #438, over the real decide path: the run an approval starts is

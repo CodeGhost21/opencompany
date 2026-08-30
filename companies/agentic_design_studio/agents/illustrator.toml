@@ -1,2 +1,39 @@
 role = "Illustrator"
 description = "Custom illustration and iconography."
+
+# Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
+# manages its own work on the board and sees, but does not redefine, company
+# direction. The orchestrator keeps unrestricted access.
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+    # The global baseline (`globals/ledgers/`). Every teammate may raise a risk
+    # and record what it learned — both are worthless if only the orchestrator
+    # can write them, because the teammate that hit the thing is the one that
+    # knows. `commitments` stays read-only: promising something outward is not a
+    # specialist's call to make alone.
+    { name = "risks", access = "record" },
+    { name = "commitments", access = "read" },
+    { name = "learnings", access = "record" },
+    # This studio's own axes (`ledgers/`).
+    { name = "projects", access = "record" },
+    { name = "design-decisions", access = "record" },
+]
+
+# Write scope (docs/spec/runtime/agents.md): confined to this company's
+# shared active-work document, plus the always-writable agents/<id> home.
+# The bare entries below preserve this agent's existing (reasoning-tier)
+# routed context — only the last entry changes behavior, by adding a write
+# grant. standards/ and playbooks/ stay out: governance documents, left to
+# the operator and the unconfined orchestrator.
+context = [
+    "brief.md", "claims.md",
+    { path = "projects/fintech-rebrand.md", access = "write" },
+]
+
+# The role's working rules, checked in beside this file and read at manifest
+# load. The `.toml` carries the wiring; `prompts/` carries how the role works.
+# A missing path here is a manifest error rather than a skipped entry — a role
+# whose prompt was written around a briefing it never received fails silently.
+prompt_files = ["prompts/illustrator.md"]

@@ -93,8 +93,7 @@ pub const COLUMN_IN_REVIEW: &str = "in_review";
 /// The terminal column — nothing dispatches out of it.
 pub const COLUMN_DONE: &str = "done";
 
-/// Every column the board renders, in board order — the host's half of the
-/// console's `TASK_COLUMNS` (`frontend/src/lib/tasks-sample.ts`).
+/// Every column the board renders, in board order.
 ///
 /// A card's `column` is a plain string on the wire, so before #205 a typo'd or
 /// invented column was persisted verbatim and then simply never rendered: the
@@ -108,14 +107,15 @@ pub const COLUMN_DONE: &str = "done";
 /// goes back to `todo` with the reason on its note rather than into a second
 /// not-started column. Issue #337 then made `planning` live: entering it runs
 /// one planning pass and settles the card (see [`COLUMN_PLANNING`]).
-pub const BOARD_COLUMNS: [&str; 6] = [
-    COLUMN_TODO,
-    COLUMN_PLANNING,
-    COLUMN_IN_PROGRESS,
-    COLUMN_PAUSED,
-    COLUMN_IN_REVIEW,
-    COLUMN_DONE,
-];
+///
+/// **Derived, no longer declared.** It used to be a second literal list beside
+/// [`crate::ledger::board::COLUMNS`], with the console keeping a third; the
+/// board's own `TASK_COLUMNS` comment admitted what that cost — *"a Rust test
+/// cannot see the TS list, so a column added on one side and not the other
+/// keeps this green."* Now the table is the declaration, this is a `const fn`
+/// projection of it, and the console reads its labels off the `tasks` ledger.
+/// One edit adds a column everywhere.
+pub const BOARD_COLUMNS: [&str; crate::ledger::board::COLUMNS.len()] = crate::ledger::board::ids();
 
 /// The column id issue #206 used for the unqueued pool, removed by #301.
 ///
@@ -153,6 +153,7 @@ pub fn is_board_column(column: &str) -> bool {
 /// | [`Paused`](RunStatus::Paused) | [`COLUMN_PAUSED`] | resumed, not approved |
 /// | [`Failed`](RunStatus::Failed) | [`COLUMN_TODO`] | with the run's error on the card |
 /// | [`Cancelled`](RunStatus::Cancelled) | [`COLUMN_TODO`] | with the cancellation reason on the card |
+/// | [`Declined`](RunStatus::Declined) | [`COLUMN_TODO`] | a by-design decline (#1809); reason on the card, now a one-off |
 /// | [`Pending`](RunStatus::Pending) / [`Running`](RunStatus::Running) | — | not settled |
 ///
 /// # `Succeeded` lands in review, **not** in Done
@@ -222,36 +223,43 @@ pub fn column_for_settled_run(status: RunStatus) -> Option<&'static str> {
         // Not reviewable work. Epic #183 §3: a card that cannot proceed returns
         // to To-do carrying the reason, never into a stuck column of its own.
         RunStatus::Failed | RunStatus::Cancelled => Some(COLUMN_TODO),
+        // A by-design decline (issue #1809) also returns the card to To-do: the
+        // builder declined to automate it, the card body carries the reason, and
+        // the deliverable is flipped to `once` so its next dispatch reaches the
+        // assignee to do by hand rather than re-entering the builder.
+        RunStatus::Declined => Some(COLUMN_TODO),
         // Still in flight. Nothing to land.
         RunStatus::Pending | RunStatus::Running => None,
     }
 }
 
-/// The human label for a column id (`in_progress` → `In progress`).
+/// The human label for a phase or a stage id (`working` → `Working`,
+/// `in_progress` → `In progress`).
 ///
-/// The board's ids are wire words; anything a person reads needs the label. The
-/// console has carried these in `TASK_COLUMNS`
-/// (`frontend/src/lib/tasks-sample.ts`) since #205 — this is the host's half,
-/// added for the exported task record (issue #352), which is read by people who
+/// The board's ids are wire words; anything a person reads needs the label.
+/// Added for the exported task record (issue #352), which is read by people who
 /// have never seen the board and must not be shown `in_review`.
 ///
-/// Like [`BOARD_COLUMNS`], the two lists are a hand-maintained mirror: a Rust
-/// test cannot see the TS one, so a renamed label is a deliberate two-place
-/// edit. An unknown id falls back to itself rather than to a guess, so a column
-/// added on one side still prints something truthful.
+/// **Both vocabularies**, because since #1512 the same field can be either: a
+/// `TaskCard` carries a phase, a `TaskRecord` carries a stage, and this is
+/// called with both. Phases are looked up first — a genuine ambiguity exists
+/// (`done` is both) and they agree on it.
+///
+/// Read out of [`crate::ledger::board`] rather than out of a `match` beside it,
+/// so a renamed label is one edit and cannot half-land. The console no longer
+/// keeps a copy at all — it reads the same labels off the `tasks` ledger, which
+/// is built from the same table.
+///
+/// An unknown id falls back to itself rather than to a guess, so a stored card
+/// carrying a state this build does not know still prints something truthful.
 ///
 /// `pub(crate)`: presentation is not part of the port's contract, and the only
 /// consumer is the exported record. Widen it if a second surface needs it.
 pub(crate) fn column_label(column: &str) -> &str {
-    match column {
-        COLUMN_TODO => "To-do",
-        COLUMN_PLANNING => "Planning",
-        COLUMN_IN_PROGRESS => "In progress",
-        COLUMN_PAUSED => "Paused",
-        COLUMN_IN_REVIEW => "In review",
-        COLUMN_DONE => "Done",
-        other => other,
+    if let Some(phase) = crate::ledger::board::phase(column) {
+        return phase.label;
     }
+    crate::ledger::board::column(column).map_or(column, |held| held.label)
 }
 
 // ---------------------------------------------------------------------------
@@ -476,10 +484,65 @@ pub struct TaskPlan {
     /// The teammate the planner would hand it to. Applied to the card **only**
     /// when the card had no assignee and this names a real one — a plan never
     /// reassigns work a person already assigned.
+    ///
+    /// Set only when the pass resolved **exactly one** candidate (issue #1106).
+    /// Two or more is an open choice, not a proposal, and lands in
+    /// [`assignee_candidates`](Self::assignee_candidates) instead — the two are
+    /// never both populated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_assignee: Option<String>,
+    /// The teammates that plausibly fit, when more than one did (issue #1106).
+    ///
+    /// Non-empty means the pass **declined to choose** and the card is waiting
+    /// on a person: an unassigned card whose planner named two teammates who
+    /// could each take it is not a card with a proposal, it is a card with a
+    /// question. Empty is every other case — the card was already assigned, or
+    /// exactly one candidate resolved (see
+    /// [`proposed_assignee`](Self::proposed_assignee)), or none did.
+    ///
+    /// Additive on the wire like every field above it, so a board holding
+    /// pre-#1106 plans reads back unchanged: those carry a `proposedAssignee`
+    /// and no candidates, which is exactly the shape a one-candidate pass writes
+    /// today.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignee_candidates: Vec<AssigneeCandidate>,
     /// When the pass that produced this brief finished.
     pub planned_at_millis: u64,
+}
+
+/// One teammate the planner thinks could take a card, and why (issue #1106).
+///
+/// The reason is the whole point. A bare list of two ids asks an operator to
+/// re-derive the judgement the planner already made; the line beside each is
+/// what lets them answer without opening two agent pages.
+///
+/// `id` is **canonical** — resolved against the roster by the host before it is
+/// stored, never the raw string the model emitted. A candidate the roster does
+/// not recognise is dropped rather than shown, for the same reason
+/// `proposed_assignee` drops one: the console must not offer a pick that the
+/// write boundary would then refuse.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssigneeCandidate {
+    /// The canonical roster key: a teammate id, or a desk id.
+    pub id: String,
+    /// One line on why this one fits. Model prose, shown to a person who is
+    /// about to decide; nothing dispatches off it.
+    pub reason: String,
+}
+
+/// One metered planning pass attributed to a task.
+///
+/// Planning runs outside the attempt machinery, so it has no `run_id`. Keeping
+/// each non-zero pass on the card preserves failed and superseded planning
+/// spend instead of making the latest successful brief stand in for history.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskPlanningUsage {
+    /// When the model call completed.
+    pub at_millis: u64,
+    /// Tokens and source-currency USD reported by that call.
+    pub usage: crate::ports::types::TokenUsage,
 }
 
 impl TaskPlan {
@@ -538,15 +601,27 @@ where
 /// of a task was a chat message: prose in a conversation, with no durable thing
 /// to open, share, or hand to somebody else. This is that thing.
 ///
-/// # `run_id` is unconditional, and that is the whole design
+/// # A last-resort link is unconditional, and that is the whole design
 ///
 /// An output with **no** artifacts and **no** workflows is not an absence — it
 /// is the *trace case*, and it is the common one. Plenty of tasks produce no
 /// file (a message sent, a record updated, a question answered), and for those
-/// the attempt's trace **is** the deliverable. Making `run_id` mandatory is what
-/// stops "no artifact" degrading into "no link", which is the failure epic #183
-/// §6 exists to close. It is also the fallback when an artifact is later
-/// deleted: the pinned artifact link dangles, the trace does not.
+/// the producer's own record **is** the deliverable. A mandatory last-resort
+/// link is what stops "no artifact" degrading into "no link", which is the
+/// failure epic #183 §6 exists to close. It is also the fallback when an
+/// artifact is later deleted: the pinned artifact link dangles, the producer
+/// does not.
+///
+/// **The invariant is "there is always something to open", not "there is always
+/// a `run_id`"** (issue #806). Until that issue this field *was* a bare
+/// `run_id: String`, and its own docs argued the mandatory run was the design —
+/// conflating the guarantee with the single mechanism that happened to provide
+/// it. A run is *an* addressable producer; it is not the only one. An operator
+/// chat turn produces things too, and run records stay deliberately reserved for
+/// actual work attempts (#183 §4), so such a turn has no run to name and a card
+/// it settled could carry no output at all. [`TaskOutputSource`] is that
+/// distinction made explicit: the guarantee is unchanged and now type-level,
+/// while what satisfies it is a closed set the console matches on.
 ///
 /// # Which attempt, and why nothing has to choose
 ///
@@ -574,17 +649,14 @@ where
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskOutput {
-    /// The attempt that produced it — always present, and the link of last
-    /// resort (see the type's docs).
-    pub run_id: String,
-    /// That attempt's 1-based ordinal, for the operator-facing label
-    /// (*"attempt 2"*).
+    /// What produced it — and the link of last resort (see the type's docs).
     ///
-    /// `None` when the run row could not be read at stamp time. The ordinal is
-    /// a label, never an identity: `run_id` addresses the attempt either way, so
-    /// a failed read costs a nicety and never a link.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attempt: Option<u32>,
+    /// Flattened, so a [`Run`](TaskOutputSource::Run) source is *byte-identical*
+    /// on the wire to the `runId` + `attempt` pair this struct carried before
+    /// [`TaskOutputSource`] existed. That is what makes this need no migration:
+    /// every stored card deserializes into the variant it always meant.
+    #[serde(flatten)]
+    pub source: TaskOutputSource,
     /// Epoch-millis the stamp was written (the moment the attempt settled).
     pub at_millis: u64,
     /// Every artifact the attempt published, pinned at the version it wrote.
@@ -601,6 +673,89 @@ pub struct TaskOutput {
     /// correlation, not of the record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workflows: Vec<TaskOutputWorkflow>,
+}
+
+/// What produced a [`TaskOutput`] — and, when nothing else survives, what the
+/// card's link of last resort points at (issue #806).
+///
+/// # Why this is a sum and not an optional `run_id`
+///
+/// Making `run_id` optional would have been honest about the absence and silent
+/// about what is actually there, leaving every reader to re-derive "then what do
+/// I link to?" and the console's trace arm to degrade to the card even for a
+/// turn that demonstrably produced a workflow. Synthesising a run row for a chat
+/// turn was the other candidate and is worse: it would reopen #183 §4 on purpose
+/// — *"run records stay reserved for actual work attempts, so the Attempts list
+/// shows turns that did something"* — and put an id that addresses nothing real
+/// behind a type that promises it does.
+///
+/// A closed set keeps the guarantee the type has always made (there is always
+/// one more link) while saying which kind of thing is at the other end, so the
+/// console can label it correctly instead of calling a conversation an attempt.
+///
+/// # Wire compatibility
+///
+/// `#[serde(untagged)]` plus the `#[serde(flatten)]` on
+/// [`TaskOutput::source`] means [`Run`](Self::Run) reads and writes exactly the
+/// `runId` / `attempt` keys the struct used before this type existed. Stored
+/// cards need no migration and no dual-read: they deserialize into `Run`, which
+/// is what they always were. A `ChatTurn` is new keys on a new record only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+// `rename_all` on an enum renames the VARIANTS, not their fields, and an
+// untagged enum never writes a variant name — so it would have silently done
+// nothing here while the fields went out as `run_id`/`chat_id` and broke every
+// stored card. `rename_all_fields` is the attribute that reaches them.
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum TaskOutputSource {
+    /// A work attempt — the original and still overwhelmingly common case.
+    Run {
+        /// The attempt that produced it.
+        run_id: String,
+        /// That attempt's 1-based ordinal, for the operator-facing label
+        /// (*"attempt 2"*).
+        ///
+        /// `None` when the run row could not be read at stamp time. The ordinal
+        /// is a label, never an identity: `run_id` addresses the attempt either
+        /// way, so a failed read costs a nicety and never a link.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+    },
+    /// An operator chat turn that produced something without a work attempt
+    /// behind it — a turn that authored a workflow inline with `create_workflow`
+    /// being the case that forced this (PR #805, issue #678).
+    ///
+    /// Carries the conversation, which is the durable, addressable record of
+    /// what the operator asked for and what came back. It is deliberately **not**
+    /// a run: minting one would make the Attempts list claim work was attempted.
+    ChatTurn {
+        /// The conversation the turn belongs to — [`TaskRecord::origin_chat_id`]
+        /// for the card this settles.
+        chat_id: String,
+    },
+}
+
+impl TaskOutputSource {
+    /// The run that produced this, when one did.
+    ///
+    /// The accessor exists so the many readers that only ever wanted "which run,
+    /// if any" do not each grow a `match`. A chat turn answers `None`, which is
+    /// the truthful answer to a question about runs — never an absence of a
+    /// *link*, which [`TaskOutput`] still always has.
+    pub fn run_id(&self) -> Option<&str> {
+        match self {
+            Self::Run { run_id, .. } => Some(run_id.as_str()),
+            Self::ChatTurn { .. } => None,
+        }
+    }
+
+    /// That attempt's 1-based ordinal, when there is an attempt and it was
+    /// readable.
+    pub fn attempt(&self) -> Option<u32> {
+        match self {
+            Self::Run { attempt, .. } => *attempt,
+            Self::ChatTurn { .. } => None,
+        }
+    }
 }
 
 /// One published deliverable, pinned to the exact revision this attempt wrote.
@@ -853,6 +1008,9 @@ pub struct TaskRecord {
     /// a structured field rather than an artifact or note prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<TaskPlan>,
+    /// Every non-zero planning pass, including failed and superseded passes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planning_attempts: Vec<TaskPlanningUsage>,
     /// Whether this card produces a one-off result or a reusable workflow
     /// (issue #580).
     ///
@@ -898,10 +1056,21 @@ pub struct TaskRecord {
     /// that path, and the only run row a console can navigate to. Pinned by test
     /// rather than left to be rediscovered.
     ///
-    /// `None` for every card opened from chat, from a dispatched card, straight
-    /// on the board, and for every card written before this field existed —
-    /// additive on the wire like [`Self::parent_task_id`], so no stored board
-    /// needs migrating.
+    /// # A card opened from chat stamps its **turn's** id (issue #983)
+    ///
+    /// A chat turn now mints a run row of its own, so the field's meaning is
+    /// "the machine act that opened this card" rather than "the workflow run
+    /// that did". A card raised from a DM used to be the only visible sign that
+    /// a long turn was under way and had nothing pointing back at it, so an
+    /// operator staring at a card in Planning could not reach the attempt
+    /// working it. [`origin_workflow_id`](Self::origin_workflow_id) stays `None`
+    /// on that path — there is no graph behind a chat turn — so the two fields
+    /// are no longer set together, and a reader wanting *the workflow* must
+    /// check that one rather than infer it from this.
+    ///
+    /// `None` for a dispatched card, a card opened straight on the board, and
+    /// for every card written before this field existed — additive on the wire
+    /// like [`Self::parent_task_id`], so no stored board needs migrating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_run_id: Option<String>,
     /// The workflow graph whose run opened this card (issue #661 / M5).
@@ -1034,6 +1203,13 @@ mod test {
             column_for_settled_run(RunStatus::Cancelled),
             Some(COLUMN_TODO)
         );
+        // Issue #1809: a by-design decline returns the card to To-do, same as a
+        // failure or cancel — the reason is on the note and the card becomes a
+        // one-off, never a stuck column of its own.
+        assert_eq!(
+            column_for_settled_run(RunStatus::Declined),
+            Some(COLUMN_TODO)
+        );
         // Not settled — an in-flight attempt has no landing to write.
         assert_eq!(column_for_settled_run(RunStatus::Pending), None);
         assert_eq!(column_for_settled_run(RunStatus::Running), None);
@@ -1061,6 +1237,7 @@ mod test {
             RunStatus::Succeeded,
             RunStatus::Failed,
             RunStatus::Cancelled,
+            RunStatus::Declined,
         ] {
             assert_ne!(
                 column_for_settled_run(status),
@@ -1090,6 +1267,7 @@ mod test {
             RunStatus::Paused,
             RunStatus::Failed,
             RunStatus::Cancelled,
+            RunStatus::Declined,
         ] {
             assert_ne!(
                 column_for_settled_run(status),
@@ -1119,6 +1297,7 @@ mod test {
             RunStatus::Succeeded,
             RunStatus::Failed,
             RunStatus::Cancelled,
+            RunStatus::Declined,
         ] {
             if let Some(column) = column_for_settled_run(status) {
                 assert!(is_board_column(column), "{status} lands in '{column}'");
@@ -1167,6 +1346,7 @@ mod test {
             verification: "the PR exists and CI is green".to_string(),
             scope: "the changelog only; no code changes".to_string(),
             proposed_assignee: Some("maya".to_string()),
+            assignee_candidates: Vec::new(),
             planned_at_millis: 42,
         }
     }
@@ -1330,6 +1510,7 @@ mod test {
             // #339's baseline fixture stays baseline: it exists to prove the
             // output stamp round-trips against a card carrying nothing else.
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -1386,8 +1567,10 @@ mod test {
     fn an_output_stamp_round_trips_and_is_absent_on_a_legacy_card() {
         let mut card = plain_card();
         card.output = Some(TaskOutput {
-            run_id: "run-2".to_string(),
-            attempt: Some(2),
+            source: TaskOutputSource::Run {
+                run_id: "run-2".to_string(),
+                attempt: Some(2),
+            },
             at_millis: 99,
             artifacts: vec![TaskOutputArtifact {
                 artifact_id: "a-1".to_string(),
@@ -1436,8 +1619,10 @@ mod test {
     fn a_task_that_produced_no_file_still_carries_a_link() {
         let mut card = plain_card();
         card.output = Some(TaskOutput {
-            run_id: "run-1".to_string(),
-            attempt: Some(1),
+            source: TaskOutputSource::Run {
+                run_id: "run-1".to_string(),
+                attempt: Some(1),
+            },
             at_millis: 5,
             artifacts: Vec::new(),
             workflows: Vec::new(),
@@ -1450,7 +1635,7 @@ mod test {
 
         let back: TaskRecord = serde_json::from_str(&json).expect("round trip");
         let output = back.output.expect("the stamp survives with no deliverable");
-        assert_eq!(output.run_id, "run-1");
+        assert_eq!(output.source.run_id(), Some("run-1"));
         assert!(output.artifacts.is_empty());
         assert!(output.workflows.is_empty());
     }
@@ -1460,8 +1645,10 @@ mod test {
     #[test]
     fn an_unknown_attempt_ordinal_still_leaves_an_addressable_link() {
         let output = TaskOutput {
-            run_id: "run-9".to_string(),
-            attempt: None,
+            source: TaskOutputSource::Run {
+                run_id: "run-9".to_string(),
+                attempt: None,
+            },
             at_millis: 5,
             artifacts: Vec::new(),
             workflows: Vec::new(),
@@ -1469,8 +1656,93 @@ mod test {
         let json = serde_json::to_string(&output).expect("serialize");
         assert!(!json.contains("attempt"), "{json}");
         let back: TaskOutput = serde_json::from_str(&json).expect("round trip");
-        assert_eq!(back.run_id, "run-9");
-        assert_eq!(back.attempt, None);
+        assert_eq!(back.source.run_id(), Some("run-9"));
+        assert_eq!(back.source.attempt(), None);
+    }
+
+    // --- issue #806: an output whose producer is not a run --------------------
+
+    /// **The migration guarantee.** Every card written before `TaskOutputSource`
+    /// existed carries a bare `runId` + `attempt` pair, and there is no dual-read
+    /// anywhere — so if this stops deserializing into `Run`, every stamped card
+    /// in every store silently loses its link.
+    ///
+    /// The literal here is deliberately hand-written rather than produced by
+    /// serializing the current type: a test that round-trips today's shape would
+    /// still pass if both halves drifted together, which is exactly the failure
+    /// it is supposed to catch.
+    #[test]
+    fn a_stamp_written_before_the_source_union_still_reads_as_a_run() {
+        let stored = r#"{"runId":"run-7","attempt":2,"atMillis":1234}"#;
+        let output: TaskOutput =
+            serde_json::from_str(stored).expect("a pre-#806 stamp must still load");
+        assert_eq!(output.source.run_id(), Some("run-7"));
+        assert_eq!(output.source.attempt(), Some(2));
+        assert_eq!(output.at_millis, 1234);
+    }
+
+    /// And the other direction: a `Run` source must still *write* those exact
+    /// keys, so a card stamped by this build is readable by anything that has
+    /// not been updated — and by the console's `"runId" in output` discriminator.
+    #[test]
+    fn a_run_source_serializes_to_the_keys_it_always_did() {
+        let output = TaskOutput {
+            source: TaskOutputSource::Run {
+                run_id: "run-7".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 1234,
+            artifacts: Vec::new(),
+            workflows: Vec::new(),
+        };
+        let json = serde_json::to_string(&output).expect("serialize");
+        assert!(json.contains(r#""runId":"run-7""#), "{json}");
+        assert!(json.contains(r#""attempt":2"#), "{json}");
+        assert!(
+            !json.contains("chatId") && !json.contains("source"),
+            "the union must be flattened, not nested or tagged: {json}"
+        );
+    }
+
+    /// A chat turn's stamp carries the conversation and **no** run — the whole
+    /// point of #806. `run_id()` answering `None` is the truthful answer to a
+    /// question about runs, and is what stops a reader labelling a conversation
+    /// as an attempt.
+    #[test]
+    fn a_chat_turn_stamp_carries_a_conversation_and_no_run() {
+        let output = TaskOutput {
+            source: TaskOutputSource::ChatTurn {
+                chat_id: "chat-3".to_string(),
+            },
+            at_millis: 9,
+            artifacts: Vec::new(),
+            workflows: vec![TaskOutputWorkflow {
+                workflow_id: "wf-1".to_string(),
+                run_id: None,
+                action: TaskOutputAction::Created,
+            }],
+        };
+        let json = serde_json::to_string(&output).expect("serialize");
+        assert!(json.contains(r#""chatId":"chat-3""#), "{json}");
+        assert!(
+            !json.contains("runId\":\"chat"),
+            "a chat turn must never be written as a run: {json}"
+        );
+
+        let back: TaskOutput = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back.source.run_id(), None);
+        assert_eq!(back.source.attempt(), None);
+        assert_eq!(
+            back.source,
+            TaskOutputSource::ChatTurn {
+                chat_id: "chat-3".to_string()
+            }
+        );
+        assert_eq!(
+            back.workflows.len(),
+            1,
+            "the deliverable it produced is what makes the link worth having"
+        );
     }
 
     // --- The plan → workflow bridge (issue #580) -----------------------------
@@ -1526,6 +1798,7 @@ mod test {
 
         // A workflow card carrying a proposal round-trips whole.
         let proposed = TaskRecord {
+            planning_attempts: Vec::new(),
             deliverable: TaskDeliverable::Workflow,
             workflow_proposal: Some(TaskWorkflowProposal {
                 summary: "Email the weekly digest every Monday".to_string(),

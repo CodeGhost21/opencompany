@@ -1,38 +1,34 @@
 //! Read-only connection status (`GET …/connections`).
 //!
-//! Deliberately **un-gated**: connection *status* is readable even when the
-//! token-exchanging OAuth write routes ([`ops::connections`](super::connections),
-//! the `oauth` feature) are not compiled. Without this route the console's
+//! Deliberately **un-gated**: connection *status* is readable even when native
+//! OAuth cleanup routes ([`ops::connections`](super::connections), the `oauth`
+//! feature) are not compiled. Without this route the console's
 //! `GET …/connections` 404s and the page falls back to the read-only
 //! "connections unavailable" banner; with it the console renders real
-//! per-provider state and lights up the Connect buttons.
+//! per-provider state.
 //!
 //! Every field here is a **non-secret projection** — the provider id, a
-//! `connected` boolean, an optional account label, and the credential tier the
-//! Connect would route through — mirroring the GraphQL `Company.connections`
+//! `connected` boolean, an optional account label, and a credential-source tier
+//! — mirroring the GraphQL `Company.connections`
 //! resolver
 //! ([`resolve_connections`](crate::server::graphql::connections::resolve_connections)).
 //! The stored OAuth token material never appears in the response or any log.
 //!
-//! ## Hosted versus the self-hosted hatch (issue #319)
+//! ## Hosted connections and retired native OAuth (issues #319, #838)
 //!
-//! [`connect_route`] answers one question per provider: *can a Connect click
-//! possibly succeed on this host, and by which route?* It reports a
+//! [`connect_route`] reports a
 //! [`CredentialSource`] tier — the same vocabulary
 //! [`ops::composio`](super::composio) already uses, so the two console surfaces
 //! read the same to an operator:
 //!
 //! * `attested` — the pod carries a platform-projected identity, so connections
 //!   are the platform's to run. Nothing to register here, and the console offers
-//!   no local Connect. A hosted tenant is injected no `OPENCOMPANY_OAUTH_*`
-//!   variable, so a local Connect on such a host could only ever fail; reporting
-//!   the tier makes that failure unreachable from the console rather than a
-//!   400 the operator has to interpret.
-//! * `static` — either a token this company already stored (a BYO override), or
-//!   this host's own registered provider application: the **self-hosted hatch**
-//!   documented on [`ops::connections`](super::connections). Connect works
-//!   exactly as it does today.
-//! * `none` — neither, so no Connect can succeed and the console says so.
+//!   no local Connect.
+//! * `static` — a legacy native OAuth token this company already stored. It
+//!   remains visible and revocable, but no agent can use it.
+//! * `none` — no stored legacy credential or hosted path. A configured native
+//!   provider app is included here: #838 retired its start route rather than
+//!   reporting a route that can no longer create a usable connection.
 //!
 //! ### Provider mapping, for when the hosted route lands
 //!
@@ -70,8 +66,8 @@ struct ConnectionStateDto {
     provider: String,
     /// Whether a non-empty OAuth token is stored for this provider.
     connected: bool,
-    /// Which route a Connect for this provider would take on this host — see
-    /// [`connect_route`]. A tier name, never a credential and never a path.
+    /// The source of this provider's connection state — see [`connect_route`].
+    /// A tier name, never a credential and never a path.
     credential_source: CredentialSource,
     /// The connected account label, when known — never token material. Omitted
     /// when not connected or when the stored blob carries no account.
@@ -88,19 +84,17 @@ struct ConnectionStateDto {
     unverified: bool,
 }
 
-/// Can a Connect click for `provider` possibly succeed on this host, and by
-/// which route?
+/// Reports the connection source for one provider.
 ///
 /// Stored-wins, mirroring [`ops::composio`](super::composio)'s precedence:
 ///
 /// 1. a token already stored for this provider → [`CredentialSource::Static`]
-///    (the BYO override — whatever else the host offers, this company is
-///    already connected through its own grant);
+///    (a legacy native credential, visible and revocable but not agent-usable);
 /// 2. else a platform-projected instance identity →
 ///    [`CredentialSource::Attested`];
-/// 3. else this host's own registered provider application →
-///    [`CredentialSource::Static`] (the self-hosted hatch);
-/// 4. else [`CredentialSource::None`].
+/// 3. else [`CredentialSource::None`]. A host provider app is deliberately not
+///    a route: native `start` is retired until its compatibility endpoint is
+///    removed (#1023).
 ///
 /// Step 2 is deliberately restricted to the **projected-file** tier.
 /// [`TinyhumansTokenSource::from_env`] also resolves a long-lived
@@ -119,8 +113,8 @@ struct ConnectionStateDto {
 /// type rather than restating the precedence, so what the tests exercise is the
 /// same code the request path runs.
 #[cfg(test)]
-fn connect_route(provider: &str, stored: bool, env: &dyn EnvSource) -> CredentialSource {
-    HostConnectRoutes::resolve(env).route(provider, stored, env)
+fn connect_route(_provider: &str, stored: bool, env: &dyn EnvSource) -> CredentialSource {
+    HostConnectRoutes::resolve(env).route(stored)
 }
 
 /// The host-level half of [`connect_route`], resolved once.
@@ -158,15 +152,12 @@ impl HostConnectRoutes {
 
     /// The full precedence for one provider, given the already-resolved
     /// host-level facts.
-    fn route(&self, provider: &str, stored: bool, env: &dyn EnvSource) -> CredentialSource {
+    fn route(&self, stored: bool) -> CredentialSource {
         if stored {
             return CredentialSource::Static;
         }
         if self.attested {
             return CredentialSource::Attested;
-        }
-        if host_provider_app_configured(provider, env) {
-            return CredentialSource::Static;
         }
         CredentialSource::None
     }
@@ -175,24 +166,9 @@ impl HostConnectRoutes {
     /// entry point the two read projections — this module and the GraphQL
     /// [`resolve_connections`](crate::server::graphql::connections::resolve_connections)
     /// — share, so they cannot drift apart.
-    pub(crate) fn route_from_env(&self, provider: &str, stored: bool) -> CredentialSource {
-        self.route(provider, stored, &crate::app::config::ProcessEnv)
+    pub(crate) fn route_from_env(&self, _provider: &str, stored: bool) -> CredentialSource {
+        self.route(stored)
     }
-}
-
-/// Whether this host has a provider application registered for `provider`,
-/// delegated to the hatch module so the rule lives in exactly one place.
-#[cfg(feature = "oauth")]
-fn host_provider_app_configured(provider: &str, env: &dyn EnvSource) -> bool {
-    super::connections::provider_app_configured(provider, env)
-}
-
-/// Without the `oauth` feature the token-exchanging write routes are not
-/// compiled at all (they 404), so no local Connect can succeed on this host no
-/// matter what the environment holds.
-#[cfg(not(feature = "oauth"))]
-fn host_provider_app_configured(_provider: &str, _env: &dyn EnvSource) -> bool {
-    false
 }
 
 /// Builds the connection-status route fragment (both scope forms).
@@ -498,6 +474,8 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -509,9 +487,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -675,10 +657,11 @@ mod tests {
     }
 
     /// The precedence matrix from [`connect_route`], driven through the env seam
-    /// so nothing mutates the process environment: stored wins, else a projected
-    /// platform identity, else this host's own provider app, else nothing.
+    /// so nothing mutates the process environment: stored wins, then a projected
+    /// platform identity, then nothing. A configured native provider app is no
+    /// longer a route after #838.
     #[test]
-    fn connect_route_follows_stored_then_attested_then_hatch() {
+    fn connect_route_never_advertises_a_retired_native_provider_app() {
         use crate::app::config::MapEnv;
 
         let dir = tempfile::Builder::new()
@@ -691,17 +674,13 @@ mod tests {
             crate::company::credentials::TOKEN_FILE_ENV,
             path.display().to_string(),
         )]);
-        // An obviously fake host provider application — the self-hosted hatch.
-        // The state signing secret is part of the hatch being *open*: without
-        // one no nonce can be issued, so no handshake can complete (issue #318).
-        let hatch = MapEnv::new([
+        let retired_native_app = MapEnv::new([
             ("OPENCOMPANY_OAUTH_GITHUB_ID", "fake-client-id"),
             ("OPENCOMPANY_OAUTH_GITHUB_SECRET", "fake-client-secret"),
-            ("OPENCOMPANY_OAUTH_STATE_SECRET", "a-private-value"),
         ]);
 
-        // 1. A stored token is the BYO override and outranks everything else,
-        //    including a projected platform identity.
+        // 1. A historical stored token is still visible and revocable. It
+        //    outranks every host-level source for that description.
         assert_eq!(
             connect_route("github", true, &projected),
             CredentialSource::Static
@@ -711,8 +690,8 @@ mod tests {
             CredentialSource::Static
         );
 
-        // 2. Nothing stored + a projected platform identity → the platform owns
-        //    the connection, for every provider (the identity is host-level).
+        // 2. Nothing stored + a projected platform identity → the platform
+        //    owns the connection, for every provider (the identity is host-level).
         assert_eq!(
             connect_route("github", false, &projected),
             CredentialSource::Attested
@@ -722,21 +701,13 @@ mod tests {
             CredentialSource::Attested
         );
 
-        // 3. No platform identity, but this host registered its own provider
-        //    application → the hatch is open and Connect works as it does today.
-        //    Only for the provider it was registered for.
-        if cfg!(feature = "oauth") {
-            assert_eq!(
-                connect_route("github", false, &hatch),
-                CredentialSource::Static
-            );
-        }
         assert_eq!(
-            connect_route("slack", false, &hatch),
-            CredentialSource::None
+            connect_route("github", false, &retired_native_app),
+            CredentialSource::None,
+            "a configured native app must not be offered after its start route retires"
         );
 
-        // 4. Neither → no Connect can succeed on this host.
+        // 3. Neither → no connection route exists on this host.
         assert_eq!(
             connect_route("github", false, &MapEnv::default()),
             CredentialSource::None
@@ -764,37 +735,6 @@ mod tests {
             CredentialSource::None,
             "a static inference key must not be read as a platform connection route"
         );
-
-        // Same operator, with their own GitHub app registered: the hatch stays
-        // open and still reads `static`, not `attested`.
-        if cfg!(feature = "oauth") {
-            let with_hatch = MapEnv::new([
-                (crate::company::credentials::API_KEY_ENV, "th_fake_key"),
-                ("OPENCOMPANY_OAUTH_GITHUB_ID", "fake-client-id"),
-                ("OPENCOMPANY_OAUTH_GITHUB_SECRET", "fake-client-secret"),
-                ("OPENCOMPANY_OAUTH_STATE_SECRET", "a-private-value"),
-            ]);
-            assert_eq!(
-                connect_route("github", false, &with_hatch),
-                CredentialSource::Static,
-                "the self-hosted hatch must keep working when an inference key is also set"
-            );
-
-            // Issue #318: the same operator without a state signing secret. The
-            // provider application is fully registered, and the hatch is still
-            // shut — an unsigned-nonce flow has no CSRF check worth the name, so
-            // the honest answer is that no Connect can succeed here.
-            let no_state_secret = MapEnv::new([
-                (crate::company::credentials::API_KEY_ENV, "th_fake_key"),
-                ("OPENCOMPANY_OAUTH_GITHUB_ID", "fake-client-id"),
-                ("OPENCOMPANY_OAUTH_GITHUB_SECRET", "fake-client-secret"),
-            ]);
-            assert_eq!(
-                connect_route("github", false, &no_state_secret),
-                CredentialSource::None,
-                "a registered provider app with no state signing secret is not connectable"
-            );
-        }
 
         // And a `TINYHUMANS_TOKEN_FILE` naming a path that does not exist
         // degrades to the static tier inside the resolver — which is likewise

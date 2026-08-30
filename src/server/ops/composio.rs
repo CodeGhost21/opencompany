@@ -78,9 +78,19 @@ use crate::server::error::ApiError;
 use crate::server::ops::composio_toolkits::{self, CatalogSource, OpenModeToolkits};
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
-/// The reminder attached to every mutating response.
+/// The reminder attached to a set / rotate response.
 const SWITCH_NOTE: &str =
     "Agents pick up the new Composio token on their next turn — no restart needed.";
+
+/// The reminder attached to a clear response.
+///
+/// A clear does not hand agents a new token — it withdraws the BYO override, so
+/// what they present next is whatever tier remains (a company key, the instance
+/// identity, or none). Reusing [`SWITCH_NOTE`] here would tell the operator that
+/// a new token exists when the effective credential has fallen back to nothing
+/// (issue #1471).
+const CLEAR_NOTE: &str =
+    "Composio token cleared. Agents use whatever credential remains on their next turn.";
 
 /// The toolkits the console should offer for a company, whether that answer
 /// came from open mode, and where the list came from.
@@ -519,7 +529,11 @@ async fn set_token(
     journal(&company, change, None).await?;
     Ok(Json(MutationResponse {
         status: effective_status(runtime).await?,
-        note: SWITCH_NOTE.to_string(),
+        note: if body.token.trim().is_empty() {
+            CLEAR_NOTE.to_string()
+        } else {
+            SWITCH_NOTE.to_string()
+        },
     }))
 }
 
@@ -1006,6 +1020,10 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
+    #[cfg(feature = "composio")]
+    use axum::routing::post;
+    #[cfg(feature = "composio")]
+    use axum::{Json, Router};
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -1023,6 +1041,33 @@ mod tests {
             .prefix("oc-composio-")
             .tempdir()
             .expect("tempdir")
+    }
+
+    /// A loopback Composio authorize endpoint for the feature-enabled route
+    /// test. Keeping the HTTP boundary real proves the handler reaches the
+    /// client after the admin guard, without allowing a unit test to dial the
+    /// production backend.
+    #[cfg(feature = "composio")]
+    async fn spawn_authorize_backend() -> String {
+        let app = Router::new().route(
+            "/agent-integrations/composio/authorize",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["toolkit"], "gmail");
+                Json(json!({
+                    "success": true,
+                    "data": {
+                        "connectUrl": "https://composio.test/connect/gmail",
+                        "connectionId": "gmail-connection"
+                    }
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
@@ -1045,6 +1090,8 @@ mod tests {
         let id = CompanyId::new(company);
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -1056,9 +1103,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -1212,6 +1263,24 @@ mod tests {
         hundred_entries().into_iter().map(|e| e.slug).collect()
     }
 
+    /// Serialises this test against `an_admin_is_unaffected`'s env mutation.
+    ///
+    /// In composio builds that test repoints `COMPOSIO_BACKEND_URL_ENV` at a
+    /// loopback backend for its whole body. The cache-seeding tests below derive
+    /// a cache key that embeds that URL, seed the cache under it, then re-derive
+    /// the key on the request path — a process-wide override landing between the
+    /// two reads would change the key and strand the seeded entry, failing the
+    /// `catalogSource == "backend"` assertion. `EnvVarGuard` serialises guard
+    /// users against each other, so taking it here closes the race the way the
+    /// crate documents (unguarded `std::env::var` readers are otherwise fair
+    /// game). Gated to composio builds, where the mutation exists.
+    #[cfg(feature = "composio")]
+    fn composio_backend_env_guard() -> crate::test_support::EnvVarGuard {
+        crate::test_support::EnvVarGuard::capture(&[
+            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+        ])
+    }
+
     /// The heart of the reopened issue: in open mode the console is offered the
     /// **backend's** catalog, not a list maintained by hand in this repo.
     ///
@@ -1223,6 +1292,8 @@ mod tests {
     /// in favour of the constant.
     #[tokio::test]
     async fn open_mode_serves_the_fetched_catalog_rather_than_a_hardcoded_list() {
+        #[cfg(feature = "composio")]
+        let _env = composio_backend_env_guard();
         let home_dir = home();
         let state = state_with_manifest_id(
             home_dir.path(),
@@ -1272,6 +1343,8 @@ mod tests {
     /// ninety-nine providers it decided against.
     #[tokio::test]
     async fn an_explicit_allowlist_is_never_widened_by_the_catalog() {
+        #[cfg(feature = "composio")]
+        let _env = composio_backend_env_guard();
         let home_dir = home();
         let state = state_with_manifest_id(
             home_dir.path(),
@@ -1303,6 +1376,8 @@ mod tests {
     /// catalog is the failure this pins shut.
     #[tokio::test]
     async fn an_unfetchable_catalog_is_marked_degraded_not_passed_off_as_real() {
+        #[cfg(feature = "composio")]
+        let _env = composio_backend_env_guard();
         let home_dir = home();
         let state = state_with_manifest_id(
             home_dir.path(),
@@ -1353,6 +1428,8 @@ mod tests {
     /// different test.
     #[tokio::test]
     async fn a_credential_change_evicts_the_cached_catalog() {
+        #[cfg(feature = "composio")]
+        let _env = composio_backend_env_guard();
         let home_dir = home();
         let state = state_with_manifest_id(
             home_dir.path(),
@@ -1455,6 +1532,50 @@ mod tests {
         )
         .await;
         assert_eq!(resp["status"]["credentialSource"], "none");
+    }
+
+    /// The note on a write names the operation (issue #1471): a set tells the
+    /// operator a new token is live, a clear must not claim one exists — the
+    /// effective credential after a clear is whatever tier remains, which may
+    /// be nothing at all.
+    #[tokio::test]
+    async fn the_clear_note_does_not_claim_a_new_token() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+
+        let (_, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": TOKEN })),
+        )
+        .await;
+        let set_note = resp["note"].as_str().expect("a note").to_string();
+        assert!(
+            set_note.contains("new Composio token"),
+            "a set announces the new token: {set_note}"
+        );
+
+        let (_, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "" })),
+        )
+        .await;
+        let clear_note = resp["note"].as_str().expect("a note").to_string();
+        assert_ne!(
+            clear_note, set_note,
+            "set and clear are told apart: {clear_note}"
+        );
+        assert!(
+            !clear_note.contains("new Composio token"),
+            "a clear must not invent a token that no longer exists: {clear_note}"
+        );
+        assert!(
+            clear_note.contains("cleared"),
+            "the clear names what it did: {clear_note}"
+        );
     }
 
     /// The hosted shape, driven through the env seam (no process mutation): a
@@ -1721,12 +1842,21 @@ mod tests {
     }
 
     /// The other side of the boundary, and the reason this is a role check
-    /// rather than a removal: an admin still does both things. `authorize`
-    /// answering `409` here is the *build* refusing (no `composio` feature),
-    /// which is exactly the point — it got past the guard and failed later, on
-    /// a different axis than the member's `403`.
+    /// rather than a removal: an admin still does both things. Without the
+    /// feature, `authorize` answers `409` at the build boundary; with it, this
+    /// test supplies a loopback backend and proves the admin reaches the real
+    /// authorization call without dialling production (issue #801).
     #[tokio::test]
     async fn an_admin_is_unaffected() {
+        #[cfg(feature = "composio")]
+        let backend = spawn_authorize_backend().await;
+        #[cfg(feature = "composio")]
+        let env = crate::test_support::EnvVarGuard::capture(&[
+            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+        ]);
+        #[cfg(feature = "composio")]
+        env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), GRANTED).await;
 
@@ -1740,13 +1870,25 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{raw}");
         assert_eq!(resp["status"]["credentialSource"], "static");
 
-        let (status, _, raw) = send(
+        let (status, _body, raw) = send(
             &state,
             "POST",
             "/api/v1/company/composio/authorize",
             Some(json!({ "toolkit": "gmail" })),
         )
         .await;
+        #[cfg(feature = "composio")]
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an admin reaches authorization: {raw}"
+        );
+        #[cfg(feature = "composio")]
+        assert_eq!(
+            _body["connectUrl"], "https://composio.test/connect/gmail",
+            "the handler returns the loopback backend's authorization URL: {_body}"
+        );
+        #[cfg(not(feature = "composio"))]
         assert_eq!(
             status,
             StatusCode::CONFLICT,

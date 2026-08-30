@@ -1,0 +1,106 @@
+# Interpreted opportunities: what the signals might mean, ranked, with the
+# evidence attached.
+#
+# The studio's product. Kept separate from `signals` because the two are judged
+# differently — a signal is judged on whether it was observed accurately, an
+# opportunity on whether the inference holds. Collapsing them produces the
+# characteristic failure of opportunity research: a confident brief whose
+# evidence, when checked, is one enthusiastic forum post.
+
+title = "Opportunities"
+purpose = """
+Every opportunity this studio has identified: the pain, who has it, what the \
+evidence is, how it ranks, and what happened to the ones the operator passed \
+on. Read it before ranking anything new — most weeks resurface last week's \
+opportunity with a different name.\
+"""
+written_by = "`record_entry` to raise or re-rank an opportunity, `close_entry` when it is pursued or dropped"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "opportunity"
+role = "title"
+required = true
+description = "The pain and who has it, in one line. Not the product idea."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "evidence"
+role = "refs"
+required = true
+description = "The signal ids behind it. An opportunity with one signal is a hunch with a citation."
+
+[[field]]
+name = "who_has_it"
+role = "prose"
+required = true
+description = "Specifically. \"SMBs\" is not an answer and produces briefs nobody can act on."
+
+[[field]]
+name = "rank"
+role = "number"
+description = "The score from the ranking rubric, and it is a score rather than an opinion — see the rubric."
+
+[[field]]
+name = "why_now"
+role = "prose"
+description = "What changed to make this an opportunity now. Without an answer it is a permanent condition, not an opportunity."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — pursued, passed on, or shown not to exist. Required when it closes."
+
+[[status]]
+name = "candidate"
+
+[[status]]
+name = "ranked"
+
+[[status]]
+name = "briefed"
+
+[[status]]
+name = "pursued"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "passed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Ranked and briefed"
+blurb = "Scored against the rubric and put in front of the operator."
+statuses = ["ranked", "briefed"]
+order = "recent"
+
+[[section]]
+heading = "Candidates"
+blurb = "Clustered from signals, not yet ranked. Each should name who specifically has the pain."
+statuses = ["candidate"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Pursued or passed on, each with the reason. The passes matter most here: most \
+weeks resurface an earlier opportunity under a new name, and the recorded \
+reason is what stops the same brief being written four times.\
+"""
+statuses = ["pursued", "passed"]
+cap = 20

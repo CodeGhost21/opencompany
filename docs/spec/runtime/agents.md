@@ -69,6 +69,9 @@ layout first.
 role = "Copywriter"                     # required
 description = "Write ads and campaign copy."
 tier = "reasoning"                      # cognition hint; never selects a model
+harness = "deep"                        # which [[harness]] runs this agent's
+                                        # turns — see harnesses.md. Omitted
+                                        # means the company's default harness.
 tools = ["docs.*", "mcp:notion"]        # grant globs — see tools.md
 delegates_to = ["creative"]             # desks this agent may hand work to
 budget_usd_daily = 5.0                  # per-agent daily cap
@@ -77,9 +80,74 @@ prompt = """                            # appended to the generated persona
 Write for the reader, not the client.
 """
 prompt_files = ["prompts/house-style.md"]   # checked-in, bundle-relative
-context = ["Brand/Brand voice.md"]          # live workspace documents
+context = [                                 # live workspace documents
+    "brand/brand-voice.md",                 #   read only (the bare-string shorthand)
+    { path = "agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
+]
 classes = ["evidence"]                      # routing exclusions — see below
+
+ledgers = [                                 # per-agent ledger access (omit for unrestricted)
+    { name = "tasks", access = "record" },
+    { name = "decisions", access = "read" },
+]
+can_declare_ledgers = false                 # may this agent `define_ledger`? default true
 ```
+
+### `tier` versus `harness`
+
+They answer different questions and are deliberately separate fields.
+
+`tier` names a **workload** (`reasoning`, `vision`, …) and is resolved against
+whatever provider the agent's harness turns out to use. `harness` names the
+**engine and the credential**. So an agent keeps its tier when it moves between
+harnesses, and two agents sharing a tier on different harnesses run on different
+models — which is the point of naming more than one.
+
+Naming a harness the company does not declare is a validation error, reported
+against both the agent and the id. Naming none is not: every roster written
+before `[[harness]]` existed binds nobody, and all of them keep working.
+### `context` write access
+
+A bare string in `context` is read-only — routed into the prompt, nothing
+more. `{ path, access = "write" }` additionally puts that exact path in this
+agent's `workspace_write`/`workspace_create` scope.
+
+**Omitting every write entry is unconfined**, matching every manifest written
+before this existed: `workspace_write`/`workspace_create` reach anywhere in the
+company's tree, as they always could. Declaring **at least one** write entry
+confines this agent's `workspace_write`/`workspace_create` to exactly the paths
+it declared, plus its own `agents/<id>/` home, which stays writable regardless
+— a role narrowed to a real access list must not also lose the ability to
+produce and revise its own work. See `src/harness/workspace_tools.rs` for the
+enforcement and why the pre-existing unconfined default is otherwise
+unchanged.
+
+### `ledgers`
+
+Which of the company's ledgers this agent's five ledger tools
+(`list_ledgers`, `read_ledger`, `record_entry`, `close_entry`,
+`define_ledger`) can see and use, and at what access.
+
+An omitted `ledgers` key is **unrestricted** — every ledger, at `record`
+access — the tool surface every agent had before this field existed. A
+declared list restricts `list_ledgers`/`read_ledger` to exactly the slugs
+named (an undeclared slug is invisible, not merely unwritable), and
+`record_entry`/`close_entry` additionally require `access = "record"` on that
+entry. A bare `{ name = "tasks" }` with no `access` key defaults to `read` —
+the safer of the two.
+
+This is the **visibility and read/record** half of ledger access; a ledger's
+own `writers` list (`docs/spec/runtime/ledgers.md`) stays the authoritative
+check for whether a write actually lands. Declaring `access = "record"` for a
+built-in ledger whose `writers` excludes this agent is a manifest validation
+error — the two must not silently disagree. A company-declared ledger is not
+cross-checked at manifest-load time, since it may not exist yet; any
+disagreement there is an ordinary tool refusal at call time.
+
+`can_declare_ledgers` (default `true`) governs `define_ledger` alone — a
+company discovers which axes it needs while running, so declaring one is
+unrestricted by default; set it `false` to keep a narrow role from growing the
+registry.
 
 ## The prompt
 
@@ -88,17 +156,61 @@ An agent's system prompt is assembled in this order, and the order is a decision
 1. the generated **persona** — who this teammate is, at which company;
 2. its inline **`prompt`**;
 3. its **`prompt_files`** bodies;
-4. tool briefs (workspace, publishing, skills catalogue);
+4. tool briefs (workspace, ledgers, sandbox, publishing, skills catalogue);
 5. its routed **`context`** documents.
 
 Static material first, volatile last. The prompt prefix is what a provider cache
 reuses across turns, so a workspace note the operator edits between two turns
 must not invalidate the briefing behind it.
 
+### The sandbox brief
+
+Step 4 includes a **sandbox** brief (`harness::toolbelt::sandbox_brief`) naming
+the agent's own working directory and the tools that reach it: `file_read` /
+`file_write` / `edit` / `list` / `glob` / `grep` under the `files`/`docs` grant,
+`shell` and `read_workspace_state` under `shell`, and `apply_patch` /
+`git_operations` / `csv_export` under `code`. Each clause is emitted only under
+the grant that wired its tools, and an agent holding none of the three gets no
+section.
+
+It is not cosmetic. A granted tool the prompt never names is, in practice, a
+tool the agent does not use: asked to *write* something, an agent that had never
+been told it holds `file_write` recorded a task about writing it instead, and
+`shell` — wired since the exec cell — was named in no brief at all. The brief
+also states the path confinement the belt already enforces for the file/code
+tools (`exec_security` sets `workspace_only`, so an absolute path or a `../`
+escape is refused), because an agent that does not know it spends turns
+rediscovering it one refusal at a time. The shell clause is deliberately not
+framed that way: `action_dir` only sets the command's working directory, and a
+same-uid command can read anywhere the server can
+([agent-isolation.md](../security/agent-isolation.md)), so the brief describes
+the directory as where shell commands *start*, never as a jail.
+
+The `shell` clause tracks what was **wired**, not what was granted:
+`toolbelt::shell_tools` withholds the whole namespace when the per-agent audit
+logger cannot initialize, and the brief follows it rather than the grant.
+
+The `shell`/`code` clauses also track the per-turn capability tier
+(`capability_budget::resolve_filter`, live at `HarnessPool::ensure`): a fail-closed
+metering error or an exhausted budget makes `filter_by_capabilities` drop the
+matching tools from the vector `build_agent` hands to the builder, and
+`sandbox_brief_flags` withholds the matching clause for the same turn — so the
+brief never instructs an agent to call a tool the filter has already removed.
+
 Step 5 is resolved by the async caller before the (synchronous) agent build and
 fingerprinted over document **bodies**, so editing a routed note reaches the next
 turn rather than the next restart. See
 [context-routing.md](orchestration/context-routing.md).
+
+**A named teammate is told its name.** A manifest `[[agent]]` is addressed by its
+role, and its persona reads *"You are the Content Writer at Acme."* An
+operator-added teammate also has a display name — the one the console puts on the
+DM header, the subtitle and the composer — and its persona names it too: *"You are
+Alex, the Content Writer at Acme. … Teammates and the operator address you as
+Alex; it is how you are called here, not a separate character to play."* The name
+is an addressing handle, not an identity to build a character around, and it never
+replaces the role. A name that is blank, or that only restates the role, falls
+back to the role-only wording (issue #1105).
 
 **`prompt` is appended, never substituted.** The generated line is what binds the
 agent to *this* role at *this* company; a prompt that replaced it would silently
@@ -128,6 +240,40 @@ before touching the filesystem, rather than by canonicalizing: canonical
 comparison resolves symlinks, and whether a bundle is valid must not depend on
 how the checkout was laid out on the reading machine.
 
+### Seeing the assembled prompt
+
+A brief is the most editable thing in a bundle and used to be the least
+inspectable: reading one as the agent receives it meant running the company and
+reading a provider trace. `opencompany prompt` renders the same composition from
+a manifest alone.
+
+```sh
+./scripts/dump-prompt.sh --company companies/agentic_product_team
+./scripts/dump-prompt.sh --company <dir> --agent bug_triager       # one teammate
+./scripts/dump-prompt.sh --company <dir> --agent bug_triager --raw # bytes only
+./scripts/dump-prompt.sh --company <dir> --out /tmp/prompts        # a file each
+./scripts/dump-prompt.sh --company <dir> --json                    # machine-readable
+```
+
+The report names every section, where its bytes came from (a manifest field, a
+bundle file, a brief function), and the agent's effective grants — a missing
+brief is almost always a missing grant. `--raw` prints the concatenation exactly
+as the harness performs it, which is what makes it diffable against a real
+trace.
+
+**What it cannot render, it names.** Routed `context` bodies need a live
+workspace store, the skill catalogue needs a materialized bundle directory, the
+MCP brief needs a configured registry, and the vendored runtime's safety
+preamble and grounding suffix need a live `PromptContext`. Each appears under
+*Not rendered here* with the reason, so a section missing from the dump is
+visibly missing rather than invisibly absent.
+
+The wrapper exists for the feature flag: the harness owns the tool briefs and
+compiles only under `--features openhuman`, so calling the subcommand from a
+default build produces a shorter prompt that would otherwise look complete.
+Composition itself (`src/company/prompt_dump.rs`) is always compiled — a
+debugging surface that only exists in a feature build is one nobody runs.
+
 ### Budgets
 
 Each document section is clamped to `PROMPT_FILE_BUDGET_CHARS` (10,000
@@ -143,6 +289,91 @@ whole document, while clamping the tail costs only the tail.
 An empty or whitespace-only document is dropped rather than rendered as a bare
 heading. An empty section reads to the model as a source that exists and says
 nothing, which is worse than its absence.
+
+## What a turn is allowed to spend
+
+Two ceilings bound one turn, and they bound different things.
+
+### Tool iterations — 25
+
+A turn may run **25** tool-calling rounds before the runtime pauses it and hands
+the operator a resumable checkpoint instead of an answer.
+
+The number is stated by this crate, not inherited. It used to be inherited: the
+agent builder was never told a cap, so every teammate silently ran on the
+vendored default of ten. Ten is a summariser's budget. A product manager asked
+for a feature spec reads the standards, reads the release checklist, reads the
+nearest prior spec, drafts, and publishes — and spends the ten before delivering
+anything, which is the incident the raise comes from.
+
+Twenty-five is ~2.5x headroom over that shape without the 5x of the runtime's
+"extended" 50. **Cost grows faster than the multiplier**: each iteration re-sends
+a transcript longer than the last one's, so 2.5x the rounds is more than 2.5x the
+spend. That is why the ceiling is the smallest number that covers the observed
+work rather than the largest one that would be safe.
+
+It is a **global** default, deliberately: it reaches every shipped template
+without editing each one. A teammate cannot raise or lower it from its manifest
+today.
+
+**Reaching it is a pause, not a failure.** The runtime stops the tool loop, asks
+the model once more (with tools withheld) for a resumable "Done so far / Next
+steps" checkpoint, and returns that as an ordinary successful reply. There is no
+error to catch and no error to match on, which is precisely why a capped turn
+used to be invisible — the operator read a tidy plan with no deliverable behind
+it and no way to tell the agent had been cut off mid-task. So the harness reads
+the runtime's cap flag while the turn's agent lock is still held and carries it
+out on the turn's outcome, OR'd across every turn behind one operator bubble (the
+responder, any desk lead it handed work to, and the relay turn that folds their
+answers back together). When any of them paused, the operator gets a **second,
+unauthored bubble** after the reply saying the turn stopped at its step limit,
+that nothing errored, and that replying "continue" asks the agent to pick up
+from there. It is a separate bubble rather than an addition to the reply because
+the reply — and only the reply — is written back to the context store as memory;
+appending would file the platform's notice as something the agent said and
+recall it into later turns. See `src/harness/mod.rs`
+(`TurnOutcome::hit_iteration_cap`), `src/runtime/delegation.rs` for the fold, and
+`src/harness/brain.rs` for the notice.
+
+### In-turn spend — armed only for a teammate with a declared daily budget
+
+The company's other two spend controls — the plan-level token ceiling and a
+teammate's `budget_usd_daily` — are both **pre-dispatch**. They decide whether a
+turn may *start*; neither can see inside one. So a turn that begins one cent
+under a cap can finish arbitrarily far over it, and raising the iteration ceiling
+widens that window in proportion.
+
+A running turn is therefore additionally metered by an in-turn brake — openhuman's
+`BudgetStopHook` — an after-call threshold check installed between iterations.
+It records each completed model call, then compares cumulative spend
+(`TurnCost::total_usd()`) against the cap and pauses the turn before the next
+provider call once spend is at or beyond it. The brake is installed **only** for
+a teammate who declares a `budget_usd_daily` cap. Because the check runs after a
+call has already been charged, a crossing call lands on the ledger before the
+next one is prevented — the turn can finish at or slightly above the cap, so the
+worst-case overshoot is bounded by a single model call rather than an entire
+turn ("one call" rather than "one turn, of unknown size").
+
+This mirrors the vendored runtime's own posture rather than inventing one.
+OpenHuman constructs `BudgetStopHook` nowhere — it is an available primitive, not
+an applied policy — and the only hook it installs is `GoalBudgetStopHook`, opt-in
+and tied to a user-declared goal. Its own docs are explicit: *"we never
+hard-stop a user-present turn that isn't actively burning a live budget."* So a
+teammate with no declared budget gets no in-turn brake, and there is deliberately
+no blanket per-turn dollar figure that no operator can see or change (it would
+not be in `company.toml` and not in the console). Four shipped templates do set
+`budget_usd_daily` — three agents in `signals_opportunity_studio` and one in
+`e2e_harness` — so the opt-in path is genuinely exercised, not dead code.
+
+Since a budget halt and an iteration-cap pause are different outcomes, the
+runtime reports them separately: `TurnOutcome::hit_iteration_cap` is read from
+[`Agent::last_turn_hit_cap`](oh::agent::Agent::last_turn_hit_cap), which stays
+`false` for a hook-driven stop — the run paused below the 25-round ceiling, so
+the cap predicate never held. A cap pause means the teammate ran out of rounds
+with work still to do and can be resumed via the "continue" bubble above; a
+budget halt means it ran out of money, returns whatever reply the model produced
+before the hook fired, and gets no such bubble today. Anything that renders one
+to an operator must not label it with the other.
 
 ## `classes`
 
@@ -175,9 +406,12 @@ rename can switch off is not a control.
 | --- | --- |
 | Bundle loading, `prompt_files` resolution | `src/company/agent_file.rs` |
 | Prompt composition and clamping | `src/company/prompt.rs` |
+| Rendering a composed prompt back out (`opencompany prompt`) | `src/company/prompt_dump.rs` |
 | Routing table and exclusions | `src/company/context_routing.rs` |
 | Roster type and constants | `src/company/types.rs` |
 | Manifest wiring and validation | `src/company/manifest.rs` |
+| Iteration cap, stated on every built agent | `src/harness/build.rs` |
+| In-turn spend brake, installed per turn | `src/harness/mod.rs` |
 
 The first three are **always compiled**, though the harness that spends the
 prompt is behind the `openhuman` feature. Composition, clamping and the

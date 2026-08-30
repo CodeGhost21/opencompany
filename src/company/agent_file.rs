@@ -81,12 +81,36 @@ struct AgentFile {
     description: Option<String>,
     #[serde(default)]
     tier: Option<String>,
+    /// Which `[[harness]]` this agent runs on. Cross-checked against the
+    /// company's declared harnesses in `CompanyManifest::validate`, not here —
+    /// this file cannot see them.
     #[serde(default)]
-    tools: Vec<String>,
+    harness: Option<String>,
+    /// Which model that harness should run this agent on.
+    ///
+    /// Cross-checked in `CompanyManifest::validate` alongside `harness`, for
+    /// the same reason: a model only means something relative to the harness
+    /// it is set against, and this file cannot see the company's.
+    ///
+    /// Absent from this struct until now, while `Agent` had the field — so a
+    /// bundle whose roster lives in `agents/<id>.toml` had its `model` line
+    /// dropped by serde as an unknown key and hardcoded to `None` below. That
+    /// skipped validation too, so the file was neither honoured nor refused:
+    /// the teammate simply ran on the harness default while its own file said
+    /// otherwise.
+    #[serde(default)]
+    model: Option<String>,
+    /// Carried verbatim onto [`Agent::tools`](crate::company::Agent::tools),
+    /// whose three-state contract (issue #1804) this mirrors: an absent `tools`
+    /// key parses to `None` (inherit the standard grant — every `agents/*.toml`
+    /// written before #1804), `tools = []` to `Some(vec![])` (explicit deny-all),
+    /// and `tools = [globs]` to `Some(globs)` (narrow).
+    #[serde(default)]
+    tools: Option<Vec<String>>,
     #[serde(default)]
     delegates_to: Vec<String>,
     #[serde(default)]
-    context: Option<Vec<String>>,
+    context: Option<Vec<crate::company::ContextEntry>>,
     #[serde(default)]
     budget_usd_daily: Option<f64>,
     #[serde(default)]
@@ -95,6 +119,10 @@ struct AgentFile {
     prompt_files: Vec<String>,
     #[serde(default)]
     classes: Vec<String>,
+    #[serde(default)]
+    ledgers: Option<Vec<crate::company::LedgerGrant>>,
+    #[serde(default)]
+    can_declare_ledgers: Option<bool>,
 }
 
 /// Loads every agent definition under `<dir>/agents/`, in roster order.
@@ -135,15 +163,7 @@ pub(crate) fn load_agents_from(
     names: &[String],
     read: &dyn Fn(&str) -> std::result::Result<String, std::io::ErrorKind>,
 ) -> Result<Vec<Agent>> {
-    let mut agents = Vec::new();
-    let mut problems = Vec::new();
-
-    for name in names {
-        match parse_agent_file(name, read) {
-            Ok(agent) => agents.push(agent),
-            Err(mut file_problems) => problems.append(&mut file_problems),
-        }
-    }
+    let (agents, problems) = parse_agents(names, read);
 
     // Duplicate ids cannot arise from distinct filenames, but an `id` key that
     // disagrees with its stem is rejected above, so by here every id *is* its
@@ -157,6 +177,32 @@ pub(crate) fn load_agents_from(
             problems,
         })
     }
+}
+
+/// Parses every named file independently, returning every agent that parsed
+/// alongside every problem from the ones that did not.
+///
+/// [`load_agents_from`] turns this into an all-or-nothing [`Result`] for a
+/// company's own roster, where one malformed file should fail the whole
+/// bundle rather than silently ship a company short a teammate. The global
+/// baseline (`crate::globals`) wants the opposite: a malformed *global* must
+/// not cost every other global, so it calls this directly and keeps the
+/// agents that parsed.
+pub(crate) fn parse_agents(
+    names: &[String],
+    read: &dyn Fn(&str) -> std::result::Result<String, std::io::ErrorKind>,
+) -> (Vec<Agent>, Vec<String>) {
+    let mut agents = Vec::new();
+    let mut problems = Vec::new();
+
+    for name in names {
+        match parse_agent_file(name, read) {
+            Ok(agent) => agents.push(agent),
+            Err(mut file_problems) => problems.append(&mut file_problems),
+        }
+    }
+
+    (agents, problems)
 }
 
 /// The roster files of an embedded bundle, in the order `build.rs` recorded.
@@ -229,6 +275,7 @@ fn parse_agent_file(
         role,
         description: file.description,
         tier: file.tier,
+        harness: file.harness,
         tools: file.tools,
         delegates_to: file.delegates_to,
         context: file.context,
@@ -237,6 +284,13 @@ fn parse_agent_file(
         prompt_files: file.prompt_files,
         prompt_files_resolved,
         classes: file.classes,
+        ledgers: file.ledgers,
+        name: None,
+        can_declare_ledgers: file.can_declare_ledgers.unwrap_or(true),
+        // Provenance is set by whoever merges the baseline in, never by a file:
+        // this same parser reads both a company's `agents/` and `globals/`.
+        global: false,
+        model: file.model,
     })
 }
 
@@ -445,6 +499,30 @@ mod tests {
         }
     }
 
+    /// A per-file teammate's `model` is carried, like its `harness`.
+    ///
+    /// `AgentFile` had `harness` but not `model`, so serde dropped the line as
+    /// an unknown key and the built `Agent` hardcoded `None`. The failure was
+    /// silent in both directions: the override never applied, and because
+    /// `CompanyManifest::validate` only sees what parsing produced, the file
+    /// was not refused either. A bundle could state a model, be accepted, and
+    /// run on the harness default.
+    #[test]
+    fn a_per_file_teammate_carries_its_model_override() {
+        let dir = bundle(&[(
+            "critic.toml",
+            "role = \"Critic\"\nharness = \"laptop\"\nmodel = \"claude-opus-4-5\"\n",
+        )]);
+        let agents = load_agents(dir.path()).expect("loads");
+        let critic = agents.iter().find(|a| a.id == "critic").expect("parsed");
+        assert_eq!(critic.harness.as_deref(), Some("laptop"));
+        assert_eq!(
+            critic.model.as_deref(),
+            Some("claude-opus-4-5"),
+            "a model in the file must reach the agent, or it is neither honoured nor refused"
+        );
+    }
+
     #[test]
     fn a_subdirectory_toml_is_a_document_not_a_teammate() {
         // `prompt_files` may point at a `.toml` briefing; descending into
@@ -472,7 +550,7 @@ delegates_to = ["research"]
 budget_usd_daily = 5.0
 prompt = "Be specific about what would change your mind."
 prompt_files = ["prompts/rubric.md"]
-context = ["GOAL.md", "CLAIMS.md"]
+context = ["GOAL.md", "claims.md"]
 classes = ["judge", "evidence"]
 "#,
             ),
@@ -482,7 +560,10 @@ classes = ["judge", "evidence"]
         let agent = load_agents(dir.path()).expect("loads").remove(0);
         assert_eq!(agent.id, "critic");
         assert_eq!(agent.tier.as_deref(), Some("reasoning"));
-        assert_eq!(agent.tools, ["docs.*", "mcp:notion"]);
+        assert_eq!(
+            agent.tools,
+            Some(vec!["docs.*".to_string(), "mcp:notion".to_string()])
+        );
         assert_eq!(agent.delegates_to, ["research"]);
         assert_eq!(agent.budget_usd_daily, Some(5.0));
         assert_eq!(
@@ -491,7 +572,12 @@ classes = ["judge", "evidence"]
         );
         assert_eq!(
             agent.context.as_deref(),
-            Some(&["GOAL.md".to_string(), "CLAIMS.md".to_string()][..])
+            Some(
+                &[
+                    crate::company::ContextEntry::from("GOAL.md"),
+                    crate::company::ContextEntry::from("claims.md")
+                ][..]
+            )
         );
         assert_eq!(agent.classes, ["judge", "evidence"]);
     }

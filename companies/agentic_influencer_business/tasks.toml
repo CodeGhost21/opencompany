@@ -1,0 +1,47 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a creator business is defined by —
+# the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-content-calendar"
+title = "Set up the content calendar"
+priority = "high"
+note = """
+Get the next month onto `content` — one row per planned piece, with its \
+channel, its date and its purpose.
+
+A creator business without a calendar publishes reactively, and reactive \
+publishing is what audience decline looks like from the inside.
+
+Done when the next month is on `content` with dates.\
+"""
+
+[[task]]
+id = "set-up-the-sponsorship-terms"
+title = "Set up the sponsorship terms"
+priority = "high"
+note = """
+Record on `decisions` what this brand will and will not take money for, \
+before an offer makes it tempting to decide case by case. Open \
+`sponsorships` rows for anything live.
+
+Done when the standing terms are a decision row and live deals have rows.\
+"""
+
+[[task]]
+id = "set-up-the-signal-watch"
+title = "Set up the signal watch"
+priority = "medium"
+note = """
+Decide what goes on `audience-signals` and how often it is read: which \
+numbers matter, and what a change in one would mean.
+
+Done when the rule is recorded and the current baseline is captured.\
+"""

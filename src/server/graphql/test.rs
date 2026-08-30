@@ -15,6 +15,30 @@ use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
+/// The workflow summaries a company itself has: the global baseline is listed
+/// in every company, and these tests are about the company's own graphs.
+///
+/// This is an **id heuristic**, not provenance: `WorkflowSummary` carries no
+/// `global` flag over GraphQL, so a row is classified as "the baseline's" by
+/// whether its id matches one of `crate::globals::workflows()`. A company
+/// definition of the *same* id supersedes the global one (see
+/// `crate::company::list_workflows_with_globals`) and would be wrongly
+/// excluded here — none of the fixtures below give a company workflow an id
+/// that collides with a global, so that gap does not fire in this suite, but
+/// see `graphql_lists_a_company_override_of_a_global_id_by_its_own_content`
+/// for the same-id case asserted directly, without this helper.
+pub(crate) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .as_array()
+        .expect("summaries")
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::workflows().iter().any(|w| w.id == id)
+        })
+        .collect()
+}
+
 pub(crate) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("opencompany-gql-")
@@ -27,12 +51,34 @@ pub(crate) fn manifest() -> CompanyManifest {
 }
 
 pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
+    state_with_manifest(home, manifest()).await
+}
+
+/// [`state_with_company`] over an explicit manifest, for a test that needs the
+/// company configured differently from [`manifest`] and should not have to
+/// restate the whole record to get there.
+pub(crate) async fn state_with_manifest(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+) -> AppState {
+    state_with_builder(home, manifest, |builder| builder).await
+}
+
+/// [`state_with_manifest`] with a runtime-builder override, for a test that
+/// swaps a store the runtime owns — e.g. a counting deep-trace store.
+async fn state_with_builder(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    override_runtime: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
+) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
-            manifest: manifest(),
+            manifest: manifest.clone(),
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
@@ -42,17 +88,21 @@ pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
+    let runtime =
+        override_runtime(RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone()))
+            .build()
+            .await
+            .unwrap();
     let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
     state.registry().insert(id, Arc::new(runtime));
     // Every route needs a principal now; the harness signs in as an admin so
@@ -145,6 +195,255 @@ async fn approvals_field_is_empty_before_any_park() {
 }
 
 // ---------------------------------------------------------------------------
+// The approval tier over GraphQL (issue #1070)
+// ---------------------------------------------------------------------------
+
+/// A company whose always-ask list is **not** empty.
+///
+/// The shared [`manifest`] leaves `always_approve` on its default, which is
+/// `[]` — and two empty lists are indistinguishable however they are wired, so
+/// a suite driven off it could not tell `alwaysApprove` from
+/// `manifestAlwaysApprove`, nor either from a resolver that answered `[]`
+/// unconditionally. The values are the same pair the REST suite uses.
+fn policy_manifest() -> CompanyManifest {
+    toml::from_str(
+        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         always_approve = [\"payment.send\", \"filing.submit\"]\n",
+    )
+    .unwrap()
+}
+
+/// The tier is readable, and it is the one the manifest declares — together
+/// with the always-ask list, which is the half of the policy that actually
+/// decides what parks.
+///
+/// `Company` already resolved `approvals` and `pendingApprovals` and not the
+/// setting that decides whether anything ever enters that queue — so an empty
+/// queue read the same under `supervised` (nothing pending) and `full` (nothing
+/// will ever park). `full` **with** an always-ask list is a third reading
+/// again, which is why the list is asserted here and not left to the override
+/// case below: a resolver that answered `[]` unconditionally would report this
+/// company as holding nothing back when it holds back two things.
+#[tokio::test]
+async fn policy_field_reports_the_tier_in_force() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let app = router(state_with_manifest(&home, policy_manifest()).await);
+    let value = query(
+        app,
+        r#"{"query":"{ company(id: \"acme\") { policy { mode alwaysApprove manifestMode manifestAlwaysApprove overridden } } }"}"#,
+    )
+    .await;
+    let policy = &value["data"]["company"]["policy"];
+    assert_eq!(policy["mode"], "full", "{value}");
+    assert_eq!(policy["manifestMode"], "full", "{value}");
+    assert_eq!(policy["overridden"], false, "{value}");
+    assert_eq!(
+        policy["alwaysApprove"],
+        serde_json::json!(["payment.send", "filing.submit"]),
+        "with nothing overriding it the list in force is the manifest's, and it \
+         is reported in the manifest's order: {value}"
+    );
+    assert_eq!(
+        policy["manifestAlwaysApprove"],
+        serde_json::json!(["payment.send", "filing.submit"]),
+        "{value}"
+    );
+}
+
+/// **The anti-drift assertion, and the reason this field maps `PolicyDto`
+/// rather than reading the record itself.**
+///
+/// With a console override in force, `mode` and `manifestMode` diverge — and a
+/// resolver that recomputed the tier from `manifest.policy.mode` would answer
+/// `full` here while `GET {scope}/policy` answered `readonly`, with no way for
+/// a caller to know which surface it had reached. That is the
+/// two-sources-of-truth defect issue #1027 nearly shipped by putting this value
+/// on `/capabilities` instead.
+///
+/// `overridden` is asserted separately from the two words on purpose: an
+/// override that happened to match the manifest would still be an override, and
+/// comparing `mode` with `manifestMode` cannot see one.
+#[tokio::test]
+async fn policy_field_reports_the_override_not_the_manifest() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let store = FsCompanyStore::new(home.clone());
+    let state = state_with_manifest(&home, policy_manifest()).await;
+
+    // Tighten the tier the way `PUT {scope}/policy` does — an overlay, never a
+    // manifest edit. Both fields are overridden, and the list is deliberately
+    // *not* the manifest's: two equal lists cannot show which one each field
+    // was read from.
+    let mut record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    record.overlay_policy = Some(crate::ports::types::PolicyOverride {
+        mode: Some("readonly".to_string()),
+        always_approve: Some(vec!["deploy.production".to_string()]),
+        auto_approve_under_usd: Some(Some(4.0)),
+        approval_ttl_hours: Some(48),
+        set_by: crate::ports::types::Actor {
+            kind: crate::ports::types::ActorKind::Operator,
+            id: "ada@example.com".to_string(),
+        },
+        at_millis: 1_700_000_000_000,
+    });
+    store.save(&record).await.unwrap();
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id: \"acme\") { policy { mode alwaysApprove autoApproveUnderUsd approvalTtlHours manifestMode manifestAlwaysApprove manifestAutoApproveUnderUsd manifestApprovalTtlHours overridden setBy setAtMillis } } }"}"#,
+    )
+    .await;
+    let policy = &value["data"]["company"]["policy"];
+    assert_eq!(
+        policy["mode"], "readonly",
+        "the tier IN FORCE is the override, not the manifest: {value}"
+    );
+    assert_eq!(
+        policy["manifestMode"], "full",
+        "and the manifest's tier is still reported, so a client can see what a reset restores: {value}"
+    );
+    assert_eq!(
+        policy["alwaysApprove"],
+        serde_json::json!(["deploy.production"]),
+        "the list IN FORCE is the override's too — and it is the lever that wins \
+         over every tier, `full` included, so reading it from the manifest here \
+         would report a company as holding back two things it does not: {value}"
+    );
+    assert_eq!(
+        policy["manifestAlwaysApprove"],
+        serde_json::json!(["payment.send", "filing.submit"]),
+        "while the manifest's list is what a reset restores. The two fields \
+         disagree on purpose: equal lists could not tell them apart, nor tell \
+         either from the other being returned twice: {value}"
+    );
+    assert_eq!(policy["overridden"], true, "{value}");
+    assert_eq!(policy["autoApproveUnderUsd"], 4.0, "{value}");
+    assert_eq!(policy["approvalTtlHours"], 48.0, "{value}");
+    assert!(policy["manifestAutoApproveUnderUsd"].is_null(), "{value}");
+    assert!(policy["manifestApprovalTtlHours"].is_null(), "{value}");
+    assert_eq!(policy["setBy"], "ada@example.com", "{value}");
+    assert_eq!(
+        policy["setAtMillis"], 1_700_000_000_000_f64,
+        "epoch millis survive the f64 widening exactly: {value}"
+    );
+}
+
+/// The two fields a client renders a policy *control* from: the tiers it may
+/// offer, and what it has to tell an operator about when a change bites.
+///
+/// Neither varies with the company, which is why they are asserted once here
+/// rather than in both cases above. `tiers` is not the text table — it is that
+/// table narrowed to `POLICY_MODES` and ordered by it, so the console offers
+/// exactly what this runtime accepts; offering a tier the gate would silently
+/// downgrade is the failure it exists to prevent. `takesEffect` is the single
+/// constant `GET`, `PUT` and `DELETE` all answer with, so an operator cannot be
+/// quoted two different timings by two surfaces — the same one-derivation rule
+/// the rest of this field follows.
+#[tokio::test]
+async fn policy_field_reports_the_selectable_tiers_and_when_a_change_takes_effect() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let app = router(state_with_manifest(&home, policy_manifest()).await);
+    let value = query(
+        app,
+        r#"{"query":"{ company(id: \"acme\") { policy { tiers { value label description } takesEffect } } }"}"#,
+    )
+    .await;
+    let policy = &value["data"]["company"]["policy"];
+
+    let tiers = policy["tiers"].as_array().expect("tiers");
+    let offered: Vec<&str> = tiers
+        .iter()
+        .map(|tier| tier["value"].as_str().expect("tier value"))
+        .collect();
+    assert_eq!(
+        offered,
+        crate::company::POLICY_MODES.to_vec(),
+        "the tiers offered are the ones the runtime accepts, in its order: {value}"
+    );
+    for tier in tiers {
+        assert!(
+            !tier["label"].as_str().unwrap_or_default().is_empty()
+                && !tier["description"].as_str().unwrap_or_default().is_empty(),
+            "tier `{}` came back without operator-facing text, which is the whole \
+             point of sending tiers rather than mode names: {value}",
+            tier["value"]
+        );
+    }
+
+    // One tier pinned exactly. `value`, `label` and `description` are three
+    // adjacent `String`s: a mapping that swapped them would leave every
+    // assertion above green while showing an operator a tier name where the
+    // consequences should be.
+    let readonly = tiers
+        .iter()
+        .find(|tier| tier["value"] == "readonly")
+        .expect("the readonly tier");
+    assert_eq!(readonly["label"], "Read-only", "{value}");
+    assert_eq!(
+        readonly["description"],
+        "The agents can look at things but change nothing and spend nothing.",
+        "{value}"
+    );
+
+    assert_eq!(
+        policy["takesEffect"],
+        crate::server::ops::policy::TAKES_EFFECT,
+        "asserted against the constant itself, not a copy of its wording: the \
+         property is that GraphQL quotes the *same* timing REST does, and a \
+         copy here would let the two drift apart while staying green: {value}"
+    );
+    assert!(
+        !policy["takesEffect"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "and it is actually said, rather than the field existing and being blank: {value}"
+    );
+}
+
+/// **Auth parity with REST.** `GET {scope}/policy` answers 401 to an
+/// unauthenticated caller; this must not be the softer way in.
+///
+/// Tested rather than assumed. The gate lives in `graphql_handler` *before*
+/// `schema().execute()`, so no resolver runs at all — but "the framework covers
+/// it" is exactly the reasoning that ships a hole, and nothing in this suite
+/// exercised the refusal before now. The same query minus the session cookie
+/// every other test sends must return the error and no policy data.
+#[tokio::test]
+async fn policy_field_is_refused_without_a_session() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let app = router(state_with_company(&home).await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/graphql")
+                .header("content-type", "application/json")
+                // Deliberately no `cookie` header — the one difference from
+                // `query()`.
+                .body(Body::from(
+                    r#"{"query":"{ company(id: \"acme\") { policy { mode } } }"}"#.to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        value["data"]["company"].is_null(),
+        "an unauthenticated caller must get no policy data: {value}"
+    );
+    assert_eq!(
+        value["errors"][0]["message"], "unauthorized",
+        "and must be told why, the same as the REST 401: {value}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Manifest-derived + store-backed reads, over a fuller company.
 // ---------------------------------------------------------------------------
 
@@ -177,6 +476,8 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: rich_manifest(),
             ledger: Vec::new(),
@@ -188,9 +489,13 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -217,11 +522,22 @@ async fn team_lists_manifest_teammates() {
         r#"{"query":"{ company(id:\"acme\"){ team { id role name inboxEnabled } } }"}"#,
     )
     .await;
+    // The global baseline is appended to every roster; this test is about the
+    // company's own teammate, so it reads the row rather than the whole list.
     let team = value["data"]["company"]["team"].as_array().unwrap();
-    assert_eq!(team.len(), 1);
-    assert_eq!(team[0]["id"], "maya");
-    assert_eq!(team[0]["role"], "Marketing Lead");
-    assert!(team[0]["name"].is_null());
+    let maya = team
+        .iter()
+        .find(|row| row["id"] == "maya")
+        .expect("maya is on the roster");
+    assert_eq!(maya["role"], "Marketing Lead");
+    assert!(maya["name"].is_null());
+    for global in crate::globals::agents() {
+        assert!(
+            team.iter().any(|row| row["id"] == global.id.as_str()),
+            "the baseline teammate `{}` is missing from the roster",
+            global.id
+        );
+    }
 }
 
 /// Issue #343: the GraphQL roster resolves the **effective** cap and its
@@ -248,7 +564,9 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
         name: "Jamie".to_string(),
         role: "Growth".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
+        model: None,
+        harness: None,
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -332,14 +650,18 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         name: "Zeroed".to_string(),
         role: "Growth".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
+        model: None,
+        harness: None,
     });
     record.overlay_agents.push(OverlayAgent {
         id: "uncapped".to_string(),
         name: "Uncapped".to_string(),
         role: "Ops".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
+        model: None,
+        harness: None,
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -452,6 +774,8 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .append(
             runtime.id(),
             crate::ports::types::CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 task_id: None,
                 chat_id: "General".to_string(),
@@ -467,6 +791,8 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .append(
             runtime.id(),
             crate::ports::types::CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 task_id: None,
                 chat_id: "main".to_string(),
@@ -515,6 +841,8 @@ async fn chat_history_clamps_an_oversized_page_request() {
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "General".to_string(),
@@ -552,6 +880,35 @@ async fn chat_history_projects_the_card_a_reply_opened() {
     let home = home_dir.path().to_path_buf();
     let state = state_with_rich_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    // The card has to actually be on the board: the history projection
+    // reports `taskId` only for a card that still exists, so that a chip
+    // cannot come back pointing at a card someone deleted (issue #984).
+    runtime
+        .tasks()
+        .upsert(
+            runtime.id(),
+            &crate::ports::tasks::TaskRecord {
+                id: "t-77".to_string(),
+                title: "Draft the launch note".to_string(),
+                note: None,
+                column: crate::ports::tasks::COLUMN_TODO.to_string(),
+                priority: "medium".to_string(),
+                assignee: String::new(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                planning_attempts: Vec::new(),
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
     for (text, task_id) in [
         ("opened a card", Some("t-77".to_string())),
         ("opened nothing", None),
@@ -561,6 +918,8 @@ async fn chat_history_projects_the_card_a_reply_opened() {
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id,
                     chat_id: "General".to_string(),
@@ -616,6 +975,8 @@ async fn chat_history_projects_threads_and_reactions() {
         .append(
             runtime.id(),
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: None,
                 task_id: None,
                 chat_id: "General".to_string(),
@@ -631,6 +992,8 @@ async fn chat_history_projects_threads_and_reactions() {
         .append(
             runtime.id(),
             CompanyEvent::AgentReply {
+                mentions: Vec::new(),
+                mention_depth: 0,
                 parent: Some(root),
                 task_id: None,
                 chat_id: "General".to_string(),
@@ -682,6 +1045,63 @@ async fn chat_history_projects_threads_and_reactions() {
         0,
         "an un-reacted message carries no rows: {threaded}"
     );
+}
+
+/// Issue #1682 + #65: an operator message's attachments project on the GraphQL
+/// history surface with the same store-authored metadata the REST route
+/// returns, from the one shared `MessageView`. The console downloads over REST,
+/// but a transcript hydrated through either door must name the same files —
+/// the drift #65 exists to prevent.
+#[tokio::test]
+async fn chat_history_projects_attachments() {
+    use crate::ports::types::{Attachment, CompanyEvent};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    runtime
+        .events()
+        .append(
+            runtime.id(),
+            CompanyEvent::OperatorMessage {
+                text: "here is the file".to_string(),
+                by: None,
+                chat: Some("General".to_string()),
+                parent: None,
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: vec![Attachment {
+                    node_id: "node-42".to_string(),
+                    name: "diagram.png".to_string(),
+                    mime: "image/png".to_string(),
+                    size: 2048,
+                    extracted_text: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let app = router(state);
+    let value = query(
+        app,
+        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 10) { items { text attachments { nodeId name mime size } } } } } }"}"#,
+    )
+    .await;
+    let items = value["data"]["company"]["chat"]["history"]["items"]
+        .as_array()
+        .unwrap();
+    let msg = items
+        .iter()
+        .find(|m| m["text"] == "here is the file")
+        .expect("the operator message is in history");
+    let attachments = msg["attachments"].as_array().expect("attachments project");
+    assert_eq!(attachments.len(), 1, "exactly one attachment: {msg}");
+    assert_eq!(attachments[0]["nodeId"], "node-42");
+    assert_eq!(attachments[0]["name"], "diagram.png");
+    assert_eq!(attachments[0]["mime"], "image/png");
+    assert_eq!(attachments[0]["size"], 2048.0);
 }
 
 #[tokio::test]
@@ -791,6 +1211,7 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -861,8 +1282,8 @@ async fn memory_page_reflects_upserts() {
 /// An unpopulated surface resolves to `[]`, never to `null` or an error.
 ///
 /// `workspaceTree` is the exception and states why: since issue #551 a company
-/// is never born with an empty tree — boot scaffolds the reserved `Agents/`
-/// root (and, until issue #645, an empty `Desks/` beside it) — so what it
+/// is never born with an empty tree — boot scaffolds the reserved `agents/`
+/// root (and, until issue #645, an empty `desks/` beside it) — so what it
 /// proves here is that the resolver answers with exactly that and invents
 /// nothing else. A member folder is *not* part of that baseline; this mints one
 /// to pin the authorship projection (#326), which is the only place in the
@@ -893,10 +1314,20 @@ async fn empty_surfaces_resolve_to_empty_lists() {
         .map(|node| node["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["Agents", "maya"]);
+    assert_eq!(
+        names,
+        vec![
+            "agents",
+            "artifacts",
+            "maya",
+            "readme.md",
+            "readme.md",
+            "secrets"
+        ]
+    );
     let root = tree
         .iter()
-        .find(|node| node["name"] == serde_json::json!("Agents"))
+        .find(|node| node["name"] == serde_json::json!("agents"))
         .unwrap();
     assert_eq!(root["createdBy"]["kind"], "seed");
     assert!(root["createdBy"]["agentId"].is_null());
@@ -908,7 +1339,9 @@ async fn empty_surfaces_resolve_to_empty_lists() {
     assert_eq!(folder["createdBy"]["agentId"], "maya");
     assert_eq!(company["inboxes"].as_array().unwrap().len(), 0);
     assert_eq!(company["skills"].as_array().unwrap().len(), 0);
-    assert_eq!(company["workflows"].as_array().unwrap().len(), 0);
+    // The global baseline is listed in every company, so "empty" here means the
+    // company has no graphs of its own.
+    assert_eq!(own_workflows(&company["workflows"]).len(), 0);
 }
 
 #[tokio::test]
@@ -965,6 +1398,7 @@ async fn usage_reflects_recorded_samples() {
                 cost_usd: 0.5,
                 kind: SampleKind::Inference,
                 run_id: None,
+                model: None,
             },
         )
         .await
@@ -1078,6 +1512,8 @@ async fn skills_and_workflows_resolve_from_source_dir() {
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -1089,9 +1525,13 @@ async fn skills_and_workflows_resolve_from_source_dir() {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1153,6 +1593,8 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
     let store = FsCompanyStore::new(home.clone());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -1164,9 +1606,13 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1262,6 +1708,8 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -1280,9 +1728,13 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
             }],
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1307,7 +1759,7 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
     )
     .await;
     let company = &value["data"]["company"];
-    let summaries = company["workflows"].as_array().expect("summaries");
+    let summaries = own_workflows(&company["workflows"]);
     assert_eq!(summaries.len(), 1, "value: {value}");
     assert_eq!(summaries[0]["id"], "hosted");
     // The real name from the overlay body, not the id fallback.
@@ -1359,6 +1811,8 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
     let store = FsCompanyStore::new(home.to_path_buf());
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -1375,9 +1829,13 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
             }],
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -1391,9 +1849,7 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
         r#"{"query":"{ company(id:\"acme\"){ workflows { id name enabled } } }"}"#,
     )
     .await;
-    let summaries = value["data"]["company"]["workflows"]
-        .as_array()
-        .expect("summaries");
+    let summaries = own_workflows(&value["data"]["company"]["workflows"]);
     assert_eq!(summaries.len(), 1, "value: {value}");
     assert_eq!(summaries[0]["id"], "orphan");
     assert_eq!(summaries[0]["name"], "Orphan Flow");
@@ -1425,11 +1881,184 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
         .iter()
         .map(|row| row["id"].as_str().unwrap())
         .collect();
-    let gql_ids: Vec<&str> = summaries
+    // Both sides unfiltered here: the point of this assertion is that the two
+    // surfaces answer with the same id set, baseline graphs included.
+    let gql_ids: Vec<&str> = value["data"]["company"]["workflows"]
+        .as_array()
+        .expect("summaries")
         .iter()
         .map(|row| row["id"].as_str().unwrap())
         .collect();
     assert_eq!(rest_ids, gql_ids, "REST and GraphQL disagree on the id set");
+}
+
+/// A company workflow whose id collides with a global's must win — checked by
+/// its own distinguishing content, not by `own_workflows`' id heuristic, which
+/// would misclassify this exact row as "the baseline's" because the ids match.
+///
+/// This is the case the `own_workflows` doc comment calls out directly: a
+/// company definition of the same id as a global supersedes it (see
+/// `crate::company::list_workflows_with_globals`), so `Company.workflows` must
+/// list exactly one row for that id, carrying the company's own name.
+#[tokio::test]
+async fn graphql_lists_a_company_override_of_a_global_id_by_its_own_content() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    let taken = crate::globals::workflows()[0].id.clone();
+
+    let store = FsCompanyStore::new(home.to_path_buf());
+    store
+        .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: vec![crate::ports::types::OverlayWorkflow {
+                id: taken.clone(),
+                toml: format!(
+                    "id = \"{taken}\"\nname = \"Ours, Not The Baseline's\"\n\
+                     [[node]]\nid = \"n1\"\nkind = \"trigger\"\nname = \"Start\"\n\
+                     [[node]]\nid = \"n2\"\nkind = \"output\"\nname = \"Done\"\n\
+                     [[edge]]\nfrom = \"n1\"\nto = \"n2\"\n"
+                ),
+            }],
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        })
+        .await
+        .unwrap();
+
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    state.registry().insert(id, Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ workflows { id name } } }"}"#,
+    )
+    .await;
+    let summaries = value["data"]["company"]["workflows"].as_array().unwrap();
+    let matching: Vec<&serde_json::Value> = summaries
+        .iter()
+        .filter(|row| row["id"] == taken.as_str())
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the shadowed global must not be listed alongside the override: {value}"
+    );
+    assert_eq!(
+        matching[0]["name"], "Ours, Not The Baseline's",
+        "the company's own definition must win, not the global's: {value}"
+    );
+}
+
+/// A company that opts out of a global workflow via `[globals].disable` must
+/// neither list it in `Company.workflows` nor resolve it through
+/// `Company.workflow(id)` — the same contract `crate::globals::test`'s
+/// `a_disabled_global_workflow_neither_lists_nor_loads` pins at the pure
+/// `list_workflows_with_globals` / `load_workflow_with_globals` layer, checked
+/// here through the actual GraphQL resolvers (`resolve_summaries` /
+/// `resolve_one`) instead of calling those functions directly.
+#[tokio::test]
+async fn graphql_hides_a_company_disabled_global_workflow() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    let dropped = crate::globals::workflows()[0].id.clone();
+    let kept = crate::globals::workflows()[1].id.clone();
+
+    let disabling_manifest: CompanyManifest = toml::from_str(&format!(
+        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\n\
+         [globals]\ndisable = [\"workflow:{dropped}\"]\n"
+    ))
+    .unwrap();
+
+    let store = FsCompanyStore::new(home.to_path_buf());
+    store
+        .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: disabling_manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+        })
+        .await
+        .unwrap();
+
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), disabling_manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    state.registry().insert(id, Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let value = query(
+        router(state),
+        &format!(
+            r#"{{"query":"{{ company(id:\"acme\"){{ workflows {{ id }} dropped: workflow(id:\"{dropped}\"){{ id }} kept: workflow(id:\"{kept}\"){{ id }} }} }}"}}"#
+        ),
+    )
+    .await;
+    let company = &value["data"]["company"];
+    let ids: Vec<&str> = company["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&dropped.as_str()),
+        "the disabled global must not be listed: {value}"
+    );
+    assert!(
+        ids.contains(&kept.as_str()),
+        "an unrelated global must still be listed: {value}"
+    );
+    assert!(
+        company["dropped"].is_null(),
+        "the disabled global must not resolve by id either: {value}"
+    );
+    assert!(
+        !company["kept"].is_null(),
+        "an unrelated global must still resolve by id: {value}"
+    );
 }
 
 /// `Company.workspaceSearch` (issue #607), over the same shared helper the REST
@@ -1448,7 +2077,7 @@ async fn workspace_search_resolves_hits_with_paths_and_totals() {
     let workspace = state.registry().get(&id).unwrap().workspace().clone();
     let folder = crate::ports::workspace::WorkspaceNode {
         id: "f-std".to_string(),
-        name: "Standards".to_string(),
+        name: "standards".to_string(),
         kind: crate::ports::workspace::NodeKind::Folder,
         parent_id: None,
         updated_at_millis: 1_000,
@@ -1457,6 +2086,7 @@ async fn workspace_search_resolves_hits_with_paths_and_totals() {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     workspace.create(&id, &folder, None).await.unwrap();
     let note = crate::ports::workspace::WorkspaceNode {
@@ -1481,7 +2111,7 @@ async fn workspace_search_resolves_hits_with_paths_and_totals() {
     assert_eq!(results["total"], 1, "{value}");
     let hits = results["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["path"], "standards/Support.md");
     assert_eq!(hits[0]["matched"], "content");
     assert_eq!(hits[0]["node"]["id"], "n-support");
     assert_eq!(hits[0]["node"]["kind"], "file");
@@ -1548,6 +2178,7 @@ async fn given_a_binary_node(state: &AppState, name: &str, mime: &str, bytes: &[
         mime: Some(mime.to_string()),
         size: None,
         sha256: None,
+        adopted: false,
     };
     workspace.create_binary(&id, &node, bytes).await.unwrap();
     node.id
@@ -1689,6 +2320,7 @@ async fn a_prose_note_projects_no_binary_metadata() {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     workspace
         .create(&id, &note, Some("# Charter\n\nprose, not bytes.\n"))
@@ -1724,4 +2356,288 @@ async fn a_prose_note_projects_no_binary_metadata() {
     assert!(note["mime"].is_null(), "{note}");
     assert!(note["size"].is_null(), "{note}");
     assert!(note["sha256"].is_null(), "{note}");
+}
+
+// ---------------------------------------------------------------------------
+// Run observability: what a company's agents actually did
+// ---------------------------------------------------------------------------
+
+/// Seeds one workflow-node attempt with a two-step trace and a deep half.
+async fn given_a_workflow_node_attempt(state: &AppState) {
+    use crate::ports::deep_trace::{RunStepDetailRecord, TurnStepDetail};
+    use crate::ports::runs::{NewRun, RunStepRecord};
+    use crate::ports::types::{TurnStep, TurnStepFailure, TurnStepKind, TurnStepStatus};
+
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("runtime");
+    let runs = runtime.runs();
+
+    let row = runs
+        .create_run(
+            &id,
+            NewRun::for_workflow_node("att-1", "wr-1", "solve", "programmer"),
+        )
+        .await
+        .unwrap();
+    runs.begin_run_untriggered(&id, &row.id).await.unwrap();
+
+    for (seq, kind, label) in [
+        (0u32, TurnStepKind::Thinking, "Thinking"),
+        (1, TurnStepKind::ToolCall, "Shell"),
+    ] {
+        runs.append_run_step(
+            &id,
+            &RunStepRecord {
+                run_id: "att-1".to_string(),
+                step_seq: seq,
+                at_millis: 100 + seq as u64,
+                step: TurnStep {
+                    kind,
+                    status: TurnStepStatus::Ok,
+                    label: label.to_string(),
+                    failure: (seq == 1).then_some(TurnStepFailure::BlockedByPolicy),
+                    result: (seq == 1).then(|| "1 line".to_string()),
+                    ..TurnStep::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    runtime
+        .deep_trace()
+        .append_step_detail(
+            &id,
+            &RunStepDetailRecord {
+                run_id: "att-1".to_string(),
+                step_seq: 0,
+                at_millis: 100,
+                detail: TurnStepDetail {
+                    reasoning: Some("Collatz — memoise the chain".to_string()),
+                    ..TurnStepDetail::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The join, in one request: workflow run → attempts → steps → deep detail.
+///
+/// This is the query that had no answer before an `agent` node minted a row —
+/// its turn has neither a card nor a conversation, so nothing could name it.
+#[tokio::test]
+async fn agent_runs_walks_a_workflow_run_to_its_reasoning() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns(workflowRunId:\"wr-1\") { id agentId nodeId workflowRunId status stepCount steps { seq kind label result failure deep { reasoning } } } } }"}"#,
+    )
+    .await;
+
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "one node ran under wr-1: {value}");
+    let run = &runs[0];
+    assert_eq!(run["id"], "att-1");
+    assert_eq!(run["agentId"], "programmer");
+    assert_eq!(run["nodeId"], "solve");
+    assert_eq!(run["workflowRunId"], "wr-1");
+
+    // Live, so the settled count is deliberately null — a client must count the
+    // steps rather than trust a total the settle has not written yet.
+    assert!(
+        run["stepCount"].is_null(),
+        "a running attempt has no settled count"
+    );
+
+    let steps = run["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["kind"], "thinking");
+    assert_eq!(steps[1]["label"], "Shell");
+    assert_eq!(steps[1]["result"], "1 line");
+    assert_eq!(steps[1]["failure"], "blocked_by_policy");
+
+    // The deep half: reasoning the scrubbed step deliberately does not carry.
+    assert_eq!(steps[0]["deep"]["reasoning"], "Collatz — memoise the chain");
+    assert!(
+        steps[1]["deep"].is_null(),
+        "a step with no detail recorded has no deep half"
+    );
+}
+
+/// The deep half is a store read, not a constant: a query that does not select
+/// `steps.deep` must not drag the deep store into the request at all. The
+/// console's Observatory list polls every 4/30 seconds and deliberately selects
+/// no deep bodies, so an eager read would materialize up to `limit` runs ×
+/// hundreds of detail rows per poll for data nothing renders — the lookahead
+/// keeps that read off the hot path.
+#[tokio::test]
+async fn a_list_query_without_deep_does_not_read_the_deep_store() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::ports::deep_trace::{DeepTraceStore, RunStepDetailRecord};
+    use crate::store::fs_ops::FsOps;
+
+    #[derive(Clone)]
+    struct CountingDeepTrace {
+        inner: Arc<FsOps>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl DeepTraceStore for CountingDeepTrace {
+        async fn append_step_detail(
+            &self,
+            company: &CompanyId,
+            record: &RunStepDetailRecord,
+        ) -> crate::error::Result<()> {
+            self.inner.append_step_detail(company, record).await
+        }
+
+        async fn list_step_details(
+            &self,
+            company: &CompanyId,
+            run_id: &str,
+        ) -> crate::error::Result<Vec<RunStepDetailRecord>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.list_step_details(company, run_id).await
+        }
+
+        async fn list_step_details_for_runs(
+            &self,
+            company: &CompanyId,
+            run_ids: &[String],
+        ) -> crate::error::Result<std::collections::HashMap<String, Vec<RunStepDetailRecord>>>
+        {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .list_step_details_for_runs(company, run_ids)
+                .await
+        }
+
+        async fn purge_deep_trace(
+            &self,
+            company: &CompanyId,
+            run_id: Option<&str>,
+        ) -> crate::error::Result<u64> {
+            self.inner.purge_deep_trace(company, run_id).await
+        }
+    }
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let deep = Arc::new(CountingDeepTrace {
+        inner: Arc::new(FsOps::new(home.clone())),
+        reads: reads.clone(),
+    });
+    let state = state_with_builder(&home, manifest(), |b| b.with_deep_trace(deep)).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    // The list read selects no deep bodies…
+    let value = query(
+        router(state.clone()),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns { id steps { seq kind label result } } } }"}"#,
+    )
+    .await;
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "the attempt still lists: {value}");
+    assert_eq!(runs[0]["steps"][0]["kind"], "thinking");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "a deep-less list must not read the deep store"
+    );
+
+    // …and the single-run deep read still works when it is selected.
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRun(id:\"att-1\") { steps { seq deep { reasoning } } } } }"}"#,
+    )
+    .await;
+    let steps = value["data"]["company"]["agentRun"]["steps"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRun missing: {value}"));
+    assert_eq!(steps[0]["deep"]["reasoning"], "Collatz — memoise the chain");
+    assert!(
+        reads.load(Ordering::SeqCst) >= 1,
+        "selecting deep must read the store"
+    );
+}
+
+/// The unredacted half is role-gated: a member sees the scrubbed trace and no
+/// `deep`, exactly as approval contents are gated (issue #618). Without this,
+/// any signed-in member could read raw tool arguments and output — which may
+/// carry credentials and file contents — through the Observatory.
+#[tokio::test]
+async fn a_member_gets_the_trace_but_not_the_deep_half() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/graphql")
+                .header("content-type", "application/json")
+                .header(
+                    "cookie",
+                    crate::server::test_support::member_cookie("acme"),
+                )
+                .body(Body::from(
+                    r#"{"query":"{ company(id:\"acme\") { agentRuns { id steps { seq kind deep { reasoning } } } } }"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let runs = value["data"]["company"]["agentRuns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("agentRuns missing: {value}"));
+    assert_eq!(runs.len(), 1, "a member still lists the attempt: {value}");
+    let steps = runs[0]["steps"].as_array().unwrap();
+    // The scrubbed skeleton is the member's answer…
+    assert_eq!(steps[0]["kind"], "thinking");
+    // …and the unredacted half is withheld.
+    assert!(
+        steps.iter().all(|s| s["deep"].is_null()),
+        "a member must not receive deep bodies: {value}"
+    );
+}
+
+/// An unrelated workflow run selects nothing rather than everything — the
+/// failure mode of a filter that is silently dropped.
+#[tokio::test]
+async fn agent_runs_filters_by_workflow_run() {
+    let home = tempfile::tempdir().unwrap().keep();
+    let state = state_with_company(&home).await;
+    given_a_workflow_node_attempt(&state).await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\") { agentRuns(workflowRunId:\"other\") { id } } }"}"#,
+    )
+    .await;
+    assert_eq!(
+        value["data"]["company"]["agentRuns"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "{value}"
+    );
 }

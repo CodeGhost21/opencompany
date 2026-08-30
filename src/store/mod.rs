@@ -30,10 +30,14 @@ pub mod paths;
 
 /// Config-driven backend selection: maps `OPENCOMPANY_STORAGE` (fs | sqlite |
 /// mongodb) onto opened port implementations, injected once per process into
-/// every company's `RuntimeBuilder`. `OPENCOMPANY_MEMORY` (store | tinycortex)
-/// selects an optional overlay that swaps just the memory + context ports onto
-/// a dedicated engine on top of that base.
+/// every company's `RuntimeBuilder`. `OPENCOMPANY_MEMORY` can select a hosted
+/// provider overlay for the memory, context, and facts ports.
 pub mod select;
+
+/// Char-boundary-safe slicing shared by the context backends' ranged `peek`
+/// and search-snippet windows, so a byte offset landing mid-codepoint widens
+/// to the boundary instead of panicking the slice.
+pub(crate) mod text;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
@@ -46,23 +50,16 @@ pub mod sqlite;
 #[cfg(feature = "mongodb")]
 pub mod mongodb;
 
-/// TinyCortex-backed memory and context ports over a mockable client. The
-/// company-scoped [`CortexClient`](tinycortex::CortexClient) seam plus the
-/// offline [`InMemoryCortex`](tinycortex::InMemoryCortex) test/fallback backend;
-/// the real persistent engine lives in [`tinycortex_engine`]. Only links under
-/// `tinycortex`.
-#[cfg(feature = "tinycortex")]
-pub mod tinycortex;
-
-/// The in-pod, persistent TinyCortex memory engine
-/// ([`EngineCortex`](tinycortex_engine::EngineCortex)): a real engine-backed
-/// [`CortexClient`](tinycortex::CortexClient) over the vendored `tinycortex`
-/// crate, keeping each company's traces, task results, and context chunks in a
-/// durable per-company SQLite workspace. Ships in degraded lexical/recency recall
-/// mode (no embedding compute — that lands in 188c2). Only links under
-/// `tinycortex`.
-#[cfg(feature = "tinycortex")]
-pub mod tinycortex_engine;
+/// The TinyMemory `MemoryProvider` seam (issue #914): one engine-neutral driver
+/// contract behind the three memory ports, with the provider chosen by
+/// configuration — a hosted service behind a URL and a credential, or nothing.
+/// [`memory::BoundMemory`] is the only public way to
+/// get a port out of a provider, and it derives the namespace from the
+/// `CompanyId`, which is what keeps the tenant-isolation invariant the ports'
+/// `&CompanyId` argument gives us and the contract's bare `namespace: &str` does
+/// not. Only links under `tinymemory`.
+#[cfg(feature = "tinymemory")]
+pub mod memory;
 
 /// A backend-agnostic port-conformance suite: async assertions parameterized
 /// over any [`CompanyStore`](crate::ports::CompanyStore) /
@@ -88,8 +85,9 @@ pub use layout::DataLayout;
 pub use migrate::migrate_legacy_nest_announced;
 pub use paths::{Bundle, DATA_DIR_ENV, home_divergence_warning, resolve_home};
 pub use select::{
-    MemoryBackend, MemoryOverlay, StorageHandles, StorageKind, StorageSettings,
-    open_memory_overlay, open_storage, plaintext_secret_refusal,
+    MemoryBackend, MemoryOverlay, MemoryScopes, MemorySelection, StorageHandles, StorageKind,
+    StorageSettings, open_memory_overlay, open_storage, plaintext_secret_refusal,
+    refuse_bundle_env,
 };
 
 #[cfg(feature = "sqlite")]
@@ -97,12 +95,6 @@ pub use sqlite::SqliteStore;
 
 #[cfg(feature = "mongodb")]
 pub use mongodb::MongoStore;
-
-#[cfg(feature = "tinycortex")]
-pub use tinycortex::{CortexClient, CortexContextStore, CortexMemoryStore, InMemoryCortex};
-
-#[cfg(feature = "tinycortex")]
-pub use tinycortex_engine::EngineCortex;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 

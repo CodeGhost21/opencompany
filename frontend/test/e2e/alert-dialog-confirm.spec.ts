@@ -23,11 +23,17 @@ import { expect, test, type Page, type Route } from "@playwright/test";
  * actionability checks on: an intercepting backdrop fails that click rather than
  * passing silently.
  *
- * Two of the three call sites on `main` are exercised, because the fix lives in
- * the shared primitive (`components/ui/alert-dialog.tsx`) and not at any one
- * call site: the task delete inside `TaskEditDialog`, and the lifecycle
- * `ConfirmAction` in `SettingsView` (the same shape as `TaskDetailView`'s
- * `ConfirmButton`, whose own confirm needs a live in-flight run to reach).
+ * The call site exercised is the task delete inside `TaskEditDialog`. It used to
+ * be joined by `SettingsView`'s lifecycle `ConfirmAction`, on the argument that
+ * the fix lives in the shared primitive (`components/ui/alert-dialog.tsx`) and
+ * not at any one caller — but that confirm guarded `Suspend`, and issue #1401
+ * removed it from a console signed in as a person: `suspend` is a
+ * `PlatformScope` route, so the dialog took a confirmation and then answered
+ * `401`. A spec cannot drive a button that is correctly no longer there, and
+ * `lifecycle-platform-scope.spec.ts` now covers why it is gone. The remaining
+ * confirms all need state this spec would have to build first — a live
+ * in-flight run (`TaskDetailView`), a declared list (`ManageListsView`) — so the
+ * primitive is proven once here rather than badly twice.
  *
  * Like the rest of `test/e2e`, this drives a *running* host and is not wired
  * into CI — the Playwright config declares no `webServer`. It is a reproduction
@@ -90,7 +96,7 @@ async function holdNextRequest(
 test("confirming a task delete dismisses the dialog before the request lands", async ({
   page,
 }) => {
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
 
   // Create a card of our own so the test never deletes somebody else's row.
   const title = `e2e confirm-closes ${Date.now()}`;
@@ -98,11 +104,18 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   await page.locator("#new-prompt").fill(title);
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  const card = page.locator('[role="button"]').filter({ hasText: title });
+  // `draggable` identifies a card whichever board is rendering it: the shared
+  // `LedgerBoard` puts the attribute on the wrapper it drags, so this holds for
+  // the task board and for a declared ledger's columns alike.
+  const card = page.locator("[draggable=true]").filter({ hasText: title });
   await expect(card).toBeVisible({ timeout: 30_000 });
 
   // Open the card's detail screen, then its edit dialog, then ask to delete.
-  await card.click();
+  // The open action lives on the title button, not the whole card (issue #1391):
+  // the wrapper is a drag surface, and the centre of a freshly created card
+  // happens to sit on the title today but would drift below it as soon as the
+  // card grew a note or an assignee.
+  await card.getByTestId("task-card-open").click();
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   await page.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(dialog(page)).toContainText("Delete");
@@ -128,41 +141,9 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   // Let the delete through and confirm the handler really did run: closing the
   // dialog must not have cost us the action.
   release("continue");
-  await page.goto("/#/tasks");
-  await expect(page.locator('[role="button"]').filter({ hasText: title })).toHaveCount(
+  await page.goto("/#/ledgers/tasks");
+  await expect(page.locator("[draggable=true]").filter({ hasText: title })).toHaveCount(
     0,
     { timeout: 30_000 },
   );
-});
-
-test("confirming a lifecycle change dismisses the dialog from a second call site", async ({
-  page,
-}) => {
-  await page.goto("/#/settings");
-
-  const suspend = page.getByRole("button", { name: "Suspend", exact: true });
-  await expect(suspend).toBeVisible({ timeout: 30_000 });
-  await suspend.click();
-
-  // `SettingsView`'s shared `ConfirmAction` — same primitive, different caller.
-  await expect(dialog(page)).toContainText("Suspend this company?");
-
-  // Suspending for real ends the session, so the request is held and then
-  // failed: the console reports "couldn't suspend", the harness company stays
-  // running for the specs after this one, and the dialog's behaviour on confirm
-  // — the only thing under test — is unaffected either way.
-  const release = await holdNextRequest(page, /\/companies\/[^/]+\/suspend$/, "POST");
-
-  await dialog(page).getByRole("button", { name: "Suspend", exact: true }).click();
-
-  await expectDismissed(page);
-  await expectConsoleInteractive(page);
-
-  // Fail the held request, then confirm the company is still running — the
-  // specs after this one drive a live company.
-  release("abort");
-  await page.goto("/#/settings");
-  await expect(page.getByRole("button", { name: "Suspend", exact: true })).toBeVisible({
-    timeout: 30_000,
-  });
 });

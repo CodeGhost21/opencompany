@@ -1,0 +1,110 @@
+# What actually shipped, and when.
+#
+# Not the board. A card says somebody did some work; a release says the product
+# changed underneath every customer at a particular moment — which is the only
+# fact that lets an incident be correlated with a cause, a support answer be
+# accurate about what a customer has, and a changelog be written from something
+# other than memory.
+
+title = "Releases"
+purpose = """
+Every version put in front of customers: what went out, when, who approved it, \
+and what had to be rolled back. Read it before diagnosing anything that started \
+recently, and before telling a customer what they are running.\
+"""
+written_by = "`record_entry` to cut or update a release, `close_entry` when it is fully rolled out or rolled back"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+description = "The version, as customers would see it — `2026.08.3`, not `sprint-14`."
+
+[[field]]
+name = "release"
+role = "title"
+required = true
+description = "What this release is, in one line a customer would understand."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "owner"
+role = "owner"
+description = "Who cut it and is watching it."
+
+[[field]]
+name = "shipped_on"
+role = "date"
+
+[[field]]
+name = "contents"
+role = "prose"
+description = "What changed, grouped as customers experience it rather than as commits."
+
+[[field]]
+name = "risk"
+role = "prose"
+description = "What could go wrong with this specific release, and what is being watched to catch it."
+
+[[field]]
+name = "rollback"
+role = "prose"
+description = "How to undo it, written before it goes out. A release with no rollback plan is not ready."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — fully rolled out, or pulled and why. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "Tasks, tags, and the incident row if one followed."
+
+[[status]]
+name = "planned"
+
+[[status]]
+name = "staged"
+label = "In staging"
+
+[[status]]
+name = "rolling_out"
+label = "Rolling out"
+
+[[status]]
+name = "released"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "rolled_back"
+label = "Rolled back"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "In flight"
+blurb = "Staged or rolling out. Watch these before starting anything new."
+statuses = ["staged", "rolling_out"]
+order = "recent"
+
+[[section]]
+heading = "Planned"
+blurb = "Agreed, not cut."
+statuses = ["planned"]
+order = "recent"
+
+[[section]]
+heading = "Shipped"
+blurb = """
+Out, or pulled — each with the reason. This is the timeline an incident is \
+correlated against, so the dates matter more than the prose.\
+"""
+statuses = ["released", "rolled_back"]
+cap = 20

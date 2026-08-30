@@ -92,25 +92,71 @@ struct Settled {
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
 }
 
-impl From<Result<&WorkflowRun, &str>> for Settled {
-    /// # Why four of the six ride the `Ok` arm only
+/// A run that ended in an error, as [`record_run_finished`] takes it (issue
+/// #1008).
+///
+/// # Why this is not just a `&str`
+///
+/// It was, and that was the bug. A failed run's journal row listed no
+/// deliveries, no board rows, no blocked nodes and no approvals — not because
+/// the run had none, but because the *error arm had nowhere to read them from*.
+/// A run that mailed two owner summaries and then broke at a later node showed
+/// zero delivery rows, which reads as "it sent nothing" and is the opposite of
+/// true; a run that opened a card and then failed left the card on the board
+/// with no run admitting to it.
+///
+/// `partial` is what the run had done by the time it broke, threaded up from
+/// the runner on
+/// [`OpenCompanyError::WorkflowRunFailed`](crate::OpenCompanyError::WorkflowRunFailed).
+/// `None` is still correct and still common: the boot sweep's synthetic finish
+/// describes a run this process never saw, and a run refused before the engine
+/// started has genuinely done nothing.
+///
+/// The `From<&str>` conversion keeps every call site that has only a message
+/// reading as it did.
+pub struct FailedRun<'a> {
+    /// The failure, as the journal's `error` string.
+    pub error: &'a str,
+    /// What the run had already done, when the caller can say.
+    pub partial: Option<&'a WorkflowRun>,
+}
+
+impl<'a> From<&'a str> for FailedRun<'a> {
+    /// A failure with nothing known about what the run had done.
+    fn from(error: &'a str) -> Self {
+        Self {
+            error,
+            partial: None,
+        }
+    }
+}
+
+impl From<Result<&WorkflowRun, FailedRun<'_>>> for Settled {
+    /// # Which fields ride which arm
     ///
-    /// Issue #383: `cancelled` does, and that is not an oversight. A run the
-    /// runner never returned from cannot have been *stopped by an operator* — the
-    /// stop signal resolves into an `Ok(cancelled)`, never into an `Err` — so the
-    /// error arm is unambiguously a failure or the boot sweep's synthetic one.
+    /// Issue #383: `cancelled` rides the `Ok` arm only, and that is not an
+    /// oversight. A run the runner never returned from cannot have been *stopped
+    /// by an operator* — the stop signal resolves into an `Ok(cancelled)`, never
+    /// into an `Err` — so the error arm is unambiguously a failure or the boot
+    /// sweep's synthetic one.
     ///
-    /// Issue #638: `notices` does, for the same reason — a run that never
-    /// returned produced none, and an `Err` is already fully described by
-    /// `error`.
+    /// # The other five ride both arms now (issue #1008)
     ///
-    /// Issue #661 (M5): `board` does too, and here the limitation is worth
-    /// stating rather than inheriting. A card is durable the moment the drain
-    /// writes it, so a run that opened two cards and then failed at a later node
-    /// leaves **both cards on the board** — but returns no `WorkflowRun`, so this
-    /// event lists neither. The work survives; the listing does not, and the board
-    /// itself is the record in that case. Same trade `notices` already makes.
-    fn from(outcome: Result<&WorkflowRun, &str>) -> Self {
+    /// `deliveries`, `notices`, `board`, `blocked_nodes` and `approvals` used to
+    /// be hard-coded empty on the `Err` arm, on the argument that a failure
+    /// "returns no `WorkflowRun` to read rows off". That was true of the
+    /// signature, not of the world: every one of those rows records something
+    /// the run **already did** — a report that was mailed, a card that is on the
+    /// board, an approval sitting on the operator's Approvals page — and all of
+    /// them are durable by the time the run breaks. Zeroing them made the
+    /// journal disagree with what the operator could see in front of them.
+    ///
+    /// So the failure arm now carries a [`FailedRun::partial`] when the caller
+    /// has one, and reads exactly the same fields off it that the `Ok` arm
+    /// reads. `pending_approvals` is the one deliberate exception: it describes
+    /// what the run is *still waiting on*, and a run that failed is waiting on
+    /// nothing.
+    fn from(outcome: Result<&WorkflowRun, FailedRun<'_>>) -> Self {
         match outcome {
             Ok(run) => Self {
                 deliveries: run.deliveries.clone(),
@@ -122,36 +168,42 @@ impl From<Result<&WorkflowRun, &str>> for Settled {
                 blocked_nodes: run.blocked_nodes.clone(),
                 approvals: run.approvals.clone(),
             },
-            Err(err) => Self {
-                deliveries: Vec::new(),
-                pending_approvals: Vec::new(),
-                error: Some(err.to_string()),
-                cancelled: false,
-                notices: Vec::new(),
-                board: Vec::new(),
-                // Issues #881 / #880: the `Ok` arm only, same trade as `board`
-                // above and worth naming for the same reason. A run whose node
-                // blocked settles `Ok` by design — a blocked node is not a
-                // failed one — so this arm is genuinely a failure, and a
-                // failure returns no `WorkflowRun` to read rows off. Any
-                // approval such a run parked is still on the operator's
-                // Approvals page; what is lost is this event's *listing* of
-                // it, not the card.
-                blocked_nodes: Vec::new(),
-                approvals: Vec::new(),
-            },
+            Err(failed) => {
+                let partial = failed.partial;
+                Self {
+                    deliveries: partial.map(|p| p.deliveries.clone()).unwrap_or_default(),
+                    // The exception, and it is a claim: a failed run is not
+                    // waiting on anybody. Any gate it parked before it broke is
+                    // still decidable from the Approvals page — `approvals`
+                    // below is the receipt for that — but listing it here would
+                    // say this run intends to continue, which it does not.
+                    pending_approvals: Vec::new(),
+                    error: Some(failed.error.to_string()),
+                    cancelled: false,
+                    notices: partial.map(|p| p.notices.clone()).unwrap_or_default(),
+                    board: partial.map(|p| p.board.clone()).unwrap_or_default(),
+                    blocked_nodes: partial.map(|p| p.blocked_nodes.clone()).unwrap_or_default(),
+                    approvals: partial.map(|p| p.approvals.clone()).unwrap_or_default(),
+                }
+            }
         }
     }
 }
 
+/// Returns whether the finish was durably appended. `false` means the append
+/// failed and was swallowed (the run itself is unaffected, exactly as before) —
+/// so a caller that knows the run is otherwise about to disappear from the live
+/// set can escalate the lost record from this helper's `warn` to an `error`
+/// naming the run. Issue #1009 added the return; callers that do not care about
+/// the outcome (the boot sweep, the read-side cross-check) simply ignore it.
 pub async fn record_run_finished(
     events: &Arc<dyn EventLog>,
     company: &CompanyId,
     workflow_id: &str,
     scheduled: bool,
     run_id: &str,
-    outcome: Result<&WorkflowRun, &str>,
-) {
+    outcome: Result<&WorkflowRun, FailedRun<'_>>,
+) -> bool {
     // Which fields ride which arm, and why, is documented on `Settled::from`.
     let settled = Settled::from(outcome);
 
@@ -174,7 +226,9 @@ pub async fn record_run_finished(
 
     if let Err(err) = events.append(company, event).await {
         // Swallowed on purpose: the run already happened and its work is valid.
-        // Losing the record is worth a loud line, never a failed run.
+        // Losing the record is worth a loud line, never a failed run. The caller
+        // learns of the loss through the `false` return (issue #1009) and may
+        // escalate it — this helper stays best-effort and never fails the run.
         tracing::warn!(
             %company,
             workflow = %workflow_id,
@@ -182,7 +236,9 @@ pub async fn record_run_finished(
             %err,
             "workflow run outcome could not be journaled; the run itself was unaffected"
         );
+        return false;
     }
+    true
 }
 
 /// Terminates workflow runs a previous host process left open (issue #371).
@@ -244,6 +300,9 @@ pub async fn sweep_interrupted_runs(events: &Arc<dyn EventLog>, company: &Compan
                 workflow_id,
                 run_id,
                 scheduled,
+                // This fold groups a run's nodes with its outcome; who started
+                // it (issue #1862 prerequisite) is not part of that grouping.
+                started_by: _,
             } => {
                 open.insert(run_id, (workflow_id, scheduled));
             }
@@ -284,7 +343,7 @@ pub async fn sweep_interrupted_runs(events: &Arc<dyn EventLog>, company: &Compan
             &workflow_id,
             scheduled,
             &run_id,
-            Err(INTERRUPTED_BY_RESTART),
+            Err(INTERRUPTED_BY_RESTART.into()),
         )
         .await;
     }
@@ -468,16 +527,30 @@ mod test {
     }
 
     /// The other direction, and the one that keeps the field honest: a run with
-    /// nothing to say carries an empty list, and a *failed* run carries none at
-    /// all rather than inheriting whatever the Ok arm would have had.
+    /// nothing to say carries an empty list, and a failure the caller knows
+    /// nothing else about carries none either — rather than inheriting whatever
+    /// the Ok arm would have had.
+    ///
+    /// Since issue #1008 that second clause is conditional on the *caller*: a
+    /// failure that arrives with a partial run does carry its notices, which
+    /// `a_run_that_delivered_and_then_failed_keeps_its_rows` pins. This one pins
+    /// the arm where there is genuinely nothing to read.
     #[tokio::test]
-    async fn an_ordinary_run_and_a_failed_run_carry_no_notices() {
+    async fn an_ordinary_run_and_a_failure_with_nothing_known_carry_no_notices() {
         let (_dir, events) = log();
         let company = CompanyId::new("acme");
 
         let ok = run_with(Vec::new(), Vec::new());
         record_run_finished(&events, &company, "wf", false, "run-ok", Ok(&ok)).await;
-        record_run_finished(&events, &company, "wf", false, "run-bad", Err("boom")).await;
+        record_run_finished(
+            &events,
+            &company,
+            "wf",
+            false,
+            "run-bad",
+            Err("boom".into()),
+        )
+        .await;
 
         for event in journaled(&events, &company).await {
             let CompanyEvent::WorkflowRunFinished { notices, .. } = event else {
@@ -485,6 +558,136 @@ mod test {
             };
             assert!(notices.is_empty(), "nothing to say means an empty list");
         }
+    }
+
+    /// Issue #1008's second half: a run that **delivered two reports and then
+    /// failed** still lists those deliveries.
+    ///
+    /// This is the arm that was hard-coded empty. The reports were already in
+    /// the recipients' inboxes by the time the later node broke, so journaling
+    /// zero delivery rows did not describe a run that sent nothing — it
+    /// described a run whose record disagreed with the world. The same holds for
+    /// the board card it opened, the approval it parked and the notice it
+    /// raised, so all four ride the failure arm together.
+    #[tokio::test]
+    async fn a_run_that_delivered_and_then_failed_keeps_its_rows() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+
+        let partial = WorkflowRun {
+            notices: vec!["a call was refused".to_string()],
+            board: vec![crate::ports::WorkflowRunBoardRow {
+                action: crate::ports::WorkflowBoardAction::Spawned,
+                task_id: Some("task-7".to_string()),
+                title: Some("Draft the summary".to_string()),
+                assignee: None,
+            }],
+            approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                node_id: Some("work".to_string()),
+                tool: Some("shell".to_string()),
+                outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                approval_id: Some("appr-1".to_string()),
+            }],
+            ..run_with(
+                vec![
+                    report("owner-summary", DeliveryStatus::Sent),
+                    report("board-summary", DeliveryStatus::Sent),
+                ],
+                Vec::new(),
+            )
+        };
+
+        record_run_finished(
+            &events,
+            &company,
+            "digest",
+            false,
+            "run-bad",
+            Err(FailedRun {
+                error: "the third node died",
+                partial: Some(&partial),
+            }),
+        )
+        .await;
+
+        let CompanyEvent::WorkflowRunFinished {
+            deliveries,
+            error,
+            board,
+            approvals,
+            notices,
+            pending_approvals,
+            ..
+        } = journaled(&events, &company)
+            .await
+            .into_iter()
+            .find(|e| matches!(e, CompanyEvent::WorkflowRunFinished { .. }))
+            .expect("the failure was journaled")
+        else {
+            unreachable!("matched above")
+        };
+
+        assert_eq!(
+            deliveries.len(),
+            2,
+            "two reports were sent before the run broke; zeroing them tells the operator \
+             nothing went out: {deliveries:?}"
+        );
+        assert_eq!(
+            error.as_deref(),
+            Some("the third node died"),
+            "carrying the rows must not stop this reading as a failure"
+        );
+        assert_eq!(board.len(), 1, "the card is on the board: {board:?}");
+        assert_eq!(
+            approvals.len(),
+            1,
+            "the card is on the Approvals page: {approvals:?}"
+        );
+        assert_eq!(notices, vec!["a call was refused".to_string()]);
+        assert!(
+            pending_approvals.is_empty(),
+            "the one deliberate exception: a failed run is not waiting on anybody, however \
+             many gates it parked on the way down"
+        );
+    }
+
+    /// The other half of the same claim: a failure with **nothing known** about
+    /// what the run did still journals honestly empty rows rather than inventing
+    /// any. The boot sweep's synthetic finish is exactly this shape.
+    #[tokio::test]
+    async fn a_failure_with_no_partial_run_journals_empty_rows() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+
+        record_run_finished(
+            &events,
+            &company,
+            "digest",
+            false,
+            "run-bad",
+            Err("boom".into()),
+        )
+        .await;
+
+        let CompanyEvent::WorkflowRunFinished {
+            deliveries,
+            board,
+            approvals,
+            blocked_nodes,
+            ..
+        } = journaled(&events, &company)
+            .await
+            .into_iter()
+            .find(|e| matches!(e, CompanyEvent::WorkflowRunFinished { .. }))
+            .expect("the failure was journaled")
+        else {
+            unreachable!("matched above")
+        };
+        assert!(deliveries.is_empty());
+        assert!(board.is_empty());
+        assert!(approvals.is_empty());
+        assert!(blocked_nodes.is_empty());
     }
 
     fn report(node: &str, status: DeliveryStatus) -> DeliveryReport {
@@ -561,7 +764,7 @@ mod test {
             "digest",
             true,
             "run-1",
-            Err("agent node `worker` had no inference source"),
+            Err("agent node `worker` had no inference source".into()),
         )
         .await;
 
@@ -670,7 +873,7 @@ mod test {
             "digest",
             false,
             "run-bad",
-            Err("it broke"),
+            Err("it broke".into()),
         )
         .await;
         start(&events, &company, "run-dead", false).await;
@@ -705,6 +908,7 @@ mod test {
                     workflow_id: "digest".to_string(),
                     run_id: run_id.to_string(),
                     scheduled,
+                    started_by: None,
                 },
             )
             .await
@@ -731,6 +935,8 @@ mod test {
                     node_id: "ceo".to_string(),
                     status: crate::ports::types::WorkflowNodeStatus::Ok,
                     elapsed_ms: 12,
+                    diagnostics: Vec::new(),
+                    agent_run_id: None,
                 },
             )
             .await
@@ -951,7 +1157,15 @@ mod test {
             "owner",
         )
         .await;
-        record_run_finished(&events, &company, "digest", true, "run-1", Err("it broke")).await;
+        record_run_finished(
+            &events,
+            &company,
+            "digest",
+            true,
+            "run-1",
+            Err("it broke".into()),
+        )
+        .await;
 
         assert_eq!(
             stranded(&events, &company, "digest").await,
@@ -1024,12 +1238,28 @@ mod test {
         let company = CompanyId::new("acme");
         start(&events, &company, "run-1", true).await;
         deliver(&events, &company, "digest", "run-1", "a", "owner").await;
-        record_run_finished(&events, &company, "digest", true, "run-1", Err("crash 1")).await;
+        record_run_finished(
+            &events,
+            &company,
+            "digest",
+            true,
+            "run-1",
+            Err("crash 1".into()),
+        )
+        .await;
 
         start(&events, &company, "run-2", true).await;
         // run 2 skipped A (its own already_delivered saw it) and sent B.
         deliver(&events, &company, "digest", "run-2", "b", "owner").await;
-        record_run_finished(&events, &company, "digest", true, "run-2", Err("crash 2")).await;
+        record_run_finished(
+            &events,
+            &company,
+            "digest",
+            true,
+            "run-2",
+            Err("crash 2".into()),
+        )
+        .await;
 
         assert_eq!(
             stranded(&events, &company, "digest").await,
@@ -1117,6 +1347,8 @@ mod test {
                     node_id: "ceo".to_string(),
                     status: crate::ports::types::WorkflowNodeStatus::Ok,
                     elapsed_ms: 3,
+                    diagnostics: Vec::new(),
+                    agent_run_id: None,
                 },
             )
             .await
@@ -1144,5 +1376,59 @@ mod test {
         let (_home, events) = log();
         let company = CompanyId::new("acme");
         assert!(stranded(&events, &company, "digest").await.is_empty());
+    }
+
+    /// An [`EventLog`] whose `append` always fails — the store went away
+    /// mid-run. Issue #1009 uses it to prove the swallowed-append path reports
+    /// its loss instead of only warning.
+    struct FailingAppendLog;
+
+    #[async_trait::async_trait]
+    impl EventLog for FailingAppendLog {
+        async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
+            Err(crate::error::OpenCompanyError::Store(
+                "append failed (test double)".to_string(),
+            ))
+        }
+
+        async fn read_from(
+            &self,
+            _id: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+            Ok(Vec::new())
+        }
+
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    /// Issue #1009 (path B): a finish whose append is swallowed reports
+    /// `journaled == false` rather than the silent `()` it used to. The run is
+    /// otherwise unaffected — `record_run_finished` must not panic and must not
+    /// propagate the append error — and a working log reports `true`, so the
+    /// signal the caller escalates on is real both ways.
+    #[tokio::test]
+    async fn a_swallowed_append_reports_it_was_not_journaled() {
+        let company = CompanyId::new("acme");
+        let run = run_with(Vec::new(), Vec::new());
+
+        let failing: Arc<dyn EventLog> = Arc::new(FailingAppendLog);
+        let journaled =
+            record_run_finished(&failing, &company, "digest", false, "run-1", Ok(&run)).await;
+        assert!(
+            !journaled,
+            "a swallowed append reports the finish did not land"
+        );
+
+        let (_home, working) = log();
+        let journaled =
+            record_run_finished(&working, &company, "digest", false, "run-1", Ok(&run)).await;
+        assert!(journaled, "a working log reports the finish landed");
     }
 }

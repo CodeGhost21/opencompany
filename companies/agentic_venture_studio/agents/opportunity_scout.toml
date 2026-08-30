@@ -6,3 +6,14 @@ description = "Surface and score market opportunities and startup theses."
 # teammate came first. Stating the tier keeps the same agent orchestrating
 # instead of handing the job to whoever sorts first alphabetically.
 tier = "orchestrator"
+
+# The role's working rules, checked in beside this file and read at manifest
+# load. The `.toml` carries the wiring; `prompts/` carries how the role works.
+# A missing path here is a manifest error rather than a skipped entry — a role
+# whose prompt was written around a briefing it never received fails silently.
+prompt_files = ["prompts/opportunity_scout.md"]
+
+# The company belt minus `chargebee`. Stated explicitly rather than left empty
+# because an omitted `tools` line inherits the WHOLE company grant, billing
+# included — omission is how capability arrives here, not how it is withheld.
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*"]

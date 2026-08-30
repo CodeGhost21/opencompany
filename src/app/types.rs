@@ -12,7 +12,7 @@ use crate::ports::types::{CompanyId, SecretValue};
 use crate::runtime::CompanyRegistry;
 use crate::server::platform_auth::PlatformAuthConfig;
 use crate::server::webhook::WebhookConfig;
-use crate::{VERSION, tiny::RuntimeModuleStatus};
+use crate::{BUILD_COMMIT, VERSION, tiny::RuntimeModuleStatus};
 
 /// Runtime configuration for OpenCompany.
 ///
@@ -75,6 +75,9 @@ pub struct AppConfig {
     /// each company's builder so the store-level quota decorator is configured
     /// from one place rather than re-read per company.
     pub workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Whether each agent's private filesystem workspace is Git-backed and
+    /// automatically checkpointed after tool calls.
+    pub workspace_git_enabled: bool,
     /// Tenant namespace for shared-single-DB deployments
     /// (`OPENCOMPANY_TENANT_ID`). When set, provisioned/booted company ids are
     /// prefixed with `<tenant>--` via [`Self::namespaced_company_id`] so many
@@ -133,6 +136,7 @@ impl Default for AppConfig {
             max_companies: None,
             max_companies_per_tenant: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            workspace_git_enabled: false,
             webhook: None,
             tenant_namespace: None,
             admin_email: None,
@@ -154,6 +158,26 @@ pub fn namespace_company_id(tenant: &str, id: CompanyId) -> CompanyId {
         id
     } else {
         CompanyId::new(format!("{prefix}{}", id.as_ref()))
+    }
+}
+
+/// A tenant namespace must not contain the `--` id delimiter.
+///
+/// [`namespace_company_id`] and `app::orphans::filter_to_tenant` both encode a
+/// tenant as the `<tenant>--` prefix, so a namespace containing `--` makes the
+/// encoding ambiguous: `acme` namespacing `other--company` collides with
+/// `acme--other` namespacing `company`, and the shorter tenant's filter then
+/// claims the longer tenant's ids. Reject the delimiter at the boundary that
+/// reads `OPENCOMPANY_TENANT_ID` so a malformed namespace fails loudly instead
+/// of silently misattributing another tenant's companies.
+pub fn validate_tenant_namespace(tenant: &str) -> Result<(), String> {
+    if tenant.contains("--") {
+        Err(format!(
+            "tenant namespace `{tenant}` contains `--`, which is the company-id \
+             delimiter; a namespace may not contain it"
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -385,9 +409,16 @@ pub struct AppState {
     stores: Option<crate::store::StorageHandles>,
     /// The memory engine overlay selected by `OPENCOMPANY_MEMORY`, when it is
     /// not the base store's own memory. Provisioning and boot apply it after
-    /// `stores` so a dedicated engine (TinyCortex) backs recall on top of any
+    /// `stores` so a dedicated provider can back recall on top of any
     /// base backend. `None` means the base backend's memory is used unchanged.
-    memory_overlay: Option<crate::store::MemoryOverlay>,
+    ///
+    /// Behind a lock because the engine is no longer decided only at boot: the
+    /// console's engine route opens a replacement overlay and swaps it in, then
+    /// rebuilds each registered company so the new ports are actually in force
+    /// (`crate::server::ops::memory_engine`). Same shape, and the same reason,
+    /// as [`Self::auth_mode_override`] — a choice an operator makes while the
+    /// process is running, which telling them to restart for would defeat.
+    memory_overlay: Arc<RwLock<Option<crate::store::MemoryOverlay>>>,
     /// The repo-level shared skill library directory (`skills/`), set on the
     /// serve path. `None` in platform-provisioned mode (no repo checkout), where
     /// the `skillRegistry` query degrades to empty.
@@ -413,6 +444,13 @@ pub struct AppState {
     /// the process. Lazy because it is a disk read that only `/spec` needs, and
     /// `AppState::new` is deliberately IO-free.
     instance_id: Arc<OnceLock<String>>,
+    /// Who is currently present, per company.
+    ///
+    /// Host-global and in-memory, like the live turn bus it publishes
+    /// alongside — presence is a lease, not a record, so it has no port and no
+    /// backend. See [`crate::server::presence`] for the TTL contract and for
+    /// why a second replica knowing nothing about this one is acceptable.
+    presence: Arc<crate::server::presence::PresenceRegistry>,
     /// Which storage backend is serving the durable ports. Reported by `/spec`
     /// as a kind only — never a path or a connection string.
     storage_kind: crate::store::StorageKind,
@@ -470,6 +508,28 @@ pub struct AppState {
     /// `restartRequired` and the console still says so, which is the honest
     /// answer when a rebuild is genuinely unavailable.
     rebuilder: Option<Arc<dyn crate::runtime::RuntimeRebuilder>>,
+    /// Where this host reports product analytics, if anywhere (issue #1739).
+    ///
+    /// Held here because it is a **process-wide** decision — one deployment
+    /// kind, one identity, one destination — that every company's builder then
+    /// inherits, and threading it separately to boot, to provisioning and to
+    /// the rebuilder is how one of the three comes to be missed. The default is
+    /// [`NullTracker`](crate::analytics::NullTracker): a state nobody wired
+    /// reports nothing, which is what every test, every desktop build and every
+    /// self-hosted install gets.
+    analytics: Arc<dyn crate::analytics::Tracker>,
+    /// Builds the engine for a `transport = "local"` `acp` harness (issue
+    /// #1245). `None` — every test host, and any embedder that does not wire
+    /// one — leaves every such harness `unavailable`. Only the desktop shell
+    /// has an implementation to give this; it lives at
+    /// [`crate::ports::acp::AcpAgentFactory`], ungated, for the same reason
+    /// [`rebuilder`](Self::rebuilder) above is: the desktop supplies it, this
+    /// crate only defines the seam.
+    acp_agents: Option<Arc<dyn crate::ports::acp::AcpAgentFactory>>,
+    /// Live inbound ACP sessions. Kept on the host, rather than on a company,
+    /// because one ACP connection may open sessions for several companies.
+    #[cfg(feature = "acp")]
+    acp_sessions: Arc<crate::server::acp::SessionRegistry>,
     /// The boot-only builder inputs recorded per company at registration, so a
     /// rebuild configures the successor exactly as boot configured its
     /// predecessor. See [`BootInputs`](crate::runtime::BootInputs) for why
@@ -501,10 +561,11 @@ impl AppState {
             config_root: None,
             ownership: Arc::new(RwLock::new(HashMap::new())),
             stores: None,
-            memory_overlay: None,
+            memory_overlay: Arc::new(RwLock::new(None)),
             skills_root: None,
             skill_registry: Arc::new(OnceLock::new()),
             instance_id: Arc::new(OnceLock::new()),
+            presence: Arc::new(crate::server::presence::PresenceRegistry::new()),
             storage_kind: crate::store::StorageKind::default(),
             // Fails "not set up", so a host that never calls `with_setup_complete`
             // — every test fixture — presents the wizard rather than silently
@@ -518,9 +579,25 @@ impl AppState {
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
             #[cfg(feature = "mcp")]
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            analytics: crate::analytics::null_tracker(),
             rebuilder: None,
+            acp_agents: None,
+            #[cfg(feature = "acp")]
+            acp_sessions: Arc::new(crate::server::acp::SessionRegistry::new()),
             boot_inputs: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Wires this host's analytics tracker (issue #1739).
+    pub fn with_analytics(mut self, analytics: Arc<dyn crate::analytics::Tracker>) -> Self {
+        self.analytics = analytics;
+        self
+    }
+
+    /// Where this host reports analytics. A [`NullTracker`](crate::analytics::NullTracker)
+    /// unless something wired one, which is every build but a hosted tenant's.
+    pub fn analytics(&self) -> Arc<dyn crate::analytics::Tracker> {
+        self.analytics.clone()
     }
 
     /// Wires this host's in-place runtime rebuilder (issue #290).
@@ -529,9 +606,72 @@ impl AppState {
         self
     }
 
+    /// Wires this host's local-transport ACP agent factory (issue #1245).
+    pub fn with_acp_agents(mut self, factory: Arc<dyn crate::ports::acp::AcpAgentFactory>) -> Self {
+        self.acp_agents = Some(factory);
+        self
+    }
+
+    /// This host's local-transport ACP agent factory, when one is wired.
+    pub fn acp_agents(&self) -> Option<Arc<dyn crate::ports::acp::AcpAgentFactory>> {
+        self.acp_agents.clone()
+    }
+
+    /// Whether a `transport = "local"` ACP harness can actually run here.
+    ///
+    /// Issue #1814. Two callers — the harness picker and the teammate `PATCH`
+    /// validator — used to ask [`acp_agents`](Self::acp_agents) directly, which
+    /// answers a different question: whether a factory was HANDED OVER, not
+    /// whether this build can use one. Those coincide on every server build and
+    /// on a desktop compiled with `acp`, and diverge on exactly one
+    /// configuration — a desktop compiled WITHOUT it:
+    ///
+    /// * [`with_acp_agents`](Self::with_acp_agents) is deliberately ungated, so
+    ///   that `src-tauri` can hand over a factory without pulling the whole
+    ///   embedded harness in behind `crate::harness` (`crate::ports::acp` exists
+    ///   for that reason). The desktop shell calls it unconditionally.
+    /// * The runtime cannot use what it was given: `RuntimeBuilder` forces
+    ///   `acp_agents = None` under `cfg(not(feature = "acp"))`, and
+    ///   `lanes::resolve_acp_engine` is an unconditional `Err` there — its
+    ///   factory parameter is typed `Infallible`, so `Some` is uninhabited.
+    ///
+    /// The result was a picker that offered `claude` and `codex`, a `PATCH`
+    /// that accepted the binding, and then every turn failing with `lanes.rs`'s
+    /// "run it from the desktop app" — advice for somebody already in it.
+    ///
+    /// One method rather than the same conjunct at both call sites: they were
+    /// already copy-paste siblings, comments included, and a predicate the two
+    /// can state differently is what opened the gap in the first place.
+    pub fn can_run_local_acp(&self) -> bool {
+        cfg!(feature = "acp") && self.acp_agents.is_some()
+    }
+
+    /// Sessions opened through the host's ACP HTTP transport.
+    #[cfg(feature = "acp")]
+    pub fn acp_sessions(&self) -> Arc<crate::server::acp::SessionRegistry> {
+        Arc::clone(&self.acp_sessions)
+    }
+
     /// This host's in-place runtime rebuilder, when one is wired.
     pub fn rebuilder(&self) -> Option<Arc<dyn crate::runtime::RuntimeRebuilder>> {
         self.rebuilder.clone()
+    }
+
+    /// Whether this host can rebuild a registered company's runtime in place
+    /// (issue #290) — the capability behind every surface that offers to apply
+    /// a configuration change without a process restart.
+    ///
+    /// [`crate::server::setup`] and [`crate::server::ops::memory_engine`]
+    /// establish the same fact by *attempting* a rebuild and reporting the
+    /// failure. That is the right shape for an action already under way, and
+    /// the wrong one for a surface deciding whether to *offer* the action at
+    /// all: a console that cannot ask up front renders a control whose only
+    /// possible outcome is the `Config` error [`rebuild_company`] returns
+    /// (issue #1736). Asking is what lets it say "not on this host" instead.
+    ///
+    /// [`rebuild_company`]: crate::runtime::rebuild_company
+    pub fn can_rebuild_in_place(&self) -> bool {
+        self.rebuilder.is_some()
     }
 
     /// Records the boot-only builder inputs for `id`, at registration.
@@ -630,15 +770,38 @@ impl AppState {
             .get_or_init(|| crate::app::instance::load_or_create(&self.home))
     }
 
-    /// Installs the memory engine overlay selected by `OPENCOMPANY_MEMORY`.
-    pub fn with_memory_overlay(mut self, overlay: crate::store::MemoryOverlay) -> Self {
-        self.memory_overlay = Some(overlay);
+    /// Installs the memory engine overlay selected at boot
+    /// (`OPENCOMPANY_MEMORY`, or `[memory]` in `config.toml`).
+    pub fn with_memory_overlay(self, overlay: crate::store::MemoryOverlay) -> Self {
+        self.set_memory_overlay(Some(overlay));
         self
     }
 
-    /// The memory engine overlay, if one is selected (`OPENCOMPANY_MEMORY`).
-    pub fn memory_overlay(&self) -> Option<&crate::store::MemoryOverlay> {
-        self.memory_overlay.as_ref()
+    /// The bound memory engine overlay, if one is selected.
+    ///
+    /// Returns a clone rather than a borrow: the overlay can be replaced while
+    /// the process runs (see [`Self::set_memory_overlay`]), and every field of
+    /// it is an `Arc`, so the clone costs a handful of refcount bumps and
+    /// cannot observe a half-applied swap.
+    pub fn memory_overlay(&self) -> Option<crate::store::MemoryOverlay> {
+        self.memory_overlay
+            .read()
+            .expect("memory overlay poisoned")
+            .clone()
+    }
+
+    /// Replaces the bound memory engine overlay.
+    ///
+    /// `None` returns memory to the base storage backend's own ports. This
+    /// only changes what a company built *after* it will bind — companies
+    /// already in the registry hold the previous ports on their cached
+    /// runtime, so a caller that wants the swap in force must rebuild them
+    /// ([`crate::runtime::rebuild_company`]).
+    pub fn set_memory_overlay(&self, overlay: Option<crate::store::MemoryOverlay>) {
+        *self
+            .memory_overlay
+            .write()
+            .expect("memory overlay poisoned") = overlay;
     }
 
     /// The repo-level shared skill registry, loaded from `dir` and cached.
@@ -650,7 +813,34 @@ impl AppState {
         if let Some(cached) = self.skill_registry.get() {
             return Ok(cached.clone());
         }
-        let registry: Arc<[SkillDoc]> = load_dir_skills(dir)?.into();
+        // A *configured* library that is missing or not a directory is a host
+        // misconfiguration, not a parse failure `load_dir_skills` would flag —
+        // it returns `Ok(empty)` for a nonexistent `dir`, which would silently
+        // downgrade a server-authoritative install to a client-authored one
+        // (the exact invariant `shared_skill_registry`'s doc forbids). Reject it
+        // as `Config` (a 500 / failed boot) before the load can flatten it away.
+        if !dir.is_dir() {
+            return Err(crate::OpenCompanyError::Config(format!(
+                "shared skill library at {} is not a directory",
+                dir.display()
+            )));
+        }
+        // `load_dir_skills` reports a parse/validation failure via the same
+        // `DataParse`/`DataInvalid` variants a per-company workflow file uses,
+        // where the HTTP mapping (issue #1017) treats them as the *caller's*
+        // bad input (400/422). Here the "file" is the operator-provisioned
+        // shared library, not anything a caller submitted, so that mapping
+        // would misreport a host misconfiguration as a client error. Recast
+        // as `Config` — already the crate's "runtime setup is broken" variant
+        // (see `app/config.rs`) — so it renders the 500 documented above.
+        let registry: Arc<[SkillDoc]> = load_dir_skills(dir)
+            .map_err(|error| {
+                crate::OpenCompanyError::Config(format!(
+                    "shared skill library at {} failed to load: {error}",
+                    dir.display()
+                ))
+            })?
+            .into();
         // A concurrent caller may have set it first; keep whichever won.
         let _ = self.skill_registry.set(registry.clone());
         Ok(self.skill_registry.get().cloned().unwrap_or(registry))
@@ -860,6 +1050,18 @@ impl AppState {
         &self.registry
     }
 
+    /// Who is currently present, per company.
+    pub fn presence(&self) -> &crate::server::presence::PresenceRegistry {
+        &self.presence
+    }
+
+    /// A cloned handle to the same host-global registry [`Self::presence`]
+    /// borrows from, for a background task (the periodic sweep) that must
+    /// outlive any single request's borrow of `self`.
+    pub fn presence_handle(&self) -> std::sync::Arc<crate::server::presence::PresenceRegistry> {
+        self.presence.clone()
+    }
+
     /// The prebuilt GraphQL read-plane schema.
     pub fn schema(&self) -> &crate::server::graphql::OcSchema {
         &self.schema
@@ -925,6 +1127,7 @@ impl AppState {
         AppSpec {
             name: "opencompany",
             version: VERSION,
+            build_commit: BUILD_COMMIT,
             framework: "axum",
             modules: vec![
                 "app",
@@ -975,7 +1178,7 @@ impl AppState {
     /// capability rather than a version number. Growing the list must never
     /// break a client that has not heard of the new entry.
     fn capabilities(&self) -> Vec<&'static str> {
-        let mut out = vec!["rest", "graphql", "sse", "approvals", "devices"];
+        let mut out = vec!["rest", "graphql", "sse", "approvals"];
         if self.hub_identity.is_some() {
             out.push("hub-identity");
         }
@@ -993,6 +1196,31 @@ pub struct AppSpec {
     pub name: &'static str,
     /// Crate version.
     pub version: &'static str,
+    /// The Git commit this host was built from: a short object id, suffixed
+    /// `-dirty` when the tree carried uncommitted changes, or `"unknown"`
+    /// when the build could not determine one.
+    ///
+    /// On the unauthenticated handshake, beside [`Self::version`], because the
+    /// line this surface polices is **build facts versus deployment facts**. A
+    /// build fact is identical for every instance compiled from the same
+    /// artifact and says nothing about *this* host. A deployment fact — the
+    /// storage path two fields below, a connection string, a data root — is
+    /// unique to this host and directly actionable, which is why
+    /// [`Self::storage`] reports a kind and not a location. A revision id is
+    /// the first kind: it is `version` at usable precision, and `version` has
+    /// always been served here.
+    ///
+    /// That line survives this repository going private, which is the case
+    /// worth stating explicitly. A commit id is an opaque hash; without the
+    /// repository it maps to nothing, so closing the source *narrows* what
+    /// this field discloses rather than widening it. The residual risk is the
+    /// public case — an unauthenticated caller can look the revision up and
+    /// read off which fixes are missing — and it is accepted deliberately.
+    /// Answering "which build is this host actually running?" without a shell
+    /// on the box is the entire reason the field exists: an operator served a
+    /// three-day-old binary on 2026-08-25 had to compare `strings` output to
+    /// work that out.
+    pub build_commit: &'static str,
     /// HTTP framework used by this host.
     pub framework: &'static str,
     /// First-class source modules.
@@ -1037,6 +1265,13 @@ mod tests {
     #[test]
     fn default_config_binds_locally() {
         assert_eq!(AppConfig::default().bind, "127.0.0.1:8080");
+    }
+
+    /// Automatic Git checkpoints in agent workspaces are opt-in: the host
+    /// default is off, preserving the pre-checkpoint behavior exactly.
+    #[test]
+    fn workspace_git_checkpoints_default_off() {
+        assert!(!AppConfig::default().workspace_git_enabled);
     }
 
     fn bound_to(bind: &str) -> AppConfig {
@@ -1098,6 +1333,10 @@ mod tests {
     }
 
     /// A host with nothing to open is the only one the wizard is for.
+    ///
+    /// The registered-company half of this lives in `server::setup::test`,
+    /// beside the helper that can build a real runtime:
+    /// `spec_reports_setup_complete_once_a_company_is_registered`.
     #[test]
     fn spec_reports_setup_incomplete_for_an_empty_unstamped_host() {
         let spec = AppState::new(AppConfig::default()).spec();
@@ -1107,10 +1346,6 @@ mod tests {
             "no stamp and no companies is exactly the first-run case"
         );
     }
-
-    /// The registered-company half of this lives in `server::setup::test`,
-    /// beside the helper that can build a real runtime:
-    /// `spec_reports_setup_complete_once_a_company_is_registered`.
 
     #[cfg(feature = "mcp")]
     #[test]
@@ -1357,6 +1592,23 @@ mod tests {
     }
 
     #[test]
+    fn skill_registry_rejects_a_configured_but_missing_library() {
+        // A configured `skills_root` that does not exist is a host
+        // misconfiguration. `load_dir_skills` returns `Ok(empty)` for a missing
+        // dir, so without the `is_dir` guard the registry would silently flatten
+        // to empty — downgrading a server-authoritative install to a
+        // client-authored one, the invariant `shared_skill_registry` forbids.
+        let state = AppState::new(AppConfig::default());
+        let err = state
+            .skill_registry(std::path::Path::new("/nonexistent"))
+            .expect_err("a missing configured library must fail, not load empty");
+        assert!(
+            matches!(err, crate::OpenCompanyError::Config(_)),
+            "expected a Config error for a missing library, got {err:?}"
+        );
+    }
+
+    #[test]
     fn namespaced_company_id_is_noop_when_unset() {
         let config = AppConfig::default();
         assert!(config.tenant_namespace.is_none());
@@ -1395,6 +1647,20 @@ mod tests {
         // Only the leading `tenant:` is stripped, and only once.
         assert_eq!(canonical_tenant("company:acme"), "company:acme");
         assert_eq!(canonical_tenant("tenant:tenant:x"), "tenant:x");
+    }
+
+    #[test]
+    fn tenant_namespace_rejects_the_id_delimiter() {
+        // A namespace containing `--` makes the `<tenant>--` id prefix
+        // ambiguous between tenants, so the boundary that reads
+        // `OPENCOMPANY_TENANT_ID` rejects it.
+        assert!(validate_tenant_namespace("acme").is_ok());
+        assert!(validate_tenant_namespace("acme-corp").is_ok());
+        assert_eq!(
+            validate_tenant_namespace("acme--other").unwrap_err(),
+            "tenant namespace `acme--other` contains `--`, which is the company-id \
+             delimiter; a namespace may not contain it"
+        );
     }
 
     #[test]

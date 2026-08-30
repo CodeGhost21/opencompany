@@ -1,5 +1,7 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 
+import { workflowDetailName } from "./workflows";
+
 /**
  * Issue #541: the five withheld node kinds (`tool_call`, `http_request`,
  * `switch`, `output_parser`, `sub_workflow`) grew config forms in the workflow
@@ -32,16 +34,19 @@ async function dismissTour(page: Page) {
   await expect(skip).toBeHidden();
 }
 
-/** Selects the workflow named `name` in the picker and waits for it to settle. */
-async function selectWorkflow(page: Page, name: string) {
-  await page.getByRole("combobox").first().click();
-  await page.getByRole("option", { name, exact: true }).click();
-  await expect(page.getByRole("combobox").first()).toContainText(name);
-}
-
 /** Best-effort teardown so a failed spec does not poison the next run. */
+/**
+ * Best-effort teardown so a failed spec does not poison the next run.
+ * `expectedVersion` is required (issue #1013), so this reads the workflow's
+ * current token first.
+ */
 async function removeWorkflow(request: APIRequestContext, id: string) {
-  await request.delete(`${COMPANY_SCOPE}/workflows/${id}`).catch(() => undefined);
+  const version = await request
+    .get(`${COMPANY_SCOPE}/workflows/${id}`)
+    .then(async (res) => (res.ok() ? ((await res.json()).version as string | null) : null))
+    .catch(() => null);
+  const query = version ? `?expectedVersion=${encodeURIComponent(version)}` : "";
+  await request.delete(`${COMPANY_SCOPE}/workflows/${id}${query}`).catch(() => undefined);
 }
 
 const SUBMIT = "workflow-dialog-submit";
@@ -64,7 +69,7 @@ test("authoring a tool_call node's config through the form round-trips to the ho
     await expect(dialog.getByText("New workflow", { exact: true })).toBeVisible();
 
     // Name the workflow.
-    await dialog.getByLabel("Id", { exact: true }).fill(id);
+    await dialog.getByLabel("Workflow ID", { exact: true }).fill(id);
     await dialog.getByLabel("Name", { exact: true }).fill(name);
 
     // The starter trigger row is already `start`. Add a second node and make it
@@ -92,7 +97,12 @@ test("authoring a tool_call node's config through the form round-trips to the ho
     await dialog.getByRole("combobox", { name: "Edge to" }).click();
     await page.getByRole("option", { name: "act", exact: true }).click();
 
+    // Issue #1808: create mode gates the write behind an id-confirm. The first
+    // click only opens it (portalled onto `document.body`, so it is reached by
+    // test id on the page, not scoped to `dialog`); the confirm's own action —
+    // also rendered "Create workflow" — is what fires the write.
     await dialog.getByTestId(SUBMIT).click();
+    await page.getByTestId("workflow-id-confirm-create").click();
     await expect(dialog).toBeHidden({ timeout: 15_000 });
 
     // The host stored exactly the keys the form emitted — not the node-id
@@ -111,9 +121,14 @@ test("authoring a tool_call node's config through the form round-trips to the ho
 
     // Reopen from the saved graph (a fresh load, not local state) and click the
     // node: the inspector's Config block shows the slug the host round-tripped.
+    //
+    // Issue #1110: creating landed on the new workflow's own URL, so the reload
+    // comes back on its detail view with no picking to do — which is also this
+    // spec's incidental proof that a `#/workflows/<id>` survives a reload.
+    await expect(page).toHaveURL(new RegExp(`#/workflows/${id}$`));
     await page.reload();
     await dismissTour(page);
-    await selectWorkflow(page, name);
+    await expect(workflowDetailName(page)).toHaveText(name, { timeout: 30_000 });
 
     const node = page.locator('.react-flow__node[data-id="act"]');
     await expect(node).toBeVisible({ timeout: 15_000 });

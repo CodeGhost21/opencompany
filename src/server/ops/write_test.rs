@@ -11,7 +11,7 @@ use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::TaskRecord;
-use crate::ports::types::{CompanyId, CompanyRecord, ContextChunk};
+use crate::ports::types::{CompanyId, CompanyRecord, CompressedTrace, ContextChunk};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
@@ -35,7 +35,7 @@ fn manifest() -> CompanyManifest {
 /// The sorted node names in a workspace tree body.
 ///
 /// A freshly-built company is no longer an empty tree: boot scaffolds the
-/// reserved `Agents/` and `Desks/` roots (issue #551), so the tests below name
+/// reserved `agents/` and `desks/` roots (issue #551), so the tests below name
 /// what they expect rather than counting to zero. Nothing is provisioned
 /// *inside* them — a member folder is minted when that agent or desk first
 /// produces something.
@@ -97,6 +97,8 @@ async fn state_with(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest(),
             ledger: Vec::new(),
@@ -108,9 +110,13 @@ async fn state_with(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -214,8 +220,9 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(task["title"], "Q2 brief");
-    // Issue #206/#301: manual entry lands in To-do, the board's one intake lane.
-    assert_eq!(task["column"], "todo");
+    // Issue #206/#301: manual entry lands in To-do, the board's one intake lane
+    // — which reads as `pending`, its phase, since issue #1512.
+    assert_eq!(task["column"], "pending");
     let id = task["id"].as_str().unwrap().to_string();
 
     // Drag (PATCH column) via the {id} scope.
@@ -347,7 +354,7 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body.to_string().contains("in_progress"),
+        body.to_string().contains("working"),
         "the refusal must list the columns that do exist: {body}"
     );
 
@@ -370,7 +377,11 @@ async fn task_writes_reject_a_column_the_board_cannot_render() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
-    assert_eq!(board.as_array().expect("board")[0]["column"], "paused");
+    // The refused patch left the card where it was: paused, which reads as the
+    // `working` phase with `paused` named as the stage (issue #1512).
+    let card = &board.as_array().expect("board")[0];
+    assert_eq!(card["column"], "working");
+    assert_eq!(card["stage"], "paused");
 }
 
 /// #334: `in_review → done` is a move the write boundary accepts, and the one
@@ -446,7 +457,7 @@ async fn created_tasks_default_to_the_todo_column() {
         Some(json!({"title": "queued work"})),
     )
     .await;
-    assert_eq!(defaulted["column"], crate::ports::tasks::COLUMN_TODO);
+    assert_eq!(defaulted["column"], crate::ledger::board::PHASE_PENDING);
 
     // An explicit column is still honored verbatim — `spawn_task`, the
     // orchestrator's `revise`, and a failed run all place their own card.
@@ -458,7 +469,8 @@ async fn created_tasks_default_to_the_todo_column() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_PLANNING);
+    assert_eq!(explicit["column"], crate::ledger::board::PHASE_WORKING);
+    assert_eq!(explicit["stage"], crate::ports::tasks::COLUMN_PLANNING);
 
     // Issue #301: `backlog` is gone from the board, so a client still writing
     // it is refused rather than persisting a card nothing renders. Legacy data
@@ -473,7 +485,7 @@ async fn created_tasks_default_to_the_todo_column() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        refused.to_string().contains("todo"),
+        refused.to_string().contains("pending"),
         "the refusal must name the columns that replaced it: {refused}"
     );
 
@@ -565,7 +577,7 @@ async fn a_task_created_from_a_thread_remembers_and_reads_back_that_thread() {
 async fn a_stamped_card_hands_its_output_link_to_both_reads() {
     use crate::ports::artifacts::ArtifactKind;
     use crate::ports::tasks::{
-        TaskOutput, TaskOutputAction, TaskOutputArtifact, TaskOutputWorkflow,
+        TaskOutput, TaskOutputAction, TaskOutputArtifact, TaskOutputSource, TaskOutputWorkflow,
     };
 
     let home_dir = home();
@@ -598,8 +610,10 @@ async fn a_stamped_card_hands_its_output_link_to_both_reads() {
         .find(|t| t.id == id)
         .expect("card");
     card.output = Some(TaskOutput {
-        run_id: "run-2".to_string(),
-        attempt: Some(2),
+        source: TaskOutputSource::Run {
+            run_id: "run-2".to_string(),
+            attempt: Some(2),
+        },
         at_millis: 42,
         artifacts: vec![TaskOutputArtifact {
             artifact_id: "a-1".to_string(),
@@ -667,14 +681,21 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    // Asserted on `stage`, not on `column`: since issue #1512 the DTO's
+    // `column` is the phase, and `working` covers both the dispatched stage and
+    // three that are not — so a phase assertion could not tell "dispatched"
+    // from "being planned", which is the only thing this test is about.
     assert_ne!(
-        created["column"], COLUMN_IN_PROGRESS,
+        created["stage"], COLUMN_IN_PROGRESS,
         "a chat-created card must never arrive already dispatched"
     );
     assert_eq!(
-        created["column"], COLUMN_TODO,
+        created["column"],
+        crate::ledger::board::PHASE_PENDING,
         "it lands in the board's intake lane, where the human drag is the gate"
     );
+    assert_eq!(created["stage"], serde_json::Value::Null, "{created}");
+    let _ = COLUMN_TODO;
 
     // Issue #301 added a second pre-dispatch column and made To-do the only
     // intake lane, so the spend gate is re-checked across every creation shape
@@ -688,7 +709,7 @@ async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
     ] {
         let (status, created) = send(&state, "POST", "/api/v1/company/tasks", Some(body)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_ne!(created["column"], COLUMN_IN_PROGRESS, "{created}");
+        assert_ne!(created["stage"], COLUMN_IN_PROGRESS, "{created}");
     }
 
     let journal = runtime
@@ -742,6 +763,7 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -854,6 +876,41 @@ async fn memory_create_and_delete_journals_event() {
 }
 
 #[tokio::test]
+async fn memory_traces_are_inspectable_newest_last() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    for (cycle_id, summary, at_millis) in [
+        ("cycle-1", "first completed cycle", 1_000),
+        ("cycle-2", "second completed cycle", 2_000),
+    ] {
+        runtime
+            .memory
+            .save_trace(
+                runtime.id(),
+                CompressedTrace {
+                    cycle_id: cycle_id.into(),
+                    summary: summary.into(),
+                    at_millis,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, traces) = send(&state, "GET", "/api/v1/company/memory/traces", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let traces = traces.as_array().unwrap();
+    assert_eq!(traces.len(), 2);
+    assert_eq!(traces[0]["cycleId"], "cycle-1");
+    assert_eq!(traces[0]["summary"], "first completed cycle");
+    assert_eq!(traces[0]["atMillis"], 1_000);
+    assert_eq!(traces[1]["cycleId"], "cycle-2");
+}
+
+#[tokio::test]
 async fn memory_list_filters_stats_and_dual_write() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
@@ -890,7 +947,7 @@ async fn memory_list_filters_stats_and_dual_write() {
     // List reflects the store, newest-first.
     let (status, rows) = send(&state, "GET", "/api/v1/company/memory", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = rows.as_array().unwrap();
+    let rows = rows["items"].as_array().unwrap();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["id"], "f-new");
     assert_eq!(rows[2]["id"], "f-old");
@@ -904,25 +961,27 @@ async fn memory_list_filters_stats_and_dual_write() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let pref = pref.as_array().unwrap();
+    let pref = pref["items"].as_array().unwrap();
     assert_eq!(pref.len(), 1);
     assert_eq!(pref[0]["id"], "f-mid");
 
     // `?query=` is a case-insensitive substring over title + body.
     let (status, hit) = send(&state, "GET", "/api/v1/company/memory?query=priya", None).await;
     assert_eq!(status, StatusCode::OK);
-    let hit = hit.as_array().unwrap();
+    let hit = hit["items"].as_array().unwrap();
     assert_eq!(hit.len(), 1);
     assert_eq!(hit[0]["id"], "f-new");
 
-    // Stats over the seeded facts: 3 facts, freshest timestamp, no agent chunks
-    // yet (seeding bypassed the mirror), 0 task outcomes.
+    // Stats over the seeded facts: 3 display items, freshest timestamp, no
+    // teammate memory yet (seeding bypassed the mirror), and 0 task outcomes.
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 3);
     assert_eq!(stats["factsUpdatedAtMillis"], 3_000);
-    assert_eq!(stats["agentChunks"], 0);
+    assert_eq!(stats["totalItems"], 3);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
+    assert_eq!(stats["documentMemory"], 0);
     // Nothing but facts so far, so "Last updated" tracks the newest fact.
     assert_eq!(stats["lastUpdatedAtMillis"], 3_000);
 
@@ -947,12 +1006,15 @@ async fn memory_list_filters_stats_and_dual_write() {
         "an operator fact must be mirrored into the ContextStore for agent recall"
     );
 
-    // Stats now count that mirror as an agent chunk (not a task outcome).
+    // The mirror stays agent-recallable but is not a display item of teammate
+    // memory — the fact is the one row the operator sees.
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 4);
-    assert_eq!(stats["agentChunks"], 1);
+    assert_eq!(stats["totalItems"], 4);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
+    assert_eq!(stats["documentMemory"], 0);
 }
 
 /// The Brain's "Last updated" stat must move when *agents* write memory, not
@@ -974,7 +1036,8 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 0);
-    assert_eq!(stats["agentChunks"], 0);
+    assert_eq!(stats["totalItems"], 0);
+    assert_eq!(stats["teammateMemory"], 0);
     assert_eq!(
         stats["lastUpdatedAtMillis"], 0,
         "no memory of any kind yet, so the stat has nothing to report"
@@ -1003,8 +1066,10 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
     let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["facts"], 0, "still no operator facts");
-    assert_eq!(stats["agentChunks"], 2);
+    assert_eq!(stats["totalItems"], 2);
+    assert_eq!(stats["teammateMemory"], 1);
     assert_eq!(stats["taskOutcomes"], 1);
+    assert_eq!(stats["documentMemory"], 0);
     assert_eq!(
         stats["factsUpdatedAtMillis"], 0,
         "the facts-only figure is unchanged — it is simply not the whole story"
@@ -1038,12 +1103,13 @@ async fn memory_stats_last_updated_covers_agent_written_context() {
         last_updated + 60_000,
         "the stat is the max across every memory source, whichever is freshest"
     );
+    assert_eq!(stats["totalItems"], 3);
 
     // The list surfaces the same stamps per row, so a context card no longer
     // renders "—" while the header claims recent activity.
     let (status, rows) = send(&state, "GET", "/api/v1/company/memory", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = rows.as_array().unwrap();
+    let rows = rows["items"].as_array().unwrap();
     let context_rows: Vec<&Value> = rows.iter().filter(|r| r["origin"] != "fact").collect();
     assert_eq!(context_rows.len(), 2);
     assert!(
@@ -1154,7 +1220,7 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list_b.as_array().unwrap().len(), 0);
+    assert_eq!(list_b["items"].as_array().unwrap().len(), 0);
 
     // A's own memory holds exactly the one fact.
     let (status, list_a) = send_auth(
@@ -1166,7 +1232,7 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list_a.as_array().unwrap().len(), 1);
+    assert_eq!(list_a["items"].as_array().unwrap().len(), 1);
 
     // A's token may not address B's memory at all — 403 (scoped auth).
     let (status, _) = send_auth(
@@ -1331,16 +1397,16 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
     // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
-    // `Agents/` root (issue #551). The manifest here has an agent and it gets
+    // `agents/` root and operator-only `secrets/README.md`. The manifest here has an agent and it gets
     // no folder — a member folder is minted on first use, not on joining the
-    // roster. `Desks/` is absent for the same reason since issue #645: nothing
+    // roster. `desks/` is absent for the same reason since issue #645: nothing
     // writes into it, so it is minted on first use rather than scaffolded.
     let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["Agents"],
-        "a fresh company starts with the one system root and nothing else"
+        vec!["agents", "artifacts", "readme.md", "readme.md", "secrets"],
+        "a fresh company starts with its system scaffold and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
 
@@ -1348,7 +1414,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
         &state,
         "POST",
         "/api/v1/company/workspace",
-        Some(json!({"name": "Standards", "kind": "folder"})),
+        Some(json!({"name": "standards", "kind": "folder"})),
     )
     .await;
     let folder_id = folder["id"].as_str().unwrap().to_string();
@@ -1409,7 +1475,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     // "the runtime laid this down" from "somebody wrote this".
     let root = tree
         .iter()
-        .find(|node| node["name"] == json!("Agents"))
+        .find(|node| node["name"] == json!("agents"))
         .expect("the Agents root is in the tree");
     assert_eq!(root["createdBy"], json!({"kind": "seed"}));
     assert_eq!(root["kind"], json!("folder"));
@@ -1546,7 +1612,10 @@ async fn workspace_reads_are_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(provisioned_names(&tree_b), vec!["Agents"]);
+    assert_eq!(
+        provisioned_names(&tree_b),
+        vec!["agents", "artifacts", "readme.md", "readme.md", "secrets"]
+    );
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
     let (status, _) = send_auth(
@@ -1583,7 +1652,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
         &state,
         "POST",
         "/api/v1/company/workspace",
-        Some(json!({"name": "Standards", "kind": "folder"})),
+        Some(json!({"name": "standards", "kind": "folder"})),
     )
     .await;
     let folder_id = folder["id"].as_str().unwrap().to_string();
@@ -1615,7 +1684,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     let hits = results["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["id"], json!(note_id));
-    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["path"], "standards/support.md");
     assert_eq!(hits[0]["matched"], "content");
     assert_eq!(hits[0]["kind"], "file");
     assert_eq!(hits[0]["updatedBy"], json!({"kind": "operator"}));
@@ -1646,7 +1715,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     let (status, scoped) = send(
         &state,
         "GET",
-        "/api/v1/company/workspace/search?q=support&prefix=Standards",
+        "/api/v1/company/workspace/search?q=support&prefix=standards",
         None,
     )
     .await;
@@ -1688,7 +1757,7 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
 }
 
 /// `POST …/workspace/sweep-empty-agent-folders` (issue #700): the operator's
-/// one-time tidy of the empty `Agents/<id>/` folders a pre-#570 company still
+/// one-time tidy of the empty `agents/<id>/` folders a pre-#570 company still
 /// carries.
 ///
 /// The whole route in one test, because the halves only mean something together:
@@ -1706,13 +1775,13 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
-    // Boot already scaffolded `Agents/`; find it rather than making a rival.
+    // Boot already scaffolded `agents/`; find it rather than making a rival.
     let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     let agents_id = tree
         .as_array()
         .unwrap()
         .iter()
-        .find(|node| node["name"] == "Agents")
+        .find(|node| node["name"] == "agents")
         .expect("boot scaffolds the Agents root")["id"]
         .as_str()
         .unwrap()
@@ -1822,10 +1891,14 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
     assert_eq!(
         provisioned_names(&tree),
         vec![
-            "Agents".to_string(),
-            "README.md".to_string(),
+            "agents".to_string(),
+            "artifacts".to_string(),
             "cmo".to_string(),
             "launch-brief.md".to_string(),
+            "readme.md".to_string(),
+            "readme.md".to_string(),
+            "readme.md".to_string(),
+            "secrets".to_string(),
         ],
         "the folder holding a deliverable, the operator's note and the root all stay"
     );
@@ -2415,6 +2488,57 @@ async fn skills_registry_is_empty_when_no_library_is_served() {
     assert_eq!(body.as_array().expect("an array").len(), 0);
 }
 
+/// A slug is also a directory name (`skills/<slug>/`), so the handlers that
+/// take one from the URL must refuse the values that could escape or traverse
+/// the scratch tree: a parent segment (`..`), a path separator (`a/b`), and a
+/// leading uppercase (`A` — slugs are lowercase by contract).
+#[tokio::test]
+async fn skill_handlers_reject_unsafe_slugs_and_write_nothing() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    // `a%2Fb` is how a `/` arrives *inside* one path segment — the router sees
+    // one slug and the handler must reject it rather than letting a separator
+    // into a directory name.
+    for bad in ["..", "a%2Fb", "A"] {
+        let (status, body) = send(
+            &state,
+            "POST",
+            &format!("/api/v1/company/skills/{bad}/install"),
+            Some(json!({"name": "Name", "description": "desc"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "install {bad}: {body}");
+
+        let (status, body) = send(
+            &state,
+            "PUT",
+            &format!("/api/v1/company/skills/{bad}"),
+            Some(json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "toggle {bad}: {body}");
+    }
+
+    // A rejected slug must never reach the skill store.
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "an unsafe slug must not persist a delta"
+    );
+
+    // The same handlers still accept a well-formed slug.
+    let (status, skill) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/skills/a-1",
+        Some(json!({"enabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{skill}");
+    assert_eq!(skill["id"], "a-1");
+    assert_eq!(skill["enabled"], true);
+}
+
 #[tokio::test]
 async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
     let home_dir = home();
@@ -2505,7 +2629,7 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
 }
 
 #[tokio::test]
-async fn team_overlay_add_delete_and_manifest_delete_conflict() {
+async fn team_overlay_and_manifest_teammates_can_both_be_added_and_deleted() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
@@ -2514,11 +2638,15 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     // named `null` (the console falls back to the role).
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
+    // The company's own teammate; the global baseline is appended to every
+    // roster and is not what this test is about.
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 1);
-    assert_eq!(roster[0]["id"], "ceo");
-    assert_eq!(roster[0]["role"], "Chief");
-    assert!(roster[0]["name"].is_null());
+    let ceo = roster
+        .iter()
+        .find(|row| row["id"] == "ceo")
+        .expect("the manifest teammate is listed");
+    assert_eq!(ceo["role"], "Chief");
+    assert!(ceo["name"].is_null());
 
     // Add an overlay teammate.
     let (status, member) = send(
@@ -2536,15 +2664,9 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 2);
     let dana = roster.iter().find(|m| m["id"] == id).unwrap();
     assert_eq!(dana["name"], "Dana");
     assert_eq!(dana["role"], "Designer");
-
-    // Deleting a manifest teammate is a 409.
-    let (status, body) = send(&state, "DELETE", "/api/v1/company/team/ceo", None).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["code"], "conflict");
 
     // Deleting the overlay teammate is a 204.
     let (status, _) = send(
@@ -2560,8 +2682,11 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 1);
-    assert_eq!(roster[0]["id"], "ceo");
+    assert!(
+        roster.iter().all(|row| row["id"] != id.as_str()),
+        "the deleted overlay teammate is still listed: {roster:?}"
+    );
+    assert!(roster.iter().any(|row| row["id"] == "ceo"));
 
     // Toggle an inbox on.
     let (status, ack) = send(
@@ -2573,6 +2698,22 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ack["key"], "ceo");
+
+    // And a manifest teammate deletes too — recorded as a tombstone on the
+    // record, never as a rewrite of `company.toml`, so the blueprint being
+    // re-read on the next load does not bring it back.
+    let (status, _) = send(&state, "DELETE", "/api/v1/company/team/ceo", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != "ceo"),
+        "the manifest teammate is still listed after its delete: {roster:?}"
+    );
 }
 
 #[tokio::test]
@@ -3167,6 +3308,8 @@ async fn state_with_manifest_and_defaults(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -3178,9 +3321,13 @@ async fn state_with_manifest_and_defaults(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3209,6 +3356,8 @@ async fn state_with_manifest_and_overlays(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -3220,9 +3369,13 @@ async fn state_with_manifest_and_overlays(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3338,6 +3491,65 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(list.as_array().unwrap().len(), 0);
 }
 
+/// Issue #1270: a build without the `mcp` feature must serve List A exactly as
+/// before and answer the directory routes `not_wired`.
+///
+/// Gated on the absence of the feature rather than written once for both builds:
+/// with `mcp` on, these routes reach a live registry and two upstream
+/// directories over the network, which is not a thing a unit test may do. The
+/// default `cargo test --locked` lane is what runs this, and it is the lane that
+/// compiles the unwired half in the first place.
+#[cfg(not(feature = "mcp"))]
+#[tokio::test]
+async fn without_the_mcp_feature_the_directory_is_not_wired_and_list_a_is_unchanged() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/mcp/servers",
+        Some(json!({ "name": "notion", "endpoint": "https://notion.example/mcp" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // List A is served, and carries none of the registry-only keys.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["source"], "runtime");
+    for key in ["serverId", "qualifiedName", "iconUrl", "transport"] {
+        assert!(
+            list[0].get(key).is_none(),
+            "`{key}` must not appear without a registry install"
+        );
+    }
+
+    // Every directory route answers the console's degrade signal.
+    for (method, uri) in [
+        ("GET", "/api/v1/company/mcp/registry/search?q=git"),
+        (
+            "GET",
+            "/api/v1/company/mcp/registry/entry?qualifiedName=@a/b",
+        ),
+        ("POST", "/api/v1/company/mcp/registry/install"),
+        ("POST", "/api/v1/company/mcp/registry/sid/connect"),
+        ("POST", "/api/v1/company/mcp/registry/sid/disconnect"),
+        ("PUT", "/api/v1/company/mcp/registry/sid/env"),
+        ("DELETE", "/api/v1/company/mcp/registry/sid"),
+    ] {
+        let (status, body) = send(&state, method, uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert_eq!(body["code"], "not_wired", "{method} {uri}");
+    }
+
+    // And the List A delete still works with no install behind the row.
+    let (status, _) = send(&state, "DELETE", "/api/v1/company/mcp/servers/notion", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
 #[tokio::test]
 async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     let home_dir = home();
@@ -3373,16 +3585,16 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     );
 }
 
-/// Issue #568: each listed server carries the ids of the agents whose *effective*
-/// grants reach it — over the full runtime roster, manifest agents plus overlay
-/// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
-/// (and every overlay teammate, which has no tools row) inherits the wildcard and
-/// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
-/// that server.
+/// Issue #568: each listed server carries the agents whose *effective* grants
+/// reach it — over the full runtime roster, manifest agents plus overlay
+/// teammates. With a company `allow = ["*", "mcp:*"]`, an agent that declares
+/// no `tools` (and every overlay teammate, which has no tools row) inherits the
+/// wildcard and explicit MCP grant and reaches every server; an agent that
+/// narrows itself to `mcp:notion` reaches only that server.
 #[tokio::test]
 async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
          [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
@@ -3391,40 +3603,63 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     .unwrap();
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
+    // A minted id, exactly as `POST …/team` gives an operator-added teammate —
+    // the shape that used to reach the console's "Reachable by" line raw (#931).
     let overlay = crate::ports::types::OverlayAgent {
-        id: "helper".to_string(),
+        id: "019fa75dbc9b-000000000001".to_string(),
         name: "Helper".to_string(),
         role: "Assistant".to_string(),
         description: None,
-        tools: Vec::new(),
+        tools: None,
+        model: None,
+        harness: None,
     };
     let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
 
     let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
     assert_eq!(status, StatusCode::OK);
-    let reach = |name: &str| -> Vec<String> {
+    let reach = |name: &str| -> Vec<(String, String)> {
         let row = list
             .as_array()
             .unwrap()
             .iter()
             .find(|s| s["name"] == name)
             .unwrap_or_else(|| panic!("server `{name}` is listed"));
-        let mut ids: Vec<String> = row["reachableBy"]
+        let mut agents: Vec<(String, String)> = row["reachableBy"]
             .as_array()
             .expect("reachableBy serializes as an array")
             .iter()
-            .map(|v| v.as_str().unwrap().to_string())
+            .map(|v| {
+                (
+                    v["id"].as_str().unwrap().to_string(),
+                    v["name"].as_str().unwrap().to_string(),
+                )
+            })
             .collect();
-        ids.sort();
-        ids
+        agents.sort();
+        agents
     };
+    let pair = |id: &str, name: &str| (id.to_string(), name.to_string());
 
     // notion: the narrowed ceo, the wildcard-inheriting eng, and the overlay.
-    assert_eq!(reach("notion"), vec!["ceo", "eng", "helper"]);
+    // Issue #931: every row carries the display label the rest of the console
+    // uses — a manifest agent's role, an overlay teammate's name — so the minted
+    // overlay id is never what a reader sees.
+    assert_eq!(
+        reach("notion"),
+        vec![
+            pair("019fa75dbc9b-000000000001", "Helper"),
+            pair("ceo", "Chief"),
+            pair("eng", "Engineer"),
+        ]
+    );
     // linear: only the wildcard holders — ceo scoped itself out of it.
     assert_eq!(
         reach("linear"),
-        vec!["eng", "helper"],
+        vec![
+            pair("019fa75dbc9b-000000000001", "Helper"),
+            pair("eng", "Engineer"),
+        ],
         "ceo narrowed to mcp:notion, so it cannot reach linear"
     );
 }
@@ -3461,9 +3696,9 @@ async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|v| v.as_str().unwrap())
+            .map(|v| (v["id"].as_str().unwrap(), v["name"].as_str().unwrap()))
             .collect::<Vec<_>>(),
-        vec!["ceo"],
+        vec![("ceo", "Chief")],
         "the company allow covers mcp:docs for the one agent"
     );
     assert!(
@@ -3481,7 +3716,7 @@ async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
 #[tokio::test]
 async fn mcp_reachability_is_empty_for_a_disabled_server() {
     let manifest: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\", \"mcp:*\"]\n\
          [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
          [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
     )
@@ -3495,7 +3730,7 @@ async fn mcp_reachability_is_empty_for_a_disabled_server() {
             .as_array()
             .expect("reachableBy serializes as an array")
             .iter()
-            .map(|v| v.as_str().unwrap().to_string())
+            .map(|v| v["id"].as_str().unwrap().to_string())
             .collect()
     };
 
@@ -3686,6 +3921,8 @@ async fn state_with_source_dir(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -3697,9 +3934,13 @@ async fn state_with_source_dir(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         })
         .await
         .unwrap();
@@ -3776,7 +4017,20 @@ async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() 
     // `GET …/workflows` (seed ∪ overlay) now lists it.
     let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = list.as_array().unwrap();
+    // The company's own graphs; the baseline is listed in every company.
+    // Id heuristic, not provenance — `greet` never collides with a global id
+    // here, so this is safe; see
+    // `workflow_create_of_an_id_matching_a_global_wins_by_content` for the
+    // colliding case, asserted by content rather than this filter.
+    let rows: Vec<&serde_json::Value> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::workflows().iter().any(|w| w.id == id)
+        })
+        .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], "greet");
 
@@ -3784,6 +4038,61 @@ async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() 
     let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(graph["name"], "greet");
+}
+
+/// A company workflow whose id matches a global's must win — checked by its
+/// own content (the name it was created with), not by an id-membership
+/// filter, which would misclassify this exact row as "the baseline's" because
+/// the ids match. `create_company_workflow` does not special-case global ids
+/// (only seed files, overlays and `[workflows].enabled` reserve one), so
+/// creating over a global id is exactly this: the company's overlay
+/// definition of that id supersedes the global on every read.
+#[tokio::test]
+async fn workflow_create_of_an_id_matching_a_global_wins_by_content() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let seed_dir = home.join("seed");
+    std::fs::create_dir_all(&seed_dir).unwrap();
+    let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
+    let taken = crate::globals::workflows()[0].id.clone();
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workflows",
+        Some(workflow_body(&taken)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["id"], taken);
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let matching: Vec<&serde_json::Value> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["id"] == taken.as_str())
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the shadowed global must not be listed alongside the override: {list}"
+    );
+    assert_eq!(
+        matching[0]["name"], taken,
+        "the company's own definition (named after its id, per `workflow_body`) must win"
+    );
+
+    let (status, graph) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workflows/{taken}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(graph["name"], taken);
 }
 
 #[tokio::test]
@@ -3836,7 +4145,12 @@ async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "invalid_request");
+    // Issue #1016: a dangling edge is now a structured `workflow_invalid` whose
+    // `problems` array names the endpoint and the field, so the console can
+    // highlight the id the author wrote.
+    assert_eq!(body["code"], "workflow_invalid");
+    assert_eq!(body["problems"][0]["node_id"], "ghost");
+    assert_eq!(body["problems"][0]["field"], "to");
 
     // An agent node naming a teammate not on the roster.
     let (status, body) = send(
@@ -3981,341 +4295,6 @@ async fn mcp_add_probes_without_rollback_and_persists_health() {
     assert!(
         health["status"].is_string(),
         "test returns health: {health}"
-    );
-}
-
-// -- Telegram channel (issue #31) -------------------------------------------
-
-use crate::company::telegram::RecordingTelegramApi;
-
-/// A running "acme" company whose host has a recording Telegram transport
-/// injected, so the inbound webhook can actually deliver a reply offline. The
-/// host is loopback-only (no `public_url`) — the local/self-host shape of issue
-/// #203.
-async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) -> AppState {
-    state_with_telegram_at(home, api, None).await
-}
-
-/// As [`state_with_telegram`], but with `public_url` set — the hosted shape,
-/// where Telegram can actually deliver to the `/hooks/...` route.
-async fn state_with_telegram_at(
-    home: &std::path::Path,
-    api: RecordingTelegramApi,
-    public_url: Option<&str>,
-) -> AppState {
-    use crate::ports::CompanyStore;
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            id: id.clone(),
-            manifest: manifest(),
-            ledger: Vec::new(),
-            lifecycle: "running".to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    let connections =
-        crate::server::ops::ConnectionsRuntime::new().with_telegram(std::sync::Arc::new(api));
-    let state = AppState::new(AppConfig {
-        public_url: public_url.map(str::to_string),
-        ..AppConfig::default()
-    })
-    .with_connections(connections);
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
-
-/// Posts a raw Telegram update to the inbound webhook (no session; the secret
-/// header is the only credential), returning the status and JSON body.
-async fn telegram_hook(
-    state: &AppState,
-    secret_header: Option<&str>,
-    body: Value,
-) -> (StatusCode, Value, String) {
-    let mut request = Request::builder()
-        .method("POST")
-        .uri("/hooks/acme/telegram")
-        .header("content-type", "application/json");
-    if let Some(secret) = secret_header {
-        request = request.header("x-telegram-bot-api-secret-token", secret);
-    }
-    let request = request.body(Body::from(body.to_string())).unwrap();
-    let response = router(state.clone()).oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let raw = String::from_utf8_lossy(&bytes).to_string();
-    let value = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-    };
-    (status, value, raw)
-}
-
-const BOT_TOKEN: &str = "7654321:AAExampleBotTokenNeverLeaks";
-const WEBHOOK_SECRET: &str = "wh-secret-abc123";
-
-fn telegram_update(chat_id: i64, text: &str) -> Value {
-    json!({
-        "update_id": 1,
-        "message": {
-            "message_id": 7,
-            "from": { "id": 999, "username": "bob" },
-            "chat": { "id": chat_id, "type": "private" },
-            "text": text,
-        }
-    })
-}
-
-#[tokio::test]
-async fn telegram_config_is_write_only_and_status_reads_back() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home).await;
-
-    // Nothing configured yet. This host binds loopback with no `public_url`, so
-    // it never offers a webhook URL (issue #203) — Telegram could not deliver
-    // to one, and inbound rides `getUpdates` polling instead.
-    let (status, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(cfg["configured"], false);
-    assert_eq!(cfg["tokenSet"], false);
-    assert!(cfg["webhookUrl"].is_null(), "unreachable host: {cfg}");
-
-    // Store both credentials (write-only).
-    let (status, cfg) = send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(cfg["configured"], true);
-    assert_eq!(cfg["tokenSet"], true);
-    assert_eq!(cfg["secretSet"], true);
-    // Neither secret is ever echoed back.
-    let body = cfg.to_string();
-    assert!(
-        !body.contains(BOT_TOKEN),
-        "bot token leaked into PUT status"
-    );
-    assert!(
-        !body.contains(WEBHOOK_SECRET),
-        "secret leaked into PUT status"
-    );
-
-    // A partial write rotates the secret without re-sending the token.
-    let (status, _) = send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "webhookSecret": "rotated" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
-    assert_eq!(cfg["tokenSet"], true, "token survived a secret-only PUT");
-
-    // DELETE clears both.
-    let (status, cfg) = send(&state, "DELETE", "/api/v1/company/channels/telegram", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(cfg["configured"], false);
-    assert_eq!(cfg["tokenSet"], false);
-}
-
-#[tokio::test]
-async fn telegram_webhook_rejects_an_unverified_post() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    // No secret header at all.
-    let (status, _, _) = telegram_hook(&state, None, telegram_update(1, "hi")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    // Wrong secret.
-    let (status, _, _) = telegram_hook(&state, Some("nope"), telegram_update(1, "hi")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let api = RecordingTelegramApi::new();
-    let state = state_with_telegram(&home, api.clone()).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    // A verified inbound update runs one cycle; the echo brain replies and the
-    // reply is delivered back to the ORIGIN chat (555), not any other.
-    let (status, body, raw) = telegram_hook(
-        &state,
-        Some(WEBHOOK_SECRET),
-        telegram_update(555, "status?"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["ok"], true);
-    assert_eq!(body["delivered"], 1);
-    assert_eq!(api.sent(), vec![(555, "You said: status?".to_string())]);
-    // The bot token never appears in the webhook response.
-    assert!(
-        !raw.contains(BOT_TOKEN),
-        "token leaked into webhook response"
-    );
-}
-
-#[tokio::test]
-async fn telegram_set_webhook_registers_the_public_url() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let api = RecordingTelegramApi::new();
-    // The hosted shape: a real public https URL Telegram can deliver to.
-    let state = state_with_telegram_at(&home, api.clone(), Some("https://acme.example")).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    // The status advertises the webhook only on such a host.
-    let (_, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
-    assert_eq!(
-        cfg["webhookUrl"],
-        "https://acme.example/hooks/acme/telegram"
-    );
-
-    let (status, res) = send(
-        &state,
-        "POST",
-        "/api/v1/company/channels/telegram/webhook",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["ok"], true);
-    let webhooks = api.webhooks();
-    assert_eq!(webhooks.len(), 1);
-    assert_eq!(webhooks[0], "https://acme.example/hooks/acme/telegram");
-}
-
-/// Issue #203: on a host with no public https URL, registering a webhook is
-/// refused outright. Accepting it would be actively harmful — Telegram could
-/// never deliver to the URL *and* a registration blocks `getUpdates`, so it
-/// would take down the one inbound path that does work.
-#[tokio::test]
-async fn telegram_set_webhook_is_refused_on_a_host_telegram_cannot_reach() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let api = RecordingTelegramApi::new();
-    let state = state_with_telegram(&home, api.clone()).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    let (status, res) = send(
-        &state,
-        "POST",
-        "/api/v1/company/channels/telegram/webhook",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        res.to_string().contains("OPENCOMPANY_PUBLIC_URL"),
-        "the refusal must say how to fix it: {res}"
-    );
-    assert!(
-        api.webhooks().is_empty(),
-        "no loopback URL was ever handed to Telegram"
-    );
-}
-
-/// The channel is usable with a bot token alone: no webhook secret, no public
-/// URL, no `setWebhook` — the polling listener covers inbound.
-#[tokio::test]
-async fn telegram_is_configured_by_a_bot_token_alone() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let api = RecordingTelegramApi::new();
-    let state = state_with_telegram(&home, api).await;
-
-    let (status, cfg) = send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(cfg["configured"], true, "a token is the whole setup: {cfg}");
-    assert_eq!(cfg["secretSet"], false);
-    assert!(cfg["webhookUrl"].is_null());
-    // The host has a transport wired, so it long-polls for inbound.
-    assert_eq!(cfg["polling"], true);
-}
-
-#[tokio::test]
-async fn telegram_token_never_leaks_even_when_delivery_fails() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    // A transport that fails with an error embedding the bot token.
-    let api = RecordingTelegramApi::failing_with_token_echo();
-    let state = state_with_telegram(&home, api).await;
-    send(
-        &state,
-        "PUT",
-        "/api/v1/company/channels/telegram",
-        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
-    )
-    .await;
-
-    // The turn still runs; a delivery failure never fails the webhook and never
-    // surfaces the token in the response body.
-    let (status, body, raw) =
-        telegram_hook(&state, Some(WEBHOOK_SECRET), telegram_update(42, "ping")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["delivered"], 0);
-    assert!(
-        !raw.contains(BOT_TOKEN),
-        "token leaked on a failed delivery"
     );
 }
 
@@ -4479,6 +4458,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         parent_task_id: parent.map(str::to_string),
         output: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,
@@ -4500,6 +4480,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to this task — admitted.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-1".into(),
             agent_id: "ceo".into(),
@@ -4509,6 +4491,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // An ordinary chat reply — excluded.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "General".into(),
             agent_id: "ceo".into(),
@@ -4518,6 +4502,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to a different task — excluded.
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-other".into(),
             agent_id: "ceo".into(),
@@ -4668,6 +4654,7 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,
@@ -4726,7 +4713,7 @@ async fn a_withdrawn_discussion_message_stops_being_served() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(withdrawn["redacted"], true);
     assert_eq!(
-        withdrawn["redactedBy"], "harness-admin",
+        withdrawn["redactedBy"], "Harness Admin",
         "a withdrawal nobody's name is on is a message that can vanish quietly"
     );
     assert_eq!(
@@ -4741,9 +4728,9 @@ async fn a_withdrawn_discussion_message_stops_being_served() {
     assert_eq!(thread.len(), 2, "the row is withdrawn, not deleted: {body}");
     assert_eq!(thread[0]["seq"], seq);
     assert_eq!(thread[0]["redacted"], true);
-    assert_eq!(thread[0]["redactedBy"], "harness-admin");
+    assert_eq!(thread[0]["redactedBy"], "Harness Admin");
     assert_eq!(
-        thread[0]["author"], "harness-admin",
+        thread[0]["author"], "Harness Admin",
         "the poster is still named"
     );
     assert_eq!(
@@ -4972,7 +4959,7 @@ async fn task_discussion_posts_persist_and_are_scoped_to_their_card() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(posted["text"], "blocked on the API key");
-    assert_eq!(posted["author"], "harness-admin");
+    assert_eq!(posted["author"], "Harness Admin");
 
     for (task, text) in [
         ("t-1", "unblocked, the key was rotated"),
@@ -5335,6 +5322,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -5353,6 +5341,8 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
             run_id: None,
         },
         CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-1".into(),
             agent_id: "writer".into(),
@@ -5403,7 +5393,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
     let html = String::from_utf8(bytes.to_vec()).expect("the document is utf-8");
     assert!(html.starts_with("<!doctype html>"));
     assert!(html.contains("Launch post"));
-    assert!(html.contains("<dd>In review</dd>"));
+    assert!(html.contains("<dd>Working — In review</dd>"));
     assert!(html.contains("First draft is up."));
 
     let after_board = runtime.tasks().list(&company).await.unwrap();
@@ -5454,6 +5444,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -5559,6 +5550,7 @@ async fn dispatched_task(
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -6017,6 +6009,7 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -6297,14 +6290,7 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
     for (id, task) in [("run-a", "t-1"), ("run-b", "t-1"), ("run-c", "t-other")] {
         runtime
             .runs()
-            .create_run(
-                &company,
-                NewRun {
-                    id: id.to_string(),
-                    task_id: task.to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
+            .create_run(&company, NewRun::for_task(id, task, "ceo"))
             .await
             .unwrap();
     }
@@ -6351,6 +6337,155 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
     assert_eq!(
         approvals[0]["id"], "appr-attempt-2",
         "the attempt id decides ownership, not the card link",
+    );
+}
+
+/// The **queue** answers ownership the same way the card does (#1891).
+///
+/// [`the_attempt_id_outranks_the_card_link_when_both_are_present`] pins the task
+/// detail read. `GET …/approvals` projected the raw park stamp instead, so the
+/// two surfaces disagreed about the same approval: the card refused to show
+/// `appr-elsewhere` and the queue handed it out labelled `t-1`. Every console
+/// join on that link — the board's blocked row, the Approvals page's per-card
+/// filter — inherited the disagreement.
+///
+/// Read-only that was a wrong label. Once the board card grew Approve and
+/// Decline it became an operator resolving another card's request, so the two
+/// reads are pinned against each other here rather than left to agree by
+/// convention.
+#[tokio::test]
+async fn the_queue_resolves_ownership_the_same_way_the_card_does() {
+    use crate::ports::runs::NewRun;
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    for (id, task) in [("run-b", "t-1"), ("run-c", "t-other")] {
+        runtime
+            .runs()
+            .create_run(&company, NewRun::for_task(id, task, "ceo"))
+            .await
+            .unwrap();
+    }
+
+    let under_run = |run: &str| {
+        let mut effect = parked_effect();
+        effect.run_id = Some(run.to_string());
+        effect
+    };
+
+    // Stamped with this card, parked under another card's attempt. The card
+    // read refuses it; the queue must not label it `t-1` either.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-elsewhere"),
+            &under_run("run-c"),
+            dispatched_at + 5,
+            TaskLink::Task { id: "t-1".into() },
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    // Stamped Unlinked *and* carrying a run id — which `workflow_run_of` reads
+    // as a workflow park, because the two id spaces are indistinguishable by
+    // value. The card read claims it (it checks membership in this card's own
+    // attempt ids, which the queue has no way to do); the queue leaves it
+    // alone rather than risk relabelling a workflow approval onto a card.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-attempt-2"),
+            &under_run("run-b"),
+            dispatched_at + 6,
+            TaskLink::Unlinked,
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    // No attempt at all: the stamp is the whole answer, unchanged.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-stamped"),
+            &parked_effect(),
+            dispatched_at + 7,
+            TaskLink::Task { id: "t-1".into() },
+            ApprovalConversation::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/approvals", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let queue = body.as_array().unwrap();
+    let owner_of = |id: &str| {
+        queue
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing from the queue: {queue:?}"))["task"]
+            .clone()
+    };
+
+    assert_eq!(
+        owner_of("appr-elsewhere"),
+        json!({ "link": "task", "id": "t-other" }),
+        "the attempt outranks the stamp on the queue, exactly as on the card",
+    );
+    assert_eq!(
+        owner_of("appr-attempt-2"),
+        json!({ "link": "unlinked" }),
+        "an Unlinked park carrying a run id is a workflow park by `workflow_run_of`'s \
+         rule, and the queue must not claim it for a card on the strength of an id \
+         whose space it cannot identify",
+    );
+    assert_eq!(
+        owner_of("appr-stamped"),
+        json!({ "link": "task", "id": "t-1" }),
+        "a park with no attempt keeps the link it was stamped with",
+    );
+
+    // The pinning half, and it is a **subset** rather than an equality, which is
+    // the honest shape of the guarantee.
+    //
+    // The queue may never claim an approval the card does not — that direction
+    // is the defect, and it is what puts a decision the operator should not
+    // have in front of them. It may fall short: `approval_owner` asks whether a
+    // run is among *this card's* attempts, which the queue cannot ask without
+    // per-card state, so where the id space is ambiguous the queue abstains.
+    // The cost of abstaining is a blocked row the board does not draw; the cost
+    // of the other direction is deciding somebody else's request.
+    let (_, card) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let on_card: std::collections::HashSet<&str> = card["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    let from_queue: std::collections::HashSet<&str> = queue
+        .iter()
+        .filter(|row| row["task"] == json!({ "link": "task", "id": "t-1" }))
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        from_queue.is_subset(&on_card),
+        "the queue must never put an approval on a card the card itself disowns: \
+         queue={from_queue:?} card={on_card:?}",
+    );
+    assert!(
+        from_queue.contains("appr-stamped"),
+        "and must still carry the unambiguous ones: {from_queue:?}",
+    );
+    assert!(
+        !from_queue.contains("appr-elsewhere"),
+        "least of all the one parked under another card's attempt: {from_queue:?}",
     );
 }
 
@@ -6693,7 +6828,7 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
             "/api/v1/company/smtp",
             Some(
                 json!({ "provider": "smtp", "host": "mail.example.test", "port": 587,
-                         "username": "u", "password": "p", "from": "a@example.test" }),
+                         "username": "u", "password": "p", "from_email": "a@example.test" }),
             ),
         ),
         (
@@ -6706,14 +6841,6 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
             "/api/v1/company/domain",
             Some(json!({"domain": "x.test"})),
         ),
-        // The Telegram bot the company speaks as, and where its updates land.
-        (
-            "PUT",
-            "/api/v1/company/channels/telegram",
-            Some(json!({ "botToken": "x" })),
-        ),
-        ("DELETE", "/api/v1/company/channels/telegram", None),
-        ("POST", "/api/v1/company/channels/telegram/webhook", None),
         // Which tool servers exist, and the credentials they carry.
         (
             "POST",
@@ -6747,6 +6874,39 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
     }
 }
 
+/// The counterpart to the table above, on the same two surfaces: a member is
+/// let *through* the reads.
+///
+/// `docs/modules/server/authority.md` asserts in prose that reads on these
+/// surfaces stay open to any member — they carry non-secret routing and never a
+/// credential — and until now nothing pinned it. `GET …/domain` and
+/// `GET …/smtp` are new (issue #1460), and the easy mistake when adding a route
+/// to a module whose every other handler takes `AdminScopedCompany` is to reach
+/// for the same extractor: the console's Settings screen would then `403` for
+/// every member while the identical data stayed readable to them over GraphQL
+/// as `Company.domain` and `Company.smtp`.
+///
+/// `200` specifically, not merely "not 403": these read stored config that may
+/// be absent, and both answer that case with a body rather than a status, so
+/// anything else would mean the route did not run.
+#[tokio::test]
+async fn a_member_may_read_what_the_company_reaches_the_world_as() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+    let member =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Member)
+            .await;
+
+    for uri in ["/api/v1/company/domain", "/api/v1/company/smtp"] {
+        let (status, response) = send_cookie(&state, "GET", uri, None, &member).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "GET {uri} refused a member: {response}"
+        );
+    }
+}
+
 /// The other side, on the same table: the harness admin is refused by none of
 /// them on role grounds.
 ///
@@ -6769,11 +6929,6 @@ async fn an_admin_is_refused_by_none_of_them() {
             "PUT",
             "/api/v1/company/domain",
             Some(json!({"domain": "x.test"})),
-        ),
-        (
-            "PUT",
-            "/api/v1/company/channels/telegram",
-            Some(json!({ "botToken": "x" })),
         ),
         (
             "POST",
@@ -7258,6 +7413,7 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
         },
         Some("the agent's draft"),
     )
@@ -7295,6 +7451,14 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
 /// proposal graph, straight through the task store (the builder pass that would
 /// normally mint it is behind the `openhuman` feature). Returns the card id.
 async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
+    seed_proposal_card_assigned(state, ops, "ceo").await
+}
+
+/// [`seed_proposal_card`], with the assignee set to whatever the caller
+/// passes rather than the hardcoded `"ceo"` — for proving the owning-desk
+/// default against a card assigned directly to a desk (issue #1882 review),
+/// where `assignee` is the desk's own canonical id rather than a teammate's.
+async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &str) -> String {
     let runtime = state
         .registry()
         .get(&CompanyId::new("acme"))
@@ -7306,12 +7470,13 @@ async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
         note: None,
         column: "in_review".to_string(),
         priority: "medium".to_string(),
-        assignee: "ceo".to_string(),
+        assignee: assignee.to_string(),
         updated_at_millis: 1,
         origin_chat_id: None,
         parent_task_id: None,
         output: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
         workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
             summary: "Email the digest".to_string(),
@@ -7392,6 +7557,176 @@ async fn applying_a_proposal_creates_the_workflow_and_finishes_the_card() {
     assert_eq!(created["enabled"], true, "a manual trigger is not disarmed");
 }
 
+/// Issue #1862 prerequisite: a proposal that names no `ownerDesk` defaults to
+/// the proposing card's assignee's desk. `seed_proposal_card` assigns the
+/// card to `ceo`, and `desk_manifest` seats `ceo` on the `engineering` desk —
+/// so the created workflow must come out owned by `engineering` even though
+/// `digest_ops` never mentions it.
+///
+/// This reads the default back off the persisted overlay TOML directly,
+/// rather than the `GET …/workflows/{id}` response (which now also projects
+/// `ownerDesk`, see `WorkflowGraph::owner_desk`) — pinning the actual stored
+/// effect of the defaulting logic, independent of the read projection.
+#[tokio::test]
+async fn applying_a_proposal_defaults_the_owner_desk_from_the_assignees_desk() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "the assignee's desk fills the omitted owner_desk"
+    );
+}
+
+/// **Regression, issue #1882 review — blank must default the same as absent.**
+/// A stored proposal that names `ownerDesk` as a blank/whitespace string (a
+/// builder pass that emits the key but leaves it empty, rather than omitting
+/// it) must still fall through to the assignee-desk default. Before the fix,
+/// `Some("   ")` passed the `is_none()` gate in `apply_workflow_proposal`, so
+/// the default never ran and the blank string was persisted as the "owner"
+/// instead.
+#[tokio::test]
+async fn applying_a_proposal_with_a_blank_owner_desk_still_defaults_it() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let mut ops = digest_ops(None);
+    ops["ownerDesk"] = json!("   ");
+    let id = seed_proposal_card(&state, ops).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "a blank ownerDesk must default the same as an omitted one: {file:?}"
+    );
+}
+
+/// **Regression, issue #1882 review — a desk-assigned card must default to
+/// its own desk.** `runtime::assignee::AssigneeResolution::canonical` stores
+/// a desk assignment as the desk's own canonical id, not a teammate id — so
+/// `record.assignee` can BE `"engineering"` directly. Before the fix, the
+/// defaulting fallback only checked desk MEMBERSHIP (`desk_of_member`), which
+/// a desk id is never a member of, so a card already naming its owning desk
+/// still produced an ownerless workflow.
+#[tokio::test]
+async fn applying_a_proposal_for_a_desk_assigned_card_defaults_to_that_desk() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card_assigned(&state, digest_ops(None), "engineering").await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "a card assigned straight to a desk must default owner_desk to that desk: {file:?}"
+    );
+}
+
+/// **Regression, issue #1882 review — a multi-desk teammate must not default
+/// an arbitrary owner.** `desk_of_member` returns the first desk in
+/// `desk_ids` declaration order, which is fine for the informational message
+/// it was written for (`unknown_desk_message`) but wrong for a value that
+/// gets persisted: a proposal naming no `ownerDesk`, assigned to a teammate
+/// who sits on two desks, has no basis for picking either one. Before the
+/// fix, `apply_workflow_proposal`'s fallback used `desk_of_member` directly
+/// and silently persisted `"engineering"` — the desk declared first in the
+/// manifest — even though `ceo` sits on `legal` too. The fix must leave
+/// `owner_desk` `None` rather than guess.
+#[tokio::test]
+async fn applying_a_proposal_for_a_multi_desk_assignee_leaves_owner_desk_unset() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+         [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n\
+         [[group_chat]]\nid = \"legal\"\nname = \"Legal\"\nmembers = [\"ceo\"]\n\
+         [policy]\nmode = \"full\"\n",
+    )
+    .unwrap();
+    let state = state_with_manifest(&home, manifest).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk, None,
+        "a teammate on two desks gives no basis for picking either one: {file:?}"
+    );
+}
+
 /// #276: applying a proposal whose trigger carries a schedule creates the
 /// workflow **switched off** — armed only by a person, never by approving the
 /// proposal.
@@ -7456,7 +7791,7 @@ async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
     // The card is untouched save for the reason on its note: still In Review,
     // still carrying the proposal to retry once the roster is fixed.
     let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
-    assert_eq!(card["task"]["column"], "in_review");
+    assert_eq!(card["task"]["stage"], "in_review");
     assert!(card["task"].get("workflowProposal").is_some(), "{card}");
 
     // …and no workflow was created.
@@ -7468,6 +7803,157 @@ async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
             .iter()
             .all(|w| w["id"] != "weekly-digest"),
         "a refused proposal must not leave a workflow behind"
+    );
+}
+
+/// A company with one desk, so its runtime deliverable set is exactly
+/// `["engineering"]` — enough to tell a channel target that works from one that
+/// does not (issue #1191).
+fn desk_manifest() -> CompanyManifest {
+    toml::from_str(
+        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+         [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n\
+         [policy]\nmode = \"full\"\n",
+    )
+    .unwrap()
+}
+
+/// [`digest_ops`], with the output node posting its report to `target`.
+fn digest_ops_posting_to(target: &str) -> Value {
+    json!({
+        "id": "weekly-digest",
+        "name": "Weekly digest",
+        "description": "Post the weekly digest",
+        "nodes": [
+            { "id": "start", "kind": "trigger", "name": "Start" },
+            { "id": "write", "kind": "agent", "name": "Draft it", "agent": "ceo" },
+            {
+                "id": "post_summary",
+                "kind": "output",
+                "name": "Post to engineering desk",
+                "destination": { "kind": "channel", "target": target }
+            }
+        ],
+        "edges": [
+            { "from": "start", "to": "write" },
+            { "from": "write", "to": "post_summary" }
+        ]
+    })
+}
+
+/// **The #1191 regression.** The builder appended `-desk` to a desk's display
+/// name, so the proposal routed its report to `engineering-desk` — not a channel
+/// this runtime can deliver to.
+///
+/// Apply used to persist it: the operator was told "Workflow created — the card
+/// is done", the card flipped to Done, and the workflow that now existed could
+/// never deliver and could not be saved again from the editor without first
+/// fixing a destination the operator never chose. Apply is a save, and it is now
+/// held to the save rule — with the located `workflow_invalid` envelope, so the
+/// console can say WHICH node.
+#[tokio::test]
+async fn applying_a_proposal_with_an_unwired_channel_is_refused_and_keeps_the_card_in_review() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card(&state, digest_ops_posting_to("engineering-desk")).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "workflow_invalid", "{body}");
+    let problem = body["problems"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the refusal must carry a breakdown: {body}"))
+        .iter()
+        .find(|p| p["node_id"] == "post_summary")
+        .unwrap_or_else(|| panic!("no problem names the output node: {body}"));
+    assert_eq!(problem["field"], "destination.target", "{body}");
+    assert!(
+        problem["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is not a workflow delivery channel"),
+        "{body}"
+    );
+
+    // The card is recoverable, exactly as it is for roster drift: still In
+    // Review, still carrying its proposal, with the reason on its note.
+    let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
+    assert_eq!(card["task"]["stage"], "in_review", "{card}");
+    assert!(card["task"].get("workflowProposal").is_some(), "{card}");
+    assert!(
+        card["task"]["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("still waiting for review"),
+        "{card}"
+    );
+
+    // …and nothing was persisted.
+    let (_status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert!(
+        workflows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["id"] != "weekly-digest"),
+        "a refused apply must not leave a workflow behind: {workflows}"
+    );
+}
+
+/// The invariant the defect broke, stated directly: whatever apply persists,
+/// the ordinary editor save route accepts back unchanged.
+///
+/// Before #1191 these two routes gave opposite answers to the same bytes —
+/// apply created the graph and `PUT` refused it — so the operator's first edit
+/// of a copilot-built workflow was blocked on a destination they never chose.
+#[tokio::test]
+async fn an_applied_proposal_can_be_saved_again_unchanged() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card(&state, digest_ops_posting_to("engineering")).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["column"], "done");
+
+    // Read the created graph back and save it straight to the editor's route,
+    // byte-for-byte, with its own version token.
+    let (status, graph) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workflows/weekly-digest",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+
+    let mut body = graph.clone();
+    body["expectedVersion"] = graph["version"].clone();
+    let (status, saved) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workflows/weekly-digest",
+        Some(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "what apply persists, the editor must accept back unchanged: {saved}"
     );
 }
 
@@ -7489,7 +7975,7 @@ async fn rejecting_a_proposal_returns_the_card_to_todo() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{card}");
-    assert_eq!(card["column"], "todo");
+    assert_eq!(card["column"], "pending");
     assert!(card.get("workflowProposal").is_none(), "{card}");
     assert_eq!(
         card["deliverable"], "workflow",
@@ -8446,6 +8932,152 @@ async fn a_malformed_multipart_body_is_still_a_400() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// First-run company setup (docs/spec/runtime/company-setup.md)
+// ---------------------------------------------------------------------------
+
+/// The e-commerce worked example, end to end over the router.
+///
+/// The default test build has no harness, so this is the unpolished path — and
+/// that is exactly the contract worth pinning: a company with no inference
+/// credential still gets a real industry roster rather than an empty page or an
+/// error. Decision D3's floor, asserted at the surface an operator meets.
+#[tokio::test]
+async fn setup_proposes_a_real_roster_with_no_model_wired() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/setup/roster",
+        Some(json!({
+            "industry": "E-commerce — I sell homeware online",
+            "teamHint": "",
+            "automate": "Social media posts, Meta ads, generating my reports, order dispatch",
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "ecommerce", "{body}");
+    assert_eq!(
+        body["source"], "fallback",
+        "no harness is wired, so the curated team ships: {body}"
+    );
+    let agents = body["agents"].as_array().expect("agents array");
+    assert!(
+        (4..=6).contains(&agents.len()),
+        "a proposal must be a workable team, got {}: {body}",
+        agents.len()
+    );
+    let roles: Vec<&str> = agents
+        .iter()
+        .map(|a| a["role"].as_str().unwrap_or_default())
+        .collect();
+    assert!(roles.contains(&"Logistics Coordinator"), "{roles:?}");
+    // Every row must be directly usable as a `POST …/team` body — the console
+    // passes them straight through, so a missing field would surface as a
+    // half-created teammate rather than as a validation error here.
+    for agent in agents {
+        for field in ["name", "role", "description"] {
+            assert!(
+                agent[field].as_str().is_some_and(|v| !v.trim().is_empty()),
+                "agent is missing `{field}`: {agent}"
+            );
+        }
+    }
+}
+
+/// Setup proposes; it does not create. The roster must be untouched afterwards,
+/// because the console is what creates each teammate — and because the empty
+/// roster is also the "has setup run?" signal (decision D4), a route that
+/// created them itself would answer that question before the operator had seen
+/// a single name.
+#[tokio::test]
+async fn setup_creates_no_teammates_of_its_own() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (before_status, before) = send(&state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(before_status, StatusCode::OK);
+    let before_len = before.as_array().expect("roster").len();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/setup/roster",
+        Some(json!({ "industry": "content creator", "automate": "daily posts" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, after) = send(&state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(
+        after.as_array().expect("roster").len(),
+        before_len,
+        "setup created teammates itself: {after}"
+    );
+}
+
+/// The answers are persisted, because Phase 2 builds this company's workflows
+/// from them and must not have to ask a second time.
+#[tokio::test]
+async fn setup_remembers_the_answers() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/setup/roster",
+        Some(json!({
+            "industry": "E-commerce",
+            "teamHint": "plus customer support",
+            "automate": "Meta ads, order dispatch",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.path().to_path_buf());
+    let record = store
+        .load(&CompanyId::new("acme"))
+        .await
+        .expect("load")
+        .expect("record");
+    let answers = record.setup.expect("the answers were stored");
+    assert_eq!(answers.industry, "E-commerce");
+    assert_eq!(answers.team_hint, "plus customer support");
+    assert_eq!(answers.automate, "Meta ads, order dispatch");
+}
+
+/// An operator who types nothing still gets a team. The three questions are
+/// free text and the last two are skippable, so an empty body is a real request
+/// rather than a client bug — and stranding someone on the setup screen is the
+/// one outcome worse than a generic roster.
+#[tokio::test]
+async fn setup_answers_an_empty_body_with_the_generic_team() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/setup/roster",
+        Some(json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "generic", "{body}");
+    assert!(
+        body["agents"].as_array().expect("agents").len() >= 4,
+        "{body}"
+    );
+}
+
 /// `[workspace] max_blob_mb` above the default is a real knob again.
 ///
 /// It never was one: the route stopped reading at 64 MiB whatever a company had
@@ -8764,6 +9396,7 @@ async fn the_run_history_carries_a_runs_board_rows() {
             workflow_id: "digest".into(),
             run_id: "run-1".into(),
             scheduled: true,
+            started_by: None,
         },
         CompanyEvent::WorkflowRunFinished {
             workflow_id: "digest".into(),
@@ -8804,7 +9437,7 @@ async fn the_run_history_carries_a_runs_board_rows() {
 
     let (status, runs) = send(&state, "GET", "/api/v1/company/workflows/runs", None).await;
     assert_eq!(status, StatusCode::OK);
-    let runs = runs.as_array().expect("an array of runs");
+    let runs = runs["runs"].as_array().expect("an array of runs");
 
     let settled = runs
         .iter()
@@ -8869,5 +9502,450 @@ async fn a_card_opened_by_a_run_projects_its_provenance() {
         by_hand["originRunId"].is_null() && by_hand["originWorkflowId"].is_null(),
         "a card no run opened must carry neither key, so the board's existing wire shape is \
          unchanged: {by_hand}"
+    );
+}
+
+/// Both addressing forms reach it, like every other write-plane route — the
+/// platform `…/companies/{id}/…` spelling and the single-company alias.
+#[tokio::test]
+async fn setup_is_reachable_under_both_scope_forms() {
+    let home = home();
+    let state = state_with_company(home.path()).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/companies/acme/setup/roster",
+        Some(json!({ "industry": "software" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "software", "{body}");
+}
+
+// ---------------------------------------------------------------------------
+// Chat attachments (issue #1682)
+// ---------------------------------------------------------------------------
+
+/// Uploads one file to the chat-attachment route, hand-rolling the multipart
+/// body so the test drives the real `Multipart` extractor rather than a stub —
+/// the same shape as `upload_file`, pointed at `/chat/upload`.
+async fn chat_upload(
+    state: &AppState,
+    filename: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
+    const BOUNDARY: &str = "----opencompany1682boundary";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    if let Some(ct) = content_type {
+        body.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
+    }
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/chat/upload")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let out = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = if out.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&out).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+/// The upload half of #1682: a file posts to `/chat/upload`, comes back as a
+/// compact `AttachmentRef` with the store's own metadata, and lands in the
+/// workspace tree as a binary node the existing blob route can serve. This is
+/// the reference the send path then carries by id.
+#[tokio::test]
+async fn chat_upload_stores_binary_and_returns_ref() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Not valid UTF-8, so nothing on this path can be quietly routing it
+    // through a `String` and turning the attachment into a prose note.
+    let png: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00,
+    ];
+    let (status, reference) = chat_upload(&state, "hero.png", Some("image/png"), &png).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    assert_eq!(reference["name"], "hero.png");
+    assert_eq!(reference["mime"], "image/png");
+    assert_eq!(reference["size"], png.len() as u64);
+    let node_id = reference["nodeId"].as_str().expect("a node id").to_string();
+
+    // It is a real binary node in the tree, so it shares the workspace quota
+    // and the hardened blob serve rather than a parallel store.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == node_id.as_str())
+        .expect("the uploaded node is in the tree");
+    assert_eq!(listed["mime"], "image/png");
+    assert_eq!(listed["size"], png.len() as u64);
+
+    // And it streams back byte-exactly through the existing blob route — the
+    // download path #1682 reuses untouched.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{node_id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(got.to_vec(), png, "the bytes must survive the round trip");
+}
+
+/// A browser may send a full path as the filename; the route stores under the
+/// last segment only, named by the workspace rule — the same sanitizer the
+/// workspace upload applies, so no client string reaches a filesystem path.
+#[tokio::test]
+async fn chat_upload_sanitizes_pathy_filename() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let bytes: Vec<u8> = vec![0x00, 0x01, 0x02, 0xff];
+    let (status, reference) = chat_upload(
+        &state,
+        "../../etc/Secret Report.bin",
+        Some("application/octet-stream"),
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let name = reference["name"].as_str().unwrap();
+    assert!(
+        !name.contains('/') && !name.contains('\\'),
+        "the stored name kept a path separator: {name}"
+    );
+    assert_eq!(
+        name, "secret-report.bin",
+        "stored under the sanitized last segment"
+    );
+}
+
+/// Codex review finding on #1682: chat uploads all land at the workspace
+/// root, so a second message attaching a file under an earlier one's exact
+/// name — the common case of picking `image.png` twice — used to 409 rather
+/// than attach, since the only way to free the name was deleting the first
+/// upload and breaking its download. The route now retries once under a
+/// disambiguated name instead of failing the attach.
+#[tokio::test]
+async fn chat_upload_disambiguates_a_repeated_filename() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let first: Vec<u8> = vec![0x01, 0x02, 0x03];
+    let (status, first_ref) = chat_upload(&state, "image.png", Some("image/png"), &first).await;
+    assert_eq!(status, StatusCode::OK, "{first_ref}");
+    assert_eq!(first_ref["name"], "image.png");
+
+    // A later message attaches a *different* file under the same filename.
+    let second: Vec<u8> = vec![0x09, 0x08, 0x07, 0x06];
+    let (status, second_ref) = chat_upload(&state, "image.png", Some("image/png"), &second).await;
+    assert_eq!(status, StatusCode::OK, "{second_ref}");
+    let second_name = second_ref["name"].as_str().expect("a stored name");
+    assert_ne!(
+        second_name, "image.png",
+        "the second upload must not silently fail or overwrite the first"
+    );
+    assert!(
+        second_name.starts_with("image-") && second_name.ends_with(".png"),
+        "expected a disambiguated image-*.png name, got {second_name}"
+    );
+
+    // Both node ids are distinct, live in the tree, and stream back their own
+    // (not each other's) bytes — no data was lost or aliased on the collision.
+    let first_id = first_ref["nodeId"].as_str().unwrap();
+    let second_id = second_ref["nodeId"].as_str().unwrap();
+    assert_ne!(first_id, second_id);
+    for (node_id, want) in [(first_id, &first), (second_id, &second)] {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/company/workspace/blob/{node_id}"))
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&got.to_vec(), want);
+    }
+}
+
+/// The headline of #1682 end-to-end: an operator attaches a file, the message
+/// carries it, and a reload projects the attachment back with the **store's**
+/// name / mime / size — never a client claim, because `/chat` was handed only
+/// the node id. This is the reload proof the whole two-step design exists for.
+#[tokio::test]
+async fn chat_message_with_attachment_journals_and_hydrates() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x01];
+    let (status, reference) = chat_upload(&state, "diagram.png", Some("image/png"), &png).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    // The send carries the id only — no name, mime or size the host could be
+    // tricked into trusting.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "here is the diagram", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The reload: the operator's own message comes back with the attachment,
+    // and every field is the store's.
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = history
+        .as_array()
+        .expect("history is a list")
+        .iter()
+        .find(|m| m["text"] == "here is the diagram")
+        .expect("the operator message survived the reload");
+    let attachments = mine["attachments"]
+        .as_array()
+        .expect("the message carries its attachment on reload");
+    assert_eq!(attachments.len(), 1, "exactly one attachment: {mine}");
+    let attachment = &attachments[0];
+    assert_eq!(attachment["nodeId"], node_id.as_str());
+    assert_eq!(attachment["name"], "diagram.png", "name is the store's");
+    assert_eq!(attachment["mime"], "image/png", "mime is the store's");
+    assert_eq!(attachment["size"], png.len() as u64, "size is the store's");
+}
+
+/// Codex review finding on #1682, round 2: a bare node id told a hosted or
+/// sidecar brain a file existed but gave it nothing to act on — no device
+/// tool bridges a `context_*` call into the workspace's binary store. The
+/// send route now extracts a readable attachment's text and journals it
+/// alongside the reference, so `wire_event` (`brain::medulla::effects`) has
+/// real content to put on the wire.
+///
+/// Reads the raw journal rather than `/chat/history` on purpose:
+/// `extracted_text` is an internal server-to-brain channel, not operator-
+/// facing data, so `ChatAttachmentDto` deliberately drops it — the console
+/// never sees it and must not.
+#[tokio::test]
+async fn chat_attachment_text_is_extracted_and_journaled_for_the_brain() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let text = b"Q3 revenue grew 12% year over year.".to_vec();
+    let (status, reference) = chat_upload(&state, "report.txt", Some("text/plain"), &text).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "summarize the attached report", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(
+        journaled[0].extracted_text.as_deref(),
+        Some("Q3 revenue grew 12% year over year."),
+        "a plain-text attachment's content must reach the durable event, \
+         not just its node id"
+    );
+}
+
+/// A binary attachment nothing here parses (an image) journals with no
+/// extracted text — the reference alone rides the wire, and honestly: no
+/// content is fabricated for a format extraction cannot read.
+#[tokio::test]
+async fn chat_attachment_with_no_readable_text_journals_none() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x01];
+    let (status, reference) = chat_upload(&state, "photo.png", Some("image/png"), &png).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "what's in this photo?", "attachments": [node_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    let journaled = runtime
+        .events()
+        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|s| match s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { attachments, .. }
+                if !attachments.is_empty() =>
+            {
+                Some(attachments)
+            }
+            _ => None,
+        })
+        .expect("the message with an attachment is in the journal");
+
+    assert_eq!(journaled.len(), 1);
+    assert_eq!(journaled[0].extracted_text, None);
+}
+
+/// The IDOR / phantom guard: a `node_id` that resolves to no binary node in
+/// this company's workspace refuses the send with a `400`, on the same terms a
+/// malformed thread `parent` does — so a stale or hostile client cannot attach
+/// another company's file, or a file that does not exist.
+#[tokio::test]
+async fn chat_message_rejects_foreign_node() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "trust me", "attachments": ["01JZZZNOTAREALNODE00000000"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // And nothing was journaled: the refusal is before the append, so the
+    // transcript does not hold a message pointing at a file this company lacks.
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        history
+            .as_array()
+            .expect("history is a list")
+            .iter()
+            .all(|m| m["text"] != "trust me"),
+        "a refused attachment message still reached the transcript: {history}"
+    );
+}
+/// Codex review finding: an unbounded attachment list turns one `/chat` POST
+/// into an attacker-controlled multiplier on `resolve_attachments`' tree scan
+/// and extraction work. Refused with a `400` before any of that work runs.
+#[tokio::test]
+async fn chat_message_rejects_too_many_attachments() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let ids: Vec<String> = (0..21).map(|n| format!("node-{n}")).collect();
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({ "message": "too many", "attachments": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        history
+            .as_array()
+            .expect("history is a list")
+            .iter()
+            .all(|m| m["text"] != "too many"),
+        "a refused attachment message still reached the transcript: {history}"
+    );
+}
+
+/// Codex review finding: the same node id repeated in `attachments` used to
+/// resolve — and extract — once per repetition. A message attaching the same
+/// file three times over carries it exactly once.
+#[tokio::test]
+async fn chat_message_deduplicates_a_repeated_attachment_id() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let text = b"Q3 revenue grew 12%.".to_vec();
+    let (status, reference) = chat_upload(&state, "report.txt", Some("text/plain"), &text).await;
+    assert_eq!(status, StatusCode::OK, "{reference}");
+    let node_id = reference["nodeId"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({
+            "message": "attached three times",
+            "attachments": [node_id.clone(), node_id.clone(), node_id],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, history) = send(&state, "GET", "/api/v1/company/chat/history", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = history
+        .as_array()
+        .expect("history is a list")
+        .iter()
+        .find(|m| m["text"] == "attached three times")
+        .expect("the message survived");
+    assert_eq!(
+        mine["attachments"].as_array().map(Vec::len),
+        Some(1),
+        "a repeated id must resolve to one attachment, not three: {mine}"
     );
 }

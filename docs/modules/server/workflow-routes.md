@@ -82,6 +82,23 @@ without a client migration.
 `400`. The id keys the union read path, the scheduler and every journalled run,
 so a rename would silently orphan all three. A rename is a create plus a delete.
 
+**The `ownerDesk` field (issue #1862).** `GET` returns `ownerDesk` (camelCase)
+alongside `version`; on disk it is `owner_desk` in the workflow's TOML. `POST`
+and `PUT` accept the same field in the body. There is no console control to set
+or change it today — the create/edit dialog only carries forward whatever a
+previous read hydrated it with — so an API caller is currently the only way to
+assign or move one. Because `PUT` replaces the graph wholesale, **`ownerDesk`
+must be echoed back exactly like `version`**; omitting it on an edit clears the
+desk assignment rather than leaving it untouched.
+
+A stored `ownerDesk` can stop resolving after the desk it names is renamed or
+removed. The `GET` path already tolerates that — a saved graph must still load
+— and `PUT` now grandfathers it too: a desk that is both unresolvable *and*
+unchanged from what was already stored does not block the save, so editing
+some other field is never refused by desk drift the console gave the operator
+no way to fix. A **newly typed or selected** desk that fails to resolve is
+still a validation error.
+
 **Past runs are orphaned, not reaped.** A deleted workflow's
 `WorkflowRunFinished` entries stay in the company journal and keep coming back
 from `GET …/workflows/runs`. The journal is append-only and shared with chat and
@@ -100,14 +117,18 @@ job is re-syncing cron rows that live in a second durable store.
 # Read the graph and its concurrency token.
 curl -s "$HOST/api/v1/company/workflows/weekly_digest" \
      -H "Authorization: Bearer $TOKEN"
-# → { "id": "weekly_digest", …, "editable": true, "version": "73e8ccc6…" }
+# → { "id": "weekly_digest", …, "ownerDesk": "engineering", "editable": true,
+#     "version": "73e8ccc6…" }
 
 # Correct the schedule, conditional on nothing having changed since that read.
+# `ownerDesk` is echoed back verbatim from the read above — a PUT that drops
+# it clears the desk assignment instead of leaving it alone.
 curl -X PUT "$HOST/api/v1/company/workflows/weekly_digest" \
      -H "Authorization: Bearer $TOKEN" \
      -H 'content-type: application/json' -d '{
   "id": "weekly_digest",
   "name": "Weekly digest",
+  "ownerDesk": "engineering",
   "nodes": [ { "id": "start", "kind": "trigger", "name": "Monday 10:00",
                "schedule": "0 10 * * MON" },
              { "id": "done", "kind": "output", "name": "Owner summary",
@@ -147,31 +168,66 @@ rides the create body and the read shape under the same key, and the model
 type is reused verbatim in both directions (`kind` / `target` are single words,
 so there is no camelCase mirror to drift from).
 
+### Paging the run history (issue #1012)
+
+`GET …/workflows/runs` is paged: `?limit=` counts **runs** (not journal rows),
+`hasMore` says whether an older page exists, and `nextBeforeSeq` is the cursor
+to pass back as `?before_seq=`. The page is cut by `seq` and displayed by
+`(atMillis, seq)` — two different keys, because `atMillis` is wall-clock and
+cutting on it loses runs when the clock steps backwards. Clients must **not**
+derive the cursor. Full contract, the partition argument, and the
+version-skew fallback: [run-history-paging.md](run-history-paging.md).
+
+### Destinations that can never deliver are refused at save (issue #981)
+
+Two of delivery's refusals are decided by facts that hold for *every* run of the
+graph, so a save that names one is a graph guaranteed to drop its report. Both
+are refused with a `400` when the workflow is written, not only when it runs:
+
+| Destination | Refused when | Checked in |
+| --- | --- | --- |
+| `channel` | the target is not one this **running company** can deliver to — `CompanyRuntime::deliverable_channel_ids()`, which is also what `GET …/workflows/wired-channels` serves the console's picker, and which never includes `operator` | `validate_draft_against_record` in `src/company/workflow_create.rs` (issue #1191), reading the deliverable set the caller passes in. Both write routes pass it; so does the proposal-apply path. The agent tool surfaces pass `None` (no runtime handle) and skip the rule |
+| `email` | this company's `[tools].allow` does not grant `email`, which delivery answers with `Denied` / `EmailNotGranted` before it even looks for a mailbox | `validate_draft_against_record` in `src/company/workflow_create.rs`, beside the `tool_call` grant gate — so the orchestrator's `create_workflow` tool is held to it too |
+
+The `channel` rule lived on the two write routes until issue #1191, which is
+why applying a copilot proposal persisted a graph the editor then refused to
+save back — the apply path is a save that never ran it. It now lives in the
+shared authoring core beside its `email` sibling, inside the `problems`
+accumulator, so the refusal is a `workflow_invalid` naming the node and the
+`destination.target` field rather than a bare `invalid_request` with no
+breakdown. The deliverable set is still a runtime fact: it is threaded in from
+the caller as `Option<&[String]>`, the same way #1046 threads `mail_configured`.
+
+Both are guards, not guarantees. Desks come and go and grants can be revoked, so
+a graph valid at save can be invalid at run, and delivery's own refusal stays the
+backstop — as it must for seed and legacy graphs, which never pass through the
+create path at all. Neither check runs at TOML parse time: a seed template is
+parsed with no runtime in hand, and checking there would refuse to boot it on a
+company whose desks are not resolved yet.
+
+Deliberately **not** refused at save: a wired mailbox and an established inbound
+thread with an `email` recipient. Those are per-run, per-recipient conditions an
+author-time check cannot see, and refusing on them would refuse graphs that work.
+Arming a *schedule* does check the mailbox lever (issue #1046) — see
+`UNDELIVERABLE_SCHEDULE_REFUSAL` — because a scheduled run has no reader to
+notice the dropped report.
+
 Delivery itself is **not** a route concern. It runs host-side in the shared
 `WorkflowRunner` path (`src/workflows/delivery.rs`) once the engine returns,
 because the orchestrator's `run_workflow` tool and the trigger scheduler drive
 that same port — and a scheduled run is exactly the case where nobody is
 watching the console. An **on-demand** run's response therefore carries
 `deliveries`: one row per attempt (`sent` / `skipped` / `denied` / `failed`)
-with an operator-readable reason. A delivery failure never fails the run, so on
-that run the list is where an operator learns a report did not go out; an
+with an operator-readable reason. A delivery failure never fails the run, so
+that list is where an operator learns *why* a report did not go out; an
 unwired runtime writes a loud `failed` row rather than skipping silently.
 
-A **scheduled** run is journaled too (issue #228): the same
-`WorkflowRunFinished` record a manual run writes, with its `deliveries` rows,
-folded into `GET …/workflows/runs` — so a failed scheduled delivery is as
-operator-readable as a manual one. The scheduler's stdout log still exists, but
-it is the platform team's diagnostic, not the operator surface: the run rows
-carry the full `detail`, while the log never carries a field that could bear an
-address (issue #248).
+### Every run carries a `verdict` (issue #981)
 
-That distinction decides what the scheduler's log line may say. Every row
-carries two reasons: `detail`, the free text the run response and the console
-render, and `reason`, a closed set (`DeliveryReason`). Only `reason` is logged.
-On the transport-failure arms `detail` interpolates the transport's own reply,
-and a mail transport quotes the mailbox it refused — so `detail` on host stdout
-would put a recipient's address on a platform surface. `reason` says what class
-of thing failed and has no field that could carry the address (issue #248).
+The rows say *why* a report did not go out. **`verdict` says what the run adds
+up to** — one word, on both run DTOs, always serialized. See
+[run-verdict.md](run-verdict.md) for the word list, the precedence order, and
+why an undelivered report is its own reading rather than a failure.
 
 Authoring a destination and reading the result back:
 
@@ -204,12 +260,39 @@ curl -X POST "$HOST/api/v1/company/workflows/weekly_digest/run" \
 {
   "output": { "nodes": { "done": { "items": [ { "json": { "text": "…" } } ] } } },
   "pendingApprovals": [],
+  "verdict": "ok",
   "deliveries": [
     { "node": "done", "kind": "owner", "target": "ada@acme.test",
       "status": "sent", "detail": "emailed the company's admin" }
   ]
 }
 ```
+
+### Structured validation errors (issue #1016)
+
+A `POST`/`PUT …/workflows` whose graph fails author-time validation answers
+`400 { "code": "workflow_invalid" }` with an **additive** `problems` array — one
+entry per fault, each naming the node and config field so the console can
+highlight the exact spot. The `error` string stays the joined human sentence, so
+older string-only clients are unaffected; only this one code carries `problems`.
+
+```jsonc
+{
+  "error": "node `greet` has a `config.url` of `not-a-url` that is not a valid URL — …",
+  "code": "workflow_invalid",
+  "problems": [
+    { "node_id": "greet", "field": "config.url", "message": "node `greet` has a `config.url` …" }
+  ]
+}
+```
+
+The author-time config gate (issue #661, extended #1016) now also requires a
+`transform` to carry a non-empty `config.set` (a table of expression strings), a
+`split_out` to carry `config.path`, and an `http_request` `config.url` to be a
+real `http(s)` URL with a host (a bare `not-a-url` / `ftp://…` is refused at save
+instead of failing at run). An `output_parser` stays schema-optional (a bare
+identity parser is valid) and `merge` stays config-free; a `sub_workflow` whose
+`workflow_id` names no saved workflow this company can resolve is refused too.
 
 ### A run that stopped for a person (issues #881, #880)
 
@@ -219,8 +302,9 @@ step waiting on a person is not a failure — and says so structurally:
 
 ```jsonc
 {
-  "output": null,
+  "output": { "nodes": { "draft": { "items": [ { "json": { "text": "…" } } ] } } },
   "pendingApprovals": ["spec"],
+  "verdict": "blocked",
   "deliveries": [],
   "nodes": [ { "nodeId": "spec", "status": "blocked", "elapsedMs": 42000 } ],
   "blockedNodes": [
@@ -232,6 +316,17 @@ step waiting on a person is not a failure — and says so structurally:
   ]
 }
 ```
+
+`output` carries what the nodes **upstream** of the block produced (issue
+#1008). It used to be `null`, so the run drawer showed nothing for a step that
+had just written a draft.
+
+The **blocked node itself has no entry**, here or in the durable snapshot behind
+`GET …/workflows/runs/{runId}/output`. A node refused inside its model's tool
+loop ends its turn by writing prose about being blocked, and filing that prose
+as the node's product would re-open, one surface over, exactly the confusion
+issue #881 fixed by stopping it reaching the next node. The node's `blocked`
+chip and the run's notice are what say what happened.
 
 `blockedNodes` and `approvals` are omitted entirely when empty, so a run that
 blocked on nobody is byte-unchanged. Both also ride the `WorkflowRunFinished`
@@ -249,6 +344,36 @@ row carries no `tool`).
 **Approving does not continue the run.** An agent node is not re-enterable, so
 the operator decides the card and runs the workflow again. See
 [`workflow-vocabulary.md`](../../spec/runtime/workflow-vocabulary.md) for why.
+
+### The node a run is executing right now (issue #1010)
+
+`GET …/workflows/runs` folds **both** node brackets, not just the finish. A run
+still in flight carries `startedNodes` — the ids it has begun, in start order —
+beside the `nodes` rows it has finished:
+
+```jsonc
+{
+  "runId": "run-live",
+  "running": true,
+  "startedNodes": ["collect", "draft"],
+  "nodes": [ { "nodeId": "collect", "status": "ok", "elapsedMs": 12000 } ]
+}
+```
+
+Started minus finished is the node executing right now — here, `draft`. Before
+this the fold read `WorkflowNodeStarted` (issue #382) nowhere, so the only
+per-node facts the history carried were finishes, and every console that learned
+about a run from the journal rather than from a live SSE start frame — a reload,
+a cron fire, an `EventSource` reconnect, a workflow switch and back — painted the
+graph with a hole exactly where the work was happening.
+
+`startedNodes` is a **receipt of what started** and deliberately survives the
+finish: an id in it with no matching `nodes` row on a settled run is the node the
+run was standing on when it was cancelled or lost, which neither list says on its
+own. Readers must therefore pair it with `running` before painting anything as
+in flight, or a settled run overlays a spinner nothing can clear. Omitted
+entirely when empty, like `nodes`, so a run journaled before #382 is
+byte-unchanged.
 
 Swap `{ "kind": "owner" }` for `{ "kind": "email", "target": "ada@example.com" }`
 and a recipient who has never written in comes back as
@@ -268,7 +393,7 @@ wired. `email` is the only kind that can address an outsider, and it needs
 established inbound thread from that address — the same rule the agent send
 path applies; a cold recipient is skipped and reported, never mailed. Note the
 grant half is satisfied by default: since #230 an unset `[tools].allow` defaults
-to `["*", "media", "composio"]` and `*` covers `email`, so on a
+to the globals `default_allow` (which opens with `*`) and `*` covers `email`, so on a
 default-configured company the established-thread rule is the gate actually
 holding the line. Narrow `[tools].allow` explicitly to close the first one.
 
@@ -277,72 +402,53 @@ responses expose only non-secret status. The networked seams (DNS, SMTP, OAuth
 exchange) are dependency-inverted behind traits carried on `ConnectionsRuntime`
 and default to empty (offline) — a surface whose seam is absent returns
 `404 {"code":"not_wired"}`, which the console degrades gracefully.
-## Building a workflow from a task card (issue #580)
 
-A board card marked `deliverable: "workflow"` does not dispatch to a teammate
-when it enters In Progress — it builds a *reusable workflow* instead. The builder
-pass (`src/harness/workflow_build.rs`) proposes a graph and lands the card **In
-Review** with a `TaskWorkflowProposal`; the graph does not exist yet. Two task
-routes finish the loop:
+### The files a run produced (issue #1684)
 
-- `POST …/tasks/{id}/workflow-proposal/apply` rebuilds a `RawWorkflow` from the
-  **stored** proposal `ops` (host authority — the browser's copy is never
-  trusted) and runs it through the **same** `create_company_workflow` core this
-  page's `POST …/workflows` uses, so a proposed graph passes exactly the checks a
-  hand-authored one does — including #276's create-disarm for a scheduled graph.
-  On success the card links to the created workflow (issue #339) and moves to
-  Done; a refused create (roster drift, a name taken since) keeps the card In
-  Review with the reason and returns a 400.
-- `POST …/tasks/{id}/workflow-proposal/reject` clears the proposal and returns
-  the card to To-do.
-
-The full contract — the deliverable choice, the builder pass, and the
-review-before-creation gate — is [workflow-build.md](../../spec/runtime/workflow-build.md).
-
-## Drafting a workflow from a description (issue #753)
-
-`POST …/workflows/draft-from-description` is the New-workflow dialog's copilot: it
-turns a sentence into a graph the create form loads, so an operator can start
-from a description instead of a blank form. It is the same engine as the #580
-card builder (`draft_workflow_from_description` in `src/harness/workflow_build.rs`)
-with the board card removed — the company evidence, the one tool-less model call,
-and the host's authority over the id, the display name, the approval gating and
-the node-kind vocabulary are identical. The one extra it grounds the model in is
-the company's **granted tool slugs** (`workflow_callable_tool_slugs`), because a
-typed description is far likelier to want a `tool_call` step than a card is.
-
-**It never persists.** The draft is validated exactly as `POST …/workflows`
-would (`courtesy_validate_draft`), handed back, and hydrated into the create
-form; the operator reviews and edits it there and presses Create, which is still
-the only call that saves a graph. So a bad draft costs a review, not a rollback,
-and the review-before-creation discipline the card builder keeps is preserved
-without a board card.
-
-Like the cron preview, it answers **200 in both model-answer cases** — a drafted
-graph, or an honest "this is better done once" — keyed by `automatable`:
-
-```bash
-curl -X POST "$HOST/api/v1/company/workflows/draft-from-description" \
-     -H "Authorization: Bearer $TOKEN" \
-     -H 'content-type: application/json' \
-     -d '{"description":"Every Monday, have the writer draft the weekly digest and email the team."}'
-```
+`GET …/workflows/runs/{rid}/artifacts` answers the deliverables one past run
+made, for the run inspector's "Files associated" section:
 
 ```jsonc
-{ "automatable": true,
-  "summary": "Draft and email the weekly digest every Monday",
-  "workflow": { "id": "weekly-digest", "name": "Weekly digest", "nodes": [ … ], "edges": [ … ] } }
+{
+  "files": [
+    { "taskId": "t_a", "artifactId": "art_a1", "title": "Launch spec",
+      "kind": "markdown", "source": "specs/launch.md", "latestVersion": 2,
+      "updatedAtMillis": 1717000000000, "workspaceNodeId": "node_9",
+      "taskTitle": "Draft the launch" }
+  ],
+  "truncated": false
+}
 ```
 
-```jsonc
-{ "automatable": false,
-  "reason": "this is better done once than built into a workflow: it names a one-time cleanup" }
-```
+There is no direct "artifacts by run" index — `ArtifactVersion.run_id` is the
+task **attempt** id, not the workflow run id. The authoritative link is the
+card's `origin_run_id`, the run that **opened** the card, so the route joins
+`run_id → cards where origin_run_id == run_id → each card's artifacts`, reading
+the two broad list primitives (`TaskStore::list` once, then `ArtifactStore::list`
+per matched card) and filtering in memory. It is **metadata only** — never the
+artifact body — and each row is enough for the console to deep-link the file into
+its card's Artifacts tab at `latestVersion` (and, when `workspaceNodeId` is set,
+to `#/workspace/<id>`).
 
-An empty description is a `400`. A build with no embedded brain classifies the
-gap the way the run route does — `not_wired` (404), `restart_required` or
-`inference_required` (409) — so the console points the operator at the same next
-step (a restart, or configuring inference in Settings) rather than a bare
-failure. The spend is metered like a card pass, under a freshly minted id and a
-`workflow:copilot` sentinel agent; there is no `RunStore` row, because a
-synchronous request is not a card's attempt at its own work.
+Like `GET …/workflows/runs/{rid}/output` it is a **lazy per-run fetch**, NOT
+folded into `GET …/workflows/runs` (that fold is already expensive, and an
+inspector opens one run at a time). The one contract difference from `output`:
+**a run with no files answers `200 { files: [], truncated: false }`, never
+`404`** — a run that opened no cards, or cards that published nothing, is the
+common case, not an error. `truncated` flips to `true` only when a run's file
+count passes the host's defensive cap (`MAX_RUN_ARTIFACTS`), which the console
+labels "newest files shown" rather than presenting an incomplete list as
+exhaustive.
+
+Provenance is the **opening** run: `origin_run_id` is stamped once, at card
+creation, so a card re-owned by a later run still lists its files under the run
+that opened it; a `sub_workflow` child stamps its parent run, so sub-workflow
+cards roll up to the parent. A legacy record with no `source` (a pre-#244
+auto-captured chat reply) is still returned, with `source` omitted, so the
+console labels it rather than the history silently dropping it.
+
+## Authoring a workflow — copilot & task-card proposals (issues #580, #753, #783, #874)
+
+Building a graph from a task card, drafting one from a free-text description,
+and grounding either on the tools a company can actually reach have their own
+focused page: [workflow-authoring-routes.md](workflow-authoring-routes.md).

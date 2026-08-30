@@ -30,6 +30,7 @@ fn node(id: &str, name: &str, parent: Option<&str>, kind: NodeKind, rev: u64) ->
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     }
 }
 
@@ -48,11 +49,11 @@ fn store() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
     (dir, ops)
 }
 
-/// `Standards/` with two notes, plus a root README.
+/// `standards/` with two notes, plus a root README.
 async fn seeded() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>, CompanyId) {
     let (dir, ops) = store();
     let id = CompanyId::new("acme");
-    ops.create(&id, &folder("f-std", "Standards", None), None)
+    ops.create(&id, &folder("f-std", "standards", None), None)
         .await
         .unwrap();
     ops.create(
@@ -64,14 +65,14 @@ async fn seeded() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>, CompanyId) {
     .unwrap();
     ops.create(
         &id,
-        &file("n-support", "Support playbook.md", Some("f-std"), 2_000),
+        &file("n-support", "support-playbook.md", Some("f-std"), 2_000),
         Some("Escalate a refund request to the CEO."),
     )
     .await
     .unwrap();
     ops.create(
         &id,
-        &file("n-readme", "README.md", None, 1_000),
+        &file("n-readme", "readme.md", None, 1_000),
         Some("# Acme\nNothing to see."),
     )
     .await
@@ -102,12 +103,12 @@ async fn a_query_matches_both_names_and_bodies() {
     let (_dir, ops, id) = seeded().await;
 
     let by_name = search(&ops, &id, "playbook").await;
-    assert_eq!(paths(&by_name), vec!["Standards/Support playbook.md"]);
+    assert_eq!(paths(&by_name), vec!["standards/support-playbook.md"]);
     assert_eq!(by_name.hits[0].matched, MatchKind::Name);
     assert_eq!(by_name.hits[0].excerpt, None, "a name match has no excerpt");
 
     let by_content = search(&ops, &id, "refund").await;
-    assert_eq!(paths(&by_content), vec!["Standards/Support playbook.md"]);
+    assert_eq!(paths(&by_content), vec!["standards/support-playbook.md"]);
     assert_eq!(by_content.hits[0].matched, MatchKind::Content);
     assert!(
         by_content.hits[0]
@@ -153,7 +154,7 @@ async fn a_folder_matches_by_name_and_never_carries_an_excerpt() {
     let folder = outcome
         .hits
         .iter()
-        .find(|h| h.path == "Standards")
+        .find(|h| h.path == "standards")
         .expect("the folder itself must be a hit");
     assert_eq!(folder.node.kind, NodeKind::Folder);
     assert_eq!(folder.matched, MatchKind::Name);
@@ -456,16 +457,16 @@ async fn an_over_large_limit_is_clamped_to_the_maximum() {
 async fn a_prefix_scopes_the_search_to_one_subtree() {
     let (_dir, ops, id) = seeded().await;
     // "standards" matches the folder, the note under it, and nothing at the root.
-    let scoped = search_workspace(ops.as_ref(), &id, "e", Some("Standards"), limit(20))
+    let scoped = search_workspace(ops.as_ref(), &id, "e", Some("standards"), limit(20))
         .await
         .unwrap();
     assert!(
-        scoped.hits.iter().all(|h| h.path.starts_with("Standards")),
+        scoped.hits.iter().all(|h| h.path.starts_with("standards")),
         "{:?}",
         paths(&scoped)
     );
     assert!(
-        !paths(&scoped).contains(&"README.md"),
+        !paths(&scoped).contains(&"readme.md"),
         "the root note is outside the scope: {:?}",
         paths(&scoped)
     );
@@ -488,7 +489,7 @@ async fn a_prefix_scopes_the_search_to_one_subtree() {
 #[tokio::test]
 async fn a_traversal_shaped_prefix_is_refused() {
     let (_dir, ops, id) = seeded().await;
-    for prefix in ["../etc", "Standards/../..", "C:\\Windows", "."] {
+    for prefix in ["../etc", "standards/../..", "C:\\Windows", "."] {
         let err = search_workspace(ops.as_ref(), &id, "e", Some(prefix), limit(20))
             .await
             .expect_err("must refuse {prefix}");

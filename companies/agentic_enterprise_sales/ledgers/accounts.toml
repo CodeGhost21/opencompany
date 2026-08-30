@@ -1,0 +1,107 @@
+# What this company knows about the organizations it sells to.
+#
+# Distinct from the deals inside them. An account outlives every deal in it: the
+# people, the political shape, the systems they already run, the fact that they
+# evaluated you two years ago and chose somebody else. When that knowledge lives
+# only inside closed deal rows, every new approach starts from zero and the
+# account notices.
+
+title = "Accounts"
+purpose = """
+What is known about each organization: who the people are, what they already \
+run, what has been tried before, and how they buy. Read it before contacting \
+anybody — an approach that ignores a prior evaluation reads as a company that \
+does not remember its own conversations.\
+"""
+written_by = "`record_entry` to record or update what is known, `close_entry` when the account is dormant or disqualified"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "account"
+role = "title"
+required = true
+description = "The organization."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "people"
+role = "prose"
+description = "Who matters and what they care about. Roles change; write the role and the person."
+
+[[field]]
+name = "stack"
+role = "prose"
+description = "What they already run, and what it would displace. The fastest disqualifier there is."
+
+[[field]]
+name = "history"
+role = "prose"
+description = "What has been tried before and how it went, including evaluations they ran and lost."
+
+[[field]]
+name = "how_they_buy"
+role = "prose"
+description = "Procurement, security review, budget cycle. The reason enterprise deals close in quarters rather than weeks."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — dormant, acquired, or disqualified. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "target"
+
+[[status]]
+name = "engaged"
+
+[[status]]
+name = "customer"
+
+[[status]]
+name = "dormant"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "disqualified"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Engaged"
+blurb = "In conversation now. Read `history` before writing to anybody here."
+statuses = ["engaged"]
+order = "recent"
+
+[[section]]
+heading = "Customers and targets"
+blurb = "Won, or worth approaching."
+statuses = ["customer", "target"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Dormant or disqualified, with the reason. A disqualified account is kept so \
+nobody spends another quarter on it — and so the reason can be re-checked when \
+it stops being true.\
+"""
+statuses = ["dormant", "disqualified"]
+cap = 20

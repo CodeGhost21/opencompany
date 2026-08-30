@@ -20,16 +20,129 @@ The cost is that no root `cargo` invocation reaches the desktop, including
 and tests it; without that lane the crate would be compiled by nothing, which is
 [issue #475](https://github.com/tinyhumansai/opencompany/issues/475)'s shape.
 
-There is a second Tauri crate in the tree — `frontend/src-tauri/`, the console's
-wrapper — and it is an independent workspace with its own `Cargo.lock` for the
-same reason this one is separate: OpenHuman's vendored dependencies own nested
-workspaces, which Cargo cannot resolve beneath another workspace root.
+### One Tauri app, because two made the desktop unusable
 
-Which one a `tauri` invocation picks up is decided by the working directory, and
-not the way most people expect: **the CLI searches subfolders of the working
-directory, not ancestors.** From `frontend/` it finds the wrapper; from the
-repository root or from `src-tauri/` it finds this one. That is worth knowing
-before reading a build failure, because the two apps share a `productName`.
+There used to be two. `frontend/src-tauri/` was a second Tauri crate sharing
+this one's `productName`, and which one a `tauri` invocation picked up was
+decided by the working directory in a way most people do not expect: **the CLI
+searches subfolders of the working directory, not ancestors.** From `frontend/`
+it found the wrapper; from the repository root or from `src-tauri/` it finds
+this one.
+
+`tauri:dev` and `tauri:build` are scripts in `frontend/package.json`, and npm
+runs a script from its manifest's own directory — so `npm run tauri:dev`, the
+obvious way to start the desktop app, started the wrapper every time. The
+wrapper registered exactly one command, `desktop_config`, and the console had
+stopped invoking it (see the comment at the top of `frontend/src/main.tsx`):
+every `oc_*` command the console uses to reach a host — `oc_embedded` first —
+was absent from its `generate_handler!`. The window opened, the console
+rendered, and no host ever appeared. The symptom reads as "the server doesn't
+start"; the cause is that the app which starts one was never the app that ran.
+
+Nothing could see it. Both crates compiled, both were tested by the `Desktop`
+lane, and the packaging steps ran from the two directories that find the shell.
+A second app is not a hazard that becomes safe by being currently correct — the
+ambiguity is the hazard — so the wrapper is deleted, `frontend/package.json`
+points `tauri:dev` at `scripts/desktop-dev.sh` and `tauri:build` at
+`src-tauri/`, and `scripts/ci/assert-single-tauri-app.sh` fails the build on
+either a second `tauri.conf.json` or a script that invokes a bare `tauri`.
+
+## What the desktop compiles in
+
+The desktop links the host with an explicit feature set, and it is declared in
+**two** places — reading only the first is issue #1738. The manifest's list, on
+the `opencompany` dependency in `src-tauri/Cargo.toml`:
+
+```toml
+opencompany = { path = "..", default-features = false, features = [
+  "sqlite", "platform-jwt", "oauth", "mcp", "tinymemory",
+] }
+```
+
+and the shipped set, passed on the `tauri` command line as
+`DESKTOP_RELEASE_FEATURES` in `.github/workflows/release-desktop-macos.yml`:
+
+```text
+opencompany/acp,opencompany/composio
+```
+
+Those two are `= ["openhuman"]` in the root manifest — pure `cfg` switches that
+pull no `dep:` entry, and `mcp` already enables `openhuman` — so turning them on
+adds no package and leaves `src-tauri/Cargo.lock` byte-identical, which is what
+lets a release still build `--locked`. A feature gating an optional dependency
+could not be passed this way and would have to move into the manifest.
+
+The cost of that arrangement is several copies of one string, and #1738 is what
+a missing copy looks like: `scripts/desktop-dev.sh` ran `tauri dev` bare, so a
+developer's shell was the manifest set and every DMG was the release set. The
+visible half was Connections — `in_build: cfg!(feature = "composio")` reported
+false, so eight provider tiles rendered "not available here" over a card asking
+the operator to paste a Composio token, on a build nobody ships. `acp` was dark
+the same way and less visibly (`acp_agents = None`, so every `transport =
+"local"` harness resolved `unavailable`; issue #1245).
+
+#1823 fixed the launcher without adding a copy: it **parses**
+`DESKTOP_RELEASE_FEATURES` out of the release workflow, with a
+`DESKTOP_FEATURES` override for the leaner build. A derived value cannot drift.
+
+`scripts/ci/assert-desktop-features.sh` guards what is still duplicated (the two
+`ci.yml` steps, `npm run tauri:build`, the by-hand command below), that the
+release `tauri build` still consumes the variable it declares — otherwise the
+source of truth is a lie — and that the launcher still derives rather than
+re-hardcoding a literal.
+
+`mcp` is the one that puts an agent harness in the app. It implies `openhuman`,
+which is what compiles `src/harness/` at all; without it the bundle boots, seeds
+a company, serves the console — and cannot think. The visible symptom was the
+setup wizard's inference test answering *"This build cannot reach a model — the
+agent harness is not compiled in."* for every provider, however good the key.
+
+The belt a desktop agent gets is deliberately the minimal one. The host declares
+`openhuman_core` with `default-features = false, features = ["skills", "mcp",
+"hosting"]`, so what a company can use is **built-in tools, MCP servers and
+skills** — no memory engine, no TokenJuice, no voice or inference stack out of
+the vendored runtime. Features left off, each on purpose:
+
+| Off | Why |
+| --- | --- |
+| `tinycortex`, `tinymemory*` | In-pod memory engines. They carry tinycortex, `tinyagents/sqlite` and a second bundled SQLite into the bundle for a surface the desktop does not offer; the runtime keeps its fs-backed memory stores. |
+| `media` | Unlike `composio` it is `["openhuman", "openhuman_core/media"]`, so it pulls an upstream domain nothing else here compiles, and its credential really is managed: the tools are wired only when a company grants the namespace **and** a platform credential is configured. There is no BYO tier, so no desktop operator has anything to supply, and `…/capabilities` answers `media_in_build: false`. |
+| `mongodb` | A per-tenant cluster is a hosting concern. |
+
+`composio` and `acp` are **not** in this table. They are shipped, by the command
+line above. The row that used to exclude them said the managed backends "need a
+platform credential the desktop has no way to hold", and that was never true of
+`composio`: `company::composio::resolve_credential` answers over three tiers and
+the platform identity is the *last* — the BYO `composio/token` override wins,
+then the company's own TinyHumans key. Tier one is exactly what a desktop
+operator can hold, and the Connections card already asks them for it. It also
+named a `search` feature, which does not exist; `search_in_build` derives from
+`cfg!(feature = "openhuman")`, which `mcp` already turns on.
+
+### The `[patch]` table is replicated, not inherited
+
+A `[patch]` section only applies in the workspace root that declares it, and
+this crate is its own workspace. Until `mcp` put `openhuman_core` in the graph
+none of the vendored crates were reachable from here, so the table could be
+omitted. Now it cannot: without it Cargo resolves `tinycortex-api`, `tinyflows`
+and the rest from crates.io — where some do not exist at all — and any that did
+resolve would be a *second* copy whose trait identities would not match the ones
+the host compiled against. `src-tauri/Cargo.toml` therefore carries a replica of
+the host's table with every path prefixed `../`. Keep the two in step.
+
+### Attaching the harness is the library's job
+
+Compiling the harness in is half of it; something has to hand each company a
+pool. That sequence — the pool, plus whichever managed media/search/inference
+backends the environment supplies — lives in `opencompany::app::attach_harness`
+and is called by both `serve` and `desktop::register`. It used to be a private
+function in `src/bin/opencompany.rs`, which is precisely why the desktop path
+built companies with no harness even once the feature was on.
+
+`embedded::start_with` additionally pins the vendored keyring to the instance
+root and installs the product identity before any runtime exists — the same two
+startup calls `serve` makes, and for the same ordering reasons (see
+`src/app/journal.rs` and `src/product.rs`).
 
 ## Packaging is a claim the lane has to make
 
@@ -61,8 +174,16 @@ package**:
 
 ```sh
 npm --prefix frontend run build     # from the repository root
-cargo tauri build                   # or: frontend/node_modules/.bin/tauri build
+cargo tauri build -- --features opencompany/acp,opencompany/composio
 ```
+
+The `--features` is not optional decoration. `tauri build` without it packages
+the **default** set, so a locally-packaged app has Composio and ACP compiled out
+while looking in every other respect like the shipped one — #1738 at the
+packaging entry point, and harder to spot there than in a dev window. `npm run
+tauri:build` carries the same string, and
+`scripts/ci/assert-desktop-features.sh` fails if the two drift from
+`DESKTOP_RELEASE_FEATURES`.
 
 `frontendDist` is resolved relative to `src-tauri/`, where `tauri.conf.json`
 lives, so it means the same thing from every working directory. A hook does not:
@@ -88,12 +209,20 @@ environment variable naming the app directory, so nothing computed from the
 working directory can be trusted.
 
 Deleting the hook removes the whole class. The cost is that `tauri dev` no longer
-starts Vite for you — run `npm --prefix frontend run dev` alongside it; `devUrl`
-already points at `localhost:5173` — and that packaging a stale console is now
-possible locally, where before it was merely likely. The failure mode is at least
+starts Vite for you, which is what `scripts/desktop-dev.sh` is for: it brings the
+console up on `localhost:5173` — reusing one already there, never killing
+somebody else's — waits until that port answers with the console rather than
+with a stranger's page, and then runs `tauri dev` from `src-tauri/`.
+`npm run tauri:dev` in `frontend/` is that script. Driving `tauri dev` by hand
+instead means running `npm --prefix frontend run dev` alongside it; `devUrl`
+already points at `localhost:5173`. The other cost is that packaging a stale
+console is now possible locally, where before it was merely likely. The failure mode is at least
 legible: Tauri reports `Unable to find your web assets … frontendDist is set to
 "../frontend/dist"` with the absolute path it resolved, rather than an `npm
 ENOENT` for a directory nobody named.
+
+Which kinds of host it can hold, and how an operator picks one, is
+[`connectors.md`](connectors.md).
 
 ## N connections, and no active one
 
@@ -282,6 +411,12 @@ holding the data root's lock (see [`data-root.md`](data-root.md)). It becomes an
 ordinary connection in the console, discovered through `oc_embedded` because
 only the core knows which port the OS chose.
 
+That root is the same canonical data directory as the CLI: `$HOME/.opencompany`
+(or `%USERPROFILE%\.opencompany` on Windows). `default_data_dir` in
+`src-tauri/src/lib.rs` delegates to the host resolver and passes the result
+explicitly to `app::prepare_instance`. `OPENCOMPANY_DATA_DIR` overrides it for
+both launchers. See [the desktop root](data-root.md#the-desktop-root-is-the-cli-root).
+
 Loopback and never `0.0.0.0`: an embedded instance is this machine's, and
 binding a routable address would publish someone's company to their network.
 
@@ -292,119 +427,68 @@ divergence in an auth extractor being precisely the class of bug that cannot be
 afforded. With a real listener, every Playwright spec and every proxy test is
 valid evidence about embedded mode too.
 
-`None` when it could not start — most often because another process holds the
-data root. The console renders that as a row; the desktop still holds remote
-hosts, which is the point of holding several.
+Not started when its root could not be taken — most often because another
+process holds it. The console renders that as a row; the desktop still holds
+remote hosts, which is the point of holding several.
 
-### First run
+### No sign-in at all
 
-`embedded::start` calls `opencompany::desktop::bootstrap_companies` before it
-binds, because a host with an empty registry cannot be signed into
-([issue #632](https://github.com/tinyhumansai/opencompany/issues/632)). Sign-in
-is per-company — `/api/v1/companies/{id}/auth/…`, or the sole-company alias —
-so an empty registry leaves the console rendering a login form for a company
-that does not exist.
+The embedded host sets `auth_mode_override` to `AuthMode::None`
+([sign-in modes](auth-modes.md#none)). A desktop install has no login screen,
+no operator mailbox, and no session: `resolve_principal` answers with the
+company's implicit local owner before it looks for a cookie or a bearer, so the
+console's first request is already authenticated as an `Admin` backed by a real
+`UserRecord` under `local:owner`.
 
-The two ways a company normally reaches the registry are both closed to a
-packaged application. Nobody types `serve --company <dir>` at a double-clicked
-app, and `POST /api/v1/companies` demands the `platform` scope, which
-`PlatformScope` grants only against a configured `platform_auth` — a prosumer
-host has no machine credential to hand out, deliberately. So the desktop
-bootstraps its own:
+The argument for it is not that the login screen was redundant. It is that
+**there was never a session carrier to bring its result home in.** The magic
+link worked — a loopback host with no mail transport echoes the code in its own
+response, and the console redeemed it — and then the cookie went nowhere:
 
-1. **Adopt** every company bundle the data root already holds, skipping
-   `archived` ones (archiving removes a company from the registry on purpose,
-   and re-registering it at the next launch would undo that quietly). The
-   bundle is the only authority — a desktop company has no source directory to
-   re-read — and `RuntimeBuilder::build` carries the persisted record's
-   console-created desks, agents and workflows forward.
-2. **Seed** the `DEFAULT_PRESET_ID` preset when there were none, stamping the
-   preset slug as the record's template provenance. Fallback rather than
-   unconditional: seeding on every launch would hand the operator a second
-   starter company per run.
+- The proxy's `reqwest` client is built without a cookie store, so nothing
+  persisted the `Set-Cookie` for the next request.
+- `x-opencompany-session`, the header carrier a paired device uses, is in
+  `RESERVED_HEADERS` and is stripped from anything the webview sends — see
+  [what the proxy will not carry](#what-the-proxy-will-not-carry).
+- `needsCarriedSession()` is false in the desktop whatever the address, so the
+  console does not hold a token either.
 
-`AppConfig.admin_email` is set to `DESKTOP_OPERATOR_EMAIL` — the same seam the
-hosted control plane fills with `OPENCOMPANY_ADMIN_EMAIL`, and the reason a
-person is eligible to sign in at all (`eligibility` in `src/server/users/`
-admits an existing user, a bootstrap admin, or an invite, and a fresh install
-has none of the three). The seeded manifest names the same address in its own
-`[users].admins`, so the company is self-describing if it is ever served
-elsewhere.
+What actually let the console through was that every request came from loopback
+anyway, which is `none` mode's premise stated in a slower way. So the ceremony —
+a synthetic `operator@opencompany.local` the operator was told to accept, a link
+the host mailed to nobody, a cookie discarded on arrival — bought nothing that
+the bind was not already providing. `none` deletes it and says what was true.
 
-Nothing is mailed: the host binds loopback, so `is_local_only` holds and
-`auth/request` returns the login code in its own response (`dev_code`), which
-the console redeems in place. `oc_embedded` carries `operatorEmail` so the
-sign-in form can offer the address — a person cannot guess it, and every other
-address gets the same silent `202`. It is a suggestion, not a lock: the field
-stays editable, which is what an operator who invites someone else needs.
+Set on the **host**, not in the shipped preset manifests: the override reaches
+every company on the data root, including ones an earlier install left there,
+so an existing install migrates by relaunching — and it leaves
+`manifest.users.mode` at its default, which a `[users].admins` entry under
+`mode = "none"` would otherwise make `validate_users` reject.
 
-### One row, however many launches
+A default, not a ceiling. `prepare_instance` reports the root's `config.toml`
+`auth_mode` and `none` is only the fallback, so an operator who deliberately
+turns a sign-in on in setup — to share their instance — still has it after a
+relaunch. The setup wizard preselects `none` when it is running in the desktop
+runtime *and* the host offers the mode, which is a preselection and not a lock.
 
-The ephemeral port is not free: it means the embedded host's *address* is
-different on every launch, and `addConnection` recognises a host by address. So
-each launch read as a first meeting — a new connection id, a new row, and the
-previous launch's row left behind pointing at a closed port. They persist, so
-they accumulated, and they all carry the same label; the sidebar filled with
-indistinguishable "This computer" entries, all but one broken (issue #615).
+**What this costs:** a device paired to the embedded host from another machine
+stops working. Every step of the pairing succeeds and the resulting token is
+inert from anywhere but this computer; see
+[sign-in modes](auth-modes.md#none) for why, and note that pairing this desktop
+*to a remote host* is unaffected — that is the section below.
 
-`oc_embedded` therefore also reports `instance_id`, read from the data root
-(see [`instance.rs`](../../../src/app/instance.rs)) rather than derived from the
-address, and the console registers this host through `adoptEmbeddedHost` rather
-than `addConnection`. That function matches on the identity, re-points the
-remembered connection at the new port, and drops anything else claiming to be
-this application's host — enforcing the invariant that at most one embedded
-connection exists at a time.
+## Several hosts on one machine
 
-Reusing the remembered id is what carries the tour state, the last-read channel
-and the mail draft across a relaunch, all of them keyed by connection id. A
-*different* `instance_id` — a second data root — is deliberately not adopted:
-that is a different host, and merging its local state is the failure the
-`(connection, company)` namespace exists to prevent.
-
-Profiles written before the identity was reported carry neither it nor an
-`origin` marker, so `embeddedProfiles` recognises them by the signature the bug
-left: this client's own label for its host, at a loopback address. Narrow on
-purpose — a host an operator added by hand is labelled by authority
-(`127.0.0.1:8080`), never with that string.
+Moved to [desktop-hosts.md](desktop-hosts.md): how the roster of local hosts
+is stored and reconciled, and why instance_id rather than address is the
+identity rule.
 
 ## Authenticating as a person
 
-A desktop cannot hold a session cookie: `SameSite=Lax` means the browser never
-sends one cross-site, and a webview is cross-site with every server. The only
-other header credential was the platform bearer, which maps to `actor: None` —
-every write anonymous in the journal.
-
-So a session has a second carrier and a way to get one. Both are documented in
-[`users.md`](users.md) → "Two carriers, one session" and "Device pairing".
-
-The token lives in the OS keychain (`src-tauri/src/keychain.rs`), and the
-console never sees it. `oc_connect` takes no device material: the core resolves
-a paired session by connection id. Pairing runs entirely in Rust —
-`oc_pair_device` performs the claim, writes the result to the keychain, and
-answers with the company, device id and expiry — so the token exists for one
-HTTP response that the webview is not on the path of. That is the difference
-between a design where the webview *should not* hold the credential and one
-where it *cannot*. The claim itself is a plain `claim()` rather than command
-logic, so the rules on it can be tested without starting a GUI — see "Where a
-credential may travel" for the one it enforces.
-
-The console's `Credential { kind: "device", ref }` is therefore a record that
-this machine is paired, not something the core is told. `ref` is the host's
-device id, useful when deciding what to revoke from the host's device list.
-
-Backend selection, the test store, and the Linux session-keyring caveat (a
-pairing there does not survive a logout) are documented in the module.
+Moved to [desktop-hosts.md](desktop-hosts.md): device credentials, backend
+selection, and the Linux session-keyring caveat.
 
 ## ACP
 
-`src-tauri/src/acp/` is the client half: it spawns a locally-installed harness
-over stdio and serves the `fs/read_text_file` and `fs/write_text_file` methods
-the agent calls back with. Path confinement is enforced in Rust, below the UI —
-the console renders the permission prompt but must never be the thing that
-enforces the answer. A renderer decides what a person sees; it must not decide
-what a model can reach.
-
-The server half (`src/server/acp/`, `src/harness/acp_run_turn.rs`) is behind the
-`acp` feature and **not yet mounted on any router**. `/acp` is a reserved prefix
-either way, so a build without it answers a protocol probe with a 404 rather
-than the console shell with a `200`.
+Moved to [desktop-hosts.md](desktop-hosts.md): the stdio harness client and
+the reserved /acp prefix.

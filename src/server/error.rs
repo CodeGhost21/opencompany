@@ -17,6 +17,36 @@ use crate::error::OpenCompanyError;
 #[derive(Debug)]
 pub struct ApiError(pub OpenCompanyError);
 
+/// A compact wrapper for a response that has already been rendered by a
+/// handler. Axum cannot use `Box<Response>` directly because it does not
+/// implement [`IntoResponse`]; this wrapper preserves that response unchanged.
+#[derive(Debug)]
+pub struct Rejection(Box<Response>);
+
+impl From<Response> for Rejection {
+    fn from(response: Response) -> Self {
+        Self(Box::new(response))
+    }
+}
+
+impl From<ApiError> for Rejection {
+    fn from(error: ApiError) -> Self {
+        Self(Box::new(error.into_response()))
+    }
+}
+
+impl From<OpenCompanyError> for Rejection {
+    fn from(error: OpenCompanyError) -> Self {
+        Self(Box::new(ApiError(error).into_response()))
+    }
+}
+
+impl IntoResponse for Rejection {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
 impl From<OpenCompanyError> for ApiError {
     fn from(error: OpenCompanyError) -> Self {
         Self(error)
@@ -32,7 +62,11 @@ impl From<serde_json::Error> for ApiError {
 impl ApiError {
     /// The HTTP status this error maps to.
     pub fn status(&self) -> StatusCode {
-        match &self.0 {
+        // Issue #1008: a failed workflow run wraps its cause so it can carry the
+        // partial run back for the journal. Classify the cause — a graph that
+        // failed validation is still a 400 whether or not partial rows rode home
+        // with it.
+        match self.0.unwrapped() {
             OpenCompanyError::CompanyNotFound(_) | OpenCompanyError::NotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -41,7 +75,18 @@ impl ApiError {
             OpenCompanyError::ManifestInvalid { .. }
             | OpenCompanyError::ManifestParse(_, _)
             | OpenCompanyError::MissingManifest(_)
-            | OpenCompanyError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            | OpenCompanyError::InvalidRequest(_)
+            | OpenCompanyError::WorkflowInvalid { .. } => StatusCode::BAD_REQUEST,
+            // Issue #1017: a stored company data file that no longer parses is
+            // the caller's bad input, not a server fault — 400, so a route like
+            // get_workflow (and the render `?` in update_company_workflow)
+            // surfaces the parse message instead of a blank 500. One central
+            // mapping covers every current and future caller that lets a
+            // DataParse escape as an ApiError.
+            OpenCompanyError::DataParse { .. } => StatusCode::BAD_REQUEST,
+            // A file that parses but fails validation is a semantically bad
+            // payload the caller can correct — 422.
+            OpenCompanyError::DataInvalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             OpenCompanyError::LifecycleConflict(_) | OpenCompanyError::Conflict(_) => {
                 StatusCode::CONFLICT
             }
@@ -77,6 +122,13 @@ impl ApiError {
             OpenCompanyError::TinyHumans { code, .. } if code == "unreachable" => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            // The shared feedback board needs a TinyHumans account; an instance
+            // provisioned without one simply has no board. That is a missing
+            // surface, not an upstream fault, so it is a 404 the console can
+            // treat as "hide the board" without special-casing a 502.
+            OpenCompanyError::TinyHumans { code, .. } if code == "no_board" => {
+                StatusCode::NOT_FOUND
+            }
             OpenCompanyError::TinyHumans { .. } => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -86,10 +138,22 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status();
-        let body = Json(json!({
-            "error": self.0.to_string(),
-            "code": self.0.code(),
-        }));
+        // Every error renders the api.md envelope `{ "error", "code" }`. A
+        // `WorkflowInvalid` additively carries a `problems` array (issue #1016)
+        // so the console can highlight the exact node + field; the key is present
+        // ONLY for that variant, so every other error stays byte-for-byte as
+        // before and no existing client sees a new field.
+        let body = match &self.0 {
+            OpenCompanyError::WorkflowInvalid { problems } => Json(json!({
+                "error": self.0.to_string(),
+                "code": self.0.code(),
+                "problems": problems,
+            })),
+            _ => Json(json!({
+                "error": self.0.to_string(),
+                "code": self.0.code(),
+            })),
+        };
         (status, body).into_response()
     }
 }
@@ -97,7 +161,26 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use axum::body::to_bytes;
+    use axum::http::header::HeaderName;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn rejection_preserves_a_pre_rendered_response() {
+        let response = Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(HeaderName::from_static("set-cookie"), "session=token")
+            .body("redirect".into_response().into_body())
+            .unwrap();
+
+        let response = Rejection::from(response).into_response();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.headers()["set-cookie"], "session=token");
+        assert_eq!(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap()[..],
+            b"redirect"
+        );
+    }
 
     #[test]
     fn maps_variants_to_status_and_code() {
@@ -128,6 +211,30 @@ mod test {
     }
 
     #[test]
+    fn maps_company_data_errors_to_400_and_422() {
+        // Issue #1017: an unparseable company data file (e.g. a workflow whose
+        // stored body is no longer valid TOML) is the caller's bad input, not a
+        // server fault — 400 with the stable `data_parse` code, so a route like
+        // get_workflow surfaces the parse message instead of a blank 500.
+        let parse = ApiError(OpenCompanyError::DataParse {
+            path: PathBuf::from("workflows/weekly-digest.toml"),
+            message: "expected `=` after key".into(),
+        });
+        assert_eq!(parse.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse.0.code(), "data_parse");
+
+        // A file that parses but fails validation is a semantically bad payload —
+        // 422, matching how the render `?` in update_company_workflow should
+        // report a graph the caller can fix.
+        let invalid = ApiError(OpenCompanyError::DataInvalid {
+            path: PathBuf::from("workflows/weekly-digest.toml"),
+            problems: vec!["missing a trigger".into()],
+        });
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid.0.code(), "data_invalid");
+    }
+
+    #[test]
     fn maps_tinyplace_transport_to_503_and_502() {
         let unreachable = ApiError(OpenCompanyError::tinyplace("unreachable", "offline"));
         assert_eq!(unreachable.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -135,5 +242,48 @@ mod test {
 
         let upstream = ApiError(OpenCompanyError::tinyplace("http_500", "boom"));
         assert_eq!(upstream.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    /// Issue #1016: a `WorkflowInvalid` renders a `400` whose envelope additively
+    /// carries a `problems` array, each entry naming its node + field.
+    #[tokio::test]
+    async fn workflow_invalid_envelope_carries_problems() {
+        use crate::error::WorkflowProblem;
+        use axum::body::to_bytes;
+
+        let err = ApiError(OpenCompanyError::WorkflowInvalid {
+            problems: vec![WorkflowProblem::node_field(
+                "greet",
+                "config.url",
+                "greet has a bad url.",
+            )],
+        });
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.0.code(), "workflow_invalid");
+
+        let body = err.into_response().into_body();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["code"], "workflow_invalid");
+        assert_eq!(json["problems"][0]["node_id"], "greet");
+        assert_eq!(json["problems"][0]["field"], "config.url");
+        assert!(
+            json["error"].as_str().unwrap().contains("bad url"),
+            "{json}"
+        );
+    }
+
+    /// Every other error keeps the plain `{ error, code }` envelope with NO
+    /// `problems` key — the new field is additive and scoped to `WorkflowInvalid`.
+    #[tokio::test]
+    async fn non_workflow_error_has_no_problems_key() {
+        use axum::body::to_bytes;
+
+        let err = ApiError(OpenCompanyError::CompanyNotFound("acme".into()));
+        let body = err.into_response().into_body();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["code"], "company_not_found");
+        assert!(json.get("problems").is_none(), "{json}");
     }
 }

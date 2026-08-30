@@ -29,17 +29,19 @@ use crate::company::mcp::{
 };
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::metering::roster_display_names;
 use crate::ports::types::CompanyRecord;
-use crate::runtime::builder::agent_effective_grants;
+use crate::runtime::builder::agent_scoped_grants;
 use crate::runtime::tools::grants_cover_server;
 use crate::server::error::ApiError;
-use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, ScopedCompany, mcp_registry, scoped};
 
 /// The reminder attached to every mutating response: the effective MCP set is
 /// re-resolved and fingerprinted on every harness cycle (`HarnessPool::ensure`),
 /// so an edit reaches agents on the company's next turn with no restart. The
 /// `mcp_fingerprint` staleness term is what makes this a property of the design.
-const NEXT_TURN_NOTE: &str = "Agents pick up this change on their next turn — no restart needed.";
+pub(super) const NEXT_TURN_NOTE: &str =
+    "Agents pick up this change on their next turn — no restart needed.";
 
 /// Builds the MCP server management route fragment.
 pub fn router() -> Router<AppState> {
@@ -56,40 +58,106 @@ pub fn router() -> Router<AppState> {
 /// One effective MCP server as the console renders it. **Never** carries a
 /// credential — only a non-secret `authConfigured` flag and the last (scrubbed)
 /// probe `health`.
+///
+/// Since issue #1270 this shape also carries a registry install. The four
+/// registry-only fields are all `Option` + `skip_serializing_if`, so a
+/// manifest / default / runtime row serializes **byte-identically** to what it
+/// did before — the console's existing readers cannot tell the change happened.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct McpServerDto {
-    name: String,
-    endpoint: String,
-    description: Option<String>,
-    /// `manifest` (committed), `runtime` (console-added), or `default`
-    /// (shipped by the install — issue #527). The console renders this as the
-    /// source badge, so the three stay distinguishable: a shipped default is
-    /// not something this operator added, and must not be labelled as if it
-    /// were.
-    source: McpSource,
-    enabled: bool,
-    allowed_tools: Vec<String>,
-    disallowed_tools: Vec<String>,
-    timeout_secs: u64,
+pub(super) struct McpServerDto {
+    pub(super) name: String,
+    pub(super) endpoint: String,
+    pub(super) description: Option<String>,
+    /// `manifest` (committed), `runtime` (console-added), `default` (shipped by
+    /// the install — issue #527), or `registry` (installed from an upstream MCP
+    /// directory — issue #1270). The console renders this as the source badge,
+    /// so the four stay distinguishable: a shipped default is not something this
+    /// operator added, and must not be labelled as if it were.
+    ///
+    /// On a **reconciled** row — one server that is both installed from the
+    /// directory and declared/typed in List A — this is the List A provenance.
+    /// See [`mcp_registry::merge_installs`](super::mcp_registry::merge_installs)
+    /// for why that side wins.
+    pub(super) source: McpSource,
+    pub(super) enabled: bool,
+    pub(super) allowed_tools: Vec<String>,
+    pub(super) disallowed_tools: Vec<String>,
+    /// Remote tool names the operator declared read-only on this server (issue
+    /// #1124). The console renders this beside the two lists above, with the same
+    /// source badge, so an operator sees which layer declared it.
+    pub(super) read_only_tools: Vec<String>,
+    pub(super) timeout_secs: u64,
     /// Whether an outbound credential is stored — never the credential itself.
-    auth_configured: bool,
-    /// The ids of the company's agents whose effective tool grants cover this
-    /// server — who can actually call it (issue #568). Computed over the same
-    /// roster the harness builds (manifest agents + promoted overlay teammates),
-    /// through the shared
-    /// [`grants_cover_server`](crate::runtime::tools::grants_cover_server), so the
-    /// console cannot disagree with the harness about reachability. **An empty
-    /// list is meaningful**: an *enabled*, healthy server no teammate can reach
-    /// is almost always a misconfiguration, and the console flags it rather than
-    /// showing an empty list silently. A **disabled** server is always empty —
-    /// the harness hands out no tool for it whatever the grants say — so the
+    ///
+    /// On a reconciled row this is the **union**: either List A's token slot or
+    /// the registry install's env values counts. The two are separate stores
+    /// dialled by separate transports, and there is no merging them; what the
+    /// field claims — "a credential is stored for this server" — stays true
+    /// either way, and the alternative (reporting only List A's slot) would
+    /// print "no credential" over a server that authenticates fine.
+    pub(super) auth_configured: bool,
+    /// The stable install id, present only on a row backed by a registry
+    /// install. Registry rows are keyed by this and **not** by `name`: `name` is
+    /// a display slug this surface mints, while `serverId` is what every
+    /// `…/mcp/registry/{serverId}/…` route and OpenHuman's own store address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) server_id: Option<String>,
+    /// The directory's qualified name (`@org/server`), when this row came from
+    /// one. The catalogue's stable identity, and what an install is re-keyed on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) qualified_name: Option<String>,
+    /// The directory's icon, when this row came from one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) icon_url: Option<String>,
+    /// How a registry install is dialled — `http_remote` or `stdio`. Absent on
+    /// a List A-only row, which is always HTTP by construction (`command` is a
+    /// validation error there).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) transport: Option<String>,
+    /// The company's agents whose effective tool grants cover this server — who
+    /// can actually call it (issue #568). Computed over the same roster the
+    /// harness builds (manifest agents + promoted overlay teammates), through the
+    /// shared [`grants_cover_server`](crate::runtime::tools::grants_cover_server),
+    /// so the console cannot disagree with the harness about reachability. **An
+    /// empty list is meaningful**: an *enabled*, healthy server no teammate can
+    /// reach is almost always a misconfiguration, and the console flags it rather
+    /// than showing an empty list silently. A **disabled** server is always empty
+    /// — the harness hands out no tool for it whatever the grants say — so the
     /// console reads the empty case against `enabled` and stays quiet there.
     /// Always serialized (even when empty).
-    reachable_by: Vec<String>,
+    ///
+    /// A **registry** row lists the whole roster: `build.rs` pushes the registry
+    /// bridge tools into every agent's toolbelt with no grant check, so every
+    /// teammate really can call every installed server. Issue #1270 leaves that
+    /// asymmetry in place deliberately and makes it operator-visible here rather
+    /// than inventing a grant filter the harness does not apply.
+    pub(super) reachable_by: Vec<RosterAgentDto>,
     /// The last recorded probe outcome (scrubbed), or `None` when never probed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    health: Option<McpHealth>,
+    pub(super) health: Option<McpHealth>,
+}
+
+/// One roster agent named on a coverage line, carried as an id **and** the label
+/// the console prints (issue #931).
+///
+/// The id alone was the whole payload until #931: readable for a manifest agent,
+/// whose id is an authored slug, but a minted `{millis}-{counter}` string for an
+/// operator-added overlay teammate — so the console's "Reachable by" line printed
+/// blueprint slugs next to raw internal ids. `name` is the same display label the
+/// Team page and the usage buckets use ([`roster_display_names`]: a manifest
+/// agent's `role`, an overlay teammate's `name`); the id stays so a client can
+/// still key or link on it.
+///
+/// `pub(super)` and named for the roster rather than for MCP because it rides
+/// out of [`roster_grants`], which the repositories surface reads too (issue
+/// #245) — its "Readable by" line is the same sentence about a different
+/// namespace and printed the same raw ids.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RosterAgentDto {
+    pub(super) id: String,
+    pub(super) name: String,
 }
 
 /// A mutating response: the resulting server, the rebuild reminder, the live
@@ -134,6 +202,9 @@ struct AddServer {
     allowed_tools: Vec<String>,
     #[serde(default)]
     disallowed_tools: Vec<String>,
+    /// Remote tool names to declare read-only on this server (issue #1124).
+    #[serde(default)]
+    read_only_tools: Vec<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
     /// The outbound credential value, stored write-only. Omit to leave auth
@@ -166,6 +237,10 @@ struct UpdateServer {
     allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     disallowed_tools: Option<Vec<String>>,
+    /// Replace the read-only declaration (issue #1124). Omit to leave it
+    /// unchanged; send `[]` to clear it.
+    #[serde(default)]
+    read_only_tools: Option<Vec<String>>,
     #[serde(default)]
     timeout_secs: Option<u64>,
     /// Rotate the outbound credential (write-only). Omit to leave it unchanged.
@@ -230,7 +305,7 @@ struct NamePath {
 }
 
 /// Loads the company's committed `[[mcp_server]]` entries from its record.
-async fn manifest_servers(runtime: &CompanyRuntime) -> Result<Vec<McpServer>, ApiError> {
+pub(super) async fn manifest_servers(runtime: &CompanyRuntime) -> Result<Vec<McpServer>, ApiError> {
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
     Ok(record.map(|r| r.manifest.mcp_servers).unwrap_or_default())
 }
@@ -240,7 +315,7 @@ async fn manifest_servers(runtime: &CompanyRuntime) -> Result<Vec<McpServer>, Ap
 /// can reach it (issue #568), and attaching the last (scrubbed) probe health.
 fn dto_from_decl(
     decl: &mcp::McpServerDecl,
-    reachable_by: Vec<String>,
+    reachable_by: Vec<RosterAgentDto>,
     health: Option<McpHealth>,
 ) -> McpServerDto {
     McpServerDto {
@@ -251,37 +326,75 @@ fn dto_from_decl(
         enabled: decl.enabled,
         allowed_tools: decl.allowed_tools.clone(),
         disallowed_tools: decl.disallowed_tools.clone(),
+        read_only_tools: decl.read_only_tools.clone(),
         timeout_secs: decl.timeout_secs,
         auth_configured: decl.auth.is_configured(),
+        // A List A decl knows nothing about a directory install; the merge pass
+        // fills these in when one reconciles onto this row.
+        server_id: None,
+        qualified_name: None,
+        icon_url: None,
+        transport: None,
         reachable_by,
         health,
     }
 }
 
 /// Every roster agent's *effective* tool grants (issue #568), as
-/// `(agent_id, grants)`.
+/// `(agent, grants)`.
 ///
 /// `pub(super)` since issue #245: the repositories surface answers the same
 /// question about a different namespace ("who can read this?"), and a second
 /// roster walk beside this one is exactly how the two consoles would come to
 /// disagree with each other and with the harness. The roster is exactly what the harness builds in
-/// `build_roster`: the manifest agents (each with its own `tools` narrowed by
-/// the company `allow`), plus the promoted overlay teammates — each narrowed by
+/// `build_roster` — the **effective** roster, not the blueprint's: the manifest
+/// agents with every operator edit applied (each with its own `tools` narrowed
+/// by the company `allow` **and** by the desks it sits on — issue #1674), plus
+/// the promoted overlay teammates — each narrowed by
 /// **its own** `tools` line the same way (issue #661), which for the common
 /// empty line is still the full company `allow`, the standard grant
 /// `overlay_agent_to_manifest` gives it. An overlay id already claimed by a
 /// manifest agent is skipped, both mirroring the harness so console
 /// reachability equals what an agent is actually granted.
-pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)> {
+///
+/// Each agent carries its display label alongside its id (issue #931), resolved
+/// through [`roster_display_names`] — the same map the Team page and the usage
+/// buckets read, so one teammate is named identically everywhere in the console.
+/// An id absent from that map (it cannot be, over this roster) falls back to the
+/// id, matching `bucket_usage`.
+pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<String>)> {
     let allow = &record.manifest.tools.allow;
-    let mut grants: Vec<(String, Vec<String>)> = record
-        .manifest
-        .agents
+    // The roster as it *effectively* stands, exactly as `build_roster` builds
+    // it: a teammate an operator edited keeps its edits (an override `tools`
+    // line replaces the manifest's), and a retired teammate is not on the
+    // roster at all. Reading the raw manifest half here made `reachableBy`
+    // track the blueprint while the harness and the Team tab's Tools card
+    // tracked the edit — so granting or revoking `mcp:*` on a manifest
+    // teammate never moved the Connections surface.
+    let effective = record.effective_agents();
+    let names = roster_display_names(&effective, &record.overlay_agents);
+    let roster_agent = |id: &str| RosterAgentDto {
+        id: id.to_string(),
+        name: names.get(id).cloned().unwrap_or_else(|| id.to_string()),
+    };
+    // Three-level narrowing, exactly as `build_roster` builds the roster (issue
+    // #1674): company `allow` → the desks this teammate sits on → the teammate's
+    // own `tools`. `agent_desk_tools` resolves through the record's *effective*
+    // desk membership, so a console-seated member is scoped by its desk as a
+    // manifest one is. Without this level a teammate on a desk whose ceiling
+    // omits `mcp:*` still read back here as reaching every server the company
+    // grants, while the harness gives it no such tools.
+    let desk_narrowed = |id: &str, tools: Option<&[String]>| {
+        let desk_tools = record.agent_desk_tools(id);
+        let desk_refs: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+        agent_scoped_grants(allow, &desk_refs, tools)
+    };
+    let mut grants: Vec<(RosterAgentDto, Vec<String>)> = effective
         .iter()
         .map(|agent| {
             (
-                agent.id.clone(),
-                agent_effective_grants(allow, &agent.tools),
+                roster_agent(&agent.id),
+                desk_narrowed(&agent.id, agent.tools.as_deref()),
             )
         })
         .collect();
@@ -307,37 +420,47 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)
         // server, and the console asserted a connection the harness does not
         // grant.
         grants.push((
-            overlay.id.clone(),
-            agent_effective_grants(allow, &overlay.tools),
+            roster_agent(&overlay.id),
+            desk_narrowed(&overlay.id, overlay.tools.as_deref()),
         ));
     }
     grants
 }
 
-/// The ids of the agents whose effective `grants` reach `decl` (issue #568),
-/// read through the shared [`grants_cover_server`] so this agrees with the
-/// harness registry. Empty ⇒ no teammate can reach the server.
+/// The agents whose effective `grants` reach `decl` (issue #568), read through
+/// the shared [`grants_cover_server`] so this agrees with the harness registry.
+/// Empty ⇒ no teammate can reach the server.
 ///
 /// A **disabled** server reaches nobody regardless of grants: `registry_for_agent`
 /// filters on `decl.enabled && grants_cover_server(..)`, so an agent granted
 /// `mcp:<slug>` still gets no such tool while the server is off. Mirroring both
 /// halves of that filter here is what keeps the console from claiming a
 /// reachability the harness does not hand out.
-fn reachers_of(roster_grants: &[(String, Vec<String>)], decl: &mcp::McpServerDecl) -> Vec<String> {
+fn reachers_of(
+    roster_grants: &[(RosterAgentDto, Vec<String>)],
+    decl: &mcp::McpServerDecl,
+) -> Vec<RosterAgentDto> {
     if !decl.enabled {
         return Vec::new();
     }
     roster_grants
         .iter()
         .filter(|(_, grants)| grants_cover_server(grants, &decl.name))
-        .map(|(id, _)| id.clone())
+        .map(|(agent, _)| agent.clone())
         .collect()
 }
 
-/// `GET …/mcp/servers` — the company's effective MCP servers, each with its last
-/// recorded (scrubbed) probe health.
-async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>, ApiError> {
-    let runtime = company.runtime.as_ref();
+/// The company's whole MCP surface as one list: the declared servers (manifest ∪
+/// install defaults ∪ runtime index) with the directory installs folded in.
+///
+/// Issue #1270. Every reader of this list — the `GET`, the List A mutation
+/// response, the delete dispatch, and the registry mutation responses — goes
+/// through here, so no two of them can disagree about a row's name, badge or
+/// health. That matters most for the reconciled case: a server that is both
+/// installed and declared has exactly one identity, and it has to be the same
+/// identity in the response to the write that created it as in the read that
+/// follows.
+pub(super) async fn merged_rows(runtime: &CompanyRuntime) -> Result<Vec<McpServerDto>, ApiError> {
     // One record load feeds both the manifest servers (merged into the effective
     // set) and the roster used for reachability (issue #568), rather than loading
     // it twice. The install-wide defaults (issue #527) are the layer *underneath*
@@ -365,7 +488,17 @@ async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>,
             .map_err(ApiError)?;
         out.push(dto_from_decl(decl, reachers_of(&grants, decl), health));
     }
-    Ok(Json(out))
+    // The directory half. A registry that cannot be read yields nothing and the
+    // declared servers stand on their own — see `mcp_registry::installs`.
+    let roster: Vec<RosterAgentDto> = grants.iter().map(|(agent, _)| agent.clone()).collect();
+    mcp_registry::merge_installs(&mut out, mcp_registry::installs(runtime).await, &roster);
+    Ok(out)
+}
+
+/// `GET …/mcp/servers` — the company's effective MCP servers, each with its last
+/// recorded (scrubbed) probe health.
+async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>, ApiError> {
+    merged_rows(company.runtime.as_ref()).await.map(Json)
 }
 
 /// `POST …/mcp/servers` — add a runtime MCP server (+ optional token).
@@ -392,6 +525,7 @@ async fn add_server(
         command: None,
         allowed_tools: body.allowed_tools.clone(),
         disallowed_tools: body.disallowed_tools.clone(),
+        read_only_tools: body.read_only_tools.clone(),
         timeout_secs: body.timeout_secs.unwrap_or(30),
         enabled: true,
         auth_secret: None,
@@ -402,7 +536,7 @@ async fn add_server(
     let manifest = manifest_servers(runtime).await?;
     if manifest.iter().any(|m| m.name.trim() == name) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
-            "`{name}` is declared in company.toml — update it to override, don't re-add it."
+            "`{name}` is declared in this company's bundle (`company.toml` or `mcp.json`) — update it to override, don't re-add it."
         ))));
     }
 
@@ -490,6 +624,9 @@ async fn update_server(
     if let Some(disallowed) = patch.disallowed_tools.clone() {
         server.disallowed_tools = disallowed;
     }
+    if let Some(read_only) = patch.read_only_tools.clone() {
+        server.read_only_tools = read_only;
+    }
     if let Some(timeout) = patch.timeout_secs {
         server.timeout_secs = timeout;
     }
@@ -523,8 +660,17 @@ async fn update_server(
     mutation_response(runtime, &name, warning).await
 }
 
-/// `DELETE …/mcp/servers/{name}` — remove a runtime server (409 for a manifest
-/// server, which can only be disabled).
+/// `DELETE …/mcp/servers/{name}` — remove a server (409 for a manifest or
+/// default server, which can only be disabled).
+///
+/// **Dispatches on where the row actually lives** (issue #1270). Dropping a
+/// runtime-index row is the right removal for a server an operator typed in, and
+/// the wrong one for a directory install: the install lives in OpenHuman's own
+/// store, keyed by `server_id`, and it stays connected — with its tools on every
+/// agent's belt — no matter what this company's index says. So a row backed by
+/// an install is uninstalled there, and a **reconciled** row (typed in *and*
+/// installed) has both halves removed, because a delete that leaves the server
+/// callable is not a delete.
 async fn delete_server(
     company: AdminScopedCompany,
     Path(NamePath { name }): Path<NamePath>,
@@ -535,7 +681,7 @@ async fn delete_server(
     let manifest = manifest_servers(runtime).await?;
     if manifest.iter().any(|m| m.name.trim() == name) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
-            "`{name}` is declared in company.toml — disable it instead of deleting."
+            "`{name}` is declared in this company's bundle (`company.toml` or `mcp.json`) — disable it instead of deleting."
         ))));
     }
     // Same guard, same reason, for an install-wide default (issue #527): the
@@ -553,28 +699,49 @@ async fn delete_server(
         ))));
     }
 
+    // Which halves this row has. Read from the same merged list the console
+    // rendered, so the delete targets the row the operator actually saw.
+    let install_id = merged_rows(runtime)
+        .await?
+        .into_iter()
+        .find(|row| row.name == name)
+        .and_then(|row| row.server_id);
+
     let mut index = load_runtime_index(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
     let before = index.len();
     index.retain(|s| s.name.trim() != name);
-    if index.len() == before {
+    let removal = mcp_registry::removal_for(index.len() != before, install_id.is_some());
+    if removal == mcp_registry::Removal::NotFound {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "no runtime MCP server named `{name}`."
         ))));
     }
-    save_runtime_index(runtime.id(), runtime.secrets().as_ref(), &index)
-        .await
-        .map_err(ApiError)?;
-    // Best-effort credential + health wipe (the store has no delete; an empty
-    // value reads as unset, so a later server of the same name never inherits a
-    // stale credential or badge).
-    clear_auth(runtime.id(), &name, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
-    clear_health(runtime.id(), &name, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    if matches!(
+        removal,
+        mcp_registry::Removal::IndexRow | mcp_registry::Removal::Both
+    ) {
+        save_runtime_index(runtime.id(), runtime.secrets().as_ref(), &index)
+            .await
+            .map_err(ApiError)?;
+        // Best-effort credential + health wipe (the store has no delete; an empty
+        // value reads as unset, so a later server of the same name never inherits a
+        // stale credential or badge).
+        clear_auth(runtime.id(), &name, runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+        clear_health(runtime.id(), &name, runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+    }
+    if matches!(
+        removal,
+        mcp_registry::Removal::Install | mcp_registry::Removal::Both
+    ) && let Some(install_id) = install_id
+    {
+        mcp_registry::remove_install(runtime, &install_id).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -592,39 +759,22 @@ async fn mutation_response(
     // DTO so the response and a later `GET` agree.
     let test = probe_and_persist(runtime, name).await;
 
-    // One record load: the manifest servers merged into the effective set, and
-    // the roster the mutated server's reachability is computed against (#568).
-    // Install-wide defaults (#527) sit under the manifest and come off the
-    // runtime, so the mutation response reflects the same three-layer merge a
-    // later `GET` will.
-    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
-    let manifest = record
-        .as_ref()
-        .map(|r| r.manifest.mcp_servers.clone())
-        .unwrap_or_default();
-    let decls = resolve_effective(
-        runtime.id(),
-        runtime.default_mcp_servers(),
-        &manifest,
-        runtime.secrets().as_ref(),
-    )
-    .await
-    .map_err(ApiError)?;
-    let decl = decls.iter().find(|d| d.name == name).ok_or_else(|| {
-        ApiError(OpenCompanyError::InvalidRequest(format!(
-            "`{name}` not found"
-        )))
-    })?;
-    let reachable_by = record
-        .as_ref()
-        .map(roster_grants)
-        .map(|grants| reachers_of(&grants, decl))
-        .unwrap_or_default();
-    let health = load_health(runtime.id(), name, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    // Re-read the same merged list a later `GET` will serve — the three declared
+    // layers (defaults under manifest under runtime) plus any directory install
+    // that reconciles onto this endpoint. Projecting the decl alone would answer
+    // an add-by-URL of an already-installed server with a row missing the
+    // `serverId` the very next read shows (issue #1270).
+    let server = merged_rows(runtime)
+        .await?
+        .into_iter()
+        .find(|row| row.name == name)
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{name}` not found"
+            )))
+        })?;
     Ok(Json(MutationResponse {
-        server: dto_from_decl(decl, reachable_by, health),
+        server,
         note: NEXT_TURN_NOTE.to_string(),
         test,
         warning,
@@ -662,7 +812,7 @@ async fn probe_and_persist(_runtime: &CompanyRuntime, _name: &str) -> Option<Mcp
 }
 
 /// Rejects an invalid server declaration as a `400`.
-fn reject_invalid(label: &str, server: &McpServer) -> Result<(), ApiError> {
+pub(super) fn reject_invalid(label: &str, server: &McpServer) -> Result<(), ApiError> {
     let problems = validate_one(label, server);
     if problems.is_empty() {
         Ok(())
@@ -883,7 +1033,7 @@ async fn discover_tools(
 mod tests {
     use super::*;
     use crate::company::CompanyManifest;
-    use crate::ports::types::{CompanyId, OverlayAgent};
+    use crate::ports::types::{CompanyId, OverlayAgent, OverlayDesk};
 
     /// A company allowing two MCP families, with one manifest agent that lists
     /// none (so it inherits both).
@@ -903,6 +1053,8 @@ role = "Chief Executive"
         )
         .expect("manifest parses");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -914,19 +1066,28 @@ role = "Chief Executive"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
     fn teammate(id: &str, tools: Vec<&str>) -> OverlayAgent {
+        // An empty argument list means "the standard grant" (`None`), matching
+        // every caller's pre-#1804 intent; a non-empty list is a narrowed grant.
+        let tools: Vec<String> = tools.into_iter().map(str::to_string).collect();
         OverlayAgent {
             id: id.to_string(),
             name: id.to_string(),
             role: "Growth".to_string(),
             description: None,
-            tools: tools.into_iter().map(str::to_string).collect(),
+            tools: (!tools.is_empty()).then_some(tools),
+            model: None,
+            harness: None,
         }
     }
 
@@ -944,7 +1105,7 @@ role = "Chief Executive"
         let grants = roster_grants(&scoped);
         let jamie = grants
             .iter()
-            .find(|(id, _)| id == "jamie")
+            .find(|(agent, _)| agent.id == "jamie")
             .expect("the overlay teammate is on the roster");
         assert_eq!(
             jamie.1,
@@ -956,11 +1117,42 @@ role = "Chief Executive"
         // the narrowing above is the teammate's own and not a company change.
         let ceo = grants
             .iter()
-            .find(|(id, _)| id == "ceo")
+            .find(|(agent, _)| agent.id == "ceo")
             .expect("on roster");
         assert_eq!(
             ceo.1,
             vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
+    /// Issue #931: every roster entry carries a printable label, so no console
+    /// coverage line has to fall back to the id.
+    ///
+    /// The id is the wrong thing to print for exactly the teammates an operator
+    /// created: `POST …/team` mints `{millis:012x}-{counter:012x}`, which is
+    /// what "Reachable by" and "Readable by" showed. The two halves resolve
+    /// differently and both are asserted — a manifest agent has no name of its
+    /// own, so its label is its `role`; an overlay teammate's is its `name`.
+    #[test]
+    fn every_roster_entry_carries_a_printable_label() {
+        let minted = "019fa75dbc9b-000000000001";
+        let mut teammate = teammate(minted, Vec::new());
+        teammate.name = "Jamie".to_string();
+        let grants = roster_grants(&record(vec![teammate]));
+        let label = |id: &str| {
+            grants
+                .iter()
+                .find(|(agent, _)| agent.id == id)
+                .unwrap_or_else(|| panic!("`{id}` is on the roster"))
+                .0
+                .name
+                .clone()
+        };
+        assert_eq!(label(minted), "Jamie", "an overlay teammate's own name");
+        assert_eq!(
+            label("ceo"),
+            "Chief Executive",
+            "a manifest agent has no name of its own, so its role is the label"
         );
     }
 
@@ -970,10 +1162,120 @@ role = "Chief Executive"
     #[test]
     fn an_unscoped_overlay_teammate_still_inherits_the_company_grant() {
         let grants = roster_grants(&record(vec![teammate("jamie", Vec::new())]));
-        let jamie = grants.iter().find(|(id, _)| id == "jamie").expect("roster");
+        let jamie = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "jamie")
+            .expect("roster");
         assert_eq!(
             jamie.1,
             vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
+    /// Issue #1674: a teammate seated on a desk whose `tools` ceiling omits
+    /// `mcp:*` must not read back as reaching every server the company grants.
+    /// `roster_grants` is what every MCP server row's `reachableBy` is computed
+    /// from, and the harness scopes the same agent by its desk (`build_roster`'s
+    /// three-level narrowing) — so a company that grants `mcp:*` while a desk
+    /// omits MCP would otherwise list that desk's teammates as reaching servers
+    /// they cannot call.
+    #[test]
+    fn a_desk_ceiling_that_omits_mcp_narrows_reachability() {
+        let mut scoped = record(vec![teammate("jamie", Vec::new())]);
+        scoped.overlay_desks.push(OverlayDesk {
+            id: "creative".to_string(),
+            name: "Creative".to_string(),
+            description: None,
+            members: vec!["jamie".to_string()],
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+        scoped
+            .overlay_desk_tools
+            .insert("creative".to_string(), vec!["mcp:notion".to_string()]);
+        let grants = roster_grants(&scoped);
+        let jamie = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "jamie")
+            .expect("the overlay teammate is on the roster");
+        assert_eq!(
+            jamie.1,
+            vec!["mcp:notion".to_string()],
+            "the desk ceiling narrows reachability below the company grant"
+        );
+
+        // The manifest agent on no desk still inherits the whole company grant,
+        // so the narrowing above is the desk's and not a company change.
+        let ceo = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "ceo")
+            .expect("on roster");
+        assert_eq!(
+            ceo.1,
+            vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
+    /// An operator's `tools` edit to a **manifest** teammate is the grant the
+    /// harness reads: `PATCH …/team/{id}` stores the edit as an override, and
+    /// `roster_grants` derives reachability from the effective roster just like
+    /// `build_roster` does — so granting or revoking `mcp:*` on the Tools card
+    /// moves the Connections surface rather than leaving it pinned to the
+    /// blueprint's `[[agent]].tools` line.
+    #[test]
+    fn a_manifest_teammates_tools_edit_reaches_the_roster() {
+        let mut scoped = record(vec![]);
+        scoped
+            .overlay_agent_edits
+            .push(crate::ports::types::AgentOverride {
+                agent_id: "ceo".to_string(),
+                // Double-option since #1804: `Some(Some(globs))` narrows.
+                tools: Some(Some(vec!["mcp:notion".to_string()])),
+                ..Default::default()
+            });
+        let grants = roster_grants(&scoped);
+        let ceo = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "ceo")
+            .expect("on roster");
+        assert_eq!(
+            ceo.1,
+            vec!["mcp:notion".to_string()],
+            "an override `tools` line replaces the manifest's, narrowed by allow"
+        );
+
+        // Resetting the override to the standard grant (`Some(None)` since
+        // #1804 — NOT `Some(Some([]))`, which is a deny-all) restores the
+        // blueprint-wide reachability.
+        let mut inherited = record(vec![]);
+        inherited
+            .overlay_agent_edits
+            .push(crate::ports::types::AgentOverride {
+                agent_id: "ceo".to_string(),
+                tools: Some(None),
+                ..Default::default()
+            });
+        let grants = roster_grants(&inherited);
+        let ceo = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "ceo")
+            .expect("on roster");
+        assert_eq!(
+            ceo.1,
+            vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
+    /// A retired manifest teammate is not on the effective roster, so it cannot
+    /// be listed as reaching a server — the same roster `build_roster` builds,
+    /// where a removed teammate is not built at all.
+    #[test]
+    fn a_retired_manifest_teammate_is_not_a_reacher() {
+        let mut retired = record(vec![]);
+        retired.overlay_retired_agents.push("ceo".to_string());
+        let grants = roster_grants(&retired);
+        assert!(
+            !grants.iter().any(|(agent, _)| agent.id == "ceo"),
+            "a retired teammate is off the effective roster"
         );
     }
 }

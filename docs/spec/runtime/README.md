@@ -29,10 +29,19 @@ Supporting docs:
   - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the
     data root: the embedded runtime's root, the agent sandboxes, choosing the
     root, and migrating a legacy doubled install
+  - [workspace-names.md](workspace-names.md) — the one naming rule for
+    everything the runtime puts in a workspace (lowercase, dashed), where it is
+    applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
     and two processes wanting the same directory
+  - [offline.md](offline.md) — running with no network at all: the documented
+    manifest, what stays hosted (Medulla, Composio, the hub identity exchange),
+    and the CI lane that executes the claim inside a network namespace
+  - [analytics.md](analytics.md) — what the product reports about its own use:
+    hosted tenants only, an opaque id, shape-and-outcome payloads that cannot
+    structurally carry content, and how to turn it off
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
@@ -43,14 +52,19 @@ Supporting docs:
 - [artifacts.md](artifacts.md) — what makes something a deliverable: the
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge
-- [manifest.md](manifest.md) — `company.toml` schema
+- [manifest.md](manifest.md) — `company.toml` schema,
+  with [manifest-semantics.md](manifest-semantics.md) for each key's behaviour
+- [globals.md](globals.md) — the global baseline: the agents, workflows, skills
+  and starting tool belt every company gets whichever vertical it started from,
+  how a company supersedes or disables one, and why provenance is persisted
 - [agents.md](agents.md) — how a teammate is declared: the inline `[[agent]]`
   form and the one-file-per-teammate `agents/<id>.toml` bundle form, custom
   prompts, checked-in briefing documents versus routed workspace documents, and
   the `classes` routing exclusions
 - [tools.md](tools.md) — the three-level tool grant
-  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an empty grant list means
-  "inherit" rather than "nothing", the four namespaces `*` never confers, the
+  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an absent grant means
+  "inherit" rather than "nothing" (and why an explicit empty agent grant is a
+  deny-all since #1804), the four namespaces `*` never confers, the
   unified tool catalog, and the seed-wins rule for console desk overrides
 - [lifecycle.md](lifecycle.md) — company state machine and durability
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
@@ -94,8 +108,13 @@ Supporting docs:
   hand over → swap), so a first-time inference config needs no restart
 - [api.md](api.md) — the map of the API surface: which planes exist and where
   each is documented
-  - [api-write-plane.md](api-write-plane.md) — every write the console makes,
+  - [Console write plane](api-write-plane.md) — every write the console makes,
     route by route
+    - [api-team-drafting.md](api-team-drafting.md) — the two draft routes behind
+      the teammate copilot, and why a model may write into a persona at all
+    - [api-tool-grants.md](api-tool-grants.md) — the three tool-grant routes
+      that widen `[tools].allow` from a connect page, and when a grant takes
+      effect
   - [api-graphql.md](api-graphql.md) — the `/graphql` read plane
 - [credentials.md](credentials.md) — the company's own TinyHumans key: the one
   seam a brokered surface resolves through (Composio today), why rotating it
@@ -103,10 +122,6 @@ Supporting docs:
   it
 - [config.md](config.md) — configuration and the one-key story
 - [setup.md](setup.md) — the first-run setup flow that writes it
-- [repos.md](repos.md) — bound repositories: the host-side mirror cache, how a
-  credential reaches git without entering argv, the environment or any file, the
-  alternates-not-hardlinks and refuse-not-evict departures, and the honest limit
-  of same-user confinement
 - [../security/agent-isolation.md](../security/agent-isolation.md) — the threat
   model behind that limit: what confines an agent today, what does not, and what
   a prompt-injected agent with `shell` can still do after every planned control
@@ -115,8 +130,28 @@ Supporting docs:
   sessions, invites, and chat attribution
 - [auth-modes.md](auth-modes.md) — the configured sign-in mode: `email`,
   `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
+- [avatars.md](avatars.md) — which icon a teammate wears and which one you do:
+  the closed `tiny:`/`blob:` reference grammar and why a URL is not an avatar,
+  the upload route (GIFs included, SVG refused), and why a person's name is
+  guessed at render time rather than written into the directory
 - [hub-console.md](hub-console.md) — one console deployment operating many hosts
   on other origins: the carried session, CORS, and what it costs
+- [finance-console.md](finance-console.md) — the Finance section: Invoicing
+  (Chargebee) and Wallet (PayPal) as sub-pages, the host read plane that makes
+  provider data reachable from the console at all, and how an operator tests a
+  connection without billing a real customer
+- [connectors.md](connectors.md) — where the runtime runs: the four connectors
+  (this computer, TinyHumans Cloud, a remote gateway, over SSH), why the choice
+  is per host rather than per application, and what each one costs
+- [company-setup/overview.md](company-setup/overview.md) — first-run **company**
+  setup: three questions asked once, turned into a real roster of agents, with
+  fallback and resume flows. Distinct from [setup.md](setup.md), which
+  configures the *instance*
+  - [company-setup-guarantees.md](company-setup-guarantees.md) — the four things
+    the host *enforces* rather than asks a prompt for: job coverage checked
+    against its own list, a tool belt asked for rather than inherited, a copy of
+    the reference team refused the name "designed", and a fallback that says
+    which fallback it is
 
 ## Responsibilities
 
@@ -164,7 +199,7 @@ port returns the crate `Result<T>`.
 | *(default)* | kernel, fs store, hosted brain client, operator API |
 | `tiny` | TinyAgents embedding (existing flag; used by stub brain and local workers) |
 | `sqlite` | SQLite store implementations |
-| `tinycortex` | TinyCortex `MemoryStore`/`ContextStore` adapters |
+| `tinymemory` | Hosted/null memory engine seam (`MemoryProvider` contract) |
 | `tinyplace` | tiny.place economy adapter and A2A routes |
 | `sidecar` | Node sidecar brain for self-hosters |
 

@@ -15,33 +15,80 @@
 //! mocks in tests, real impls when a feature is on); the OAuth write routes are
 //! compiled only under the `oauth` feature and 404 otherwise.
 
+/// `GET {scope}/activation` — the account-activation funnel read projection
+/// (issue #1843). See [`crate::company::activation`] for the derivation.
+pub mod activation;
 pub mod artifacts;
+/// Avatar uploads (`docs/spec/runtime/avatars.md`): the custom-image half of
+/// choosing a face for a teammate or for yourself.
+pub mod avatars;
+pub mod billing;
+/// `GET {scope}/agents/{agent_id}/budget-pause` and
+/// `POST {scope}/agents/{agent_id}/budget-pause/redeem` (issue #1846): read
+/// and redeem the durable re-issue marker a top-level turn parks when it
+/// pauses for lack of inference budget/credits. The console's Add-Credits CTA.
+pub mod budget_pause;
 pub mod capabilities;
-pub mod channels;
 pub mod company_key;
+/// Operator-set company logo, stored in the company manifest.
+pub mod company_logo;
+/// `PATCH {scope}` — the account-activation funnel's conscious naming step
+/// (issue #1844): sets the company's display name and stamps
+/// [`crate::ports::types::CompanyRecord::name_confirmed`]. See
+/// [`crate::company::activation`] for how that flag feeds the funnel.
+pub mod company_profile;
 pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
+pub mod deep_trace;
 pub mod domain;
+pub mod finance;
 pub mod finances;
+/// `GET {scope}/harnesses` (issue #1245's harness-picker follow-up): the
+/// company's declared `[[harness]]` set, read-only. What Settings' Harnesses
+/// page and the per-agent Harness picker both read.
+pub mod harnesses;
+pub mod hosting;
 pub mod imap;
 pub mod inbox;
 pub mod inference;
 pub mod language;
+/// The dynamic-ledger surface: list, declare, read, record, delete, retire.
+/// Reads and writes route through [`crate::company::ledgers`], which is where
+/// the one deletion rule lives.
+pub mod ledgers;
 pub mod mail;
 pub mod mailer;
 pub mod mcp;
+pub mod mcp_config;
+pub mod mcp_registry;
 pub mod memory;
+pub mod memory_engine;
+pub mod memory_ingest;
+/// The `@` picker's directory: every teammate, person, desk and broadcast token
+/// a mention can name, in one member-safe read. See [`mentions`].
+pub mod mentions;
+/// The notification feed, and the mention badge it backs. The first consumer
+/// of `NotificationStore`. See [`notifications`].
+pub mod notifications;
+pub mod pages;
 pub mod policy;
+/// Who is here and who is typing: heartbeat, clean disconnect, typing ping.
+/// Ephemeral, leased, never journaled. See [`presence`].
+pub mod presence;
 pub mod read_state;
-/// Issue #245 (operator half): bind a real repository to a company, list what
-/// is bound, revoke one. The whole credential path, with **no agent surface**
-/// behind it â no grant, no tool. See [`repos`].
-pub mod repos;
 pub mod runs;
 pub mod scope;
+/// Per-company web search settings: which provider the agents search through,
+/// and the write-only key behind it. See [`crate::company::search`].
+pub mod search;
+/// First-run company setup: propose a starting roster from three answers
+/// (`docs/spec/runtime/company-setup.md`). Proposes only — the console creates
+/// each teammate through [`team`], so setup has no second write path.
+pub mod setup;
 pub mod skills;
 pub mod smtp;
+mod task_cost;
 pub mod task_export;
 pub mod tasks;
 pub mod team;
@@ -54,6 +101,7 @@ mod team_agent;
 /// company can grant an agent — built-ins, MCP servers and Composio toolkits —
 /// in one vocabulary. Read-only and openhuman-free.
 pub mod tool_catalog;
+pub mod tool_grants;
 pub mod usage;
 pub mod workflows;
 pub mod workspace;
@@ -82,8 +130,19 @@ use crate::server::ops::mailer::{MailCredentials, MailSender};
 
 /// SecretStore key holding the JSON [`DomainStatus`](crate::company::dns::DomainStatus).
 pub(crate) const DOMAIN_KEY: &str = "__domain";
-/// SecretStore key holding the JSON SMTP credentials.
+/// SecretStore key holding the JSON SMTP configuration — everything but the
+/// password. See [`SMTP_PASSWORD_KEY`].
 pub(crate) const SMTP_KEY: &str = "__smtp";
+/// SecretStore key holding the SMTP password on its own.
+///
+/// Split out of [`SMTP_KEY`] so that "keep the stored password" is the
+/// *absence* of a write rather than a read-modify-write: `PUT …/smtp` without a
+/// password rewrites only the configuration blob and never touches this key, so
+/// it cannot write a stale secret back over a concurrent rotation. Credentials
+/// written before the split still carry the password inside the `SMTP_KEY`
+/// blob; reads fall back to it, and the first write after the split migrates it
+/// here. See `src/server/ops/smtp.rs`.
+pub(crate) const SMTP_PASSWORD_KEY: &str = "__smtp_password";
 /// SecretStore key holding the shared secret the inbound ingest HMAC is verified against.
 pub(crate) const INGEST_SECRET_KEY: &str = "ingest_secret";
 
@@ -104,11 +163,6 @@ pub struct ConnectionsRuntime {
     /// `SecretStore`, so a tenant never sees this credential. `None` means the
     /// host sends no platform mail.
     pub mail_credentials: Option<MailCredentials>,
-    /// Outbound Telegram transport used by the inbound webhook to deliver a
-    /// reply and by the channel ops to call `setWebhook`. When `None`, Telegram
-    /// delivery is "not wired yet" (the default offline build); the inbound
-    /// webhook still verifies + runs the turn, it just can't post the reply.
-    pub telegram: Option<Arc<dyn crate::company::telegram::TelegramApi>>,
 }
 
 impl ConnectionsRuntime {
@@ -134,16 +188,6 @@ impl ConnectionsRuntime {
         self.mail_credentials = Some(creds);
         self
     }
-
-    /// Injects the outbound Telegram transport (real under `telegram`, a
-    /// recording mock in tests).
-    pub fn with_telegram(
-        mut self,
-        telegram: Arc<dyn crate::company::telegram::TelegramApi>,
-    ) -> Self {
-        self.telegram = Some(telegram);
-        self
-    }
 }
 
 impl std::fmt::Debug for ConnectionsRuntime {
@@ -153,7 +197,6 @@ impl std::fmt::Debug for ConnectionsRuntime {
             .field("dns", &self.dns.is_some())
             .field("mail", &self.mail.is_some())
             .field("mail_credentials", &self.mail_credentials)
-            .field("telegram", &self.telegram.is_some())
             .finish()
     }
 }
@@ -162,29 +205,49 @@ impl std::fmt::Debug for ConnectionsRuntime {
 pub fn router() -> Router<AppState> {
     let router = Router::new()
         .merge(capabilities::router())
+        .merge(harnesses::router())
+        .merge(budget_pause::router())
         .merge(tool_catalog::router())
         .merge(connections_read::router())
-        .merge(channels::router())
+        .merge(billing::router())
+        .merge(hosting::router())
+        .merge(search::router())
+        .merge(company_logo::router())
         .merge(company_key::router())
+        .merge(company_profile::router())
         .merge(composio::router())
         .merge(domain::router())
+        .merge(deep_trace::router())
+        .merge(finance::router())
         .merge(finances::router())
         .merge(usage::router())
         .merge(smtp::router())
         .merge(inbox::router())
         .merge(tasks::router())
+        .merge(ledgers::router())
         .merge(task_export::router())
         .merge(runs::router())
         .merge(artifacts::router())
+        .merge(avatars::router())
         .merge(memory::router())
+        .merge(memory_engine::router())
+        .merge(memory_ingest::router())
         .merge(workspace::router())
+        .merge(pages::router())
         .merge(skills::router())
         .merge(mcp::router())
+        .merge(mcp_config::router())
+        .merge(mcp_registry::router())
         .merge(read_state::router())
-        .merge(repos::router())
+        .merge(notifications::router())
+        .merge(presence::router())
+        .merge(mentions::router())
         .merge(inference::router())
         .merge(team::router())
+        .merge(setup::router())
+        .merge(activation::router())
         .merge(policy::router())
+        .merge(tool_grants::router())
         .merge(workflows::router())
         .merge(mail::router());
     #[cfg(feature = "oauth")]

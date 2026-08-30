@@ -51,6 +51,40 @@ pub fn generate_id() -> String {
     format!("{millis:012x}-{counter:012x}")
 }
 
+/// The author a **host-authored notice** is journaled under (issue #966).
+///
+/// Not an agent, and deliberately not a destination either. Three sites emit
+/// prose the runtime wrote itself — an approval-overflow notice, the
+/// `"Acknowledged."` cycle fallback, and a failed-continuation report — and each
+/// used to land as an ordinary `AgentReply` carrying `"operator"` in the author
+/// field. That made them **byte-identical to a reply whose author was
+/// overwritten** by the pre-#885 defect, so no reader could tell a correct
+/// system row from a damaged agent row.
+///
+/// The value matches the literal `MessageView::project` already uses for the
+/// `DeskTaskCompleted` marker, which is what routes it to the console's centred
+/// system pill rather than a company bubble — so nothing on the read side has to
+/// learn a new word.
+///
+/// **Forward-only.** Notices already journaled keep `"operator"` and stay
+/// indistinguishable, permanently: the distinguishing information was never
+/// written down, and nothing recovers it after the fact.
+pub const SYSTEM_AUTHOR: &str = "system";
+
+/// The agent id a confined turn runs under (issue #416).
+///
+/// Deliberately **not** a roster id: it names no teammate, carries no manifest
+/// grants, and cannot be addressed.
+///
+/// Lives here rather than in `harness::confine` (issue #966) because the whole
+/// harness is `#[cfg(feature = "openhuman")]`, and the chat-history attribution
+/// audit — which compiles in the default build — has to recognise it as a
+/// *known author*. `confine` re-exports it, so every existing
+/// `confine::CONFINED_AGENT_ID` reference is unchanged. Copying the literal into
+/// the audit instead would create exactly the silent twin the console's
+/// `mapComposioCategory` carries a warning about.
+pub const CONFINED_AGENT_ID: &str = "workflow-copilot";
+
 /// The stem [`agent_slug`] falls back to when a display name yields nothing a
 /// roster id may legally be.
 pub const AGENT_SLUG_FALLBACK: &str = "teammate";
@@ -66,9 +100,9 @@ const AGENT_SLUG_MAX: usize = 64;
 /// `"Dana Designer"` becomes `dana_designer` — the same grammar the manifest
 /// validator enforces on hand-authored `[[agent]].id`s (lowercase letters,
 /// digits and underscores, starting with a letter), so a runtime-added teammate
-/// and a blueprint one name their `Agents/<id>/` folder the same way. Before
+/// and a blueprint one name their `agents/<id>/` folder the same way. Before
 /// this, runtime teammates took [`generate_id`] and read as
-/// `Agents/019fad5ada20-000000000003/` (issue #686).
+/// `agents/019fad5ada20-000000000003/` (issue #686).
 ///
 /// Deliberately **underscores, not hyphens** — unlike
 /// [`company_id_from_name`](crate::runtime::company_id_from_name), whose output

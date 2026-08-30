@@ -1,0 +1,103 @@
+# What the lab has gathered, and what each source actually turned out to be.
+#
+# This lab deliberately splits fetching from reading — the librarian gathers and
+# never reads, the scholar reads and never fetches — and that split only works
+# if there is a shared record between them. Without one, the librarian cannot
+# tell what has already been retrieved and the scholar cannot tell whether the
+# thing in front of it is primary, secondary, or somebody's blog post about a
+# paper nobody has read.
+
+title = "Sources"
+purpose = """
+Every source this lab has gathered: where it came from, whether it is primary, \
+whether anyone has actually read it, and what it turned out to establish. Check \
+it before fetching anything — the commonest waste here is retrieving what is \
+already downloaded.\
+"""
+written_by = "`record_entry` to log or assess a source, `close_entry` when it is exhausted or discarded"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "source"
+role = "title"
+required = true
+description = "What it is — title, author, date. Enough that somebody could find it again."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "locator"
+role = "refs"
+required = true
+description = "The URL, DOI or workspace path. A source nobody can re-open is an assertion."
+
+[[field]]
+name = "kind"
+role = "prose"
+required = true
+description = "primary, secondary, or commentary. Most disagreements about evidence are really disagreements about this."
+
+[[field]]
+name = "establishes"
+role = "prose"
+description = "What it actually supports, once read — which is usually narrower than what it is cited for."
+
+[[field]]
+name = "reliability"
+role = "prose"
+description = "Who produced it and what interest they have. Not a score; a sentence."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — exhausted, superseded, or discarded as unusable. Required when it closes."
+
+[[status]]
+name = "gathered"
+
+[[status]]
+name = "read"
+
+[[status]]
+name = "exhausted"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "discarded"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Gathered, unread"
+blurb = "Retrieved and waiting on the scholar. The lab's actual queue."
+statuses = ["gathered"]
+order = "recent"
+
+[[section]]
+heading = "Read"
+blurb = "Read, with what each one establishes — usually narrower than what it gets cited for."
+statuses = ["read"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Exhausted or discarded, with the reason. A discarded source is kept so nobody \
+re-fetches it: "we read this and it does not say what its abstract says" is \
+expensive to learn twice.\
+"""
+statuses = ["exhausted", "discarded"]
+cap = 20

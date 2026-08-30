@@ -1,0 +1,50 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup a live-game business is defined by —
+# the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-liveops-calendar"
+title = "Set up the liveops calendar"
+priority = "high"
+note = """
+Get the next quarter's `events` onto the board — what runs, when, and what \
+each one is meant to move.
+
+A live game with no calendar runs whatever was ready, and players read the \
+gaps as a game being wound down.
+
+Done when the quarter is scheduled with an owner per event.\
+"""
+
+[[task]]
+id = "set-up-the-economy-change-rule"
+title = "Set up the economy change rule"
+priority = "high"
+note = """
+State what an `economy-changes` row must carry before a price or a drop \
+rate moves: the value before and after, the reason, and what would say it \
+was wrong.
+
+Economy changes compound, and an unattributed one is one nobody can undo \
+when the numbers turn.
+
+Done when the rule is a `decisions` row.\
+"""
+
+[[task]]
+id = "set-up-the-player-signal-watch"
+title = "Set up the player signal watch"
+priority = "medium"
+note = """
+Decide what goes on `player-signals`, how often it is read, and what a \
+change means — retention, spend, sentiment.
+
+Done when the watchlist is recorded and the baseline is captured.\
+"""

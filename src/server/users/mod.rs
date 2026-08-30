@@ -19,7 +19,6 @@
 //! - [`token`]: minting and hashing the login/session secrets.
 //! - [`password`]: optional password hashing, verification, and policy.
 //! - [`cookie`]: naming, parsing, and rendering the session carriers.
-//! - [`devices`]: pairing a non-browser client as a person.
 //! - [`wallet`]: signing a challenge with an Ed25519 key instead of holding a
 //!   mailbox, for a company whose
 //!   [`AuthMode`](crate::app::config::AuthMode) is `wallet`.
@@ -33,9 +32,9 @@
 //!
 //! A *paired device* is what that client holds — the same [`SessionRecord`]
 //! with [`SessionKind::Device`], a label, and a year-long TTL, minted by
-//! [`devices`] from a code a signed-in human pasted in. Deliberately not a
+//! a code a signed-in human pasted in. Deliberately not a
 //! separate credential system, so that suspension, admin reset and a user's own
-//! password change already revoke devices without any of them growing a second
+//! password change already revoke sessions without any of them growing a second
 //! code path to remember.
 //!
 //! [`SessionRecord`]: crate::ports::SessionRecord
@@ -53,8 +52,8 @@
 //! sessions and flags the account so the user is asked to replace it.
 
 pub mod admin;
+pub mod bootstrap;
 pub mod cookie;
-pub mod devices;
 pub mod password;
 pub mod routes;
 pub mod token;
@@ -64,10 +63,29 @@ pub(crate) mod scope;
 
 pub use routes::router;
 
+use crate::error::OpenCompanyError;
+
+/// The longest a display name may be, in characters.
+///
+/// A name renders on every surface that shows a person — chat gutters,
+/// facepiles, the org chart, approvals — and rides in every roster payload,
+/// so the bound is the difference between a name and a place to park a page of
+/// text. Eighty is far above any real name and far below anything a UI should
+/// be asked to lay out.
+pub(crate) const MAX_DISPLAY_NAME_CHARS: usize = 80;
+
+/// Rejects a display name longer than [`MAX_DISPLAY_NAME_CHARS`], as `400`.
+pub(crate) fn validate_display_name(name: &str) -> Result<(), OpenCompanyError> {
+    if name.chars().count() > MAX_DISPLAY_NAME_CHARS {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "a display name may be at most {MAX_DISPLAY_NAME_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod auth_test;
-#[cfg(test)]
-mod devices_test;
 #[cfg(test)]
 mod hub_test;
 #[cfg(test)]

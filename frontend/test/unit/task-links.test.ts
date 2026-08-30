@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { extraOutputCount, primaryLink, readTaskFocus } from "@/lib/task-output";
+import {
+  extraOutputCount,
+  primaryLink,
+  readTaskFocus,
+  tabForFocus,
+  taskTabHref,
+} from "@/lib/task-output";
 import type { Task, TaskOutput } from "@/api/tasks";
 
 /**
@@ -74,6 +80,39 @@ describe("primaryLink", () => {
     expect(link.href).toBe("#/tasks/t-1");
   });
 
+  // --- issue #806: an output whose producer is a chat turn, not a run --------
+
+  it("opens the workflow a chat turn authored, with no run in the address", () => {
+    // The case #806 exists for: the card is settled by an operator chat turn,
+    // so there is no attempt — but there IS a deliverable, and the board's
+    // contract is written in terms of links. The workflow href must carry no
+    // `?run=`, because naming one would address an attempt that never happened.
+    const link = primaryLink(
+      task({
+        output: {
+          chatId: "chat-42",
+          atMillis: 0,
+          workflows: [{ workflowId: "w-1", action: "created" }],
+        },
+      }),
+    );
+    expect(link.kind).toBe("workflow");
+    expect(link.href).toBe("#/workflows/w-1");
+  });
+
+  it("never labels a chat turn as a run trace", () => {
+    // The last-resort arm. A chat-sourced output with nothing else to show must
+    // not reach `traceHref` — `#/tasks/t-1?run=undefined` is the shape of the
+    // bug this union prevents.
+    const link = primaryLink(
+      task({ output: { chatId: "chat-42", atMillis: 0 } }),
+    );
+    expect(link.kind).toBe("card");
+    expect(link.href).toBe("#/tasks/t-1");
+    expect(link.href).not.toContain("run=");
+    expect(link.label).not.toContain("attempt");
+  });
+
   it("escapes a task id that would otherwise break the address", () => {
     const link = primaryLink(task({ id: "t/1 2" }));
     expect(link.href).toBe("#/tasks/t%2F1%202");
@@ -124,8 +163,53 @@ describe("readTaskFocus", () => {
     expect(readTaskFocus("#/tasks/t-1?run=run-9")).toEqual({ runId: "run-9" });
   });
 
+  it("reads an explicitly addressed detail tab before a linked focus", () => {
+    expect(readTaskFocus("#/tasks/t-1?artifact=a-1&v=3&tab=discussion")).toEqual({
+      tab: "discussion",
+      artifactId: "a-1",
+      version: 3,
+    });
+  });
+
+  it("drops a tab that this screen cannot render", () => {
+    expect(readTaskFocus("#/tasks/t-1?tab=plan")).toEqual({});
+  });
+
   it("yields an empty focus for an address that asks for nothing", () => {
     expect(readTaskFocus("#/tasks/t-1")).toEqual({});
     expect(readTaskFocus("#/tasks/t-1?")).toEqual({});
+  });
+});
+
+describe("taskTabHref", () => {
+  it("replaces the tab while retaining the task focus and host scope", () => {
+    expect(taskTabHref("#/tasks/t-1?artifact=a-1&v=3&host=local", "discussion")).toBe(
+      "#/tasks/t-1?artifact=a-1&v=3&host=local&tab=discussion",
+    );
+  });
+
+  it("replaces an earlier tab rather than emitting it twice", () => {
+    expect(taskTabHref("#/tasks/t-1?tab=timeline", "attempts")).toBe(
+      "#/tasks/t-1?tab=attempts",
+    );
+  });
+});
+
+describe("tabForFocus", () => {
+  it("opens the tab the address names, ahead of a linked focus", () => {
+    expect(tabForFocus({ tab: "discussion", artifactId: "a-1" })).toBe("discussion");
+  });
+
+  it("derives the tab from a link that names no tab of its own", () => {
+    expect(tabForFocus({ artifactId: "a-1" })).toBe("artifacts");
+    expect(tabForFocus({ runId: "run-9" })).toBe("attempts");
+  });
+
+  it("falls back to the default for an address that asks for nothing", () => {
+    // A lineage hop writes a plain `#/tasks/<id>`, which claims the default
+    // tab — so the screen must land there rather than keep the tab the
+    // operator had selected on the previous card.
+    expect(tabForFocus({})).toBe("timeline");
+    expect(tabForFocus(undefined)).toBe("timeline");
   });
 });

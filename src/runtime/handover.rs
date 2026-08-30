@@ -54,9 +54,11 @@ use crate::feedback::service::FeedbackFiler;
 use crate::feedback::store::FeedbackStore;
 use crate::policy::ManifestApprovalGate;
 use crate::ports::{CompanyStore, ContextStore, EventLog, InboxStore, MemoryStore, SecretStore};
+use crate::runtime::blocked_nodes::BlockedNodeQueue;
 use crate::runtime::continuation::ContinuationQueue;
 use crate::runtime::grants::GrantSet;
 use crate::runtime::journal::RuntimeJournal;
+use crate::runtime::workflow_gates::WorkflowGateQueue;
 
 /// The live state a successor runtime adopts from the runtime it replaces.
 ///
@@ -73,6 +75,9 @@ pub struct RuntimeHandover {
     pub(crate) events: Arc<dyn EventLog>,
     pub(crate) memory: Arc<dyn MemoryStore>,
     pub(crate) context: Arc<dyn ContextStore>,
+    pub(crate) inbound_context: Arc<dyn ContextStore>,
+    pub(crate) scratch_context: Option<Arc<dyn ContextStore>>,
+    pub(crate) memory_scopes: Option<Arc<dyn crate::store::MemoryScopes>>,
     pub(crate) secrets: Arc<dyn SecretStore>,
     pub(crate) inbox: Arc<dyn InboxStore>,
     pub(crate) ops: OpsStores,
@@ -86,7 +91,22 @@ pub struct RuntimeHandover {
     /// waiting would continue the next one on its first decision instead of its
     /// last.
     pub(crate) continuations: ContinuationQueue,
+    /// Issue #978: the parked gates of every workflow run still awaiting a
+    /// decision. Inherited for [`continuations`](Self::continuations)' reason
+    /// exactly — a successor that forgot them would re-ask about every gate of a
+    /// partly-decided run.
+    pub(crate) workflow_gates: WorkflowGateQueue,
+    /// Issue #899 (Stage 1): the blocked-agent-node stashes still awaiting a
+    /// decision. Inherited live for [`continuations`](Self::continuations)'
+    /// reason — a successor that forgot them would release a blocked node's
+    /// batch with nothing to spawn and tell the operator to re-run a workflow
+    /// that is in fact ready to continue.
+    pub(crate) blocked_nodes: BlockedNodeQueue,
     pub(crate) serial: Arc<TokioMutex<()>>,
+    /// The per-agent lock slots. Inherited across the swap for the same reason
+    /// as `serial`: a fresh map would let an agent mid-turn start a second turn
+    /// beside itself.
+    pub(crate) per_agent: Arc<TokioMutex<std::collections::HashMap<String, Arc<TokioMutex<()>>>>>,
     pub(crate) task_writes: Arc<TokioMutex<()>>,
     #[cfg(feature = "openhuman")]
     pub(crate) harness: Option<Arc<crate::harness::HarnessPool>>,
@@ -112,6 +132,9 @@ impl CompanyRuntime {
             events: self.events.clone(),
             memory: self.memory.clone(),
             context: self.context.clone(),
+            inbound_context: self.inbound_context.clone(),
+            scratch_context: self.scratch_context.clone(),
+            memory_scopes: self.memory_scopes.clone(),
             secrets: self.secrets.clone(),
             inbox: self.inbox.clone(),
             ops: self.ops.clone(),
@@ -121,7 +144,10 @@ impl CompanyRuntime {
             approval_gate: self.approval_gate.clone(),
             grants: self.grants.clone(),
             continuations: self.continuations.clone(),
+            workflow_gates: self.workflow_gates.clone(),
+            blocked_nodes: self.blocked_nodes.clone(),
             serial: self.serial.clone(),
+            per_agent: self.per_agent.clone(),
             task_writes: self.task_writes.clone(),
             #[cfg(feature = "openhuman")]
             harness: self.harness.clone(),

@@ -5,6 +5,11 @@
 //! here. Every type derives `Clone, Debug, Serialize, Deserialize` so it can
 //! round-trip through JSONL persistence and the HTTP surface.
 //!
+//! [`SecretValue`] is the one deliberate exception: it hand-writes `Debug` and
+//! `Serialize` so neither can emit the plaintext credential, whichever struct
+//! happens to embed it. See its own docs for why, and
+//! `secret_value_redacts_in_debug_and_serialize` for the guard.
+//!
 //! Field lists are Phase-1-minimal: the port contract in
 //! `docs/spec/runtime/ports.md` binds trait and method names, and permits
 //! payload fields to evolve within Phase 1.
@@ -148,14 +153,99 @@ impl std::fmt::Display for ChunkAddr {
     }
 }
 
+/// The single string every redacting rendering of a [`SecretValue`] emits, in
+/// `Debug` and in `Serialize` alike.
+///
+/// One constant on purpose: the assertion that a secret did not escape is
+/// "the plaintext is absent", and a second spelling of the marker is a second
+/// thing a future guard could check for and miss.
+pub const SECRET_REDACTED: &str = "[redacted]";
+
 /// Opaque per-company secret value.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Why `Debug` and `Serialize` are hand-written
+///
+/// Both derived impls emit the plaintext credential, and both are reachable by
+/// accident rather than by mistake. The `Debug` half was patched five separate
+/// times on *enclosing* structs — [`RuntimeConfig`](crate::app::config::RuntimeConfig),
+/// [`AppConfig`](crate::app::AppConfig), `ChargebeeConfig`, `MailCredentials`,
+/// `HttpTinyplaceClient` — each time after somebody noticed a live key in a log
+/// line. That is the failure mode of guarding the container instead of the
+/// contents: it protects the structs that exist and none of the ones written
+/// next.
+///
+/// `Serialize` is the same trap with a wider blast radius, because serializing
+/// a config is a *normal* thing to do — a DTO, an event payload, a diagnostic
+/// dump. Guarding here means a struct that derives `Serialize` and holds a
+/// secret is safe the day it is written, with nobody having to remember
+/// (issue #1741).
+///
+/// # Why a marker and not a refusal
+///
+/// [`Serialize`] emits [`SECRET_REDACTED`] rather than returning an error.
+/// A refusal aborts the *whole* enclosing serialization, so an incidental
+/// diagnostic dump becomes a runtime failure in the one code path least able to
+/// cope with one — and a caller who hits it is pushed toward
+/// [`expose`](Self::expose) to work around it, which is the actual leak. The
+/// marker gives that caller exactly what they should have got. It mirrors the
+/// hand-written `Debug` impls, which cannot refuse either.
+///
+/// # Why persistence is unaffected
+///
+/// Nothing serializes a `SecretValue` through serde. Every secret-store backend
+/// — `FsSecretStore`, `SqliteStore`, `MongoStore` — writes
+/// [`expose`](Self::expose) and reads back through the `SecretValue` constructor;
+/// config resolution maps `String -> SecretValue` the same way. That is the
+/// "storable form goes through one explicit, named method" discipline, and it
+/// was already the house style before this impl existed:
+/// `cargo check --all-targets --all-features` passes with *both* serde derives
+/// deleted outright. So the redacting `Serialize` costs no persistence path.
+///
+/// `Deserialize` stays derived: reading a secret *in* never leaks one, and a
+/// config or stored shape that names a `SecretValue` field is legitimate. The
+/// asymmetry is deliberate — a serde round-trip yields
+/// `SecretValue("[redacted]")`, which fails closed at the point of use instead
+/// of quietly carrying a live credential somewhere it was never meant to go.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct SecretValue(pub String);
 
 impl SecretValue {
     /// Borrows the underlying secret string.
+    ///
+    /// The *named* way to get the plaintext out — but **not the only one**, and
+    /// an audit that greps for `expose(` alone will miss the rest. The field is
+    /// `pub`, so `let SecretValue(raw) = value` reads it just as well, and ten
+    /// production call sites already do: four in `company::mcp`, three in
+    /// `company::inference`, two in `company::composio`, one in
+    /// `company::company_key`. A complete search is
+    /// `grep -E 'expose\(|SecretValue\('`.
+    ///
+    /// Stating that rather than the tidier claim is deliberate: the tidier one
+    /// was in this file and was false, and a security audit that trusts an
+    /// incomplete grep is worse off than one told where the gaps are. Closing
+    /// the gap means privatizing the field behind a constructor, which is a
+    /// mechanical change across ~110 construction sites and belongs in its own
+    /// change rather than riding along with the serialization guard.
     pub fn expose(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Newtype shape, redacted contents: an enclosing struct's *derived*
+        // `Debug` still reads sensibly, which is the point — the container no
+        // longer has to remember anything.
+        write!(f, "SecretValue({SECRET_REDACTED})")
+    }
+}
+
+impl Serialize for SecretValue {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(SECRET_REDACTED)
     }
 }
 
@@ -190,6 +280,186 @@ pub struct Actor {
     pub id: String,
 }
 
+// ---------------------------------------------------------------------------
+// Mentions
+// ---------------------------------------------------------------------------
+
+/// Who a mention points at.
+///
+/// Deliberately **not** [`Actor`]: `@everyone` is a *scope*, not an actor, and
+/// `Actor` is a closed `{kind, id}` pair with no room for one. Modelling the
+/// broadcast token as a first-class variant is what keeps it readable on
+/// reload and in export — expanding it into N literal `@name`s at compose time
+/// (the shape `block/buzz` uses for its team mentions) loses the fact that the
+/// message was addressed to the *room* the moment it is journaled.
+///
+/// Internally tagged under `kind`, matching [`CompanyEvent`]'s own discipline,
+/// so every stored mention is self-describing.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum MentionTarget {
+    /// A roster teammate, by its `[[agent]].id`. The only variant that can
+    /// change who answers a message — see `crate::runtime::mentions`.
+    Agent {
+        /// The teammate's roster id.
+        id: String,
+    },
+    /// A human collaborator, by [`UserRecord::id`](crate::ports::users::UserRecord).
+    ///
+    /// Carried as an **id**, never as the typed label: a human has no handle in
+    /// this system (only a display name that can change and is not unique), so
+    /// resolving a mention by re-parsing text later would silently re-point it
+    /// after a rename. The literal the author typed lives in [`Mention::text`].
+    User {
+        /// The collaborator's user id.
+        id: String,
+    },
+    /// A desk, by its `[[group_chat]].id` — `@#engineering`.
+    Desk {
+        /// The desk's id.
+        id: String,
+    },
+    /// `@everyone` / `@channel`. Notifies every human in the company and puts
+    /// every roster agent on the addressed desk into the answering turn's
+    /// context.
+    ///
+    /// **Not a fan-out.** One operator message still spawns exactly one turn;
+    /// the mentioned agents are named *to* that turn, which spreads the work
+    /// through the existing gated delegation seam if it judges that it should.
+    Everyone,
+}
+
+impl MentionTarget {
+    /// The roster teammate this mention names, or `None` for every other
+    /// variant. The single accessor dispatch routing is allowed to consult.
+    pub fn agent_id(&self) -> Option<&str> {
+        match self {
+            Self::Agent { id } => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The human collaborator this mention names, or `None` for every other
+    /// variant.
+    pub fn user_id(&self) -> Option<&str> {
+        match self {
+            Self::User { id } => Some(id.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// One mention inside one chat message.
+///
+/// **Structured and authoritative.** The message body keeps the literal text
+/// the author typed, byte for byte, and this list says who that text actually
+/// resolved to at the moment it was sent. Two properties follow, and both are
+/// the reason it is stored this way rather than re-derived from the body:
+///
+/// * A rename never rewrites history. `@Jane` stays `@Jane` in the transcript
+///   and still resolves to the same person after they become `Jane Doe`.
+/// * Quoting a message cannot re-ping anybody, because a quote carries text
+///   and no mention rows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mention {
+    /// Who is mentioned.
+    pub target: MentionTarget,
+    /// The literal span the author typed — `@alice`, `@Jane Doe`, `@everyone`.
+    ///
+    /// What the renderer highlights, and **never** re-derived from the target's
+    /// current name. A chip that disagreed with the surrounding prose would be
+    /// a worse lie than no chip at all.
+    pub text: String,
+    /// Byte offset of [`Self::text`] within the message body.
+    ///
+    /// Carrying the span is what lets a multi-word human label (`@Jane Doe`)
+    /// work with no handle and no slug: the renderer highlights a known range
+    /// instead of regexing the body for something it hopes is a name.
+    pub offset: usize,
+    /// Render-only: draw the chip, but do not notify and do not route.
+    ///
+    /// Inverted (`quiet` rather than `notify`) so the `false` default means
+    /// "this pings", and the key is therefore omitted from the wire on every
+    /// ordinary mention. This is `block/buzz`'s two-tag split — `["p", id]`
+    /// notifies, `["mention", id]` only renders — collapsed into one field,
+    /// because a single list with a flag round-trips additively where two
+    /// parallel lists would not.
+    ///
+    /// Set by the server, never by the client: it is how a mention whose target
+    /// has since left the roster is demoted rather than dropped. The chip
+    /// disappears, the text stays, nobody is pinged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
+}
+
+/// How many mentions one message may carry as *pings*.
+///
+/// The blast-radius limit, and the reason `@everyone` needs no separate cap.
+/// Past this the tail is demoted to [`Mention::quiet`] rather than deleted —
+/// the spans survive, so what a reader sees still matches what the author
+/// wrote, and only the notifying stops. Same value `block/buzz` settled on.
+pub const MENTION_CAP: usize = 50;
+
+/// `skip_serializing_if` for [`CompanyEvent::AgentReply::mention_depth`].
+///
+/// A free function rather than `u8::eq(&0)` because `skip_serializing_if` takes
+/// a path, and this is the one place the "omitted means zero" contract for that
+/// field is written down.
+fn is_zero_depth(depth: &u8) -> bool {
+    *depth == 0
+}
+
+/// One file attached to a chat message (issue #1682).
+///
+/// A **reference**, not the bytes. The payload lives as an ordinary binary
+/// [`WorkspaceNode`](crate::ports::workspace::WorkspaceNode) in the sending
+/// company's own workspace blob store, and this carries only what a transcript
+/// needs to render a chip and reach that payload: the node's id plus the
+/// name / mime / size the store computed. The renderer downloads through the
+/// existing hardened `GET …/workspace/blob/{node_id}` serve (issue #667 —
+/// `nosniff` + a closed inline allow-list), so no second blob path is added and
+/// none needs securing.
+///
+/// **Server-authored on every field.** The send route is handed a `node_id`
+/// only; it re-resolves that id within the sending company's tree and copies
+/// name / mime / size straight from the store, discarding anything the client
+/// claimed. A reference that resolves to no binary node in *this* company is a
+/// `400`, on the same terms a bad thread `parent` is — so a stale or hostile
+/// client cannot cross a company boundary (IDOR) or misdescribe a payload
+/// (mime/size spoof). See `accept_chat_turn` in [`crate::server::operator`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    /// The workspace node id the payload is stored under.
+    ///
+    /// Server-generated (`generate_id`) when the file was uploaded, never a
+    /// client-chosen string — so no value here ever reaches a filesystem path.
+    pub node_id: String,
+    /// The stored file's display name, taken from the workspace node — never
+    /// the filename the browser sent with the upload.
+    pub name: String,
+    /// The stored payload's media type, taken from the workspace node.
+    pub mime: String,
+    /// The stored payload's exact length in bytes, as the store computed it.
+    pub size: u64,
+    /// The payload's text, extracted server-side at resolve time, capped to a
+    /// wire-safe length (issue #1682, codex review finding).
+    ///
+    /// A node id alone told a hosted or sidecar brain a file existed but gave
+    /// it nothing to act on — no device tool bridges that surface into the
+    /// workspace's binary store. This reuses the same `ingest::extract`
+    /// pipeline the memory-drop page already runs, so a PDF, DOCX, PPTX, XLSX
+    /// or plain-text attachment's actual words ride the same event the
+    /// reference does. `None` covers three cases alike: an image or other
+    /// format nothing here parses, a scanned document with no text layer, and
+    /// a payload too large to read for one chat turn — the caller cannot tell
+    /// which, and for "does the brain have something to read" it does not
+    /// need to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
+}
+
 /// An operator's resolution of a parked approval.
 ///
 /// The HTTP body uses the lowercase strings `"approve"` / `"deny"`. The
@@ -204,9 +474,148 @@ pub enum Verdict {
     Deny,
 }
 
+/// What the operator says one chat message is **for** (issue #1152).
+///
+/// # Why this is not a third `TaskDeliverable`
+///
+/// [`TaskDeliverable`](crate::ports::tasks::TaskDeliverable) answers a question
+/// about a **card**: once the work exists, does doing it produce a one-off
+/// result or a reusable workflow. This answers the question one step earlier —
+/// whether the message is a request for work at all. A card can never *be* "not
+/// work", so a third `TaskDeliverable` variant would be
+/// representable-but-invalid in every position that field is stored and read
+/// (`TaskRecord::deliverable`, the builder pass's dispatch check, the console's
+/// task edit dialog), and every one of those readers would owe a branch for a
+/// state that cannot occur.
+///
+/// [`deliverable`](Self::deliverable) returning `None` for [`Chat`](Self::Chat)
+/// is that same statement, made in the type: no card, therefore no deliverable
+/// to choose.
+///
+/// # The operator chooses; nothing guesses
+///
+/// Like `TaskDeliverable` (decision D2a of issue #580), this is only ever set
+/// from an explicit control a person pressed. Nothing reads a message and
+/// decides it "looks like chatter" — that judgement already exists one layer
+/// down, as the lexical triage (issue #267) and the model escalation (issue
+/// #984), and this is deliberately not a third one of those. It is the person's
+/// own statement about their own message, settled before any model runs.
+///
+/// Additive on the wire: the two work values are the exact `TaskDeliverable`
+/// words, so every `deliverable` value ever journaled on a
+/// [`CompanyEvent::OperatorMessage`] still deserializes, and a message that
+/// carried no choice still serializes with the field absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageIntent {
+    /// Not a request for work — the composer's "Just chatting". No
+    /// deterministic path opens a card for this message.
+    Chat,
+    /// A request for work, done once. The historical default: identical in
+    /// behaviour, and on the wire, to a message that expressed no choice.
+    Once,
+    /// A request for work, built as a reusable workflow. The card it opens
+    /// routes through the builder pass.
+    Workflow,
+}
+
+impl MessageIntent {
+    /// The deliverable a card opened for this message carries, or `None` when
+    /// the operator said the message asks for no card at all.
+    pub fn deliverable(self) -> Option<crate::ports::tasks::TaskDeliverable> {
+        match self {
+            Self::Chat => None,
+            Self::Once => Some(crate::ports::tasks::TaskDeliverable::Once),
+            Self::Workflow => Some(crate::ports::tasks::TaskDeliverable::Workflow),
+        }
+    }
+
+    /// Whether the operator stated this message is not a request for work.
+    pub fn is_chat(self) -> bool {
+        matches!(self, Self::Chat)
+    }
+
+    /// The wire word, for a log line or a note a person reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Once => "once",
+            Self::Workflow => "workflow",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
+
+/// One step in the account-activation funnel (issue #1843): the shared
+/// vocabulary the onboarding gate and the week-1 nudge both key off, so the
+/// two features cannot each invent their own step names and drift.
+///
+/// Fieldless and closed on purpose — a step is one of exactly these three
+/// until a future issue adds a fourth, at which point every exhaustive match
+/// over this enum (there are none yet outside this crate; keep it that way)
+/// would need to be revisited anyway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingStep {
+    /// The operator confirmed (or set) the company's display name.
+    NameConfirmed,
+    /// The company holds at least one active Composio connection AND its
+    /// `[tools].allow` explicitly grants the `composio` namespace — both
+    /// halves of [`crate::company::grants_composio_explicit`]'s rule, because
+    /// a connection nobody granted the namespace for cannot actually be used.
+    IntegrationConnected,
+    /// A real (non-dry) workflow run reached
+    /// [`RunStatus::Succeeded`](crate::ports::runs::RunStatus::Succeeded).
+    WorkflowRunSucceeded,
+}
+
+/// Who or what started a workflow run (issue #1862 prerequisite).
+///
+/// A static fact stamped at **trigger time**, not a judgment made at failure —
+/// the run that hits a blocker later needs to know who to hand it back to, and
+/// that is whoever's errand the run was, not whoever happened to be watching
+/// when it stalled. `WorkflowRunStarted` carries it; every entry point already
+/// has the identity in hand when it starts a run, so this only ever writes
+/// down a fact that already existed.
+///
+/// `Schedule` and `Operator` are fieldless because there is exactly one cron
+/// scheduler and, on that boundary, exactly one operator concept; `Agent`
+/// carries the triggering agent's id because there can be many.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartedBy {
+    /// An operator pressed Run (or the run route otherwise fired manually).
+    Operator,
+    /// An agent triggered the run — `run_workflow` from a turn, or a
+    /// dispatched card. The id is that agent's roster id.
+    Agent(String),
+    /// A cron schedule fired the run with nobody watching.
+    Schedule,
+}
+
+impl StartedBy {
+    /// The default reading of the run route's `scheduled: bool` flag, for
+    /// entry points that have not been taught to name a triggering agent yet.
+    ///
+    /// `true` is unambiguous (only the scheduler sets it) — `false` defaults to
+    /// [`Operator`](Self::Operator) even though not every manual run is
+    /// literally an operator's Run click (`run_workflow` also fires with
+    /// `scheduled: false`, see the site named on
+    /// [`WorkflowRunContext::new`](crate::ports::workflow_runner::WorkflowRunContext::new)).
+    /// That is deliberately the coarser, unwired default: a caller that knows
+    /// the real agent should build a [`StartedBy::Agent`] directly instead of
+    /// going through this conversion.
+    pub fn from_scheduled(scheduled: bool) -> Self {
+        if scheduled {
+            Self::Schedule
+        } else {
+            Self::Operator
+        }
+    }
+}
 
 /// An external stimulus fed into a company's cycle loop.
 ///
@@ -255,9 +664,10 @@ pub enum CompanyEvent {
         /// terms above, so no stored record migrates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<EventSeq>,
-        /// The composer's once-vs-workflow choice for this message (issue #845),
-        /// as the operator set it — [`TaskDeliverable::Workflow`] when they
-        /// picked "Build me the workflow".
+        /// What the operator's composer said this message is **for** (issues
+        /// #845, #1152), as they set it — [`MessageIntent::Workflow`] when they
+        /// picked "Build me the workflow", [`MessageIntent::Chat`] when they
+        /// picked "Just chatting".
         ///
         /// Carried on the event because the cycle is the only place that holds
         /// both this fact and the turn about to answer, and without it the turn
@@ -269,12 +679,155 @@ pub enum CompanyEvent {
         /// [`CompanyRuntime::inject_workflow_builder_awareness`](crate::company::runtime::CompanyRuntime)
         /// reads this to tell the turn who owns the authoring.
         ///
+        /// Typed [`MessageIntent`] rather than
+        /// [`TaskDeliverable`](crate::ports::tasks::TaskDeliverable) since
+        /// #1152, because the operator can now say the message is not a request
+        /// for work at all — which is a statement about the *message*, not a
+        /// choice of what a card produces. The field keeps its name and its wire
+        /// key: one operator choice, one field, so `{"deliverable":"workflow"}`
+        /// and "just chatting" cannot both be asserted about one message.
+        ///
         /// `None` means the caller expressed no choice — every message journaled
         /// before this field existed, and every non-chat producer. Additive on
-        /// exactly the `by` / `chat` / `parent` terms above, so no stored record
-        /// migrates.
+        /// exactly the `by` / `chat` / `parent` terms above, and the two work
+        /// words are unchanged, so no stored record migrates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        deliverable: Option<crate::ports::tasks::TaskDeliverable>,
+        deliverable: Option<MessageIntent>,
+        /// Who this message names, resolved at send time.
+        ///
+        /// The body keeps the literal `@text`; this says who it pointed at, so
+        /// the transcript renders the same chips a reload does and routing has
+        /// something to consult that is not a regex over prose. Populated from
+        /// the console's picker when it sends one, and otherwise extracted
+        /// host-side from the text — either way re-validated against the live
+        /// roster before it is journaled, so a stale client cannot ping a
+        /// teammate that no longer exists.
+        ///
+        /// Additive on exactly the `by` / `chat` / `parent` / `deliverable`
+        /// terms above: an empty list is skipped, so every already-persisted
+        /// message serializes byte-for-byte as it did before this field, and no
+        /// stored record migrates.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<Mention>,
+        /// Files the operator attached to this message (issue #1682), resolved
+        /// to durable workspace references at send time.
+        ///
+        /// Each [`Attachment`] names a binary
+        /// [`WorkspaceNode`](crate::ports::workspace::WorkspaceNode) in this
+        /// company's own workspace, carrying the name / mime / size the store
+        /// computed — never a value the client supplied. The route re-resolves
+        /// every `node_id` within the sending company's tree before this is
+        /// journaled, so a reference here cannot point outside the company or
+        /// misdescribe its payload.
+        ///
+        /// Additive on exactly the `by` / `chat` / `parent` / `deliverable` /
+        /// `mentions` terms above: an empty list is skipped, so every
+        /// already-persisted message serializes byte-for-byte as it did before
+        /// this field, and no stored record migrates.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
+    },
+    /// A turn was **accepted** for an operator message (issue #983) — the
+    /// transcript line that says the company took the work on.
+    ///
+    /// # Why this is not the run row
+    ///
+    /// Stage 1 mints a [`RunRecord`](crate::ports::runs::RunRecord) for the same
+    /// turn, and the two answer different questions. The row answers *status* —
+    /// pending, running, failed, what it cost — and is read by a poll. This is
+    /// the *transcript*: the log is the one place a reader reconstructs what
+    /// happened in a conversation from, and "a turn was accepted for this
+    /// message" cannot be inferred from the log without it. An
+    /// [`OperatorMessage`](Self::OperatorMessage) with no reply after it is
+    /// indistinguishable from a chatter message that legitimately produced none,
+    /// so the absence of an answer is not evidence of a lost turn — until this
+    /// event makes the acceptance explicit.
+    ///
+    /// **Structural only.** No message text: the text is already on the
+    /// `OperatorMessage` this brackets, and putting it here would be a second
+    /// copy to redact.
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    TurnStarted {
+        /// The turn's id — the same id its
+        /// [`RunRecord`](crate::ports::runs::RunRecord) is keyed on, so a
+        /// transcript line and a status row join without a second scheme.
+        turn_id: String,
+        /// The desk / chat thread the message was addressed to.
+        chat_id: String,
+        /// The message being replied to, when the turn answers a thread reply —
+        /// the same sequence position
+        /// [`OperatorMessage::parent`](Self::OperatorMessage) carries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<EventSeq>,
+        /// Who asked, mirroring
+        /// [`OperatorMessage`](Self::OperatorMessage)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A turn that was accepted did not produce an answer (issue #983).
+    ///
+    /// The closing bracket of [`TurnStarted`](Self::TurnStarted), written by the
+    /// turn itself when its cycle errors and by the boot sweep
+    /// ([`crate::runtime::sweep_interrupted_turns`]) for a turn the host died
+    /// under. Without it a turn killed with the pod is permanent silence: the
+    /// question is in the transcript, no answer ever follows it, and nothing
+    /// says why.
+    TurnFailed {
+        /// The turn this settles — the id its
+        /// [`TurnStarted`](Self::TurnStarted) carries.
+        turn_id: String,
+        /// Why, in plain language. Tenant-scoped like
+        /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished), and
+        /// deliberately **not** projected onto the operator SSE stream.
+        error: String,
+    },
+    /// One task attempt changed status (issue #1015).
+    ///
+    /// **The whole status machine, from one seam.** Emitted by the store
+    /// decorator that wraps `put_run` — the single write primitive every
+    /// [`RunStatus`](crate::ports::runs::RunStatus) change passes through, since
+    /// `begin_run` and `finish_run` are trait defaults that call it and no
+    /// backend overrides either. So the frame cannot be missed by adding a
+    /// caller, which is what makes this a complete surface rather than a partial
+    /// one.
+    ///
+    /// That matters most for the path the obvious seam misses:
+    /// [`reap_orphaned_runs`](crate::ports::runs::reap_orphaned_runs) settles
+    /// crash-killed runs by calling `finish_run` **directly**, never through the
+    /// cycle. Emitting from the cycle's call sites would leave exactly those
+    /// runs — the ones whose visibility the reaper exists to provide —
+    /// transitioning in silence.
+    ///
+    /// **Not [`TurnStarted`](Self::TurnStarted)/[`TurnFailed`](Self::TurnFailed)**,
+    /// though `turn_id` and this `run_id` are the same key. Those two are
+    /// appended only on the chat HTTP path and bracket an
+    /// [`OperatorMessage`](Self::OperatorMessage); firing one for a task attempt
+    /// would put a turn in the chat transcript that no one took.
+    ///
+    /// Additive: a new `kind`, absent from every journal written before it.
+    RunStatusChanged {
+        /// The attempt's id — the same id
+        /// [`RunRecord::id`](crate::ports::runs::RunRecord::id) is keyed on.
+        run_id: String,
+        /// The card this attempt is at, when it is a task attempt rather than a
+        /// chat turn. Absent for a chat turn, which belongs to no card.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        /// The attempt ordinal at that card — `1` for the first.
+        attempt: u32,
+        /// The status moved from. Absent when the row is being minted, which is
+        /// the one write with no prior state rather than a transition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        /// The status moved to.
+        to: String,
+        /// Why, on a failure. Tenant-scoped like
+        /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished) and
+        /// deliberately **not** projected onto the operator SSE stream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// An inbound webhook fired.
     WebhookReceived {
@@ -339,6 +892,19 @@ pub enum CompanyEvent {
         /// The operator's verdict.
         verdict: Verdict,
         /// Who resolved it.
+        by: Actor,
+    },
+    /// An operator extended a parked approval's deadline (issue #1805).
+    ///
+    /// The audit counterpart to the extend lever: it says *who* bought a stalled
+    /// request more time and *when*, so a run that would have default-denied over
+    /// a weekend leaves a trail naming the person who kept it alive. Thin like
+    /// [`ApprovalParked`](Self::ApprovalParked) — the moved deadline itself is
+    /// projected onto the card from the journal, not carried on the event.
+    ApprovalExtended {
+        /// The approval whose deadline was pushed out.
+        approval_id: ApprovalId,
+        /// Who extended it.
         by: Actor,
     },
     /// Feedback was filed against the company.
@@ -439,6 +1005,29 @@ pub enum CompanyEvent {
         /// `task_id` above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<EventSeq>,
+        /// Who this reply names, extracted host-side from its text.
+        ///
+        /// Rendered as chips exactly like an operator message's, and — unlike
+        /// an operator message's — **never consulted by dispatch**. That
+        /// asymmetry is the mention-loop fuse: there is no code path from a
+        /// reply's mentions to a turn, so an agent naming another agent draws a
+        /// chip and files nothing to run. The edge does not exist, which is a
+        /// stronger guarantee than an edge that is disabled.
+        ///
+        /// Additive on the same terms as `task_id` and `parent` above.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<Mention>,
+        /// How many mention hops produced this reply.
+        ///
+        /// **Reserved, and zero on every reply today.** The agent-to-agent
+        /// dispatch edge described above is off, so nothing increments this.
+        /// It ships now because it is the gate that would bound the edge if it
+        /// were ever turned on (`depth >= 2` refuses), and shipping the field
+        /// with the feature costs one omitted-when-zero key — where adding it
+        /// later would be a wire change made under pressure, at exactly the
+        /// moment a loop was being chased.
+        #[serde(default, skip_serializing_if = "is_zero_depth")]
+        mention_depth: u8,
     },
     /// A reaction was set or cleared on one chat message (issue #364).
     ///
@@ -1129,6 +1718,18 @@ pub enum CompanyEvent {
         run_id: String,
         /// Whether a cron schedule started this run rather than an operator.
         scheduled: bool,
+        /// Who or what started the run (issue #1862 prerequisite) — the fact a
+        /// parked blocker later attributes its DM to.
+        ///
+        /// `Option` and `#[serde(default)]`, unlike `scheduled`: every current
+        /// entry point already knows this at trigger time, but a journal line
+        /// written before this field existed carries none, and `None` is also
+        /// the honest reading for any future entry point that genuinely has no
+        /// identity to give. `skip_serializing_if` keeps a line with no
+        /// attribution serializing byte-identically to before this field
+        /// existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_by: Option<StartedBy>,
     },
     /// One non-trigger node of a workflow run began executing (issue #382),
     /// reported by the engine's `RunObserver` immediately before the node's
@@ -1194,6 +1795,40 @@ pub enum CompanyEvent {
         status: WorkflowNodeStatus,
         /// Wall-clock duration of the node's execution, in milliseconds.
         elapsed_ms: u64,
+        /// The node's non-fatal data-binding diagnostics (issue #1014): the
+        /// config path of every `=`-expression that resolved to `null` during
+        /// this node's execution — the engine's own list of broken wiring (see
+        /// `crate::ports::WorkflowRunNodeRow::diagnostics`).
+        ///
+        /// **Config paths only, no node output.** A null resolution carries no
+        /// value, and only its config *location* rides here — the same scrubbing
+        /// stance the rest of this event takes, so the operator-SSE projection
+        /// and the inference sidecar see the broken wiring's address and never a
+        /// payload.
+        ///
+        /// `#[serde(default)]` + `skip_serializing_if` so a journal line written
+        /// before this field existed folds back with an empty list — the event
+        /// is replayed at boot, and a field without a default would make every
+        /// pre-existing line fail to parse (silent history loss rather than a
+        /// compile error) — and a node with no unresolved wiring serializes
+        /// byte-for-byte as it did before.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<String>,
+        /// The attempt this node's agent ran as, when it opened one.
+        ///
+        /// A **structural id and nothing more**, which is why it is allowed on
+        /// an event whose whole stance is "ids, never payloads": it is no more
+        /// revealing than the `node_id` beside it, and it is what lets a console
+        /// go from a node on the canvas to that node's step trace without a
+        /// second round trip to find which attempt belonged to it.
+        ///
+        /// Absent for a non-agent node, for a host that records no attempts, and
+        /// on every line written before this field existed. Same `default` +
+        /// `skip_serializing_if` shape as `diagnostics` above, for the same
+        /// reason: the journal is replayed at boot, so a field without a default
+        /// would turn every pre-existing line into silent history loss.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_run_id: Option<String>,
     },
     /// One `output` node's report actually left the process (issue #529) — the
     /// durable record of a dispatch that the run's own
@@ -1259,30 +1894,16 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
-    /// A call inside a `sub_workflow` child ran **without** being offered for
-    /// approval, on a company whose policy would have parked the same call at
-    /// the top level (issue #617).
+    /// A legacy audit record for a call inside a `sub_workflow` child that ran
+    /// without being offered for approval (issue #617).
     ///
-    /// # Why this is a journal line and not a fix
+    /// # Compatibility
     ///
-    /// A child graph is resolved and run *inside* the engine, so its nodes never
-    /// reach the gate pass that #460 and #614 added. Gating them is not
-    /// available: tinyflows cannot resume a child across the sub-workflow
-    /// boundary, and a paused child halts the parent with an unresumable error —
-    /// so marking the child's node would convert a run that works into one that
-    /// fails with no card to decide. Until the engine can resume across that
-    /// boundary, the honest thing is to keep running and **say so**.
-    ///
-    /// That is what this records. An operator auditing what the company was
-    /// asked to approve would otherwise see a hole with nothing explaining it;
-    /// this turns the hole into a line naming the child, the node and the call.
-    /// It is an audit record of a known limitation, not a decision anybody made.
-    ///
-    /// Journaled best-effort at child *resolution*, so it lands whether or not
-    /// the child's node is ultimately reached — the point is that the call was
-    /// never offered, and a run that stops earlier for another reason does not
-    /// make that less true. Deliberately **not** written for a dry run, which
-    /// executes nothing.
+    /// This was emitted by the audit-only interim while tinyflows could not
+    /// propagate a child approval to the parent. Current runs gate child graphs
+    /// before the engine executes them, so new records are no longer emitted.
+    /// The variant remains to deserialize existing append-only journals and to
+    /// preserve their operator-visible history.
     ///
     /// Additive: an entirely new `kind`, so no journal written before it existed
     /// carries it, and its presence changes how no existing variant serializes.
@@ -1302,6 +1923,42 @@ pub enum CompanyEvent {
         /// the top level, so the line says what the operator was not asked.
         reason: String,
     },
+    /// One step of the account-activation funnel (issue #1843) completed.
+    ///
+    /// Meant to be emitted at the transition — the same moment the step's
+    /// underlying fact becomes true (a workflow run reaches `succeeded`, a
+    /// Composio connection is authorized, the operator confirms the company
+    /// name) — as an audit trail alongside the activation-derivation helper
+    /// (`crate::company::activation`), which derives the *current* answer from
+    /// source-of-truth state and never trusts this journal alone.
+    ///
+    /// **No write path emits this yet.** Issue #1843 defines the vocabulary
+    /// the funnel is spoken in and the read side that derives from source
+    /// state directly, so it does not need this trail to be correct; the write
+    /// hooks belong to whichever change lands each step's own transition (the
+    /// #1844 name-confirm route, the Composio connect flow, a workflow-run
+    /// success path) and can journal through this variant once it does. Only
+    /// [`OnboardingCompleted`](Self::OnboardingCompleted) — the terminal latch
+    /// — is wired today, from `compute_and_latch`.
+    ///
+    /// A step may complete more than once across a company's lifetime (a
+    /// Composio connection is later revoked and reconnected); each completion
+    /// is its own line, once a caller exists.
+    OnboardingStepCompleted {
+        /// Which step completed.
+        step: OnboardingStep,
+    },
+    /// Every activation step completed for the first time — the moment
+    /// [`CompanyRecord::activation_completed_at`] is stamped.
+    ///
+    /// Latched: this fires **once** per company, ever. A step regressing
+    /// afterward (a connection disconnected) does not un-complete activation
+    /// and does not re-fire this event — see
+    /// [`CompanyRecord::activation_completed_at`]'s monotonicity contract.
+    OnboardingCompleted {
+        /// Epoch-millis the funnel completed.
+        at_millis: u64,
+    },
 }
 
 impl CompanyEvent {
@@ -1314,11 +1971,15 @@ impl CompanyEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::OperatorMessage { .. } => "OperatorMessage",
+            Self::TurnStarted { .. } => "TurnStarted",
+            Self::TurnFailed { .. } => "TurnFailed",
+            Self::RunStatusChanged { .. } => "RunStatusChanged",
             Self::WebhookReceived { .. } => "WebhookReceived",
             Self::ScheduleFired { .. } => "ScheduleFired",
             Self::A2aTaskReceived { .. } => "A2aTaskReceived",
             Self::ApprovalParked { .. } => "ApprovalParked",
             Self::ApprovalResolved { .. } => "ApprovalResolved",
+            Self::ApprovalExtended { .. } => "ApprovalExtended",
             Self::FeedbackFiled { .. } => "FeedbackFiled",
             Self::PaymentReceived { .. } => "PaymentReceived",
             Self::LifecycleChanged { .. } => "LifecycleChanged",
@@ -1345,6 +2006,8 @@ impl CompanyEvent {
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeStarted { .. } => "WorkflowNodeStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
+            Self::OnboardingStepCompleted { .. } => "OnboardingStepCompleted",
+            Self::OnboardingCompleted { .. } => "OnboardingCompleted",
         }
     }
 
@@ -1410,14 +2073,51 @@ impl CompanyEvent {
             // history is not kept here at all: for a published deliverable it
             // lives on the artifact chain (#552), and for an ordinary note it
             // is not kept anywhere, which pruning this does not change.
-            | Self::WorkspaceChanged { .. } => Prunable,
+            // Issue #1015, put through the three questions above rather than
+            // swept in beside its neighbours.
+            //
+            // Is it evidence? No — the `RunRecord` is the record of an attempt's
+            // status, and this frame carries no state the row does not already
+            // hold; it says "the row moved". Does anything point at it? No: it
+            // is joined by `run_id`, which pruning does not disturb, and nothing
+            // is addressed by its sequence. Does anything read it back? No boot
+            // fold consults it — `reap_orphaned_runs` reads the *rows*, by
+            // status, which is why it can settle runs this frame never covered.
+            //
+            // And it is high-volume machine exhaust by construction: several
+            // frames per attempt, one per transition, on every card and every
+            // chat turn. Its entire meaning is "re-read this run", and it is
+            // worthless once the console has.
+            | Self::RunStatusChanged { .. }
+            | Self::WorkspaceChanged { .. }
+            // Issue #983, and classified deliberately rather than swept in with
+            // its neighbours — the doc above asks for all three questions.
+            //
+            // Is it evidence? No: it says a turn was accepted, and what the turn
+            // did is on its `AgentReply`, its `TurnFailed`, or its run row — all
+            // of which outlive it. Does anything point at it? No: nothing is
+            // addressed by its sequence the way a reaction or a redaction
+            // tombstone addresses a chat message; the turn is joined by
+            // `turn_id`, which pruning does not disturb. Does anything read it
+            // back? The boot sweep does — and only for turns *this* host left
+            // open, which by construction predate no retention pass, since a
+            // pass runs on a live company and the sweep runs before one is.
+            //
+            // What it is instead is one frame per operator message on a
+            // high-traffic desk, whose meaning is entirely spent once the turn
+            // settles. `TurnFailed` is Permanent below for the opposite reason:
+            // it is the only record that a question was accepted and never
+            // answered.
+            | Self::TurnStarted { .. } => Prunable,
 
             Self::OperatorMessage { .. }
+            | Self::TurnFailed { .. }
             | Self::WebhookReceived { .. }
             | Self::ScheduleFired { .. }
             | Self::A2aTaskReceived { .. }
             | Self::ApprovalParked { .. }
             | Self::ApprovalResolved { .. }
+            | Self::ApprovalExtended { .. }
             | Self::FeedbackFiled { .. }
             | Self::PaymentReceived { .. }
             | Self::LifecycleChanged { .. }
@@ -1447,7 +2147,16 @@ impl CompanyEvent {
             // it would re-deliver already-sent reports to real people on the
             // next re-run, which is the exact failure the variant exists to
             // prevent. See its own docs.
-            | Self::WorkflowReportDelivered { .. } => Permanent,
+            | Self::WorkflowReportDelivered { .. }
+            // Issue #1843: the activation funnel's audit trail. The *current*
+            // answer to "is this company activated" is read off
+            // `CompanyRecord::activation_completed_at` (a derived, re-computable
+            // latch), not by folding this journal — but these two events are the
+            // only durable record of *when* each step first completed and *when*
+            // the funnel as a whole did, which is exactly the kind of history a
+            // retention pass must not be allowed to quietly erase.
+            | Self::OnboardingStepCompleted { .. }
+            | Self::OnboardingCompleted { .. } => Permanent,
             // Issue #617: permanent, and it is the clearest kind of evidence
             // this enum carries — the record that a consequential call ran
             // WITHOUT the operator being asked. Pruning it would delete the only
@@ -1677,8 +2386,27 @@ impl Effect {
     /// every Composio action under one name, so the same tool is grantable when
     /// it is listing a repository's pull requests and per-call when it is
     /// sending mail.
+    ///
+    /// ## A workflow gate is asked about the call it is stopping (issue #1098)
+    ///
+    /// A gate's `kind` is the wrapper `workflow.approve`, so asking about it
+    /// classifies a name the declaration table has never heard of and returns
+    /// the undeclared fallback — the classifier never sees the `web_fetch` on
+    /// the card. That is a second, independent reason a workflow card is not
+    /// grantable today, on top of its `agent: None`, and fixing only the
+    /// principal would leave this one refusing every gate.
+    ///
+    /// [`gate_inner_call`](crate::runtime::workflow_resume::gate_inner_call)
+    /// reads the tool and arguments issue #846 already writes onto the payload,
+    /// so what is classified is what the card showed. Every other effect takes
+    /// the branch below unchanged, which is what keeps the agent path answering
+    /// exactly as it did.
     pub fn may_be_granted_standing(&self) -> bool {
-        crate::policy::consequence_of(&self.kind, &self.payload)
+        let (kind, payload) = match crate::runtime::workflow_resume::gate_inner_call(self) {
+            Some((tool, args)) => (tool, args),
+            None => (self.kind.as_str(), &self.payload),
+        };
+        crate::policy::consequence_of(kind, payload)
             .standing
             .is_grantable()
     }
@@ -1756,10 +2484,13 @@ pub struct ChunkMeta {
     /// (see `server::ops::memory::memory_stats`).
     ///
     /// Chunks are append-only and never rewritten, so this only ever moves for
-    /// a *new* chunk. Backends differ on a re-`put` of an identical body —
-    /// sqlite/mongo dedupe on the content address and keep the first write,
-    /// the fs index appends a second line — so read freshness as the max
-    /// across chunks rather than assuming one row per body.
+    /// a *new* claim: every backend keeps one row per (addr, label) — a
+    /// re-`put` of an identical (body, label) is a no-op everywhere (#1300).
+    /// A *new* label on an existing body stamps per-label on fs/sqlite and
+    /// reports the address's first-write stamp on the single-record backends
+    /// (mongodb, the provider facade) — so read
+    /// freshness as the max across chunks rather than assuming one row per
+    /// body.
     #[serde(default)]
     pub stored_at_millis: u64,
 }
@@ -1820,6 +2551,32 @@ impl TokenUsage {
 }
 
 /// Everything the brain needs to run one cycle.
+///
+/// **A cycle carries no working memory.** The struct once also carried
+/// `compressed_history` (32 recent [`CompressedTrace`]s) and `context_index`
+/// (every [`ChunkMeta`] in the company, unbounded), loaded from the
+/// [`MemoryStore`](crate::ports::MemoryStore) and
+/// [`ContextStore`](crate::ports::ContextStore) on every cycle — and read by no
+/// [`Brain`](crate::ports::Brain) implementation. Two facts made them dead
+/// rather than merely unused: no summariser exists anywhere in the crate, so a
+/// trace's `summary` is a constant string like `harness cycle handled 3
+/// event(s)`, and no brain ever consulted either field. A `roster` field was
+/// dead on the same terms; every brain re-derives the roster from the company
+/// record. Issue #1175 removed all three, so the cycle stops paying an
+/// unbounded full scan per turn for a `Vec` it drops.
+///
+/// The one live recall path is elsewhere and is untouched by this: before each
+/// turn `HarnessPool::run` retrieves the top-5 prior task outcomes from the
+/// `ContextStore` and injects them as text (`src/harness/memory_loop.rs`, under
+/// the `openhuman` feature). Traces are still *written* every cycle and kept
+/// in a bounded inspection window; nothing reads them back.
+///
+/// The one field added back since #1175 is [`Self::policy`], and it is added
+/// deliberately: it is the cycle-start approval policy, consumed by
+/// [`HarnessBrain`](crate::harness::built_in::brain::HarnessBrain) so the
+/// harness roster rebuilds against the same snapshot the native gate was
+/// re-applied from. Do not re-add any other field here until something consumes
+/// it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CycleRequest {
     /// Unique id for this cycle.
@@ -1835,12 +2592,15 @@ pub struct CycleRequest {
     /// idempotent `POST /events` on the durable log seq.
     #[serde(default)]
     pub event_seqs: Vec<EventSeq>,
-    /// Compressed traces of prior cycles.
-    pub compressed_history: Vec<CompressedTrace>,
-    /// The company roster (agent ids).
-    pub roster: Vec<String>,
-    /// The context index available to the brain.
-    pub context_index: Vec<ChunkMeta>,
+    /// The effective approval policy this cycle's runtime snapshot enforces,
+    /// captured at the same store load the native gate is re-applied from
+    /// (issue #1455). The harness rebuilds its roster against this boundary so
+    /// both gates judge one turn on one policy: a console override that lands
+    /// after the load is invisible to both, and one that landed before is in
+    /// both. `None` for callers building a request without a company record
+    /// (a brain then falls back to its own store read).
+    #[serde(default)]
+    pub policy: Option<Policy>,
 }
 
 /// The brain's output from one cycle.
@@ -2015,7 +2775,28 @@ pub struct ReplyTo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundMessage {
     /// The channel to emit on.
+    ///
+    /// A **destination**, never an author. Issue #885: all three
+    /// [`AgentReply`](CompanyEvent::AgentReply) writers used to copy this into
+    /// `agent_id`, whose contract is "the agent that produced the reply" — so
+    /// every bubble emitted on the operator channel was journaled as though the
+    /// operator had written it, permanently. Use [`agent`](Self::agent) for who
+    /// spoke; this only says where it goes.
     pub channel: String,
+    /// The roster teammate that produced this message (issue #885).
+    ///
+    /// `None` for a message no agent authored — a system notice, a scheduler
+    /// tick, a channel-level ack — and for every producer that does not know
+    /// its responder. A writer journaling an `AgentReply` falls back to
+    /// [`channel`](Self::channel) when this is absent, which is exactly the
+    /// pre-#885 behaviour, so nothing regresses on a path that has not been
+    /// taught to fill it in.
+    ///
+    /// Additive on the wire: omitted when absent, so the POST `/chat` body and
+    /// every stored record round-trip byte-identically for a producer that
+    /// sets nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// The message text.
     pub text: String,
     /// The visible processing steps behind this bubble — the agent's tool calls,
@@ -2087,6 +2868,11 @@ pub struct OutboundMessage {
     /// and says so rather than offering an action that cannot persist.
     #[serde(default, rename = "messageId", skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// Who this reply names, projected for the requesting viewer by the chat
+    /// handler. Stored replies carry structured mentions in `AgentReply`; this
+    /// field keeps the synchronous POST response identical to history and SSE.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<Mention>,
 }
 
 /// One visible step in an agent turn's processing timeline, surfaced in the
@@ -2226,6 +3012,20 @@ pub enum TurnStepKind {
     Note,
 }
 
+impl TurnStepKind {
+    /// The stable `snake_case` wire name, matching the serde rename above.
+    ///
+    /// GraphQL serializes the kind as a string; lowercasing the Rust `Debug`
+    /// name instead would yield `toolcall`, which no consumer understands.
+    pub fn wire_word(self) -> &'static str {
+        match self {
+            TurnStepKind::ToolCall => "tool_call",
+            TurnStepKind::Thinking => "thinking",
+            TurnStepKind::Note => "note",
+        }
+    }
+}
+
 /// How a [`TurnStep`] ended. Serialized in `snake_case` (`ok` / `error` /
 /// `running` / `awaiting_approval`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2282,7 +3082,20 @@ pub enum TurnStepFailure {
     /// The host lacks an operating-system permission the call needed.
     MissingPermission,
     /// A program or application the call needed is not available.
+    ///
+    /// Only ever claimed for a call that could actually invoke an external
+    /// program. A path-reading tool that runs in this process has no app to
+    /// install, so its "not there" is [`NotFound`](Self::NotFound) — see
+    /// [`crate::harness::steps`] (issue #924).
     MissingApp,
+    /// The file, folder, or bundled resource the call named does not exist.
+    ///
+    /// Distinct from [`MissingApp`](Self::MissingApp) because the remedy is
+    /// different in kind: a missing path is fixed by naming a different path,
+    /// not by installing software. Both arrive as one `ENOENT` from the
+    /// operating system, and telling a server operator to "install or open the
+    /// app" when a note is simply absent is unactionable (issue #924).
+    NotFound,
     /// The call ran past its deadline and was stopped.
     Timeout,
     /// A service the call depends on — an upstream API, or the model provider —
@@ -2291,6 +3104,24 @@ pub enum TurnStepFailure {
     /// Genuinely unclassified. The honest residue, and the *only* case that may
     /// read as "something went wrong": every state above used to land here.
     Failed,
+}
+
+impl TurnStepFailure {
+    /// The `snake_case` word this failure serializes as.
+    #[must_use]
+    pub fn wire_word(self) -> &'static str {
+        match self {
+            Self::Declined => "declined",
+            Self::BlockedByPolicy => "blocked_by_policy",
+            Self::Unauthorized => "unauthorized",
+            Self::MissingPermission => "missing_permission",
+            Self::MissingApp => "missing_app",
+            Self::NotFound => "not_found",
+            Self::Timeout => "timeout",
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2314,17 +3145,146 @@ pub struct OverlayAgent {
     pub description: Option<String>,
     /// The per-teammate tool grant: a manifest `[[agent]].tools`-style glob list,
     /// **intersected** with the company's `[tools].allow` at roster-build time
-    /// (issue #661 / L5). An **empty** list is the standard company-wide grant
-    /// (every allowed tool), exactly as an omitted manifest `tools` line is —
-    /// never "no tools". The intersection is narrow-only: this can restrict a
-    /// teammate below the company grant, never widen it past it.
+    /// (issue #661 / L5). Three distinct states, made representable by issue
+    /// #1804 (epic #1817, Rung 2):
     ///
-    /// `#[serde(default)]` keeps every overlay record written before this field
-    /// existed deserializing unchanged (as an empty list → standard grant), and
-    /// `skip_serializing_if` keeps the common empty case out of the persisted
-    /// JSON so a standard-grant teammate serializes exactly as it did before.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<String>,
+    /// * `None` — **inherit** the company's standard grant (every allowed tool).
+    ///   The default, and how every overlay record written before #1804 (which
+    ///   had no `tools` key, or serialized `[]` under the old `Vec` field)
+    ///   deserializes, so no existing teammate moves.
+    /// * `Some(vec![])` — an **explicit no-tools** grant: this teammate reaches
+    ///   nothing. Newly reachable in #1804.
+    /// * `Some(globs)` — **narrow** to those globs. The intersection is
+    ///   narrow-only: this can restrict a teammate below the company grant, never
+    ///   widen it past it.
+    ///
+    /// `skip_serializing_if = "Option::is_none"` keeps a standard-grant teammate
+    /// serializing exactly as it did before (no `tools` key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    /// A per-agent model override, carried the same way as
+    /// [`Agent::model`](crate::company::types::Agent) — see that field's docs.
+    /// `None` (the default, and how every record written before this field
+    /// existed deserializes) means this teammate takes its harness's own
+    /// model, unchanged from today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Which `[[harness]]` this teammate runs its turns on, by id — carried
+    /// the same way as [`Agent::harness`](crate::company::types::Agent::harness).
+    /// `None` (the default, and how every record written before this field
+    /// existed deserializes) means the harness marked `default = true`,
+    /// unchanged from today's hardcoded behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+}
+
+/// An operator's runtime edit of a **manifest-declared** teammate.
+///
+/// The overlay answer to "a company you deployed is still yours to change":
+/// before this, a `[[agent]]` in `company.toml` (and therefore every teammate
+/// from the global baseline, which every company gets) was write-once from the
+/// console — editing its name, role, description or tool scope meant editing
+/// the blueprint and redeploying, which a hosted operator cannot do at all.
+///
+/// Modelled exactly like [`BudgetOverride`]: a layer *on top of* the manifest
+/// row rather than a rewrite of it, so the version-controlled blueprint stays
+/// the record of what the company was launched with and the override records
+/// what an operator has since decided. Read through
+/// [`CompanyRecord::effective_agent`] / [`CompanyRecord::effective_agents`],
+/// never directly, so the roster build and every console surface resolve the
+/// same teammate.
+///
+/// Every field is `None` for "not overridden", so an untouched field keeps
+/// tracking the manifest across a redeploy. The one deliberate collapse is
+/// [`description`](Self::description): an empty string means the operator
+/// cleared it, because the write path already treats a blank description and no
+/// description as the same thing (both frame the persona identically).
+///
+/// **At most one entry per `agent_id`** — mutate through
+/// [`CompanyRecord::upsert_agent_override`] rather than pushing, for the reason
+/// [`CompanyRecord::upsert_budget_override`] gives.
+/// Deserializes a present field into `Some(inner)` — so an explicit `null`
+/// becomes `Some(None)` rather than collapsing to `None` — while a companion
+/// `#[serde(default)]` maps an absent field to `None`. The three-way distinction
+/// [`AgentOverride::tools`] relies on: absent / `null` / a value.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOverride {
+    /// The manifest teammate this edit applies to.
+    pub agent_id: String,
+    /// A display name for a teammate the manifest names only by role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The teammate's role, when an operator has renamed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The teammate's description. `Some("")` is the operator clearing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The teammate's requested tool grant, replacing the manifest's
+    /// `[[agent]].tools` line — a **double option** since issue #1804, because
+    /// the manifest field it overrides is itself now a three-state
+    /// [`Option<Vec<String>>`](crate::company::Agent::tools) and "leave it alone"
+    /// has to stay apart from "override it to standard":
+    ///
+    /// | value | means |
+    /// |---|---|
+    /// | `None` | not overridden — the manifest `tools` line flows through unchanged |
+    /// | `Some(None)` | override to **inherit** the company's standard grant |
+    /// | `Some(Some(vec![]))` | override to an **explicit no-tools** grant (deny-all) |
+    /// | `Some(Some(globs))` | override to **narrow** to those globs |
+    ///
+    /// The inner value is assigned verbatim onto
+    /// [`Agent::tools`](crate::company::Agent::tools) by
+    /// [`CompanyRecord::effective_manifest_agent`], so the manifest field's own
+    /// three-state contract carries the meaning; this layer only adds "was it set
+    /// at all". Still intersected with `[tools].allow` at read time, so it can
+    /// only ever narrow a teammate within a grant the company already made.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tools: Option<Option<Vec<String>>>,
+    /// The operator's replacement persona prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// The face this teammate wears, when somebody has chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload, validated by
+    /// [`crate::company::avatar`] before it is stored.
+    ///
+    /// `None` means **nobody has chosen**, which is not the same as "no face":
+    /// the console hashes the teammate's stable id into one of the shipped
+    /// mascots, so an untouched roster still reads as a set of individuals.
+    /// Keeping the two apart is what makes "reset to the default face"
+    /// expressible — it is [`CompanyRecord::clear_agent_avatar`], not a second
+    /// stored value.
+    ///
+    /// Carried here rather than on [`OverlayAgent`] so **one** field answers for
+    /// both kinds of teammate: an override row may name a manifest agent or an
+    /// overlay one (`effective_instructions` already works this way), and a
+    /// choice of face is the same act whichever kind was clicked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    /// The model this teammate runs, as an overlay on the blueprint.
+    ///
+    /// `Some("")` is the stored form of "cleared", matching `description`:
+    /// the write path already treats a blank and an absent value as one state,
+    /// and a distinct `None` here would mean "never edited" instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The harness this teammate is bound to, as an overlay on the blueprint.
+    ///
+    /// Cleared the same way as [`Self::model`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -2385,6 +3345,40 @@ pub struct OverlayDeskOrder {
     pub ordered: Vec<String>,
 }
 
+/// How a desk's unmentioned messages find their answerer (issue #1835).
+///
+/// `Lead` is the model every desk has always had: `members[0]` is the desk
+/// lead, made explicit by #1827, and `responder_for` hands the lead every
+/// message that names nobody. `Auto` is the channel model: **no lead exists**
+/// — no crown, no hierarchy, no `delegate_to_desk` target — and the answerer
+/// is chosen **per message**, by a best-fit selection over the channel's own
+/// membership, with the first roster member as the deterministic fallback
+/// wherever selection cannot run (the default build, the small-talk fast
+/// path, a selection failure).
+///
+/// On the wire and in storage this is `"lead"` / `"auto"`, defaulted and
+/// skipped when `Lead`, so every record written before the field existed —
+/// and every desk the org chart creates today — deserializes and re-serializes
+/// byte-for-byte unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponderMode {
+    /// `members[0]` leads the desk and answers its unmentioned messages.
+    #[default]
+    Lead,
+    /// No lead: a per-message best-fit selection over the membership answers,
+    /// falling back to the first roster member where selection cannot run.
+    Auto,
+}
+
+impl ResponderMode {
+    /// Whether this is the default mode — the `skip_serializing_if` predicate
+    /// that keeps every pre-#1835 record round-tripping byte-identically.
+    pub fn is_lead(&self) -> bool {
+        matches!(self, ResponderMode::Lead)
+    }
+}
+
 /// An operator-created desk (group chat) that the version-controlled manifest
 /// does not declare. Persisted as an overlay on the [`CompanyRecord`] and merged
 /// with the manifest's `[[group_chat]]` desks at read/resolve time; the
@@ -2401,11 +3395,20 @@ pub struct OverlayDesk {
     /// What the desk is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// The desk's founding member ids, in order; the first is its lead. Each
-    /// must resolve to a roster teammate (manifest agent or [`OverlayAgent`]).
-    /// Further members can still be added through the desk-member overlay.
+    /// The desk's founding member ids, in order; the first is its lead — unless
+    /// [`responder`](Self::responder) is [`ResponderMode::Auto`], in which case
+    /// order carries no rank at all. Each must resolve to a roster teammate
+    /// (manifest agent or [`OverlayAgent`]). Further members can still be added
+    /// through the desk-member overlay.
     #[serde(default)]
     pub members: Vec<String>,
+    /// How this desk's unmentioned messages find their answerer (issue #1835).
+    /// Defaulted and skipped when [`ResponderMode::Lead`], so every record
+    /// written before the field existed deserializes unchanged. Manifest
+    /// `[[group_chat]]` desks are always `Lead` — the blueprint syntax carries
+    /// no such field.
+    #[serde(default, skip_serializing_if = "ResponderMode::is_lead")]
+    pub responder: ResponderMode,
 }
 
 /// A workflow graph body authored at runtime (the console's create dialog or
@@ -2511,6 +3514,53 @@ impl BudgetOverride {
     }
 }
 
+impl AgentOverride {
+    /// The first `agent_id` carried by more than one entry, or `None` when every
+    /// teammate appears at most once.
+    ///
+    /// The counterpart of [`BudgetOverride::duplicate_agent_id`], and it exists
+    /// for the identical reason: [`CompanyRecord::agent_override`] reads the
+    /// *first* match, so a second row for one teammate is not a harmless
+    /// duplicate — it makes the applied name, role, description, tool grant and instructions a
+    /// function of serialization order. `upsert_agent_override` is the only
+    /// write path and it replaces in place, so this cannot happen to a record
+    /// this process wrote; a bundle is the one door these arrive through from
+    /// outside, and callers there reject rather than guess. Picking silently
+    /// would restore a name an operator changed, or apply a tool grant they
+    /// narrowed, with nothing to say which row won.
+    ///
+    /// Linear scan: an edit set is one row per edited teammate, so it is bounded
+    /// by roster size.
+    pub fn duplicate_agent_id(entries: &[AgentOverride]) -> Option<&str> {
+        let mut seen: Vec<&str> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if seen.contains(&entry.agent_id.as_str()) {
+                return Some(&entry.agent_id);
+            }
+            seen.push(&entry.agent_id);
+        }
+        None
+    }
+
+    /// Whether this override changes nothing and can be dropped rather than
+    /// stored.
+    ///
+    /// An override whose every optional field is absent carries no edit and
+    /// resolves to a no-op. The write boundary drops such a record rather than
+    /// persisting a row the console would render as "overridden" — the same
+    /// contract [`PolicyOverride`] draws for its own absent fields.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.role.is_none()
+            && self.description.is_none()
+            && self.tools.is_none()
+            && self.instructions.is_none()
+            && self.avatar.is_none()
+            && self.model.is_none()
+            && self.harness.is_none()
+    }
+}
+
 /// An operator-set override of the company's `[policy]` block, persisted on the
 /// [`CompanyRecord`] so a tier change wins over the manifest without rewriting
 /// `company.toml` and without a redeploy (issue #562).
@@ -2583,6 +3633,24 @@ pub struct PolicyOverride {
     /// over every tier including `full`, so the two must stay distinguishable.
     #[serde(default)]
     pub always_approve: Option<Vec<String>>,
+    /// The spend threshold, including an explicit `None` for "no cap".
+    ///
+    /// The outer option says whether the operator set this field; the inner
+    /// option is the threshold itself. `Some(None)` is therefore a real,
+    /// stricter choice: every spend parks for approval. The custom serde hooks
+    /// preserve the distinction between a persisted JSON `null` and an absent
+    /// key — plain nested `Option` deserialization collapses both to `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_policy_cap",
+        deserialize_with = "deserialize_policy_cap"
+    )]
+    pub auto_approve_under_usd: Option<Option<f64>>,
+    /// The approval deadline in hours, or `None` to leave the manifest's value
+    /// in force.
+    #[serde(default)]
+    pub approval_ttl_hours: Option<u64>,
     /// Who set it. A tier that can be loosened anonymously is not much of a gate.
     pub set_by: Actor,
     /// When it was set (epoch millis).
@@ -2597,8 +3665,230 @@ impl PolicyOverride {
     /// persisting a row that says nothing but whose presence the console renders
     /// as "overridden".
     pub fn is_empty(&self) -> bool {
-        self.mode.is_none() && self.always_approve.is_none()
+        self.mode.is_none()
+            && self.always_approve.is_none()
+            && self.auto_approve_under_usd.is_none()
+            && self.approval_ttl_hours.is_none()
     }
+}
+
+/// Serializes an operator spend-cap override as a number or explicit `null`.
+fn serialize_policy_cap<S>(value: &Option<Option<f64>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    value.serialize(serializer)
+}
+
+/// Deserializes a present spend-cap key, retaining `null` as an explicit
+/// no-cap override. An omitted key is handled by `#[serde(default)]` and never
+/// calls this function.
+fn deserialize_policy_cap<'de, D>(deserializer: D) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<f64>::deserialize(deserializer).map(Some)
+}
+
+/// Resolves a manifest `[policy]` against an operator override — the merge
+/// [`CompanyRecord::effective_policy`] applies, factored out so the runtime
+/// builder can build the approval gate from the same resolution without
+/// constructing a whole record.
+///
+/// `None` override means the manifest's policy is in force byte for byte.
+/// The merge is per field and `None` means "not overridden", so an operator
+/// who moved the tier has not thereby silently reset the always-ask list to
+/// the manifest's. An explicitly emptied list (`Some(vec![])`) survives as
+/// empty; only an absent field falls through. An unknown stored mode also
+/// falls through to the manifest: it can arise under version skew, and
+/// allowing the policy parser to downgrade it to `supervised` would loosen
+/// a `readonly` manifest.
+pub(crate) fn effective_policy(manifest: &Policy, override_: Option<&PolicyOverride>) -> Policy {
+    let Some(override_) = override_ else {
+        return manifest.clone();
+    };
+    Policy {
+        mode: override_
+            .mode
+            .as_deref()
+            .filter(|mode| POLICY_MODES.contains(mode))
+            .map(str::to_owned)
+            .unwrap_or_else(|| manifest.mode.clone()),
+        always_approve: override_
+            .always_approve
+            .clone()
+            .unwrap_or_else(|| manifest.always_approve.clone()),
+        auto_approve_under_usd: override_
+            .auto_approve_under_usd
+            .unwrap_or(manifest.auto_approve_under_usd),
+        approval_ttl_hours: override_.approval_ttl_hours.or(manifest.approval_ttl_hours),
+    }
+}
+
+/// The namespaces a connect surface in the console may grant (issue #1796).
+///
+/// Deliberately a **closed list**, and deliberately not "every namespace an
+/// operator could type". Each of these is a namespace the catch-all `*`
+/// refuses to confer (see `grants_composio_explicit` and its siblings in
+/// [`crate::company::types`]), which is exactly why connecting one currently
+/// dead-ends: `*` will never pick it up, and the manifest is a read-only boot
+/// snapshot on a hosted tenant.
+///
+/// What every entry has in common, and what a candidate has to have to join
+/// them: the console holds a **credential form for it**, so granting is the
+/// second half of an action the operator already took deliberately, against an
+/// account they already proved they hold. `shell`, `code` and `web` have no
+/// such form — granting those from a settings page would turn the console into
+/// a general capability-widening surface, which is the thing the seed-wins rule
+/// on `[tools]` exists to prevent. `media` is absent for the same reason: it
+/// spends real money and has no connect page to be dead-ended on.
+///
+/// Sorted, so the console's own ordering is not a second source of truth.
+pub const CONSOLE_GRANTABLE_NAMESPACES: [&str; 5] =
+    ["chargebee", "composio", "hosting", "paypal", "search"];
+
+/// Whether `namespace` is one the console is allowed to grant.
+pub fn console_grantable(namespace: &str) -> bool {
+    CONSOLE_GRANTABLE_NAMESPACES.contains(&namespace)
+}
+
+/// The operator's console-added `[tools].allow` grants (issue #1796).
+///
+/// # Why this exists at all
+///
+/// Connecting an integration stores a credential; it does not grant the tool
+/// namespace. Those are separate steps and only the first one had a write path,
+/// so five connect surfaces (chargebee, paypal, hosting, search, composio) all
+/// ended in the same dead end: the page said **Connected**, no teammate
+/// received the tools, and the page's own copy said it "cannot be fixed from
+/// this page" — accurately, because nothing in the console could write
+/// `[tools].allow`.
+///
+/// # Why an overlay and not a manifest write
+///
+/// Exactly the reason [`PolicyOverride`] is one. A rebuild re-persists
+/// `record.manifest` from the seed, merging only `[workflows].enabled`; *"every
+/// other manifest field is seed-authoritative, and for `[tools]` / `[policy]`
+/// that is a security property"* (`runtime::builder`). A manifest write would
+/// be wiped by the next rebuild **and** would contradict that invariant. This
+/// is not a merge into the blueprint: it is a durable, attributed operator
+/// decision resolved *ahead* of the manifest by
+/// [`CompanyRecord::effective_tool_allow`].
+///
+/// # Version control still wins when it speaks
+///
+/// `runtime::builder::carry_tool_grants_override` drops the whole override when
+/// the seed's `[tools]` changes, on the reasoning
+/// `carry_desk_tool_overrides` gives for desks and with more force: this layer
+/// only ever *widens*, so an override outliving a seed edit would be a runtime
+/// grant surviving the operator revoking it in version control — the named harm
+/// the seed-wins rule exists to prevent. `DELETE …/tools/grants` is how an
+/// operator clears their own grant without touching version control.
+///
+/// # Additive only, and only over the closed list
+///
+/// [`added`](Self::added) can only widen, never narrow: a namespace the seed
+/// grants cannot be revoked here, because a console that could quietly withdraw
+/// a capability version control confers would be a second, invisible authority
+/// over the same field. Narrowing already has a home — the per-desk ceiling in
+/// [`CompanyRecord::overlay_desk_tools`], which is bounded by the allow-list
+/// rather than competing with it.
+///
+/// Entries are checked against [`CONSOLE_GRANTABLE_NAMESPACES`] at the write
+/// route *and again* in [`CompanyRecord::effective_tool_allow`], so a value
+/// that reached the store some other way (version skew, a hand-edited row) can
+/// never confer `shell`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolGrantsOverride {
+    /// The namespaces the operator granted from a connect surface, on top of
+    /// whatever the seed's `[tools].allow` already says.
+    ///
+    /// Bare namespace words (`"chargebee"`), never globs: the console grants a
+    /// whole integration or nothing, and admitting a pattern here would make
+    /// this field a second grant *language* to keep in step with the manifest's.
+    #[serde(default)]
+    pub added: Vec<String>,
+    /// Who granted it. A capability that can be widened anonymously is not much
+    /// of a boundary — the same reason [`PolicyOverride::set_by`] exists.
+    pub set_by: Actor,
+    /// When it was set (epoch millis).
+    pub at_millis: u64,
+}
+
+impl ToolGrantsOverride {
+    /// Does this override actually confer anything?
+    ///
+    /// An override whose list is empty carries only attribution, and resolving
+    /// it is a no-op. The write route stores `None` rather than a row that says
+    /// nothing but that the console would render as "granted from here".
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty()
+    }
+}
+
+/// Resolves a manifest `[tools].allow` against an operator's console grants —
+/// the merge [`CompanyRecord::effective_tool_allow`] applies, factored out so
+/// the runtime builder can resolve grants without constructing a whole record.
+///
+/// The seed's list comes first and verbatim: this layer appends, so a company
+/// reading its own grants sees version control's answer in version control's
+/// order with the console's additions after it. A namespace the seed already
+/// covers is not appended twice, and one outside
+/// [`CONSOLE_GRANTABLE_NAMESPACES`] is dropped rather than trusted.
+pub(crate) fn effective_tool_allow(
+    manifest_allow: &[String],
+    override_: Option<&ToolGrantsOverride>,
+) -> Vec<String> {
+    let mut allow = manifest_allow.to_vec();
+    let Some(override_) = override_ else {
+        return allow;
+    };
+    for namespace in &override_.added {
+        if !console_grantable(namespace) {
+            continue;
+        }
+        if allow.iter().any(|grant| grant == namespace) {
+            continue;
+        }
+        allow.push(namespace.clone());
+    }
+    allow
+}
+
+/// Recovers the **seed's** `[tools].allow` from a materialised one by removing
+/// the grants a held override put there — the inverse of [`effective_tool_allow`].
+///
+/// A record's `[tools].allow` is seed-plus-console-grants (the fold in
+/// `runtime::builder`), so anything that needs version control's *own* answer
+/// has to subtract first. Three callers do, and they must agree:
+///
+/// - the rebuild's carry rule, which asks "did the seed change?" — comparing the
+///   materialised list would report an edit on every rebuild of a company that
+///   has a grant at all, and the override would be dropped immediately;
+/// - `GET …/tools/grants`, which reports `manifestAllow` — reporting the
+///   materialised list would tell an operator version control grants something
+///   it does not, and a `DELETE` would then look like it had done nothing;
+/// - the export bundle, whose `company.toml` **becomes the seed** for the
+///   restored company — writing the folded list there would silently promote a
+///   console grant to a seed grant, losing its attribution and putting it beyond
+///   the reach of `DELETE …/tools/grants` forever.
+///
+/// A namespace present in both the seed and the override is removed here too.
+/// For the carry rule that is deliberate and safe (the seed looks changed, the
+/// override is dropped, and the seed confers the namespace on its own anyway);
+/// the write route refuses to create that state in the first place.
+pub(crate) fn seed_tool_allow(
+    materialised_allow: &[String],
+    override_: Option<&ToolGrantsOverride>,
+) -> Vec<String> {
+    let Some(override_) = override_ else {
+        return materialised_allow.to_vec();
+    };
+    materialised_allow
+        .iter()
+        .filter(|grant| !override_.added.contains(grant))
+        .cloned()
+        .collect()
 }
 
 /// The operator overlays persisted as a single JSON blob by the string-column
@@ -2633,12 +3923,29 @@ pub struct OverlayBlob {
     /// loads them as empty — which is exactly "the manifest still decides".
     #[serde(default)]
     pub budgets: Vec<BudgetOverride>,
+    /// The operator's edits of manifest-declared teammates. Absent on rows
+    /// written before a blueprint teammate could be edited from the console, so
+    /// `#[serde(default)]` loads them as empty — "the manifest still decides",
+    /// which is exactly how those companies ran.
+    #[serde(default)]
+    pub agent_edits: Vec<AgentOverride>,
+    /// The ids of manifest teammates the operator has removed. Absent on rows
+    /// written before a blueprint teammate could be removed, which
+    /// `#[serde(default)]` loads as empty — "nobody was removed".
+    #[serde(default)]
+    pub retired_agents: Vec<String>,
     /// The operator's `[policy]` override (issue #562). Absent on rows written
     /// before console policy writes existed, and `#[serde(default)]` reads that
     /// absence as `None` — "the manifest's `[policy]` still decides", which is
     /// the pre-#562 behaviour exactly.
     #[serde(default)]
     pub policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants (issue #1796).
+    /// Absent on rows written before a connect surface could grant a namespace,
+    /// and `#[serde(default)]` reads that absence as `None` — "the manifest's
+    /// `[tools]` still decides", which is the pre-#1796 behaviour exactly.
+    #[serde(default)]
+    pub tool_grants: Option<ToolGrantsOverride>,
     /// The operator-set per-desk tool ceilings. Absent on rows written before
     /// desks could scope tools, and `#[serde(default)]` reads that absence as
     /// "no desk overrides a ceiling" — which leaves the manifest in charge,
@@ -2656,11 +3963,69 @@ pub struct OverlayBlob {
     /// provenance existed (the `#[serde(default)]` keeps those rows loading).
     #[serde(default)]
     pub provenance: Option<TemplateProvenance>,
+    /// The three answers first-run setup was given, when the company came from
+    /// that flow. `None` for every other company and for rows written before it
+    /// existed, which `#[serde(default)]` keeps loading.
+    ///
+    /// Carried in the blob rather than a column for the same reason
+    /// [`provenance`](Self::provenance) is: the SQLite and MongoDB backends
+    /// rebuild a record field by field, so anything not in here is silently
+    /// dropped on the way back out. That would lose the answers Phase 2 builds
+    /// workflows from — on exactly the backends a hosted tenant runs, and only
+    /// there, which is the worst shape a data-loss bug can take.
+    #[serde(default)]
+    pub setup: Option<crate::company::setup::SetupAnswers>,
+    /// Whether the operator has confirmed the company's display name
+    /// (issue #1843). See [`CompanyRecord::name_confirmed`].
+    #[serde(default)]
+    pub name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed (issue #1843). See
+    /// [`CompanyRecord::activation_completed_at`].
+    #[serde(default)]
+    pub activation_completed_at: Option<u64>,
+    /// Whether this bundle has ever been saved by activation-aware code — the
+    /// sqlite/mongodb-backed marker behind
+    /// [`CompanyStore::activation_gate_seen`] (PR #1875 review finding: the
+    /// original fix only stamped a `FsCompanyStore`-private on-disk field, so
+    /// the sqlite and mongodb backends — which round-trip through this same
+    /// blob — inherited the trait's always-`false` default and could not tell
+    /// a fresh company's *second* boot apart from a genuine pre-#1843 legacy
+    /// record, silently re-opening the exact auto-activation bug #1843 fixed
+    /// for every non-filesystem backend, including the hosted platform's
+    /// MongoDB one).
+    ///
+    /// `#[serde(default)]` reads a row written before this field existed as
+    /// `false` — indistinguishable from, and given the same one-time
+    /// grandfather grace as, a genuine pre-#1843 record. [`Self::from_record`]
+    /// always stamps `true`, since every call site that builds a blob to save
+    /// is, by definition, activation-aware code — mirroring
+    /// `FsCompanyStore::save`'s own `activation_gate_seen: true`.
+    ///
+    /// [`CompanyStore::activation_gate_seen`]: crate::ports::store::CompanyStore::activation_gate_seen
+    #[serde(default)]
+    pub activation_gate_seen: bool,
 }
 
 impl OverlayBlob {
     /// Builds a blob from a record's overlay collections and provenance.
+    /// Always stamps `activation_gate_seen: true` — correct for every
+    /// ordinary save, which by definition is activation-aware code. Bundle
+    /// import needs to preserve a *different* value when replaying a legacy
+    /// record; see [`Self::from_record_gated`].
     pub fn from_record(record: &CompanyRecord) -> Self {
+        Self::from_record_gated(record, true)
+    }
+
+    /// Like [`Self::from_record`], but lets the caller supply the
+    /// activation-gate-seen marker explicitly instead of always stamping
+    /// `true`.
+    ///
+    /// The one caller that needs this is bundle import
+    /// (`CompanyStore::save_importing`, see its own doc comment): replaying a
+    /// legacy pre-#1843 record must land with the marker still `false`, or
+    /// `RuntimeBuilder::build`'s grandfather back-fill can never fire on the
+    /// restored company's next boot (PR #1875 review finding).
+    pub fn from_record_gated(record: &CompanyRecord, activation_gate_seen: bool) -> Self {
         Self {
             agents: record.overlay_agents.clone(),
             desk_members: record.overlay_desk_members.clone(),
@@ -2668,10 +4033,17 @@ impl OverlayBlob {
             desks: record.overlay_desks.clone(),
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
+            agent_edits: record.overlay_agent_edits.clone(),
+            retired_agents: record.overlay_retired_agents.clone(),
             policy: record.overlay_policy.clone(),
+            tool_grants: record.overlay_tool_grants.clone(),
             desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
+            setup: record.setup.clone(),
+            name_confirmed: record.name_confirmed,
+            activation_completed_at: record.activation_completed_at,
+            activation_gate_seen,
         }
     }
 
@@ -2694,10 +4066,27 @@ impl OverlayBlob {
                     desks: Vec::new(),
                     workflows: Vec::new(),
                     budgets: Vec::new(),
+                    agent_edits: Vec::new(),
+                    retired_agents: Vec::new(),
                     policy: None,
+                    tool_grants: None,
                     desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     provenance: None,
+                    // A legacy bare-array row predates first-run setup by a long
+                    // way; it can carry no answers.
+                    setup: None,
+                    // Same reasoning: a legacy bare-array row predates
+                    // activation tracking entirely, so it carries neither.
+                    // `RuntimeBuilder::build`'s back-fill (not this parse) is
+                    // what supplies the right answer for an existing company.
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                    // Same reasoning again: a legacy bare-array row predates
+                    // activation tracking (and this field) entirely, so it
+                    // has never been seen by activation-aware code — exactly
+                    // what `false` means here.
+                    activation_gate_seen: false,
                 })
                 .map_err(|_| original),
         }
@@ -2705,17 +4094,39 @@ impl OverlayBlob {
 }
 
 /// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
-/// free the roster leaves them: the always-present operator channel and the two
-/// workspace system roots.
+/// free the roster leaves them: the always-present operator channel, the two
+/// workspace system roots, the author the runtime speaks under, and the two
+/// spellings of the built-in `#general` channel.
 ///
 /// Held as references to the real constants rather than re-typed literals, so a
-/// rename of any of the three moves this list with it instead of quietly
+/// rename of any of them moves this list with it instead of quietly
 /// unreserving a name. Compared case-insensitively, which is why `Agents` and
 /// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
-pub const RESERVED_AGENT_IDS: [&str; 3] = [
+///
+/// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) earns its place for the same
+/// reason `OPERATOR_CHANNEL` does, and issue #966 is why it was noticed: it
+/// reaches the console's centred system pill **by value**, so a teammate minted
+/// onto it would render as the host. `"system"` is an ordinary legal slug —
+/// `agent_slug("System")` produces it — which is what separates it from
+/// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
+/// construction because slugs never emit a hyphen.
+///
+/// [`MAIN_THREAD_ID`](crate::server::chat_history::MAIN_THREAD_ID) and
+/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK) join them for
+/// issue #1743, and both are ordinary slugs — a teammate named "Main" or
+/// "General" mints straight onto one. That id is a chat address: `responder_for`
+/// checks roster ids before it falls back to the orchestrator, so the teammate
+/// would answer every unaddressed message on the company-wide line, and the
+/// console would render the line's transcript as that teammate's DM. Desk ids
+/// and names are already excluded a few lines below; these are the two keys
+/// that route like a desk without being one.
+pub const RESERVED_AGENT_IDS: [&str; 6] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
+    crate::ports::SYSTEM_AUTHOR,
+    crate::server::chat_history::MAIN_THREAD_ID,
+    crate::server::ops::language::DEFAULT_DESK,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -2770,6 +4181,36 @@ pub struct CompanyRecord {
     /// check untrusted input with [`Self::duplicate_budget_agent_id`].
     #[serde(default)]
     pub overlay_budgets: Vec<BudgetOverride>,
+    /// Operator edits of **manifest-declared** teammates: the layer that makes a
+    /// deployed company's own roster editable from the console.
+    ///
+    /// Read through [`Self::effective_agent`] / [`Self::effective_agents`],
+    /// never directly, so the harness roster build and the console cannot
+    /// disagree about who a teammate is. Empty means the manifest decides,
+    /// which is byte-for-byte the behaviour of every record written before this
+    /// field existed — the `#[serde(default)]` is a no-op migration.
+    ///
+    /// **At most one entry per `agent_id`**; mutate through
+    /// [`Self::upsert_agent_override`].
+    #[serde(default)]
+    pub overlay_agent_edits: Vec<AgentOverride>,
+    /// Ids of **manifest-declared** teammates the operator has removed from the
+    /// console — the tombstone half of the same layer
+    /// [`Self::overlay_agent_edits`] is the edit half of.
+    ///
+    /// A tombstone rather than a manifest rewrite for the reason every overlay
+    /// here is one: `company.toml` (and the global baseline merged into it) is
+    /// re-read on every rebuild, so a teammate deleted by rewriting the roster
+    /// would simply come back. Read through [`Self::is_retired`] — and, for the
+    /// roster itself, through [`Self::effective_agents`], which filters them out
+    /// so a retired teammate is not built, not dispatchable, not seated on a
+    /// desk and not a delegation target.
+    ///
+    /// An id listed here that names nobody is inert, which is what makes the
+    /// tombstone safe to keep across a redeploy that removes the teammate from
+    /// the blueprint too.
+    #[serde(default)]
+    pub overlay_retired_agents: Vec<String>,
     /// The operator's `[policy]` override, if one is set (issue #562).
     ///
     /// `None` — the manifest's `[policy]` applies, exactly as before this
@@ -2777,6 +4218,15 @@ pub struct CompanyRecord {
     /// approval gate and the console cannot disagree about which tier is live.
     #[serde(default)]
     pub overlay_policy: Option<PolicyOverride>,
+    /// The operator's console-added `[tools].allow` grants (issue #1796).
+    ///
+    /// `None` — the manifest's `[tools].allow` applies, exactly as before this
+    /// existed. Read through [`Self::effective_tool_allow`], never directly, so
+    /// the harness that wires the tools and the console that reports them
+    /// "Connected" cannot disagree about whether a teammate actually gets them
+    /// — the disagreement #1796 is about.
+    #[serde(default)]
+    pub overlay_tool_grants: Option<ToolGrantsOverride>,
     /// Per-desk tool ceilings the operator has set from the console, keyed on
     /// desk id — the runtime override of a desk's manifest
     /// [`tools`](crate::company::GroupChat::tools).
@@ -2836,6 +4286,90 @@ pub struct CompanyRecord {
     /// loading without a migration.
     #[serde(default)]
     pub template_provenance: Option<TemplateProvenance>,
+    /// What the operator told first-run setup about their business, stored the
+    /// moment they answer (see `docs/spec/runtime/company-setup.md`).
+    ///
+    /// Kept because **Phase 2 must not ask again.** Phase 1 turns these answers
+    /// into a roster; the workflow phase turns the same answers into workflows,
+    /// and re-interrogating someone who already described their business would
+    /// undo the thing setup exists to buy.
+    ///
+    /// Written even when the operator abandons the flow before the roster
+    /// lands: they told us something true about their company, and it costs
+    /// nothing to remember it. It is deliberately **not** the "has setup run?"
+    /// flag — that question is answered by whether the roster is empty, so a
+    /// record stamped by an abandoned run cannot suppress the offer to try
+    /// again (decision D4).
+    ///
+    /// `None` for every company provisioned before setup existed; the
+    /// `#[serde(default)]` keeps those records loading without a migration.
+    #[serde(default)]
+    pub setup: Option<crate::company::setup::SetupAnswers>,
+    /// Whether the operator has confirmed the company's display name
+    /// (issue #1843) — the first step of the activation funnel
+    /// [`crate::company::activation`] derives. `false` for every record
+    /// written before the step existed; back-filled to `true` for a company
+    /// already `running` at the moment its record is next loaded/rebuilt (see
+    /// `RuntimeBuilder::build`), since a company that has been operating all
+    /// along plainly cleared whatever naming step it started with — only a
+    /// genuinely new company should be asked. The `#[serde(default)]` is the
+    /// safe fallback for a backend read that predates the field entirely; the
+    /// `running`-lifecycle back-fill is the deliberate migration, not this.
+    #[serde(default)]
+    pub name_confirmed: bool,
+    /// Epoch-millis the activation funnel completed, once — the terminal latch
+    /// [`OnboardingCompleted`](CompanyEvent::OnboardingCompleted) is journaled
+    /// at (issue #1843). `None` until every step in
+    /// [`crate::company::activation::ActivationStatus`] is true.
+    ///
+    /// **Monotonic.** Once set, nothing un-sets it: a Composio connection
+    /// disconnected after activation does not roll this back to `None`, the
+    /// same way [`Self::lifecycle`] moving to `archived` does not erase the
+    /// company's history of having run. The activation query short-circuits on
+    /// this being `Some` precisely so a later step regressing cannot flip the
+    /// answer — see the derivation helper's own docs.
+    ///
+    /// `#[serde(default)]` loads every pre-#1843 record as `None`; the store
+    /// migration in `RuntimeBuilder::build` then back-fills it for a company
+    /// already `running`, so an existing tenant is never re-gated behind an
+    /// onboarding flow it has no memory of starting.
+    #[serde(default)]
+    pub activation_completed_at: Option<u64>,
+}
+
+/// What a teammate key an operator or a model typed resolves to on a company's
+/// roster (issue #1162).
+///
+/// The three answers a caller has to tell apart. A key that names nothing is a
+/// different fact from a key that names two people: the first is a typo or an
+/// invention, the second is a collision the operator created and can only fix
+/// by renaming or by using an id. Collapsing them — or silently taking the
+/// first match — is the misrouting [`CompanyRecord::overlay_agent_ids_by_name`]
+/// exists to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeammateResolution {
+    /// Exactly one teammate. Carries the **canonical roster id**, never the key
+    /// as typed, so every consumer downstream is working in one namespace.
+    Agent(String),
+    /// Names no teammate at all.
+    Unknown,
+    /// Names more than one operator-added teammate, because they share a
+    /// display name. Carries every colliding id so a refusal can name them.
+    Ambiguous(Vec<String>),
+}
+
+impl TeammateResolution {
+    /// The canonical id when the key named exactly one teammate.
+    ///
+    /// For the callers that have nothing useful to say about the other two
+    /// answers — a cycle guard has no target to compare, a drain has nothing to
+    /// deliver to — and where the caller ahead of them has already refused.
+    pub fn agent(self) -> Option<String> {
+        match self {
+            Self::Agent(id) => Some(id),
+            Self::Unknown | Self::Ambiguous(_) => None,
+        }
+    }
 }
 
 impl CompanyRecord {
@@ -2874,6 +4408,12 @@ impl CompanyRecord {
                 members.push(add.agent_id.clone());
             }
         }
+        // A teammate the operator removed keeps its blueprint seat in
+        // `[[group_chat]].members`, so it has to be dropped here rather than at
+        // the source. Otherwise a deleted teammate would still lead a desk, still
+        // receive `delegate_to_desk` hand-offs, and still be named on the org
+        // chart — a delete that removed the card and nothing else.
+        members.retain(|id| !self.is_retired(id));
         // Apply the operator-set ordering as a whole-set permutation. Listed ids
         // sort first in the operator's order; unlisted members keep their base
         // relative order after (stable sort). Stale ids no longer members are
@@ -2952,18 +4492,116 @@ impl CompanyRecord {
     /// id, searching the manifest desks first and then the operator-created
     /// overlay desks. Lets the harness route to overlay desks by the same
     /// id-or-name key it already accepts for manifest desks.
+    ///
+    /// **An overlay desk never answers to a General spelling** (issue #1743).
+    /// `POST .../desks` accepted `general` and `main` — and the display name
+    /// `General` — until that issue, so an upgraded record can hold one, and it
+    /// would otherwise take over routing for the built-in `#general` channel:
+    /// `responder_for` would answer as its lead while the console showed the
+    /// company-wide line, and `@everyone` there would name only its members.
+    /// Keyed on the **key being asked for**, not on the desk, so such a desk
+    /// still routes normally under its own non-General id — this narrows one
+    /// question, it does not retire a desk.
+    ///
+    /// A desk the *manifest* declares is matched first and is unaffected: a
+    /// blueprint that authored the company's General desk keeps it, which is
+    /// the grandfathering this host has always honoured.
     pub fn resolve_desk_id(&self, key: &str) -> Option<String> {
+        // **Exact ids win over display-name aliases, everywhere** (issue #1862
+        // review). Desk creation enforces id uniqueness but not name
+        // uniqueness, so `{id: "ops", name: "sales"}` is a valid desk that can
+        // sit ahead of `{id: "sales", …}` in either list. A single pass whose
+        // predicate is `id == key || name == key` returns whichever comes
+        // first, so asking for the id `sales` could answer `ops` — an
+        // ownership write silently targeting a different desk. Resolve the
+        // unambiguous thing first: a key that *is* an id always means that
+        // desk. Only when no desk owns the key as an id does a display-name
+        // alias get a say, and the alias pass below keeps the manifest-first
+        // order and the General guards exactly as they were.
+        if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
+            return Some(exact.id.clone());
+        }
+        if !crate::server::chat_history::is_general_chat(Some(key))
+            && let Some(exact) = self
+                .overlay_desks
+                .iter()
+                .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                .find(|d| d.id == key)
+        {
+            return Some(exact.id.clone());
+        }
+
         self.manifest
             .group_chats
             .iter()
             .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
             .map(|c| c.id.clone())
             .or_else(|| {
+                if crate::server::chat_history::is_general_chat(Some(key)) {
+                    return None;
+                }
                 self.overlay_desks
                     .iter()
+                    // ...and an overlay desk whose **own id** is a General
+                    // spelling is excluded whatever it is asked for. The guard
+                    // above only narrows the queried key, so `{id: "main", name:
+                    // "Front office"}` was still reachable by its display name —
+                    // resolving to an id that `GET .../desks` filters out and
+                    // that every desk mutation refuses. Its lead would answer,
+                    // and the reply would be journaled under a thread the
+                    // console renders no channel for.
+                    .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
+    }
+
+    /// Whether `key` would resolve to more than one desk if [`resolve_desk_id`](Self::resolve_desk_id)
+    /// fell through to its display-name alias pass (issue #1882 review, PR
+    /// #1882 bot finding, comment 3878620688). Desk creation enforces id
+    /// uniqueness but not name uniqueness, so `{id: "sales_us", name:
+    /// "Sales"}` and `{id: "sales_eu", name: "Sales"}` can coexist right now
+    /// — no delete-and-recreate needed. `resolve_desk_id` is a read-mostly
+    /// routing lookup and is content to answer with whichever desk its alias
+    /// pass iterates to first in that case; a caller that PERSISTS the
+    /// resolved id (`validate_draft_against_record`) cannot make the same
+    /// call silently, because doing so commits a workflow's future blocker
+    /// DMs to a team the caller never actually named.
+    ///
+    /// An exact id match is never ambiguous — ids are unique by construction
+    /// — so this only inspects the alias pass, mirroring its manifest-before-
+    /// overlay priority and General-desk exclusions: a name that resolves
+    /// through the manifest is judged solely against other manifest desks
+    /// (the manifest tier always wins over overlay, so an overlay desk of the
+    /// same name is not a competing candidate), falling through to the
+    /// overlay tier only when the manifest has no match at all.
+    pub fn desk_alias_is_ambiguous(&self, key: &str) -> bool {
+        if self.manifest.group_chats.iter().any(|c| c.id == key)
+            || (!crate::server::chat_history::is_general_chat(Some(key))
+                && self.overlay_desks.iter().any(|d| {
+                    d.id == key && !crate::server::chat_history::is_general_chat(Some(&d.id))
+                }))
+        {
+            return false;
+        }
+        let manifest_matches = self
+            .manifest
+            .group_chats
+            .iter()
+            .filter(|c| c.name.eq_ignore_ascii_case(key))
+            .count();
+        if manifest_matches > 0 {
+            return manifest_matches > 1;
+        }
+        if crate::server::chat_history::is_general_chat(Some(key)) {
+            return false;
+        }
+        self.overlay_desks
+            .iter()
+            .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+            .filter(|d| d.name.eq_ignore_ascii_case(key))
+            .count()
+            > 1
     }
 
     /// Whether a desk with `desk_id` exists in either the manifest or the
@@ -2973,12 +4611,30 @@ impl CompanyRecord {
             || self.overlay_desks.iter().any(|d| d.id == desk_id)
     }
 
+    /// How the desk with **exact** id `desk_id` routes its unmentioned messages
+    /// (issue #1835).
+    ///
+    /// Manifest `[[group_chat]]` desks are always [`ResponderMode::Lead`] — the
+    /// blueprint syntax carries no responder field — and so is any id that
+    /// names no desk at all, which keeps every non-desk caller (`#general`, a
+    /// DM key, a bare teammate id) on the behaviour it has today. Takes the
+    /// resolved id, not a display name: callers that accept either resolve
+    /// through [`Self::resolve_desk_id`] first, as `desk_lead` does.
+    pub fn desk_responder_mode(&self, desk_id: &str) -> ResponderMode {
+        self.overlay_desks
+            .iter()
+            .find(|d| d.id == desk_id)
+            .map(|d| d.responder)
+            .unwrap_or_default()
+    }
+
     /// Whether `agent_id` names a roster teammate — a manifest agent or an
     /// operator-overlay teammate. The desk overlay may only add ids that resolve
     /// here.
     pub fn is_roster_agent(&self, agent_id: &str) -> bool {
-        self.manifest.agents.iter().any(|a| a.id == agent_id)
-            || self.overlay_agents.iter().any(|a| a.id == agent_id)
+        !self.is_retired(agent_id)
+            && (self.manifest.agents.iter().any(|a| a.id == agent_id)
+                || self.overlay_agents.iter().any(|a| a.id == agent_id))
     }
 
     /// Mints the roster id for a teammate about to be added under
@@ -3021,7 +4677,7 @@ impl CompanyRecord {
     /// `PATCH …/team/{agent_id}` edits a teammate's name, role and description
     /// and deliberately leaves the id alone. A name-keyed id would orphan
     /// everything already filed under the old one — the teammate's
-    /// `Agents/<id>/` folder, its `WorkspaceOrigin::Agent` stamps, its budget
+    /// `agents/<id>/` folder, its `WorkspaceOrigin::Agent` stamps, its budget
     /// override row, its desk memberships, its inbox — which is the same trap
     /// name-keyed DM ids sprang on the console's chat journals (issue #364).
     /// So a slug records what a teammate was called when it was created, and
@@ -3035,7 +4691,7 @@ impl CompanyRecord {
     /// and that folder's `Agent` origin stamps re-attribute to it. That is the
     /// intended remedy for a typo'd name — the same human, correcting
     /// themselves, keeping the work — but it does mean remove-plus-re-add is not
-    /// a way to give a teammate a clean slate. `Agents/<slug>/` is a folder
+    /// a way to give a teammate a clean slate. `agents/<slug>/` is a folder
     /// named for a seat, not a chain of custody for whoever last sat in it.
     pub fn mint_agent_id(&self, display_name: &str) -> String {
         let stem = agent_slug(display_name);
@@ -3129,6 +4785,54 @@ impl CompanyRecord {
             .collect()
     }
 
+    /// Resolves a teammate key the way every surface that takes one should:
+    /// **id first, then an operator-added teammate's display name** (issue
+    /// #1162).
+    ///
+    /// The single place the two halves of the roster's namespace are joined.
+    /// [`Self::resolve_roster_agent_id`] is deliberately id-only and
+    /// [`Self::overlay_agent_ids_by_name`] deliberately name-only; every caller
+    /// that wants "who did the human mean" needs both, in this order, and
+    /// before #1162 only the board's assignee field had them. `query_company`
+    /// printed an overlay teammate under its display name while
+    /// `delegate_to_teammate` grounded ids alone, so the orchestrator read a
+    /// name off the roster it was told was authoritative and was refused.
+    ///
+    /// **Ids win.** Trying the id namespace first is what stops a display name
+    /// shadowing a real id: a teammate mischievously (or accidentally) named
+    /// `"engineer"` can never intercept work meant for the manifest agent
+    /// `engineer`. That ordering is a guarantee, not an optimisation — it is
+    /// why this is one method rather than a convention each caller re-applies.
+    ///
+    /// **Manifest agents are not matched by role**, only by id. Two teammates
+    /// may legitimately share a role, so role-matching belongs to the surfaces
+    /// that can ask a human which one they meant — the workflow authoring
+    /// resolver does it deliberately, and stays separate for that reason.
+    ///
+    /// **Desks are not in scope here.** A caller that accepts a desk *and* a
+    /// teammate — [`assignee::resolve`] is the one — must try
+    /// [`Self::resolve_desk_id`] itself, first: a desk whose id matches a
+    /// teammate id keeps routing as a desk. Folding desks in here would teach
+    /// `delegate_to_teammate` to accept them, contradicting its own "that is a
+    /// desk, not a teammate" refusal.
+    ///
+    /// [`assignee::resolve`]: crate::runtime::assignee::resolve
+    pub fn resolve_teammate_key(&self, key: &str) -> TeammateResolution {
+        let key = key.trim();
+        if key.is_empty() {
+            return TeammateResolution::Unknown;
+        }
+        if let Some(id) = self.resolve_roster_agent_id(key) {
+            return TeammateResolution::Agent(id);
+        }
+        let mut by_name = self.overlay_agent_ids_by_name(key);
+        match by_name.len() {
+            0 => TeammateResolution::Unknown,
+            1 => TeammateResolution::Agent(by_name.remove(0)),
+            _ => TeammateResolution::Ambiguous(by_name),
+        }
+    }
+
     /// This teammate's operator-set budget override, if one exists.
     ///
     /// The presence of a row is itself information — it is what the console
@@ -3184,6 +4888,177 @@ impl CompanyRecord {
         self.overlay_budgets.push(entry);
     }
 
+    /// The operator's edit of manifest teammate `agent_id`, if one is stored.
+    ///
+    /// Reads the first match, which [`Self::upsert_agent_override`] keeps
+    /// unique. Prefer [`Self::effective_agent`] — this is for the write path and
+    /// for a surface that has to say whether an operator changed anything.
+    pub fn agent_override(&self, agent_id: &str) -> Option<&AgentOverride> {
+        self.overlay_agent_edits
+            .iter()
+            .find(|entry| entry.agent_id == agent_id)
+    }
+
+    /// Stores `entry` as **the** edit for its teammate, replacing any entry
+    /// already held for that `agent_id`, and merging field-wise so a patch that
+    /// touches one field does not drop an earlier edit of another.
+    ///
+    /// The one way a write path should add to [`Self::overlay_agent_edits`], for
+    /// the reason [`Self::upsert_budget_override`] gives: a second row for one
+    /// teammate is not a harmless duplicate, it is a silently unreachable edit.
+    pub fn upsert_agent_override(&mut self, entry: AgentOverride) {
+        if let Some(held) = self
+            .overlay_agent_edits
+            .iter_mut()
+            .find(|held| held.agent_id == entry.agent_id)
+        {
+            if entry.name.is_some() {
+                held.name = entry.name;
+            }
+            if entry.role.is_some() {
+                held.role = entry.role;
+            }
+            if entry.description.is_some() {
+                held.description = entry.description;
+            }
+            if entry.tools.is_some() {
+                held.tools = entry.tools;
+            }
+            if entry.instructions.is_some() {
+                held.instructions = entry.instructions;
+            }
+            if entry.avatar.is_some() {
+                held.avatar = entry.avatar;
+            }
+            if entry.model.is_some() {
+                held.model = entry.model;
+            }
+            if entry.harness.is_some() {
+                held.harness = entry.harness;
+            }
+            return;
+        }
+        self.overlay_agent_edits.push(entry);
+    }
+
+    /// Whether the operator has removed `agent_id` from the roster.
+    ///
+    /// Only a manifest teammate is ever retired this way — an overlay teammate
+    /// is deleted outright, since the record is the only thing that declares it.
+    pub fn is_retired(&self, agent_id: &str) -> bool {
+        self.overlay_retired_agents.iter().any(|id| id == agent_id)
+    }
+
+    /// Records `agent_id` as removed, idempotently.
+    ///
+    /// The one way a write path should add to [`Self::overlay_retired_agents`]:
+    /// a second tombstone for one teammate changes nothing about the roster but
+    /// does move the harness's overlay fingerprint, which would drop every live
+    /// agent session for a delete that had already happened.
+    pub fn retire_agent(&mut self, agent_id: &str) {
+        if !self.is_retired(agent_id) {
+            self.overlay_retired_agents.push(agent_id.to_string());
+        }
+    }
+
+    /// One manifest roster row with the operator's edits applied — who this
+    /// teammate **is**, as opposed to who `company.toml` declared it to be.
+    ///
+    /// Borrowed when nothing is overridden, so the common case allocates
+    /// nothing; owned when an edit applies, because the effective value is a
+    /// field-wise merge of two sources and there is nothing to borrow.
+    pub fn effective_manifest_agent<'a>(
+        &'a self,
+        agent: &'a crate::company::Agent,
+    ) -> std::borrow::Cow<'a, crate::company::Agent> {
+        let Some(entry) = self.agent_override(&agent.id) else {
+            return std::borrow::Cow::Borrowed(agent);
+        };
+        let mut merged = agent.clone();
+        if let Some(name) = entry.name.as_ref() {
+            merged.name = Some(name.clone());
+        }
+        if let Some(role) = entry.role.as_ref() {
+            merged.role = role.clone();
+        }
+        if let Some(description) = entry.description.as_ref() {
+            // An empty stored string is the operator clearing the description —
+            // see [`AgentOverride::description`].
+            merged.description = Some(description.clone()).filter(|text| !text.is_empty());
+        }
+        if let Some(tools) = entry.tools.as_ref() {
+            merged.tools = tools.clone();
+        }
+        if let Some(instructions) = entry.instructions.as_ref() {
+            merged.prompt = Some(instructions.clone());
+        }
+        // Issue #1245. Empty means cleared, as for `description`: an operator
+        // moving a teammate back to the company default stores a blank rather
+        // than deleting the row, so the field stops tracking the blueprint
+        // only while an override actually exists.
+        if let Some(model) = entry.model.as_ref() {
+            merged.model = Some(model.clone()).filter(|text| !text.is_empty());
+        }
+        if let Some(harness) = entry.harness.as_ref() {
+            merged.harness = Some(harness.clone()).filter(|text| !text.is_empty());
+        }
+        std::borrow::Cow::Owned(merged)
+    }
+
+    /// The teammate `agent_id` as it effectively stands, or `None` when no
+    /// manifest row carries that id (an overlay teammate is not one of these —
+    /// it is already stored in the shape an operator edits).
+    pub fn effective_agent(
+        &self,
+        agent_id: &str,
+    ) -> Option<std::borrow::Cow<'_, crate::company::Agent>> {
+        if self.is_retired(agent_id) {
+            return None;
+        }
+        self.manifest
+            .agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .map(|agent| self.effective_manifest_agent(agent))
+    }
+
+    /// The whole manifest roster with every stored edit applied — the list
+    /// shape for callers that render or index the roster rather than looking
+    /// one teammate up.
+    pub fn effective_agents(&self) -> Vec<crate::company::Agent> {
+        self.manifest
+            .agents
+            .iter()
+            .filter(|agent| !self.is_retired(&agent.id))
+            .map(|agent| self.effective_manifest_agent(agent).into_owned())
+            .collect()
+    }
+
+    /// The `[tools].allow` actually in force: the manifest's grants plus the
+    /// namespaces an operator granted from a connect surface (issue #1796).
+    ///
+    /// **The single source of truth for "what does this company grant"**, in
+    /// the shape of [`Self::effective_policy`]. The roster build, the workflow
+    /// capability bundle, every `grants_*_explicit` check in the harness and
+    /// every console status route read through here, so a namespace granted in
+    /// the console cannot be honoured by one and ignored by another — which is
+    /// the precise shape of the #1796 complaint: a page saying **Connected**
+    /// over a harness that wired nothing.
+    ///
+    /// Returns an owned `Vec` rather than a borrow because the effective value
+    /// may not exist anywhere to borrow from — it is the concatenation of two
+    /// sources.
+    ///
+    /// Additive only, and only over [`CONSOLE_GRANTABLE_NAMESPACES`]: a stored
+    /// entry outside that list is dropped here rather than trusted, so a row
+    /// that reached the store under version skew can never confer `shell`.
+    pub fn effective_tool_allow(&self) -> Vec<String> {
+        effective_tool_allow(
+            &self.manifest.tools.allow,
+            self.overlay_tool_grants.as_ref(),
+        )
+    }
+
     /// The `[policy]` actually in force: the operator's override where it sets a
     /// field, the manifest's `[policy]` everywhere else (issue #562).
     ///
@@ -3205,33 +5080,116 @@ impl CompanyRecord {
     /// allowing the policy parser to downgrade it to `supervised` would loosen
     /// a `readonly` manifest.
     pub fn effective_policy(&self) -> Policy {
-        let manifest = &self.manifest.policy;
-        let Some(override_) = &self.overlay_policy else {
-            return manifest.clone();
-        };
-        Policy {
-            mode: override_
-                .mode
-                .as_deref()
-                .filter(|mode| POLICY_MODES.contains(mode))
-                .map(str::to_owned)
-                .unwrap_or_else(|| manifest.mode.clone()),
-            always_approve: override_
-                .always_approve
-                .clone()
-                .unwrap_or_else(|| manifest.always_approve.clone()),
-            // Not overridable from the console today. Left reading the manifest
-            // rather than added to `PolicyOverride` speculatively: the issue asks
-            // for the tier and the always-ask list, and a spend threshold whose
-            // console control does not exist would be a field nothing can write.
-            auto_approve_under_usd: manifest.auto_approve_under_usd,
-        }
+        effective_policy(&self.manifest.policy, self.overlay_policy.as_ref())
     }
 
     /// The first `agent_id` on this record carrying more than one override, if
     /// any. See [`BudgetOverride::duplicate_agent_id`].
     pub fn duplicate_budget_agent_id(&self) -> Option<&str> {
         BudgetOverride::duplicate_agent_id(&self.overlay_budgets)
+    }
+
+    /// The persona instructions actually in force for `agent_id`: the operator's
+    /// override when one is stored, else the manifest agent's `prompt` (the
+    /// blueprint seed), else `None`.
+    ///
+    /// **The single source of truth for "what instructions frame this teammate"**,
+    /// in the shape of [`Self::effective_budget`]. The roster build reads through
+    /// here in both halves — manifest and overlay — so a persona edited in the
+    /// console cannot be honoured by one and ignored by another.
+    ///
+    /// The override **wins** over the blueprint `prompt`, symmetric with
+    /// `effective_budget`/`effective_policy`: it is how a manifest/blueprint
+    /// agent's persona is edited without rewriting read-only `company.toml`, and
+    /// "reset to blueprint" is clearing the override (dropping the row), never a
+    /// second manifest write. An **overlay** teammate has no manifest row, so it
+    /// falls through to `None` unless an override names it — correct, since a
+    /// bare overlay agent's persona is only ever what an operator gave it.
+    pub fn effective_instructions(&self, agent_id: &str) -> Option<String> {
+        match self
+            .agent_override(agent_id)
+            .and_then(|o| o.instructions.clone())
+        {
+            Some(instructions) => Some(instructions),
+            None => self
+                .manifest
+                .agents
+                .iter()
+                .find(|a| a.id == agent_id)
+                .and_then(|a| a.prompt.clone()),
+        }
+    }
+
+    /// Drops `agent_id`'s persona override so the manifest `prompt` applies again
+    /// — "reset to blueprint" (issue #1530).
+    ///
+    /// A no-op when nothing is stored: the caller's intent ("this teammate should
+    /// follow the blueprint") is already satisfied, exactly as `clear_budget`
+    /// treats a missing budget override.
+    pub fn clear_agent_override(&mut self, agent_id: &str) {
+        if let Some(entry) = self
+            .overlay_agent_edits
+            .iter_mut()
+            .find(|entry| entry.agent_id == agent_id)
+        {
+            entry.instructions = None;
+        }
+        self.retain_nonempty_agent_edits();
+    }
+
+    /// The face in force for `agent_id`: the chosen one, or `None` for "nobody
+    /// has chosen" — which the console renders as the mascot it hashes from the
+    /// teammate's id (`docs/spec/runtime/avatars.md`).
+    ///
+    /// Reads through the override for **either** kind of teammate, which is why
+    /// there is no manifest arm here as there is in
+    /// [`Self::effective_instructions`]: `company.toml` declares no face, so an
+    /// unset avatar has nothing to fall back to but the default, and inventing a
+    /// stored value for it would make "reset" unexpressible.
+    pub fn effective_avatar(&self, agent_id: &str) -> Option<String> {
+        self.agent_override(agent_id).and_then(|o| o.avatar.clone())
+    }
+
+    /// Drops `agent_id`'s chosen face so the hashed default applies again.
+    ///
+    /// Clears the one field rather than the row, for the reason
+    /// [`Self::upsert_agent_override`] merges field-wise: an operator resetting a
+    /// face has said nothing about the persona, the name or the tool scope, and
+    /// dropping their row would silently reset those too. A no-op when nothing
+    /// is stored — the caller's intent is already satisfied.
+    pub fn clear_agent_avatar(&mut self, agent_id: &str) {
+        if let Some(entry) = self
+            .overlay_agent_edits
+            .iter_mut()
+            .find(|entry| entry.agent_id == agent_id)
+        {
+            entry.avatar = None;
+        }
+        self.retain_nonempty_agent_edits();
+    }
+
+    /// Drops any override row left carrying no edits at all.
+    ///
+    /// Shared by the two clear paths so neither can forget a field: a row that
+    /// held only the thing just cleared is not "an empty override", it is a row
+    /// whose continued existence would move the harness's overlay fingerprint
+    /// for no change.
+    fn retain_nonempty_agent_edits(&mut self) {
+        // Every field the override can carry, not just the ones it carried
+        // when this was written. A predicate that names a subset deletes rows
+        // that are still holding the fields it forgot — here, resetting a
+        // teammate's instructions would take their harness and model with it,
+        // silently reverting both to the blueprint.
+        self.overlay_agent_edits.retain(|entry| {
+            entry.name.is_some()
+                || entry.role.is_some()
+                || entry.description.is_some()
+                || entry.tools.is_some()
+                || entry.instructions.is_some()
+                || entry.avatar.is_some()
+                || entry.model.is_some()
+                || entry.harness.is_some()
+        });
     }
 
     /// Whether `wid` is switched on (issue #276) — the single predicate the
@@ -3422,12 +5380,302 @@ mod test {
     use super::*;
     use crate::ports::workflow_runner::DeliveryStatus;
 
+    /// The answers must survive the **blob**, not merely the record.
+    ///
+    /// `CompanyRecord` gained a `setup` field and the fs store round-tripped it
+    /// for free, because it serialises the whole record. SQLite and MongoDB do
+    /// not: they rebuild a record field by field from `OverlayBlob`, so anything
+    /// missing there is dropped silently on the way back out — losing exactly the
+    /// answers Phase 2 builds workflows from, on exactly the backends a hosted
+    /// tenant runs, and nowhere else. `--all-features` compilation is what
+    /// surfaced it; this is what keeps it surfaced.
+    #[test]
+    fn the_setup_answers_survive_the_overlay_blob() {
+        let answers = crate::company::setup::SetupAnswers {
+            industry: "E-commerce — homeware".into(),
+            team_hint: "someone on dispatch".into(),
+            automate: "meta ads, order dispatch".into(),
+        };
+        let mut record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: CompanyId::new("acme"),
+            manifest: toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest"),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: Some(answers.clone()),
+            name_confirmed: false,
+            activation_completed_at: None,
+        };
+
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let parsed = OverlayBlob::parse(&json).expect("parse");
+        assert_eq!(
+            parsed.setup,
+            Some(answers),
+            "the answers were dropped by the blob the SQL backends rebuild from"
+        );
+
+        // A company that never went through setup carries nothing, and a row
+        // written before the field existed still loads.
+        record.setup = None;
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        assert_eq!(OverlayBlob::parse(&json).expect("parse").setup, None);
+        assert_eq!(
+            OverlayBlob::parse("{\"agents\":[]}")
+                .expect("legacy row")
+                .setup,
+            None
+        );
+    }
+
+    /// Issue #1741: `SecretValue` derived `Serialize`, so
+    /// `serde_json::to_value` over anything holding one emitted the plaintext
+    /// credential. Unlike the `Debug` surface — patched five separate times on
+    /// the *enclosing* structs, each time after somebody noticed a live key in
+    /// a log line — no test anywhere caught the serialize side.
+    ///
+    /// The guard lives on `SecretValue` itself, so the assertions below are
+    /// deliberately made through containers the type knows nothing about: a
+    /// struct with a plain `#[derive(Serialize)]` standing in for the next
+    /// config struct somebody writes, plus `Option`, `Vec`, a map value, and
+    /// `#[serde(flatten)]` (a genuinely different serde code path), across
+    /// both `to_string` and `to_value` (also different code paths in
+    /// `serde_json`). Regress the impl to a derive and every arm fails.
+    #[test]
+    fn secret_value_redacts_in_debug_and_serialize() {
+        use std::collections::BTreeMap;
+
+        // Obviously fake, and distinctive enough that a substring hit is a real
+        // hit. Same sentinel as the four existing planted-secret tests.
+        const FAKE_SECRET: &str = "NOT-A-REAL-KEY-planted-for-tests";
+
+        // Case-**insensitive**. A leak that arrives lowercased, uppercased, or
+        // case-mangled on the way out is still a leak, and an exact-case search
+        // reads it as clean — which is how a sibling change shipped a
+        // leak-detection test that passed a deliberate leak.
+        fn leaks(rendering: &str) -> bool {
+            rendering
+                .to_ascii_lowercase()
+                .contains(&FAKE_SECRET.to_ascii_lowercase())
+        }
+
+        // Sanity: the detector detects. Without this the whole test could be
+        // vacuous and read as green.
+        assert!(
+            leaks(&format!("token={}", FAKE_SECRET.to_ascii_lowercase())),
+            "the leak detector cannot see a lowercased sentinel; every \
+             assertion below would be vacuous"
+        );
+
+        /// The next config struct somebody writes: derives `Serialize` and
+        /// `Debug` with no idea a secret is in there.
+        #[derive(Debug, Serialize)]
+        struct UnsuspectingConfig {
+            bind: String,
+            token: SecretValue,
+            optional: Option<SecretValue>,
+            many: Vec<SecretValue>,
+            by_name: BTreeMap<String, SecretValue>,
+            // No map-*key* arm: `SecretValue` derives neither `Ord` nor
+            // `Hash`, so it cannot occupy a key position in any std map. That
+            // is worth keeping — a credential is not an identity to index by.
+            #[serde(flatten)]
+            nested: NestedSecrets,
+        }
+
+        /// Flattened into the outer struct, so serde uses `FlatMapSerializer`
+        /// instead of the ordinary struct serializer.
+        #[derive(Debug, Serialize)]
+        struct NestedSecrets {
+            inner: SecretValue,
+        }
+
+        let secret = SecretValue(FAKE_SECRET.to_string());
+        let config = UnsuspectingConfig {
+            bind: "127.0.0.1:8080".to_string(),
+            token: secret.clone(),
+            optional: Some(secret.clone()),
+            many: vec![secret.clone(), secret.clone()],
+            by_name: BTreeMap::from([("github".to_string(), secret.clone())]),
+            nested: NestedSecrets {
+                inner: secret.clone(),
+            },
+        };
+
+        // --- Serialize, both serde_json entry points -----------------------
+        let as_string = serde_json::to_string(&config).expect("serialize");
+        assert!(
+            !leaks(&as_string),
+            "plaintext reached to_string: {as_string}"
+        );
+
+        let as_value = serde_json::to_value(&config).expect("to_value");
+        let value_text = as_value.to_string();
+        assert!(
+            !leaks(&value_text),
+            "plaintext reached to_value: {value_text}"
+        );
+
+        // The bare type, not just embedded in something.
+        let bare = serde_json::to_string(&secret).expect("serialize bare");
+        assert!(
+            !leaks(&bare),
+            "plaintext reached a bare serialization: {bare}"
+        );
+        assert_eq!(bare, format!("\"{SECRET_REDACTED}\""));
+
+        // Redaction is *visible*, not a silently dropped field: an operator
+        // reading a dump can tell a secret was there and was withheld.
+        assert!(
+            as_string.contains(SECRET_REDACTED),
+            "the marker is missing, so the field vanished silently: {as_string}"
+        );
+        // Everything non-secret still serializes normally — the guard is
+        // scoped to the secret, not to the struct.
+        assert!(as_string.contains("127.0.0.1:8080"), "{as_string}");
+
+        // --- Debug, plain and alternate ------------------------------------
+        for rendering in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(
+                !leaks(&rendering),
+                "plaintext reached a Debug rendering: {rendering}"
+            );
+            assert!(rendering.contains(SECRET_REDACTED), "{rendering}");
+        }
+        // On the type itself, so an enclosing struct's *derived* Debug is safe
+        // and the container stops having to remember.
+        assert_eq!(
+            format!("{secret:?}"),
+            format!("SecretValue({SECRET_REDACTED})")
+        );
+
+        // --- The persistence door is still open ----------------------------
+        // Every secret-store backend writes `expose()` and reads back through
+        // the constructor; none of them touch serde. That path must keep
+        // returning the plaintext or storing a credential stops working.
+        assert_eq!(secret.expose(), FAKE_SECRET);
+        assert_eq!(SecretValue(secret.expose().to_string()), secret);
+
+        // --- Deserialization keeps working ---------------------------------
+        // Reading a secret *in* never leaks one, so `Deserialize` stays
+        // derived: a config or stored shape may name a `SecretValue` field.
+        let loaded: SecretValue =
+            serde_json::from_str(&format!("\"{FAKE_SECRET}\"")).expect("deserialize");
+        assert_eq!(loaded.expose(), FAKE_SECRET);
+
+        // The asymmetry is deliberate, and asserted so nobody discovers it in
+        // production: a serde round-trip yields the marker, which fails closed
+        // at the point of use rather than carrying a live credential onward.
+        let round_tripped: SecretValue = serde_json::from_str(&bare).expect("round-trip");
+        assert_eq!(round_tripped.expose(), SECRET_REDACTED);
+        assert_ne!(round_tripped, secret);
+    }
+
     fn round_trip<T>(value: &T) -> T
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
         let json = serde_json::to_string(value).expect("serialize");
         serde_json::from_str(&json).expect("deserialize")
+    }
+
+    /// The additive proof this repo asks of every new journal field: a message
+    /// carrying no mentions must serialize **byte-for-byte** as it did before
+    /// the field existed, so no stored record migrates and the cross-backend
+    /// round-trip needs no special case.
+    #[test]
+    fn a_message_with_no_mentions_serializes_as_it_did_before_the_field() {
+        let event = CompanyEvent::OperatorMessage {
+            text: "hello".to_string(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert_eq!(json, r#"{"kind":"OperatorMessage","text":"hello"}"#);
+    }
+
+    /// The same for a reply, whose `mention_depth` is a `u8` and would
+    /// otherwise serialize as a literal `0` on every reply ever written.
+    #[test]
+    fn a_reply_with_no_mentions_serializes_as_it_did_before_the_fields() {
+        let event = CompanyEvent::AgentReply {
+            chat_id: "general".to_string(),
+            agent_id: "ceo".to_string(),
+            text: "hi".to_string(),
+            steps: Vec::new(),
+            task_id: None,
+            parent: None,
+            mentions: Vec::new(),
+            mention_depth: 0,
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"hi"}"#
+        );
+    }
+
+    /// And the other direction: a record written before either field existed
+    /// still loads, which is what `#[serde(default)]` is there for.
+    #[test]
+    fn a_message_journaled_before_mentions_existed_still_loads() {
+        let stored = r#"{"kind":"OperatorMessage","text":"hello"}"#;
+        let event: CompanyEvent = serde_json::from_str(stored).expect("deserialize");
+        match event {
+            CompanyEvent::OperatorMessage { mentions, .. } => assert!(mentions.is_empty()),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_mention_round_trips_with_its_target_and_span() {
+        let mention = Mention {
+            target: MentionTarget::Agent {
+                id: "engineer".to_string(),
+            },
+            text: "@engineer".to_string(),
+            offset: 4,
+            quiet: false,
+        };
+        assert_eq!(round_trip(&mention), mention);
+        // `quiet` is omitted when false, so an ordinary mention stays small on
+        // the wire and in the journal.
+        let json = serde_json::to_string(&mention).expect("serialize");
+        assert!(!json.contains("quiet"), "{json}");
+    }
+
+    #[test]
+    fn every_mention_target_round_trips() {
+        for target in [
+            MentionTarget::Agent {
+                id: "engineer".to_string(),
+            },
+            MentionTarget::User {
+                id: "u1".to_string(),
+            },
+            MentionTarget::Desk {
+                id: "engineering".to_string(),
+            },
+            MentionTarget::Everyone,
+        ] {
+            assert_eq!(round_trip(&target), target);
+        }
     }
 
     // ── Issue #174: cycle usage carries cost, and folds ─────────────────────
@@ -3570,9 +5818,11 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         let json = serde_json::to_string(&no_steps).unwrap();
         assert_eq!(json, r#"{"channel":"operator","text":"hi"}"#);
@@ -3585,6 +5835,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "done".to_string(),
             steps: vec![TurnStep {
                 kind: TurnStepKind::Note,
@@ -3595,6 +5846,7 @@ mod test {
                 ..TurnStep::default()
             }],
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(round_trip(&with_steps), with_steps);
     }
@@ -3610,9 +5862,11 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&no_card).unwrap(),
@@ -3628,9 +5882,11 @@ mod test {
             message_id: None,
             task_id: Some("t-42".to_string()),
             channel: "operator".to_string(),
+            agent: None,
             text: "opened one".to_string(),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         };
         assert_eq!(round_trip(&with_card), with_card);
         assert!(
@@ -3657,6 +5913,8 @@ mod test {
 
         // A tool-less reply serializes without the `steps` key.
         let tool_less = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "main".to_string(),
@@ -3669,6 +5927,8 @@ mod test {
 
         // A reply with a timeline round-trips it.
         let with_steps = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "main".to_string(),
@@ -3708,6 +5968,8 @@ mod test {
 
         // An untagged reply keeps the legacy wire shape exactly.
         let untagged = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "main".to_string(),
             agent_id: "ceo".to_string(),
@@ -3722,6 +5984,8 @@ mod test {
 
         // A dispatch-produced reply carries the key and round-trips.
         let tagged = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             chat_id: "t-1".to_string(),
             agent_id: "ceo".to_string(),
@@ -3892,11 +6156,13 @@ mod test {
         }
 
         let threaded = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: Some(EventSeq::new(41)),
             text: "a follow-up".into(),
             by: None,
             chat: Some("studio".into()),
             deliverable: None,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&threaded).unwrap();
         assert!(json.contains(r#""parent":41"#), "{json}");
@@ -3906,6 +6172,8 @@ mod test {
         );
 
         let answered = CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: Some(EventSeq::new(41)),
             task_id: None,
             chat_id: "studio".into(),
@@ -3957,6 +6225,145 @@ mod test {
         );
     }
 
+    /// The three intents are exactly the three wire words, and only those
+    /// (issue #1152).
+    ///
+    /// Pinned as literals because the console and the journal both write them:
+    /// a rename here silently stops matching every message already on disk.
+    #[test]
+    fn a_message_intent_round_trips_through_its_wire_word() {
+        for (intent, word) in [
+            (MessageIntent::Chat, "chat"),
+            (MessageIntent::Once, "once"),
+            (MessageIntent::Workflow, "workflow"),
+        ] {
+            let json = serde_json::to_string(&intent).unwrap();
+            assert_eq!(json, format!("\"{word}\""));
+            assert_eq!(
+                serde_json::from_str::<MessageIntent>(&json).unwrap(),
+                intent
+            );
+            assert_eq!(intent.as_str(), word);
+        }
+        assert!(
+            serde_json::from_str::<MessageIntent>(r#""build""#).is_err(),
+            "the set is closed: an unknown word is a 400, not a silent default"
+        );
+    }
+
+    /// "Just chatting" has no deliverable, and that is the whole point of the
+    /// type (issue #1152).
+    ///
+    /// A card can never *be* "not work", so the honest mapping from a `Chat`
+    /// message onto the card field is "there is no card" — `None` — rather than
+    /// a third `TaskDeliverable` variant every stored reader would owe a branch
+    /// for.
+    #[test]
+    fn only_a_work_intent_maps_onto_a_card_deliverable() {
+        use crate::ports::tasks::TaskDeliverable;
+
+        assert_eq!(MessageIntent::Chat.deliverable(), None);
+        assert_eq!(
+            MessageIntent::Once.deliverable(),
+            Some(TaskDeliverable::Once)
+        );
+        assert_eq!(
+            MessageIntent::Workflow.deliverable(),
+            Some(TaskDeliverable::Workflow)
+        );
+        assert!(MessageIntent::Chat.is_chat());
+        assert!(!MessageIntent::Once.is_chat());
+        assert!(!MessageIntent::Workflow.is_chat());
+    }
+
+    /// **No journaled record migrates** (issue #1152).
+    ///
+    /// Retyping `OperatorMessage::deliverable` from `TaskDeliverable` to
+    /// [`MessageIntent`] is only safe if every value already written under that
+    /// key still loads, and still writes back the same bytes. Getting this wrong
+    /// does not fail CI — it fails on somebody's event log, on whichever of the
+    /// three backends they run, the next time a company boots. So the claim is a
+    /// test rather than a sentence in a doc comment.
+    ///
+    /// The blobs are asserted verbatim in both directions: parsed to the value
+    /// the new type gives them, and re-serialized byte-for-byte back to what is
+    /// on disk.
+    #[test]
+    fn every_journaled_deliverable_value_still_loads_and_writes_back_identically() {
+        for (blob, expected) in [
+            (r#"{"kind":"OperatorMessage","text":"hi"}"#, None),
+            (
+                r#"{"kind":"OperatorMessage","text":"ship the landing page","deliverable":"once"}"#,
+                Some(MessageIntent::Once),
+            ),
+            (
+                r#"{"kind":"OperatorMessage","text":"build me a weekly report","deliverable":"workflow"}"#,
+                Some(MessageIntent::Workflow),
+            ),
+        ] {
+            let event: CompanyEvent = serde_json::from_str(blob).unwrap_or_else(|e| {
+                panic!("a stored line must still load: {blob} — {e}");
+            });
+            match &event {
+                CompanyEvent::OperatorMessage { deliverable, .. } => {
+                    assert_eq!(*deliverable, expected, "{blob}")
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+            assert_eq!(
+                serde_json::to_string(&event).unwrap(),
+                blob,
+                "a stored line must serialize back byte-for-byte"
+            );
+        }
+    }
+
+    /// The new word travels on the same key, and only when it was chosen
+    /// (issue #1152).
+    ///
+    /// The absent case is the compatibility half that matters most: "Do it
+    /// once" is not the default *because it is sent* — it is the default
+    /// because nothing is sent, so an unmarked message is byte-identical on the
+    /// wire to every message journaled before this control existed.
+    #[test]
+    fn a_chat_intent_journals_under_the_same_key_and_absence_stays_absent() {
+        let chatting = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            text: "morning all".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: Some(MessageIntent::Chat),
+            attachments: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&chatting).unwrap(),
+            r#"{"kind":"OperatorMessage","text":"morning all","deliverable":"chat"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(
+                r#"{"kind":"OperatorMessage","text":"morning all","deliverable":"chat"}"#
+            )
+            .unwrap(),
+            chatting
+        );
+
+        let unmarked = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            text: "morning all".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            attachments: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&unmarked).unwrap(),
+            r#"{"kind":"OperatorMessage","text":"morning all"}"#,
+            "no choice must still put nothing on the wire"
+        );
+    }
+
     #[test]
     fn an_operator_message_journaled_before_attribution_still_loads() {
         // Exactly what is already on disk in every existing company's event
@@ -3966,11 +6373,13 @@ mod test {
         assert_eq!(
             event,
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             }
         );
     }
@@ -3981,11 +6390,13 @@ mod test {
         // export/import and the fs/sqlite/mongo round-trip stay green without
         // touching a single stored record.
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: None,
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
@@ -3996,6 +6407,7 @@ mod test {
     #[test]
     fn an_attributed_message_round_trips_with_its_actor() {
         let event = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
             parent: None,
             text: "hi".into(),
             by: Some(Actor {
@@ -4004,6 +6416,7 @@ mod test {
             }),
             chat: None,
             deliverable: None,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["by"]["kind"], "user");
@@ -4026,11 +6439,13 @@ mod test {
     fn company_event_variants_round_trip_tagged() {
         let events = vec![
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),
@@ -4263,6 +6678,8 @@ mod test {
 
     fn desk_record(toml_src: &str, overlay: Vec<OverlayDeskMember>) -> CompanyRecord {
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest: toml::from_str(toml_src).expect("parse manifest"),
             ledger: Vec::new(),
@@ -4274,9 +6691,13 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -4495,31 +6916,56 @@ mod test {
             name: "Nova".into(),
             role: "Growth".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
+            model: None,
+            harness: None,
         });
         assert!(record.is_roster_agent("ceo"));
         assert!(record.is_roster_agent("nova"));
         assert!(!record.is_roster_agent("ghost"));
     }
 
-    /// Issue #661 / L5 serde: the new per-teammate `tools` grant is optional and
-    /// empty-by-default on the wire, so an overlay record written before the
-    /// field existed deserializes unchanged, and a standard-grant teammate
-    /// serializes exactly as it did before (no `tools` key).
+    /// Issue #661 / L5 serde, updated for #1804's three-state grant: an absent
+    /// `tools` key deserializes to `None` (the standard grant) and a `None`
+    /// grant serializes with no `tools` key — so a record written before the
+    /// field existed round-trips unchanged. The two new states are wire-visible:
+    /// an explicit deny-all (`Some(vec![])`) serializes as `tools: []` (present,
+    /// NOT skipped), and a narrowed grant serializes its list.
     #[test]
-    fn overlay_agent_tools_defaults_empty_and_skips_when_empty() {
-        // An old record with no `tools` key deserializes to an empty grant.
+    fn overlay_agent_tools_three_state_serde_round_trip() {
+        // An old record with no `tools` key deserializes to `None` (standard).
         let legacy: OverlayAgent =
             serde_json::from_str(r#"{"id":"a","name":"A","role":"r"}"#).expect("legacy overlay");
-        assert!(legacy.tools.is_empty());
+        assert_eq!(legacy.tools, None);
 
-        // An empty grant is omitted from the serialized form — a standard-grant
+        // A `None` grant is omitted from the serialized form — a standard-grant
         // teammate is byte-for-byte what it was before this field existed.
         let value = serde_json::to_value(&legacy).unwrap();
         assert!(
             value.get("tools").is_none(),
-            "an empty grant must not serialize a `tools` key: {value}"
+            "a None (standard) grant must not serialize a `tools` key: {value}"
         );
+
+        // An explicit deny-all IS on the wire, as `tools: []` — it must NOT be
+        // skipped, or it would read back as the standard grant (the inversion).
+        let denied = OverlayAgent {
+            id: "d".into(),
+            name: "D".into(),
+            role: "r".into(),
+            description: None,
+            tools: Some(Vec::new()),
+            model: None,
+            harness: None,
+        };
+        let denied_value = serde_json::to_value(&denied).unwrap();
+        assert_eq!(
+            denied_value.get("tools"),
+            Some(&serde_json::json!([])),
+            "an explicit deny-all must serialize `tools: []`, not skip the key: {denied_value}"
+        );
+        let denied_round: OverlayAgent =
+            serde_json::from_str(&serde_json::to_string(&denied).unwrap()).unwrap();
+        assert_eq!(denied_round.tools, Some(Vec::new()));
 
         // A non-empty grant round-trips in order.
         let scoped = OverlayAgent {
@@ -4527,11 +6973,16 @@ mod test {
             name: "S".into(),
             role: "r".into(),
             description: None,
-            tools: vec!["docs.*".into(), "email".into()],
+            tools: Some(vec!["docs.*".into(), "email".into()]),
+            model: None,
+            harness: None,
         };
         let round: OverlayAgent =
             serde_json::from_str(&serde_json::to_string(&scoped).unwrap()).unwrap();
-        assert_eq!(round.tools, vec!["docs.*".to_string(), "email".to_string()]);
+        assert_eq!(
+            round.tools,
+            Some(vec!["docs.*".to_string(), "email".to_string()])
+        );
     }
 
     /// A record with one manifest agent and no desks, for the minting tests.
@@ -4549,12 +7000,14 @@ mod test {
             name: name.into(),
             role: "Worker".into(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
+            model: None,
+            harness: None,
         });
     }
 
     /// A free slug is minted bare — the whole point of issue #686 is that the
-    /// common case reads as `Agents/dana_designer/`.
+    /// common case reads as `agents/dana_designer/`.
     #[test]
     fn mint_agent_id_takes_the_bare_slug_when_it_is_free() {
         let record = mint_record();
@@ -4606,6 +7059,68 @@ mod test {
         assert_eq!(record.mint_agent_id("Dana Designer"), "dana_designer_2");
     }
 
+    /// **Issue #1862 review**: an exact desk id must win over another desk's
+    /// display name.
+    ///
+    /// Desk creation enforces id uniqueness but not name uniqueness, so
+    /// `{id: "ops", name: "sales"}` is a valid desk that can sit ahead of
+    /// `{id: "sales", …}`. A single pass whose predicate is
+    /// `id == key || name == key` returns whichever comes first, so asking for
+    /// the id `sales` answered `ops` — an ownership write silently targeting a
+    /// different desk than the caller named.
+    #[test]
+    fn an_exact_desk_id_beats_another_desks_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        // Deliberately in the order that loses under a first-match search: the
+        // desk merely *named* "sales" is created first.
+        record.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "sales".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+        record.overlay_desks.push(OverlayDesk {
+            id: "sales".into(),
+            name: "Revenue".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+
+        assert_eq!(
+            record.resolve_desk_id("sales").as_deref(),
+            Some("sales"),
+            "an exact id must resolve to itself, not to a desk that merely \
+             carries it as a display name"
+        );
+        // The alias still resolves for a key no desk owns as an id.
+        assert_eq!(record.resolve_desk_id("Revenue").as_deref(), Some("sales"));
+        assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+    }
+
+    /// A manifest desk's id also beats an overlay desk's display name — the
+    /// exact-id pass spans both lists, so ordering between them cannot decide
+    /// an ownership write either.
+    #[test]
+    fn a_manifest_desk_id_beats_an_overlay_desks_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"growth\"\nname = \"Content\"\nmembers = [\"ceo\"]\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_desks.push(OverlayDesk {
+            id: "studio".into(),
+            name: "growth".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+
+        assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
+    }
+
     /// Desks resolve *before* teammates in `assignee::resolve`, by id and by
     /// case-insensitive display name — so a minted id equal to either would be
     /// unreachable, and both are stepped past.
@@ -4629,6 +7144,7 @@ mod test {
             name: "Design Studio".into(),
             description: None,
             members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
         });
         assert_eq!(record.mint_agent_id("Design Studio"), "design_studio");
         // …while the overlay desk's id is reserved exactly like a manifest one.
@@ -4643,7 +7159,140 @@ mod test {
         assert_eq!(record.mint_agent_id("Operator"), "operator_2");
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
-        assert_eq!(RESERVED_AGENT_IDS, ["operator", "Agents", "Desks"]);
+        assert_eq!(record.mint_agent_id("System"), "system_2");
+        // Issue #1743: both spellings of the built-in `#general` channel. A
+        // teammate minted onto one becomes the answer to every unaddressed
+        // message on the company-wide line — `responder_for` checks roster ids
+        // before falling back to the orchestrator — and the console renders
+        // that line's transcript as the teammate's DM.
+        assert_eq!(record.mint_agent_id("Main"), "main_2");
+        assert_eq!(record.mint_agent_id("General"), "general_2");
+        assert_eq!(
+            RESERVED_AGENT_IDS,
+            ["operator", "agents", "desks", "system", "main", "General"]
+        );
+    }
+
+    /// Issue #966: the host's own author is not a name a teammate can be given.
+    ///
+    /// `SYSTEM_AUTHOR` reaches the console's centred system pill by value —
+    /// `MessageView` projects an `AgentReply`'s `agent_id` straight into
+    /// `author`, and the console keys on the string. A teammate holding that id
+    /// would therefore render *as the host*, which is a worse confusion than the
+    /// one this issue set out to fix, and the value it replaces (`"operator"`)
+    /// was already reserved.
+    ///
+    /// Its sibling `CONFINED_AGENT_ID` needs no entry here: `agent_slug` emits
+    /// only lowercase alphanumerics and underscores, so `"workflow-copilot"` is
+    /// unmintable by construction. `"system"` is an ordinary legal slug.
+    #[test]
+    fn mint_agent_id_never_returns_the_host_author() {
+        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        assert_eq!(
+            agent_slug("System"),
+            crate::ports::SYSTEM_AUTHOR,
+            "the guard is needed precisely because this is a legal slug"
+        );
+        assert_ne!(
+            record.mint_agent_id("System"),
+            crate::ports::SYSTEM_AUTHOR,
+            "a teammate must never be minted onto the id the runtime speaks under"
+        );
+    }
+
+    /// Issue #1162: the resolve every surface that takes a teammate key runs.
+    /// An id resolves, an overlay teammate's **display name** resolves to the
+    /// id it was minted under, and a key that is nobody resolves to nothing.
+    #[test]
+    fn resolve_teammate_key_takes_an_id_or_a_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "dana_designer".into(),
+            name: "Dana Designer".into(),
+            role: "Designer".into(),
+            description: None,
+            tools: None,
+            model: None,
+            harness: None,
+        });
+
+        assert_eq!(
+            record.resolve_teammate_key("ceo"),
+            TeammateResolution::Agent("ceo".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("dana_designer"),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        // The case #1162 is about: the name `query_company` prints, grounding
+        // to the id the delegation tools accept.
+        assert_eq!(
+            record.resolve_teammate_key("Dana Designer"),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("  dana designer  "),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("ghost"),
+            TeammateResolution::Unknown
+        );
+        assert_eq!(
+            record.resolve_teammate_key("   "),
+            TeammateResolution::Unknown
+        );
+    }
+
+    /// Ids win. A teammate whose **display name** is another teammate's id can
+    /// never intercept work meant for that id — the ordering is the guarantee
+    /// that makes one shared resolver safe to use everywhere.
+    #[test]
+    fn resolve_teammate_key_never_lets_a_name_shadow_an_id() {
+        let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "impostor".into(),
+            name: "ceo".into(),
+            role: "Growth".into(),
+            description: None,
+            tools: None,
+            model: None,
+            harness: None,
+        });
+        assert_eq!(
+            record.resolve_teammate_key("ceo"),
+            TeammateResolution::Agent("ceo".into())
+        );
+    }
+
+    /// Two teammates answering to one display name is a collision the operator
+    /// created, and it is reported as one: every colliding id comes back, so a
+    /// caller can name them instead of silently taking the first.
+    #[test]
+    fn resolve_teammate_key_reports_a_name_two_teammates_answer_to() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        for id in ["dana_designer", "dana_designer_2"] {
+            record.overlay_agents.push(OverlayAgent {
+                id: id.into(),
+                name: "Dana Designer".into(),
+                role: "Designer".into(),
+                description: None,
+                tools: None,
+                model: None,
+                harness: None,
+            });
+        }
+        assert_eq!(
+            record.resolve_teammate_key("dana designer"),
+            TeammateResolution::Ambiguous(vec!["dana_designer".into(), "dana_designer_2".into()])
+        );
+        // Either id still resolves on its own — the collision is in the name.
+        assert_eq!(
+            record.resolve_teammate_key("dana_designer_2"),
+            TeammateResolution::Agent("dana_designer_2".into())
+        );
     }
 
     /// Whatever is minted is a legal roster id, suffix included — the same
@@ -4809,12 +7458,25 @@ mod test {
         PolicyOverride {
             mode: mode.map(str::to_string),
             always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
             set_by: Actor {
                 kind: ActorKind::User,
                 id: "user-1".to_string(),
             },
             at_millis: 1_700_000_000_000,
         }
+    }
+
+    #[test]
+    fn explicit_no_cap_policy_override_survives_json_round_trip() {
+        let mut override_ = policy_entry(None, None);
+        override_.auto_approve_under_usd = Some(None);
+        let encoded = serde_json::to_value(&override_).expect("serialize override");
+        assert!(encoded["auto_approve_under_usd"].is_null());
+        let decoded: PolicyOverride =
+            serde_json::from_value(encoded).expect("deserialize override");
+        assert_eq!(decoded.auto_approve_under_usd, Some(None));
     }
 
     /// With no override stored, `effective_policy` is the manifest verbatim —
@@ -4912,17 +7574,171 @@ mod test {
         );
     }
 
-    /// `auto_approve_under_usd` is not overridable and keeps reading the
-    /// manifest, so the merge cannot silently drop a threshold it does not carry.
+    /// The spend threshold and deadline are overridden independently of the
+    /// tier and list, including an explicit no-cap choice.
     #[test]
-    fn the_spend_threshold_is_untouched_by_a_policy_override() {
+    fn spend_threshold_and_deadline_can_be_overridden_independently() {
         let manifest = "[company]\nname = \"Acme\"\n\
              [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
              [policy]\nmode = \"supervised\"\nauto_approve_under_usd = 2.5\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_policy = Some(policy_entry(Some("full"), Some(vec![])));
         assert_eq!(record.effective_policy().auto_approve_under_usd, Some(2.5));
+        assert_eq!(record.effective_policy().approval_ttl_hours, None);
+
+        let override_ = record.overlay_policy.as_mut().unwrap();
+        override_.auto_approve_under_usd = Some(None);
+        override_.approval_ttl_hours = Some(72);
+        let effective = record.effective_policy();
+        assert_eq!(effective.auto_approve_under_usd, None);
+        assert_eq!(effective.approval_ttl_hours, Some(72));
     }
+
+    /// The roster a company was launched with is still the roster it runs, until
+    /// somebody edits it: with no override stored, every field reads straight off
+    /// the manifest. The regression net that says adding this layer changed
+    /// nothing for a company that never uses it.
+    #[test]
+    fn an_unedited_teammate_reads_straight_off_the_manifest() {
+        let record = desk_record(EDIT_ROSTER, Vec::new());
+        let analyst = record.effective_agent("analyst").expect("on the roster");
+        assert!(matches!(analyst, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(analyst.role, "Analyst");
+        assert_eq!(analyst.description.as_deref(), Some("Weighs evidence."));
+        assert_eq!(analyst.name, None);
+        assert!(record.effective_agent("nobody").is_none());
+    }
+
+    /// An edit wins over the blueprint, field by field — and only field by
+    /// field: what nobody touched keeps tracking `company.toml`, so a redeploy
+    /// that changes it is still felt.
+    #[test]
+    fn an_edit_wins_per_field_and_the_rest_still_tracks_the_manifest() {
+        let mut record = desk_record(EDIT_ROSTER, Vec::new());
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "analyst".to_string(),
+            role: Some("Chief Vibes".to_string()),
+            name: Some("Robin".to_string()),
+            ..Default::default()
+        });
+
+        let analyst = record.effective_agent("analyst").expect("on the roster");
+        assert_eq!(analyst.role, "Chief Vibes");
+        assert_eq!(analyst.name.as_deref(), Some("Robin"));
+        assert_eq!(
+            analyst.description.as_deref(),
+            Some("Weighs evidence."),
+            "an untouched field must still come from the manifest"
+        );
+        assert_eq!(
+            analyst.tools,
+            Some(vec!["workspace.read".to_string()]),
+            "and so must an untouched tool line"
+        );
+        // The blueprint itself is never rewritten — that is the whole point of
+        // storing this as an overlay.
+        assert_eq!(record.manifest.agents[0].role, "Analyst");
+    }
+
+    /// A stored empty description is the operator clearing it, not a teammate
+    /// whose instructions are the empty string. Collapsing the two would leave a
+    /// cleared description silently re-inheriting the blueprint's.
+    #[test]
+    fn a_cleared_description_stays_cleared() {
+        let mut record = desk_record(EDIT_ROSTER, Vec::new());
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "analyst".to_string(),
+            description: Some(String::new()),
+            ..Default::default()
+        });
+        assert_eq!(
+            record.effective_agent("analyst").unwrap().description,
+            None,
+            "a cleared description must not fall back to the manifest's"
+        );
+    }
+
+    /// Two patches of different fields are one override, merged — never two
+    /// rows, of which `effective_agent` would read whichever came first.
+    #[test]
+    fn a_second_edit_merges_rather_than_duplicating() {
+        let mut record = desk_record(EDIT_ROSTER, Vec::new());
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "analyst".to_string(),
+            role: Some("Chief Vibes".to_string()),
+            ..Default::default()
+        });
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "analyst".to_string(),
+            // Double-option since #1804: `Some(Some(globs))` narrows.
+            tools: Some(Some(vec!["composio".to_string()])),
+            ..Default::default()
+        });
+
+        assert_eq!(record.overlay_agent_edits.len(), 1);
+        let analyst = record.effective_agent("analyst").unwrap();
+        assert_eq!(analyst.role, "Chief Vibes", "the earlier edit survives");
+        assert_eq!(analyst.tools, Some(vec!["composio".to_string()]));
+    }
+
+    /// A removed teammate is off the roster everywhere the roster is read: the
+    /// effective list, the per-id lookup, and the membership predicate the desk
+    /// overlay validates against. Anything that still answered `true` here would
+    /// be a surface on which a deleted teammate is still addressable.
+    #[test]
+    fn a_retired_teammate_is_off_the_roster() {
+        let mut record = desk_record(EDIT_ROSTER, Vec::new());
+        assert!(record.is_roster_agent("analyst"));
+
+        record.retire_agent("analyst");
+        assert!(record.is_retired("analyst"));
+        assert!(record.effective_agent("analyst").is_none());
+        assert!(record.effective_agents().is_empty());
+        assert!(!record.is_roster_agent("analyst"));
+        // The blueprint is untouched — the tombstone is what removes it, which
+        // is the only thing that survives the manifest being re-read on load.
+        assert_eq!(record.manifest.agents[0].id, "analyst");
+    }
+
+    /// Retiring twice is one tombstone. A second entry changes nothing about the
+    /// roster but does move the harness's overlay fingerprint, which would drop
+    /// every live agent session for a delete that had already happened.
+    #[test]
+    fn retiring_a_teammate_twice_records_one_tombstone() {
+        let mut record = desk_record(EDIT_ROSTER, Vec::new());
+        record.retire_agent("analyst");
+        record.retire_agent("analyst");
+        assert_eq!(record.overlay_retired_agents, vec!["analyst".to_string()]);
+    }
+
+    /// A removed teammate loses its blueprint desk seat too. Left in place it
+    /// would still lead the desk, still take `delegate_to_desk` hand-offs and
+    /// still sit on the org chart — a delete that removed the card and nothing
+    /// else.
+    #[test]
+    fn a_retired_teammate_loses_its_desk_seat() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
+             [[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\
+             [[group_chat]]\nid = \"studio\"\nname = \"Studio\"\n\
+             members = [\"analyst\", \"writer\"]\n";
+        let mut record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.effective_desk_members("studio"),
+            ["analyst", "writer"]
+        );
+
+        record.retire_agent("analyst");
+        assert_eq!(
+            record.effective_desk_members("studio"),
+            ["writer"],
+            "and the desk's lead moves to whoever is actually left"
+        );
+    }
+
+    const EDIT_ROSTER: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
+         description = \"Weighs evidence.\"\ntools = [\"workspace.read\"]\n";
 
     /// Issue #343: with no override stored, `effective_budget` is the manifest
     /// value verbatim — the pre-#343 behaviour, and the regression net that says
@@ -4987,7 +7803,9 @@ mod test {
             name: "Shane".to_string(),
             role: "Growth".to_string(),
             description: None,
-            tools: Vec::new(),
+            tools: None,
+            model: None,
+            harness: None,
         });
         assert_eq!(record.effective_budget("shane"), None);
 
@@ -5083,6 +7901,284 @@ mod test {
         );
     }
 
+    // ---- per-agent persona override (issue #1530) ------------------------
+
+    /// A roster with one manifest agent carrying a blueprint `prompt` and one
+    /// without — the two starting positions every persona-override case builds on.
+    const PERSONA_ROSTER: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\nprompt = \"Blueprint persona.\"\n\
+         [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n";
+
+    fn override_entry(agent_id: &str, instructions: Option<&str>) -> AgentOverride {
+        AgentOverride {
+            agent_id: agent_id.to_string(),
+            instructions: instructions.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// A stored override wins over the manifest `prompt`: this is how a
+    /// manifest/blueprint agent's persona is edited without rewriting
+    /// `company.toml`.
+    #[test]
+    fn effective_instructions_prefers_override() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.overlay_agent_edits = vec![override_entry("ceo", Some("Be terse."))];
+        assert_eq!(
+            record.effective_instructions("ceo"),
+            Some("Be terse.".to_string())
+        );
+    }
+
+    /// With no override stored, the manifest `prompt` is returned verbatim — the
+    /// pre-#1530 behaviour, and the net that says adding the field changed
+    /// nothing for a company that never edits a persona.
+    #[test]
+    fn effective_instructions_falls_back_to_manifest_prompt() {
+        let record = desk_record(PERSONA_ROSTER, Vec::new());
+        assert_eq!(
+            record.effective_instructions("ceo"),
+            Some("Blueprint persona.".to_string())
+        );
+    }
+
+    /// A bare overlay teammate (no manifest row) and a manifest agent that
+    /// declares no `prompt` both resolve to `None` when nothing overrides them.
+    #[test]
+    fn effective_instructions_none_for_bare_overlay_or_promptless_agent() {
+        let record = desk_record(PERSONA_ROSTER, Vec::new());
+        assert_eq!(record.effective_instructions("eng"), None);
+        assert_eq!(record.effective_instructions("nobody"), None);
+    }
+
+    /// An override whose `instructions` is `None` carries nothing, so resolution
+    /// falls through to the blueprint — the "reset to blueprint" contract. A
+    /// stored empty-instructions row must never blank the persona.
+    #[test]
+    fn effective_instructions_empty_override_resets_to_blueprint() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.overlay_agent_edits = vec![override_entry("ceo", None)];
+        assert_eq!(
+            record.effective_instructions("ceo"),
+            Some("Blueprint persona.".to_string()),
+            "an override that carries no instructions must fall through to the manifest"
+        );
+    }
+
+    /// `upsert_agent_override` replaces the teammate's row in place rather than
+    /// accumulating a second one — the invariant `agent_override`'s first-match
+    /// read depends on.
+    #[test]
+    fn upsert_agent_override_replaces_not_appends() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.upsert_agent_override(override_entry("ceo", Some("first")));
+        record.upsert_agent_override(override_entry("ceo", Some("second")));
+        assert_eq!(record.overlay_agent_edits.len(), 1);
+        assert_eq!(
+            record.effective_instructions("ceo"),
+            Some("second".to_string())
+        );
+    }
+
+    /// `clear_agent_override` drops the row so the blueprint applies again, and
+    /// is a no-op when nothing is stored.
+    #[test]
+    fn clear_agent_override_drops_the_row() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.upsert_agent_override(override_entry("ceo", Some("custom")));
+        record.clear_agent_override("ceo");
+        assert!(record.overlay_agent_edits.is_empty());
+        assert_eq!(
+            record.effective_instructions("ceo"),
+            Some("Blueprint persona.".to_string())
+        );
+        // No-op when absent.
+        record.clear_agent_override("ceo");
+        assert!(record.overlay_agent_edits.is_empty());
+    }
+
+    // ---- per-agent avatar override --------------------------------------
+
+    /// Nobody has chosen until somebody does: an untouched roster resolves to
+    /// `None`, which the console renders as the mascot it hashes from the id.
+    #[test]
+    fn effective_avatar_is_none_until_chosen() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        assert_eq!(record.effective_avatar("ceo"), None);
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:teal".into()),
+            ..Default::default()
+        });
+        assert_eq!(record.effective_avatar("ceo"), Some("tiny:teal".into()));
+    }
+
+    /// An overlay teammate has no manifest row, and picks a face through the
+    /// same field — one override answers for both kinds of teammate.
+    #[test]
+    fn effective_avatar_answers_for_an_overlay_teammate() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "alex".into(),
+            name: "Alex".into(),
+            role: "Writer".into(),
+            description: None,
+            tools: None,
+            model: None,
+            harness: None,
+        });
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "alex".into(),
+            avatar: Some("blob:01J8Z5Q9YQ".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            record.effective_avatar("alex"),
+            Some("blob:01J8Z5Q9YQ".into())
+        );
+    }
+
+    /// Resetting a face says nothing about the persona. The two clear paths
+    /// touch one field each, so neither can quietly undo the other's edit —
+    /// this is the regression the shared retain helper exists to prevent.
+    #[test]
+    fn clearing_one_override_field_leaves_the_others() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            instructions: Some("Be terse.".into()),
+            ..Default::default()
+        });
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:rose".into()),
+            ..Default::default()
+        });
+
+        record.clear_agent_avatar("ceo");
+        assert_eq!(record.effective_avatar("ceo"), None);
+        assert_eq!(
+            record.effective_instructions("ceo"),
+            Some("Be terse.".to_string()),
+            "resetting a face must not reset the persona"
+        );
+
+        record.clear_agent_override("ceo");
+        assert!(
+            record.overlay_agent_edits.is_empty(),
+            "the row goes once it carries nothing"
+        );
+    }
+
+    /// The mirror of the above, and the sharper half: an avatar-only override
+    /// must survive a persona reset. Before the shared retain helper, the
+    /// persona path's `retain` did not know the field existed and dropped the
+    /// whole row — resetting a persona silently reset the face too.
+    #[test]
+    fn clearing_the_persona_keeps_an_avatar_only_override() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            avatar: Some("tiny:rose".into()),
+            ..Default::default()
+        });
+        record.clear_agent_override("ceo");
+        assert_eq!(record.effective_avatar("ceo"), Some("tiny:rose".into()));
+    }
+
+    /// Duplicates are detectable, so a caller holding overrides it did not write
+    /// (a bundle import) can refuse them rather than apply whichever sorts first.
+    #[test]
+    fn duplicate_override_agent_id_detects() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        assert_eq!(
+            AgentOverride::duplicate_agent_id(&record.overlay_agent_edits),
+            None
+        );
+        record.overlay_agent_edits = vec![
+            override_entry("ceo", Some("a")),
+            override_entry("eng", Some("b")),
+            override_entry("ceo", Some("c")),
+        ];
+        assert_eq!(
+            AgentOverride::duplicate_agent_id(&record.overlay_agent_edits),
+            Some("ceo")
+        );
+    }
+
+    /// An override carrying nothing is empty — and an override carrying only
+    /// `avatar`, `model` or `harness` is not, so a face-only edit or a
+    /// model-only edit is persisted rather than dropped as a no-op.
+    #[test]
+    fn agent_override_is_empty_only_when_nothing_is_set() {
+        assert!(override_entry("ceo", None).is_empty());
+        assert!(!override_entry("ceo", Some("x")).is_empty());
+
+        for (field, fill) in [
+            (
+                "name",
+                Box::new(|e: &mut AgentOverride| e.name = Some("Ada".to_string()))
+                    as Box<dyn Fn(&mut AgentOverride)>,
+            ),
+            (
+                "role",
+                Box::new(|e: &mut AgentOverride| e.role = Some("CEO".to_string())),
+            ),
+            (
+                "description",
+                Box::new(|e: &mut AgentOverride| e.description = Some("desc".to_string())),
+            ),
+            (
+                "tools",
+                Box::new(|e: &mut AgentOverride| e.tools = Some(Some(vec!["docs.*".to_string()]))),
+            ),
+            (
+                "instructions",
+                Box::new(|e: &mut AgentOverride| e.instructions = Some("Be terse.".to_string())),
+            ),
+            (
+                "avatar",
+                Box::new(|e: &mut AgentOverride| e.avatar = Some("tiny:teal".to_string())),
+            ),
+            (
+                "model",
+                Box::new(|e: &mut AgentOverride| e.model = Some("gpt-5".to_string())),
+            ),
+            (
+                "harness",
+                Box::new(|e: &mut AgentOverride| e.harness = Some("laptop".to_string())),
+            ),
+        ] {
+            let mut edit = override_entry("ceo", None);
+            fill(&mut edit);
+            assert!(
+                !edit.is_empty(),
+                "{field} alone must make the override non-empty"
+            );
+        }
+    }
+
+    /// The persona overrides round-trip through the `OverlayBlob` the
+    /// sqlite/mongodb stores persist, and pre-#1530 rows load as "no overrides"
+    /// (the manifest still decides) rather than failing to parse.
+    #[test]
+    fn overlay_blob_round_trips_agent_overrides() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.overlay_agent_edits = vec![override_entry("ceo", Some("Be terse."))];
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.agent_edits, record.overlay_agent_edits);
+
+        // A pre-#1530 object row (no `agent_overrides` key) loads as empty.
+        let legacy = r#"{"agents":[],"desk_members":[]}"#;
+        assert!(
+            OverlayBlob::parse(legacy)
+                .expect("pre-persona object")
+                .agent_edits
+                .is_empty()
+        );
+    }
+
     /// An operator-created overlay desk resolves through the same
     /// `effective_desk_members` / `resolve_desk_id` / `desk_exists` helpers the
     /// manifest desks use, so the REST list and the harness desk-lead resolver
@@ -5098,6 +8194,7 @@ mod test {
             name: "Growth".into(),
             description: None,
             members: vec!["eng".into()],
+            responder: crate::ports::types::ResponderMode::default(),
         });
         // Resolves by id and by case-insensitive name.
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -5116,6 +8213,144 @@ mod test {
             record.effective_desk_members("growth"),
             vec!["eng".to_string(), "ceo".to_string()]
         );
+    }
+
+    /// An **overlay** desk never answers to a General spelling (issue #1743).
+    ///
+    /// `POST .../desks` accepted `general`, `main` and the display name
+    /// `General` until that issue, so an upgraded record can be carrying one.
+    /// Every routing decision on the built-in `#general` channel funnels
+    /// through this one resolver — `desk_lead` → `responder_for` picks who
+    /// answers, and `mentioned_agents` picks who `@everyone` names — so a desk
+    /// that resolves here takes the company-wide line over: the console shows
+    /// `#general` while that desk's lead answers it, and a broadcast meant for
+    /// the whole roster reaches only that desk's members.
+    ///
+    /// Keyed on the **key being asked for**, not on the desk, which is what
+    /// keeps this a narrowing of one question rather than a retirement: the
+    /// same desk still resolves under its own non-General id.
+    #[test]
+    fn an_overlay_desk_does_not_answer_to_a_general_spelling() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        record.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "General".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["ceo".into()],
+        });
+
+        for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
+            assert_eq!(
+                record.resolve_desk_id(spelling),
+                None,
+                "an overlay desk must not answer to {spelling:?}"
+            );
+        }
+        // Both desks still exist and still route under their own ids — this
+        // narrows one question, it does not take a desk away.
+        assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+        assert!(record.desk_exists("main"));
+        assert_eq!(
+            record.effective_desk_members("main"),
+            vec!["eng".to_string()]
+        );
+    }
+
+    /// ...and it must not be reachable by its **display name** either.
+    ///
+    /// The guard narrows the key being asked for, so `{id: "main", name: "Front
+    /// office"}` slipped through it: `Front office` is not a General spelling,
+    /// the name match fired, and the resolver returned `main` — an id that
+    /// `GET .../desks` filters out and that every desk mutation refuses. Its
+    /// lead would answer, and the reply would be journaled under a thread the
+    /// console renders no channel for: a conversation with no way back.
+    ///
+    /// An overlay desk on a General id is unaddressable by design; it must be
+    /// unaddressable by *every* address.
+    #[test]
+    fn an_overlay_desk_on_a_general_id_is_unreachable_by_name_too() {
+        let mut record = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            Vec::new(),
+        );
+        record.overlay_desks.push(OverlayDesk {
+            id: "main".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        assert_eq!(
+            record.resolve_desk_id("Front office"),
+            None,
+            "an overlay desk whose id shadows General must not answer to its name"
+        );
+        assert_eq!(
+            record.resolve_desk_id("front office"),
+            None,
+            "nor case-folded"
+        );
+        assert_eq!(record.resolve_desk_id("main"), None, "nor to the id itself");
+        // An ordinary overlay desk is untouched — this narrows one desk, not the rule.
+        let mut ordinary = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            Vec::new(),
+        );
+        ordinary.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "Front office".into(),
+            description: None,
+            responder: Default::default(),
+            members: vec!["eng".into()],
+        });
+        assert_eq!(
+            ordinary.resolve_desk_id("Front office").as_deref(),
+            Some("ops")
+        );
+        assert_eq!(ordinary.resolve_desk_id("ops").as_deref(), Some("ops"));
+    }
+
+    /// A desk the **manifest** declares under a General spelling is the
+    /// blueprint's own General desk, and this host has always honoured it
+    /// (issue #1743). The narrowing above is about overlay desks only; the
+    /// manifest arm of the resolver is searched first and is untouched.
+    #[test]
+    fn a_blueprint_desk_still_owns_a_general_spelling() {
+        let record = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
+             [[group_chat]]\nid = \"main\"\nname = \"Front office\"\nmembers = [\"eng\"]\n",
+            Vec::new(),
+        );
+        assert_eq!(record.resolve_desk_id("main").as_deref(), Some("main"));
+        assert_eq!(
+            record.effective_desk_members("main"),
+            vec!["eng".to_string()]
+        );
+        // And by display name, the other spelling `resolve_desk_id` matches.
+        let named = desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"General\"\nmembers = [\"ceo\"]\n",
+            Vec::new(),
+        );
+        assert_eq!(named.resolve_desk_id("General").as_deref(), Some("ops"));
+        assert_eq!(named.resolve_desk_id("general").as_deref(), Some("ops"));
     }
 
     /// The overlay blob round-trips operator-created desks through its persisted
@@ -5364,8 +8599,54 @@ mod test {
             workflow_id: "digest".to_string(),
             run_id: "run-1".to_string(),
             scheduled: true,
+            started_by: Some(StartedBy::Operator),
         };
         assert_eq!(round_trip(&event), event);
+    }
+
+    /// Every [`StartedBy`] arm round-trips, including the fielded `Agent` one —
+    /// the shape a parked blocker's sender resolution reads back.
+    #[test]
+    fn started_by_round_trips_all_arms() {
+        for started_by in [
+            StartedBy::Operator,
+            StartedBy::Agent("ceo".to_string()),
+            StartedBy::Schedule,
+        ] {
+            let event = CompanyEvent::WorkflowRunStarted {
+                workflow_id: "digest".to_string(),
+                run_id: "run-1".to_string(),
+                scheduled: matches!(started_by, StartedBy::Schedule),
+                started_by: Some(started_by.clone()),
+            };
+            assert_eq!(
+                round_trip(&event),
+                event,
+                "{started_by:?} did not round-trip"
+            );
+        }
+    }
+
+    /// A `WorkflowRunStarted` line written before this field existed (issue
+    /// #1862 prerequisite) still replays, with `started_by` reading back
+    /// `None` rather than failing to parse. Pinned against a hand-written
+    /// legacy payload rather than a round-trip, for the same reason
+    /// `a_pre_881_run_finished_line_still_replays` is: a round-trip can only
+    /// ever prove the new shape agrees with itself.
+    #[test]
+    fn a_pre_1862_run_started_line_still_replays_with_no_sender() {
+        let legacy = serde_json::json!({
+            "kind": "WorkflowRunStarted",
+            "workflow_id": "digest",
+            "run_id": "run-1",
+            "scheduled": false
+        });
+        let event: CompanyEvent =
+            serde_json::from_value(legacy).expect("a pre-#1862 journal line must still parse");
+        let CompanyEvent::WorkflowRunStarted { started_by, .. } = &event else {
+            panic!("expected a WorkflowRunStarted, got {event:?}");
+        };
+        assert_eq!(started_by, &None, "a legacy line names no sender");
     }
 
     /// Both node outcomes round-trip, including the elapsed reading — the field
@@ -5387,6 +8668,8 @@ mod test {
                 node_id: "ceo".to_string(),
                 status,
                 elapsed_ms: 1234,
+                diagnostics: Vec::new(),
+                agent_run_id: None,
             };
             assert_eq!(round_trip(&event), event);
         }
@@ -5451,14 +8734,17 @@ mod test {
 
     /// Every field on both #371 variants is required, and that is the point:
     /// the correlation id is what groups a run's nodes with its outcome, so a
-    /// line without one would be unfoldable. Nothing is `skip_serializing_if`,
-    /// so the wire form is fully self-describing.
+    /// line without one would be unfoldable. Nothing is `skip_serializing_if`
+    /// — except `WorkflowRunStarted::started_by` (issue #1862 prerequisite),
+    /// which is additive and `None` here on purpose, so the wire form stays
+    /// self-describing for every field that predates it.
     #[test]
     fn workflow_progress_variants_serialize_every_field() {
         let started = serde_json::to_string(&CompanyEvent::WorkflowRunStarted {
             workflow_id: "digest".to_string(),
             run_id: "run-1".to_string(),
             scheduled: false,
+            started_by: None,
         })
         .expect("serialize");
         assert_eq!(
@@ -5472,6 +8758,8 @@ mod test {
             node_id: "ceo".to_string(),
             status: WorkflowNodeStatus::Error,
             elapsed_ms: 7,
+            diagnostics: Vec::new(),
+            agent_run_id: None,
         })
         .expect("serialize");
         assert_eq!(
@@ -5771,5 +9059,113 @@ mod test {
         assert!(card.name.is_empty());
         assert!(card.payment_requirements.is_empty());
         assert!(card.supported_interfaces.is_empty());
+    }
+
+    /// Issue #1682: an attachment round-trips on an `OperatorMessage`, and an
+    /// empty list serializes *away* — the additive shape that makes the field
+    /// zero-migration, on exactly the terms `mentions` / `deliverable` proved
+    /// for themselves above.
+    #[test]
+    fn operator_message_attachments_round_trip_and_skip_when_empty() {
+        // Empty is absent: a message with no attachment serializes byte-for-byte
+        // as it did before the field existed.
+        let bare = CompanyEvent::OperatorMessage {
+            text: "hi".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"kind":"OperatorMessage","text":"hi"}"#,
+            "an empty attachment list must not appear on the wire"
+        );
+
+        // A carried attachment survives the round trip with every field intact.
+        let carried = CompanyEvent::OperatorMessage {
+            text: "see attached".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: vec![Attachment {
+                node_id: "node-1".into(),
+                name: "diagram.png".into(),
+                mime: "image/png".into(),
+                size: 2048,
+                extracted_text: None,
+            }],
+        };
+        let json = serde_json::to_string(&carried).unwrap();
+        assert!(json.contains(r#""nodeId":"node-1""#), "{json}");
+        assert!(json.contains(r#""mime":"image/png""#), "{json}");
+        let back: CompanyEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            CompanyEvent::OperatorMessage { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].name, "diagram.png");
+                assert_eq!(attachments[0].size, 2048);
+            }
+            other => panic!("expected OperatorMessage, got {other:?}"),
+        }
+
+        // A pre-#1682 record with no `attachments` key still loads, as an empty
+        // list — the `#[serde(default)]` half of the contract.
+        let legacy = r#"{"kind":"OperatorMessage","text":"hi"}"#;
+        match serde_json::from_str::<CompanyEvent>(legacy).unwrap() {
+            CompanyEvent::OperatorMessage { attachments, .. } => assert!(attachments.is_empty()),
+            other => panic!("expected OperatorMessage, got {other:?}"),
+        }
+    }
+
+    /// Codex review finding on #1682, round 2: `extracted_text` is a later
+    /// addition to `Attachment` itself, so it needs the identical
+    /// omit-when-absent / default-on-load contract `attachments` got above —
+    /// a record journaled by the first round of the fix (a reference with no
+    /// extracted text) must still load, and a `None` must not put a stray key
+    /// on the wire.
+    #[test]
+    fn attachment_extracted_text_round_trips_and_skips_when_absent() {
+        let no_text = Attachment {
+            node_id: "node-1".into(),
+            name: "photo.png".into(),
+            mime: "image/png".into(),
+            size: 2048,
+            extracted_text: None,
+        };
+        let json = serde_json::to_string(&no_text).unwrap();
+        assert!(
+            !json.contains("extractedText"),
+            "no extracted text must not appear on the wire: {json}"
+        );
+        assert_eq!(serde_json::from_str::<Attachment>(&json).unwrap(), no_text);
+
+        let with_text = Attachment {
+            node_id: "node-2".into(),
+            name: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 4096,
+            extracted_text: Some("Q3 revenue grew 12%.".to_string()),
+        };
+        let json = serde_json::to_string(&with_text).unwrap();
+        assert!(
+            json.contains(r#""extractedText":"Q3 revenue grew 12%.""#),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Attachment>(&json).unwrap(),
+            with_text
+        );
+
+        // A round 1 record (the reference alone, no `extractedText` key) still
+        // loads, defaulting to `None` — the same contract `attachments` itself
+        // got when it was added onto `OperatorMessage`.
+        let round_one = r#"{"nodeId":"node-3","name":"old.png","mime":"image/png","size":10}"#;
+        let loaded: Attachment = serde_json::from_str(round_one).unwrap();
+        assert_eq!(loaded.extracted_text, None);
     }
 }

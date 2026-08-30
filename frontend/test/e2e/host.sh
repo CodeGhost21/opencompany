@@ -15,7 +15,8 @@
 # how a suite comes to report on code that is not the code under test.
 #
 # Env:
-#   PW_HOST_BIND            address to bind         (default 127.0.0.1:8080)
+#   PW_HOST_BIND            address to bind         (default 127.0.0.1:<port derived
+#                           from this checkout's path, so worktrees do not collide)
 #   PW_HOST_COMPANY         company to load         (default companies/e2e_harness)
 #   PW_HOST_DATA_DIR        instance data root      (default target/e2e/data; wiped
 #                           each run ONLY while it stays inside target/e2e — see below)
@@ -28,7 +29,14 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"
 
-bind="${PW_HOST_BIND:-127.0.0.1:8080}"
+# Default port derived from this checkout's path, so two worktrees running the
+# suite at once do not land on one port. Playwright normally passes PW_HOST_BIND
+# in; this is the standalone path, and it computes the SAME number from the same
+# path (first 4 bytes of sha256, mod 8800, offset 8100) so the two agree. See the
+# `derivedPort` comment in ../../playwright.config.ts for why a fixed default is
+# actively dangerous here rather than merely inconvenient.
+derived_port=$(( 8100 + 16#$(printf '%s' "$root" | sha256sum | cut -c1-8) % 8800 ))
+bind="${PW_HOST_BIND:-127.0.0.1:$derived_port}"
 company="${PW_HOST_COMPANY:-$root/companies/e2e_harness}"
 data_dir="${PW_HOST_DATA_DIR:-$root/target/e2e/data}"
 binary="${PW_HOST_BINARY:-$root/target/debug/opencompany}"
@@ -47,7 +55,7 @@ That is the default feature set, which is all most of this suite needs — the
 harness company boots on the offline echo brain. Four specs need an agent that
 actually runs (issue #467); for those, build
 
-    cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
+    cargo build --locked --features openhuman,mcp --bin opencompany
 
 and run the suite with 'npm run e2e:live'. Point PW_HOST_BINARY elsewhere to
 use a release build or a binary you keep somewhere else.
@@ -57,7 +65,14 @@ fi
 
 if [[ "${PW_SKIP_CONSOLE_BUILD:-}" != "1" ]]; then
   echo "[e2e host] building the console bundle (PW_SKIP_CONSOLE_BUILD=1 to skip)" >&2
-  ( cd "$root/frontend" && npm run build >&2 )
+  (
+    cd "$root/frontend"
+    npm run build >&2
+    # The pages SDK is a separate Vite build. The main build clears `dist/`,
+    # so it must be emitted afterward or the shell's import map resolves
+    # `/pages-sdk/*.mjs` to the SPA fallback instead of a module.
+    npm run build:pages-sdk >&2
+  )
 fi
 
 if [[ ! -f "$root/frontend/dist/index.html" ]]; then
@@ -126,6 +141,13 @@ echo "[e2e host] serving $company on $bind (data: $data_dir)" >&2
 host_env=(
   "OPENCOMPANY_CONSOLE_DIR=$root/frontend/dist"
   "OPENCOMPANY_DATA_DIR=$data_dir"
+  # Issue #1844: this script always boots from a wiped data root (see above),
+  # so without this every spec's very first navigation would hit the new
+  # blocking onboarding gate — none of them know the three-step funnel exists.
+  # Specs that DO want to see the gate drive it through `page.route()`
+  # interception instead of a real activation state, so this is safe to set
+  # unconditionally for both companies this script serves.
+  "OPENCOMPANY_SKIP_ACTIVATION_GATE=1"
 )
 
 passthrough=(HOME PATH TMPDIR TZ LANG LC_ALL RUST_LOG RUST_BACKTRACE)

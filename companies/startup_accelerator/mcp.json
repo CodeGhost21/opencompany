@@ -1,0 +1,17 @@
+{
+  "$comment": "Applications and cohort records live in a shared workspace; a cohort company's own work is tracked in its own tracker.",
+  "mcpServers": {
+    "notion": {
+      "url": "https://mcp.notion.com/mcp",
+      "description": "The workspace this company's documents already live in. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/notion/auth"
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "description": "Issues and cycles, when the work is tracked outside this board. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/linear/auth"
+    }
+  }
+}

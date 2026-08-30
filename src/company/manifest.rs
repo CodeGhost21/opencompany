@@ -5,16 +5,18 @@
 //! the manifest inside a company directory, preferring `company.toml` over the
 //! legacy `agents.toml`.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{OpenCompanyError, Result};
-use crate::ports::{decode_wallet_address, normalize_email};
+use crate::ports::decode_wallet_address;
 
 use super::types::{
-    AUTH_MODES, BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, GATEABLE_NAMESPACES,
-    KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES,
-    PROMPT_CLASSES, TIERS, TOOL_PROVIDERS,
+    ACP_AGENTS, ACP_TRANSPORTS, AUTH_MODES, BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest,
+    GATEABLE_NAMESPACES, HARNESS_KINDS, Harness, IMPLICIT_HARNESS_ID, Inference, KNOWN_CHANNELS,
+    MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROMPT_CLASSES, TIERS,
+    TOOL_PROVIDERS,
 };
 
 /// The `delegates_to` entry that means "every desk this company has".
@@ -70,6 +72,106 @@ pub fn discover(input: &Path) -> Result<Located> {
 }
 
 impl CompanyManifest {
+    /// The company's harnesses, with the implicit one synthesized when the
+    /// manifest declares none.
+    ///
+    /// **Read harnesses through this, never through the `harnesses` field.** A
+    /// company with no `[[harness]]` block still runs on a harness — the
+    /// `built_in` one on the company-level `[inference]` — and a caller that
+    /// looked at the bare field would see an empty list and conclude the company
+    /// has no engine, which is never true.
+    pub fn effective_harnesses(&self) -> Vec<Harness> {
+        if self.harnesses.is_empty() {
+            return vec![Harness::implicit()];
+        }
+        self.harnesses.clone()
+    }
+
+    /// The id of the harness agents naming none run on.
+    ///
+    /// The entry marked `default = true`; the first declared if validation was
+    /// skipped and none is marked, so this is total rather than panicking on a
+    /// manifest that reached here unvalidated.
+    pub fn default_harness_id(&self) -> String {
+        let harnesses = self.effective_harnesses();
+        harnesses
+            .iter()
+            .find(|h| h.default)
+            .or_else(|| harnesses.first())
+            .map(|h| h.id.clone())
+            .unwrap_or_else(|| IMPLICIT_HARNESS_ID.to_string())
+    }
+
+    /// The default harness's `[harness.inference]`, when that harness declares
+    /// one; `None` when it runs on the company-level `[inference]`.
+    ///
+    /// The default harness is the one the base provider resolves for, and its
+    /// own inference section must beat the company-level one — the same
+    /// precedence a named harness gets in [`lanes::build`](crate::harness::lanes::build).
+    /// `None` (not "empty") because an absent declaration means "fall back to
+    /// `[inference]`", which the caller already holds.
+    pub fn default_harness_inference(&self) -> Option<Inference> {
+        let default_id = self.default_harness_id();
+        self.effective_harnesses()
+            .into_iter()
+            .find(|h| h.id == default_id)
+            .and_then(|h| h.inference)
+    }
+
+    /// The full default `Harness`, resolved by [`default_harness_id`](Self::default_harness_id).
+    ///
+    /// Total, like `default_harness_id` — falls back to the implicit `built_in`
+    /// harness so this never panics on a manifest reached before validation.
+    /// Exists so callers that need more than the id (chiefly `kind`, to decide
+    /// whether the default lane is even runnable — see
+    /// [`lanes::build`](crate::harness::lanes::build)) do not each re-derive
+    /// the same "find by default id" lookup [`default_harness_inference`](Self::default_harness_inference)
+    /// already does.
+    pub fn default_harness(&self) -> Harness {
+        let default_id = self.default_harness_id();
+        self.effective_harnesses()
+            .into_iter()
+            .find(|h| h.id == default_id)
+            .unwrap_or_else(Harness::implicit)
+    }
+
+    /// The harness `agent_id` runs on, resolving an unset binding to the
+    /// default. `None` only when the named harness does not exist — which
+    /// [`validate`](Self::validate) rejects, so a validated manifest always
+    /// answers.
+    ///
+    /// An id that no `[[harness]]` declares but that names a coding CLI this
+    /// build can drive locally resolves to
+    /// [`Harness::implicit_local`](crate::company::Harness::implicit_local) —
+    /// see that constructor for why a local ACP harness is not something a
+    /// `company.toml` should have to declare. A declared harness of the same
+    /// id is found first and always wins.
+    pub fn harness_for(&self, agent_id: &str) -> Option<Harness> {
+        let named = self
+            .agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .and_then(|a| a.harness.clone());
+        let want = named.unwrap_or_else(|| self.default_harness_id());
+        self.harness_by_id(&want)
+    }
+
+    /// The harness `id` names: a declared `[[harness]]` first, else the
+    /// synthesized local one when `id` is a coding CLI this build drives.
+    ///
+    /// The single resolver for "does this harness id mean anything?" — used
+    /// by [`harness_for`](Self::harness_for) resolving an agent's own binding
+    /// and by the console's write path validating a submitted one. Two copies
+    /// of the declared-then-implicit precedence would eventually disagree,
+    /// and the shape that disagreement takes is a harness the picker offers
+    /// and the `PATCH` then refuses.
+    pub fn harness_by_id(&self, id: &str) -> Option<Harness> {
+        self.effective_harnesses()
+            .into_iter()
+            .find(|h| h.id == id)
+            .or_else(|| Harness::is_implicit_local_id(id).then(|| Harness::implicit_local(id)))
+    }
+
     /// Reads, parses, and validates a manifest from `path`.
     ///
     /// `path` may be a manifest file or a directory containing one. Validation
@@ -82,8 +184,12 @@ impl CompanyManifest {
         Self::from_located(&discover(path.as_ref())?)
     }
 
-    /// Loads an already-[`discover`]ed manifest, reading the roster from
-    /// `agents/*.toml` when the bundle has one.
+    /// Loads an already-[`discover`]ed manifest, folding in what the bundle
+    /// around it declares: the roster from `agents/*.toml` when it has one, and
+    /// the MCP servers from `mcp.json`.
+    ///
+    /// This — not [`from_file`](Self::from_file) — is what every production
+    /// caller reaches through, which is why the bundle merge lives here.
     ///
     /// Split out from [`from_path`](Self::from_path) so callers that need the
     /// [`Located`] value for themselves — `opencompany check`, which prints the
@@ -98,45 +204,79 @@ impl CompanyManifest {
         // both, and deriving the root from the located manifest is what keeps
         // the two call forms from resolving `agents/` differently.
         match located.path.parent() {
-            Some(bundle) if super::agent_file::has_agent_files(bundle) => {
-                Self::from_file_with_agents(&located.path, bundle)
-            }
-            _ => Self::from_file(&located.path),
+            Some(bundle) => Self::from_file_in_bundle(&located.path, bundle),
+            None => Self::from_file(&located.path),
         }
+    }
+
+    /// [`from_file`](Self::from_file), with everything the bundle around the
+    /// manifest declares folded in: the roster from `agents/*.toml` and the MCP
+    /// servers from `mcp.json`.
+    ///
+    /// Both are merged **before** validation, so a bundle-declared server is
+    /// held to exactly the rules an inline `[[mcp_server]]` is — the HTTP-only
+    /// transport boundary, the credential-free endpoint, the unique name —
+    /// without a second copy of them living in the parser.
+    fn from_file_in_bundle(path: &Path, bundle: &Path) -> Result<Self> {
+        let mut manifest = Self::parse_file(path)?;
+
+        if super::agent_file::has_agent_files(bundle) {
+            if !manifest.agents.is_empty() {
+                return Err(OpenCompanyError::ManifestInvalid {
+                    path: path.to_path_buf(),
+                    problems: vec![format!(
+                        "this company defines its roster in `{dir}/*.toml`, but `{file}` also has `[[agent]]` entries — the two forms are exclusive, so remove the `[[agent]]` blocks or delete the `{dir}/` directory.",
+                        dir = super::agent_file::AGENTS_DIR,
+                        file = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(MANIFEST_FILE),
+                    )],
+                });
+            }
+            manifest.agents = super::agent_file::load_agents(bundle)?;
+        }
+
+        let problems = manifest.merge_bundle_mcp_servers(bundle, path);
+        manifest.into_validated_with(path, problems)
+    }
+
+    /// Folds `<bundle>/mcp.json` into `mcp_servers`, returning every problem the
+    /// file carried.
+    ///
+    /// A name declared in both `mcp.json` and an inline `[[mcp_server]]` is
+    /// refused rather than resolved by precedence — the rule the roster already
+    /// uses for the same situation, and for the same reason: either precedence
+    /// rule silently discards a declaration somebody wrote down, and a server
+    /// that quietly is not the one you configured is worse than one that
+    /// refuses to start.
+    fn merge_bundle_mcp_servers(&mut self, bundle: &Path, path: &Path) -> Vec<String> {
+        let (servers, mut problems) = super::mcp_file::load_dir_mcp_servers(bundle);
+        for server in servers {
+            if self
+                .mcp_servers
+                .iter()
+                .any(|existing| existing.name.trim() == server.name)
+            {
+                problems.push(format!(
+                    "mcp server `{}` is declared in both `{}` and `{}` — the two forms are \
+                     exclusive per server, so keep one.",
+                    server.name,
+                    super::mcp_file::MCP_FILE,
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(MANIFEST_FILE),
+                ));
+                continue;
+            }
+            self.mcp_servers.push(server);
+        }
+        problems
     }
 
     /// Reads, parses, and validates a specific manifest file.
     pub fn from_file(path: &Path) -> Result<Self> {
         Self::parse_file(path)?.into_validated(path)
-    }
-
-    /// [`from_file`](Self::from_file), with the roster taken from
-    /// `<bundle>/agents/*.toml` rather than the manifest's `[[agent]]` entries.
-    ///
-    /// The bundle roster **replaces** the inline one; it does not merge with it.
-    /// Declaring both is refused rather than resolved by precedence, because
-    /// either precedence rule silently discards teammates an operator wrote
-    /// down — and the roster is the one part of a manifest where a silent
-    /// omission stays invisible until the missing teammate fails to answer.
-    fn from_file_with_agents(path: &Path, bundle: &Path) -> Result<Self> {
-        let mut manifest = Self::parse_file(path)?;
-
-        if !manifest.agents.is_empty() {
-            return Err(OpenCompanyError::ManifestInvalid {
-                path: path.to_path_buf(),
-                problems: vec![format!(
-                    "this company defines its roster in `{dir}/*.toml`, but `{file}` also has `[[agent]]` entries — the two forms are exclusive, so remove the `[[agent]]` blocks or delete the `{dir}/` directory.",
-                    dir = super::agent_file::AGENTS_DIR,
-                    file = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(MANIFEST_FILE),
-                )],
-            });
-        }
-
-        manifest.agents = super::agent_file::load_agents(bundle)?;
-        manifest.into_validated(path)
     }
 
     /// Reads and deserializes a manifest file, without validating it.
@@ -152,10 +292,80 @@ impl CompanyManifest {
         })
     }
 
+    /// Parses a manifest that came back out of the store, applying the global
+    /// baseline to it.
+    ///
+    /// **The read path every store backend uses**, rather than a bare
+    /// `toml::from_str`, because a company is provisioned once and read
+    /// thereafter: a baseline applied only where bundles are parsed would reach
+    /// new companies and no existing one. [`apply_globals`](Self::apply_globals)
+    /// is idempotent, so re-applying it on every load is what makes a baseline
+    /// change — or a newly written `[globals].disable` — take effect on the next
+    /// read instead of at the next reprovision.
+    ///
+    /// Deliberately does **not** validate: a stored manifest was validated when
+    /// it was accepted, and failing a load over a rule that tightened since
+    /// would strand a company that is already running.
+    pub fn from_stored_toml(toml_src: &str) -> std::result::Result<Self, toml::de::Error> {
+        let mut manifest: Self = toml::from_str(toml_src)?;
+        manifest.apply_globals();
+        Ok(manifest)
+    }
+
+    /// Merges the global baseline ([`crate::globals`]) into this manifest's
+    /// roster.
+    ///
+    /// Idempotent, and safe to call on a manifest that already carries merged
+    /// globals: every teammate marked [`Agent::global`] is dropped first, then
+    /// the current baseline is re-appended. That is what lets a stored manifest
+    /// — which is serialized back out with the merged roster in it — pick up a
+    /// changed baseline and honour a `[globals].disable` entry written later.
+    ///
+    /// Two ordering rules, both protecting the same thing:
+    ///
+    /// * globals are appended **after** the company's own roster, because
+    ///   [`orchestrator_id`](super::orchestrator_id) falls back to the first
+    ///   agent declared when nobody is tagged — prepending would hand a company
+    ///   with an untagged roster to a global teammate;
+    /// * an id the company already declares is **skipped**, so a company's own
+    ///   `researcher` supersedes the global one outright rather than merging
+    ///   with it field by field.
+    pub fn apply_globals(&mut self) {
+        self.agents.retain(|agent| !agent.global);
+        for global in crate::globals::agents() {
+            if crate::globals::disabled(&self.globals.disable, "agent", &global.id) {
+                continue;
+            }
+            if self.agents.iter().any(|agent| agent.id == global.id) {
+                continue;
+            }
+            let mut agent = global.clone();
+            agent.global = true;
+            self.agents.push(agent);
+        }
+    }
+
     /// Runs [`validate`](Self::validate), reporting every problem against `path`.
+    ///
+    /// The baseline is merged **after** validation, not before: a global is
+    /// already parsed and checked by [`crate::globals`], and running it through
+    /// this validator would let one malformed global fail every company on the
+    /// host rather than only itself.
     fn into_validated(self, path: &Path) -> Result<Self> {
-        let problems = self.validate();
+        self.into_validated_with(path, Vec::new())
+    }
+
+    /// [`into_validated`](Self::into_validated), carrying problems the caller
+    /// already found.
+    ///
+    /// Bundle files that are not the manifest — `mcp.json` today — are parsed
+    /// before validation runs, and what they found has to reach the same
+    /// refusal. Reported first, because a file that would not parse is the
+    /// thing to fix before anything the manifest says about it.
+    fn into_validated_with(mut self, path: &Path, mut problems: Vec<String>) -> Result<Self> {
+        problems.extend(self.validate());
         if problems.is_empty() {
+            self.apply_globals();
             Ok(self)
         } else {
             Err(OpenCompanyError::ManifestInvalid {
@@ -303,6 +513,10 @@ impl CompanyManifest {
             }
         }
 
+        // `ledgers` grants (per-agent ledger access): see `ledger_grant_problems`.
+        let (builtin_ledgers, _) = crate::ledger::builtins();
+        problems.extend(ledger_grant_problems(&self.agents, &builtin_ledgers));
+
         // Connections: a provider is required; a stated priority must be known.
         for (index, connection) in self.connections.iter().enumerate() {
             let label = if connection.provider.trim().is_empty() {
@@ -355,6 +569,8 @@ impl CompanyManifest {
         if !BRAIN_MODES.contains(&self.brain.mode.as_str()) {
             problems.push(one_of("`[brain].mode`", BRAIN_MODES, &self.brain.mode));
         }
+
+        problems.extend(self.validate_harnesses());
 
         problems.extend(self.validate_users());
 
@@ -458,6 +674,30 @@ impl CompanyManifest {
             }
         }
 
+        // `[globals].disable`: every entry must name a global that exists. An
+        // opt-out that matches nothing is the one failure mode this list must
+        // not have — the operator wrote it, believed it, and would still get the
+        // global.
+        for entry in &self.globals.disable {
+            if crate::globals::has(entry) {
+                continue;
+            }
+            match entry.split_once(':') {
+                Some((kind, _)) if !crate::globals::DISABLE_KINDS.contains(&kind) => {
+                    problems.push(format!(
+                        "`[globals].disable` entry `{entry}` has an unknown kind `{kind}` — use one of {}.",
+                        join_backticked(crate::globals::DISABLE_KINDS)
+                    ));
+                }
+                Some(_) => problems.push(format!(
+                    "`[globals].disable` entry `{entry}` names no global — there is nothing to disable."
+                )),
+                None => problems.push(format!(
+                    "`[globals].disable` entry `{entry}` is missing its kind — write `<kind>:<id>`, e.g. `agent:{entry}`."
+                )),
+            }
+        }
+
         problems
     }
 
@@ -470,6 +710,256 @@ impl CompanyManifest {
     /// filled in under the wrong mode is not a harmless leftover: it is an
     /// operator who believes they have granted someone access and has not, and
     /// the symptom is an eligible-looking address that can never sign in.
+    /// Validates the `[[harness]]` block and every agent's binding to it.
+    ///
+    /// A section on the wrong kind is an **error, not an ignored key**, for the
+    /// same reason a bundle carrying both roster forms is: a silently discarded
+    /// declaration stays invisible until the thing it configured misbehaves, and
+    /// "my model setting does nothing" is a very expensive way to learn that
+    /// `[harness.inference]` needs `kind = "built_in"`.
+    fn validate_harnesses(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+
+        // An absent block is the implicit built_in harness, which is always
+        // valid — and is what every shipped company has. Nothing to check
+        // beyond a binding to something that cannot resolve: a coding CLI this
+        // build drives locally needs no declaration (see
+        // `Harness::implicit_local`), so only a *different* name is a problem.
+        if self.harnesses.is_empty() {
+            if let Some(agent) = self.agents.iter().find(|a| {
+                a.harness
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|named| !Harness::is_implicit_local_id(named))
+            }) {
+                let named = agent.harness.as_deref().unwrap_or_default();
+                problems.push(format!(
+                    "agent `{}` names harness `{named}`, but the manifest declares no `[[harness]]`. \
+                     Declare it, or drop the `harness` field to use the built-in default.",
+                    agent.id
+                ));
+            }
+            return problems;
+        }
+
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for harness in &self.harnesses {
+            let id = harness.id.trim();
+            if id.is_empty() {
+                problems.push("`[[harness]]` entries must each set a non-empty `id`.".into());
+            } else if !is_snake_case(id) {
+                problems.push(format!(
+                    "`[[harness]].id` `{id}` is invalid — use snake_case, the same shape as an agent id."
+                ));
+            } else if !seen.insert(id) {
+                problems.push(format!(
+                    "`[[harness]].id` `{id}` is declared more than once — harness ids must be unique."
+                ));
+            }
+
+            if !HARNESS_KINDS.contains(&harness.kind.as_str()) {
+                problems.push(one_of(
+                    &format!("`[[harness]]` `{id}`'s `kind`"),
+                    HARNESS_KINDS,
+                    &harness.kind,
+                ));
+                // The per-kind checks below all read `kind`; with an unknown one
+                // they would report confusing follow-on problems.
+                continue;
+            }
+
+            match harness.kind.as_str() {
+                "built_in" => {
+                    if harness.acp.is_some() {
+                        problems.push(format!(
+                            "`[[harness]]` `{id}` is `kind = \"built_in\"` but declares `[harness.acp]`. \
+                             An embedded harness has no ACP transport — set `kind = \"acp\"` or drop the section."
+                        ));
+                    }
+                }
+                "acp" => {
+                    if harness.inference.is_some() {
+                        problems.push(format!(
+                            "`[[harness]]` `{id}` is `kind = \"acp\"` but declares `[harness.inference]`. \
+                             An ACP agent runs on its own credential — drop the section, or use `kind = \"built_in\"`."
+                        ));
+                    }
+                    problems.extend(self.validate_acp_harness(id, harness));
+                }
+                _ => unreachable!("kind was checked against HARNESS_KINDS above"),
+            }
+        }
+
+        let defaults = self.harnesses.iter().filter(|h| h.default).count();
+        if defaults == 0 {
+            problems.push(format!(
+                "no `[[harness]]` sets `default = true` — exactly one must, so an agent naming no \
+                 harness has somewhere to run. Candidates: {}.",
+                join_backticked(
+                    &self
+                        .harnesses
+                        .iter()
+                        .map(|h| h.id.as_str())
+                        .collect::<Vec<_>>()
+                )
+            ));
+        } else if defaults > 1 {
+            problems.push(format!(
+                "{defaults} `[[harness]]` entries set `default = true` — exactly one must: {}.",
+                join_backticked(
+                    &self
+                        .harnesses
+                        .iter()
+                        .filter(|h| h.default)
+                        .map(|h| h.id.as_str())
+                        .collect::<Vec<_>>()
+                )
+            ));
+        }
+
+        for agent in &self.agents {
+            let Some(named) = agent.harness.as_deref().map(str::trim) else {
+                continue;
+            };
+            // A coding CLI this build drives locally needs no declaration —
+            // whether it is installed is a fact about the machine, not the
+            // blueprint (see `Harness::implicit_local`).
+            if !seen.contains(named) && !Harness::is_implicit_local_id(named) {
+                problems.push(format!(
+                    "agent `{}` names harness `{named}`, which no `[[harness]]` declares. Declared: {}.",
+                    agent.id,
+                    join_backticked(&seen.iter().copied().collect::<Vec<_>>())
+                ));
+            }
+        }
+
+        // Issue #1245's per-agent follow-up: `agent.model` only means anything
+        // on an `acp` harness, exactly like `[harness.acp].model` above — see
+        // `validate_acp_harness`'s own doctrine on why silently accepting it
+        // elsewhere is worse than refusing it. Skipped when the agent names an
+        // unknown harness: the loop above already reports that, and piling a
+        // second, confusing complaint about its model on top would not help.
+        for agent in &self.agents {
+            let Some(model) = agent.model.as_deref() else {
+                continue;
+            };
+            if model.trim().is_empty() {
+                problems.push(format!(
+                    "agent `{}`'s `model` is set but empty. Drop the key to use the harness's \
+                     own default, rather than naming an empty one.",
+                    agent.id
+                ));
+                continue;
+            }
+            match self.harness_for(&agent.id) {
+                Some(harness) if harness.kind == "acp" => {
+                    if harness.acp.as_ref().map(|a| a.transport.as_str()) == Some("runner") {
+                        problems.push(format!(
+                            "agent `{}` names a `model` but its harness `{}` uses \
+                             `transport = \"runner\"`. Model overrides aren't supported for a \
+                             runner yet — the runner wire protocol doesn't carry them.",
+                            agent.id, harness.id
+                        ));
+                    }
+                }
+                Some(harness) => {
+                    problems.push(format!(
+                        "agent `{}` names a `model` but runs on harness `{}` (`kind = \"{}\"`), \
+                         which has no ACP transport to forward it to. Bind this agent to an \
+                         `acp` harness, or drop `model`.",
+                        agent.id, harness.id, harness.kind
+                    ));
+                }
+                None => {}
+            }
+        }
+
+        problems
+    }
+
+    /// The `[harness.acp]` cross-field rules: each transport requires its own
+    /// addressing field and forbids the other's, so a manifest cannot claim to
+    /// spawn a local agent *and* name a remote runner.
+    fn validate_acp_harness(&self, id: &str, harness: &Harness) -> Vec<String> {
+        let mut problems = Vec::new();
+        let Some(acp) = harness.acp.as_ref() else {
+            problems.push(format!(
+                "`[[harness]]` `{id}` is `kind = \"acp\"` but declares no `[harness.acp]` — \
+                 it needs a `transport`."
+            ));
+            return problems;
+        };
+
+        if !ACP_TRANSPORTS.contains(&acp.transport.as_str()) {
+            problems.push(one_of(
+                &format!("`[[harness]]` `{id}`'s `[harness.acp].transport`"),
+                ACP_TRANSPORTS,
+                &acp.transport,
+            ));
+            return problems;
+        }
+
+        match acp.transport.as_str() {
+            "local" => {
+                match acp.agent.as_deref() {
+                    None => problems.push(format!(
+                        "`[[harness]]` `{id}` uses `transport = \"local\"` but names no `agent` — \
+                         one of {}.",
+                        join_backticked(ACP_AGENTS)
+                    )),
+                    Some(agent) if !ACP_AGENTS.contains(&agent) => problems.push(one_of(
+                        &format!("`[[harness]]` `{id}`'s `[harness.acp].agent`"),
+                        ACP_AGENTS,
+                        agent,
+                    )),
+                    Some(_) => {}
+                }
+                if acp.runner.is_some() {
+                    problems.push(format!(
+                        "`[[harness]]` `{id}` uses `transport = \"local\"` but names a `runner`. \
+                         A local agent is spawned on this machine — use `transport = \"runner\"` to reach one elsewhere."
+                    ));
+                }
+            }
+            "runner" => {
+                if acp
+                    .runner
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    problems.push(format!(
+                        "`[[harness]]` `{id}` uses `transport = \"runner\"` but names no `runner`."
+                    ));
+                }
+                if acp.agent.is_some() {
+                    problems.push(format!(
+                        "`[[harness]]` `{id}` uses `transport = \"runner\"` but names an `agent`. \
+                         A runner advertises the harnesses it can drive — this host does not choose one for it."
+                    ));
+                }
+                if acp.model.is_some() {
+                    problems.push(format!(
+                        "`[[harness]]` `{id}` uses `transport = \"runner\"` but names a `model`. \
+                         Model overrides aren't supported for a runner yet — the runner wire \
+                         protocol doesn't carry them."
+                    ));
+                }
+            }
+            _ => unreachable!("transport was checked against ACP_TRANSPORTS above"),
+        }
+
+        if acp.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+            problems.push(format!(
+                "`[[harness]]` `{id}`'s `[harness.acp].model` is set but empty. Drop the key \
+                 to use the agent's own default, rather than naming an empty one."
+            ));
+        }
+
+        problems
+    }
+
     fn validate_users(&self) -> Vec<String> {
         let mut problems = Vec::new();
         let mode = self.users.mode.as_str();
@@ -500,8 +990,7 @@ impl CompanyManifest {
         // email admin it was meant to be. Caught here so it never reaches a
         // running company.
         for admin in &self.users.admins {
-            let normalized = normalize_email(admin);
-            if normalized.is_empty() || !normalized.contains('@') {
+            if !crate::ports::users::is_usable_admin_email(admin) {
                 problems.push(format!(
                     "`[users].admins` has an invalid entry: `{admin}` does not look like an \
                      email address"
@@ -541,6 +1030,19 @@ impl CompanyManifest {
             let _ = writeln!(out, "You own:  {role}");
         }
         let _ = writeln!(out, "Brain:    {}", self.brain.mode);
+        // Always the effective set, so a company with no `[[harness]]` block
+        // prints the implicit harness it actually runs on rather than nothing.
+        let default_harness = self.default_harness_id();
+        let harnesses = self
+            .effective_harnesses()
+            .iter()
+            .map(|h| {
+                let marker = if h.id == default_harness { "*" } else { "" };
+                format!("{}{marker} ({})", h.id, h.kind)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "Harness:  {harnesses}");
         let _ = writeln!(out, "Policy:   {}", self.policy.mode);
         let _ = writeln!(out, "Tools:    {}", self.tools.provider);
         if let Some(monthly) = self.budget.monthly_usd {
@@ -606,6 +1108,55 @@ pub(crate) fn is_snake_case(id: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// Problems from every agent's `[[agent]].ledgers` grants, checked against
+/// `builtin_ledgers`.
+///
+/// An `access = "record"` grant that a built-in ledger's `writers` excludes is
+/// a manifest error rather than a silent tool refusal at call time — the two
+/// sources of truth (the agent's grant, the ledger's `writers`) must not
+/// disagree for a slug the manifest can actually see. A company-declared
+/// ledger is not checked here: it may not exist yet when the manifest is
+/// validated (the same reasoning as `context`'s missing-document rule), so any
+/// disagreement there surfaces as an ordinary tool refusal at call time
+/// instead. A free function, not a `CompanyManifest` method, so it can be
+/// pointed at a synthetic ledger list in a test without a real registry.
+fn ledger_grant_problems(
+    agents: &[crate::company::Agent],
+    builtin_ledgers: &[crate::ledger::LedgerSpec],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for agent in agents {
+        let label = if agent.id.is_empty() {
+            "an agent".to_string()
+        } else {
+            format!("agent `{}`", agent.id)
+        };
+        let Some(grants) = &agent.ledgers else {
+            continue;
+        };
+        for grant in grants {
+            if grant.access != crate::company::LedgerAccess::Record {
+                continue;
+            }
+            let Some(spec) = builtin_ledgers
+                .iter()
+                .find(|spec| spec.slug.eq_ignore_ascii_case(grant.name.trim()))
+            else {
+                continue;
+            };
+            if !spec.writable_by(&agent.id) {
+                problems.push(format!(
+                    "{label} declares `ledgers` access `record` to `{}`, but that ledger's \
+                     `writers` does not name this agent — the two must agree. Either add `{}` to \
+                     `{}`'s `writers`, or change this grant to `read`.",
+                    spec.slug, agent.id, spec.slug
+                ));
+            }
+        }
+    }
+    problems
+}
+
 /// Parses a decimal USD string, rejecting anything non-numeric or negative.
 fn parse_usd(value: &str) -> Option<f64> {
     match value.trim().parse::<f64>() {
@@ -667,8 +1218,15 @@ mod tests {
             &[],
         );
         let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
-        assert_eq!(manifest.agents.len(), 1);
-        assert_eq!(manifest.agents[0].id, "ceo");
+        // The global baseline is appended to every roster, so this asserts the
+        // company's own teammates — the thing this test is about.
+        let own: Vec<&str> = manifest
+            .agents
+            .iter()
+            .filter(|agent| !agent.global)
+            .map(|agent| agent.id.as_str())
+            .collect();
+        assert_eq!(own, ["ceo"]);
     }
 
     /// The bundle roster replaces the inline one — so a company that has moved
@@ -683,8 +1241,15 @@ mod tests {
             ],
         );
         let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
-        let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+        let ids: Vec<&str> = manifest
+            .agents
+            .iter()
+            .filter(|a| !a.global)
+            .map(|a| a.id.as_str())
+            .collect();
         assert_eq!(ids, ["ceo", "writer"]);
+        // The globals are appended after the company's own roster and none is
+        // tagged `orchestrator`, so who orchestrates is unchanged by them.
         assert_eq!(super::super::orchestrator_id(&manifest.agents), Some("ceo"));
     }
 
@@ -1047,6 +1612,65 @@ mod tests {
         }
     }
 
+    /// An `access = "record"` grant to a built-in ledger whose `writers`
+    /// excludes this agent must not silently disagree — it is a manifest
+    /// error, not a refusal the agent discovers at call time.
+    #[test]
+    fn a_record_grant_disagreeing_with_a_builtins_writers_is_rejected() {
+        let agents = vec![toml::from_str::<crate::company::Agent>(
+            "id = \"intern\"\nrole = \"Intern\"\nledgers = [{ name = \"risks\", access = \"record\" }]\n",
+        )
+        .unwrap()];
+        let risks = crate::ledger::parse(
+            &serde_json::json!({
+                "slug": "risks",
+                "title": "Risks",
+                "fields": [
+                    { "name": "id", "role": "id" },
+                    { "name": "risk", "role": "title" },
+                    { "name": "status", "role": "status" }
+                ],
+                "statuses": [{ "name": "open" }, { "name": "closed", "closed": true }],
+                "writers": ["cfo"]
+            }),
+            true,
+        )
+        .unwrap();
+
+        let problems = ledger_grant_problems(&agents, &[risks]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("agent `intern`"), "{}", problems[0]);
+        assert!(problems[0].contains("`risks`"), "{}", problems[0]);
+        assert!(problems[0].contains("writers"), "{}", problems[0]);
+    }
+
+    /// A `read` grant never conflicts with `writers` — only `record` implies
+    /// write access, so only `record` is checked.
+    #[test]
+    fn a_read_grant_never_conflicts_with_writers() {
+        let agents = vec![toml::from_str::<crate::company::Agent>(
+            "id = \"intern\"\nrole = \"Intern\"\nledgers = [{ name = \"risks\", access = \"read\" }]\n",
+        )
+        .unwrap()];
+        let risks = crate::ledger::parse(
+            &serde_json::json!({
+                "slug": "risks",
+                "title": "Risks",
+                "fields": [
+                    { "name": "id", "role": "id" },
+                    { "name": "risk", "role": "title" },
+                    { "name": "status", "role": "status" }
+                ],
+                "statuses": [{ "name": "open" }, { "name": "closed", "closed": true }],
+                "writers": ["cfo"]
+            }),
+            true,
+        )
+        .unwrap();
+
+        assert!(ledger_grant_problems(&agents, &[risks]).is_empty());
+    }
+
     /// A `delegates_to` entry must name a real desk (issue #176).
     ///
     /// The failure this catches is silent at runtime rather than loud: a member
@@ -1191,25 +1815,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_telegram_channel_entry() {
-        let manifest = parse(
-            r#"
-            [company]
-            name = "X"
-            [[agent]]
-            id = "a"
-            role = "A"
-            [channels.telegram]
-            enabled = true
-            "#,
-        );
-        assert!(
-            !manifest.validate().iter().any(|p| p.contains("telegram")),
-            "telegram is a known channel and must validate"
-        );
-    }
-
-    #[test]
     fn public_company_requires_handle() {
         let manifest = parse("[company]\nname = \"X\"\n[place]\ndiscoverable = true\n");
         let problems = manifest.validate();
@@ -1314,6 +1919,71 @@ mod tests {
                 .iter()
                 .any(|p| p.contains("workflow id") && p.contains("Bad-Id")),
             "{problems:?}"
+        );
+    }
+
+    /// A bundle laying an `mcp.json` beside its `company.toml` gets those
+    /// servers, and they are held to the same validator an inline entry is.
+    #[test]
+    fn a_bundle_mcp_json_reaches_the_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(MANIFEST_FILE), "[company]\nname = \"X\"\n")
+            .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"deepwiki": {"url": "https://mcp.deepwiki.com/mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let manifest = CompanyManifest::from_path(dir.path()).expect("loads");
+        let names: Vec<&str> = manifest
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["deepwiki"]);
+    }
+
+    /// A server declared in both forms is refused rather than resolved by
+    /// precedence — the roster's rule, for the roster's reason: either
+    /// precedence rule silently discards a declaration somebody wrote down.
+    #[test]
+    fn a_server_declared_in_both_forms_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(MANIFEST_FILE),
+            "[company]\nname = \"X\"\n[[mcp_server]]\nname = \"deepwiki\"\nendpoint = \"https://one.test/mcp\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"deepwiki": {"url": "https://two.test/mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let err = CompanyManifest::from_path(dir.path()).expect_err("must refuse");
+        let text = err.to_string();
+        assert!(text.contains("deepwiki"), "{text}");
+    }
+
+    /// A bad entry in `mcp.json` is reported against the manifest rather than
+    /// swallowed — the file is genuinely read, and its problems genuinely land.
+    #[test]
+    fn a_bad_bundle_server_is_reported_against_the_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(MANIFEST_FILE), "[company]\nname = \"X\"\n")
+            .expect("write manifest");
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"local": {"command": "npx some-mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+
+        let err = CompanyManifest::from_path(dir.path()).expect_err("must refuse");
+        let text = err.to_string();
+        assert!(
+            text.contains("stdio") && text.contains("mcp.json"),
+            "{text}"
         );
     }
 
@@ -1480,5 +2150,477 @@ mod tests {
         let located = discover(&dir).unwrap();
         assert!(!located.legacy);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod harness_tests {
+    use super::*;
+
+    fn parse(text: &str) -> CompanyManifest {
+        toml::from_str(text).expect("valid toml")
+    }
+
+    /// Every problem mentioning `harness`, so a test asserting on this block is
+    /// not perturbed by unrelated validation output.
+    fn harness_problems(m: &CompanyManifest) -> Vec<String> {
+        m.validate()
+            .into_iter()
+            .filter(|p| p.contains("harness"))
+            .collect()
+    }
+
+    const BASE: &str = "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n";
+
+    /// The compatibility case, and the one every shipped company under
+    /// `companies/` hits: no `[[harness]]` block at all still yields exactly one
+    /// harness — `built_in`, default, on the company-level `[inference]`.
+    ///
+    /// This is the test that makes "named harnesses" a purely additive feature.
+    #[test]
+    fn a_manifest_with_no_harness_block_gets_one_implicit_built_in_default() {
+        let manifest = parse(BASE);
+
+        assert!(manifest.harnesses.is_empty(), "nothing was declared");
+
+        let effective = manifest.effective_harnesses();
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].id, IMPLICIT_HARNESS_ID);
+        assert_eq!(effective[0].kind, "built_in");
+        assert!(effective[0].default);
+        assert!(effective[0].inference.is_none(), "inherits `[inference]`");
+
+        assert_eq!(manifest.default_harness_id(), IMPLICIT_HARNESS_ID);
+        assert_eq!(
+            manifest.harness_for("ceo").map(|h| h.id),
+            Some(IMPLICIT_HARNESS_ID.to_string()),
+            "an agent naming no harness lands on the implicit one"
+        );
+        assert!(harness_problems(&manifest).is_empty());
+    }
+
+    /// `default_harness` resolves the same entry `default_harness_id` names,
+    /// full struct and all — for both the implicit `built_in` case and a
+    /// declared `acp` default. Pinned separately from `default_harness_id`
+    /// because `lanes::build` (issue #1244) reads `.kind` off this to decide
+    /// whether the default lane is even runnable; a lookup that silently
+    /// resolved to the wrong harness would reintroduce the bug that fixed.
+    #[test]
+    fn default_harness_resolves_the_full_declared_entry() {
+        let implicit = parse(BASE);
+        assert_eq!(implicit.default_harness().id, IMPLICIT_HARNESS_ID);
+        assert_eq!(implicit.default_harness().kind, "built_in");
+
+        let acp_default = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"laptop\"\nkind = \"acp\"\ndefault = true\n\n\
+             [harness.acp]\ntransport = \"local\"\nagent = \"claude\"\n"
+        ));
+        assert_eq!(acp_default.default_harness().id, "laptop");
+        assert_eq!(acp_default.default_harness().kind, "acp");
+    }
+
+    /// Naming a harness when none is declared is an error rather than a silent
+    /// fallback to the implicit one: the operator wrote down an intent, and
+    /// quietly ignoring it is how "my agent is on the wrong model" happens.
+    #[test]
+    fn naming_a_harness_with_no_harness_block_is_rejected() {
+        let manifest = parse(&format!("{BASE}harness = \"deep\"\n"));
+        let problems = harness_problems(&manifest);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("ceo") && problems[0].contains("deep"));
+    }
+
+    #[test]
+    fn agents_route_to_their_named_harness_and_others_to_the_default() {
+        let manifest = parse(
+            r#"
+[company]
+name = "X"
+
+[[agent]]
+id = "ceo"
+role = "CEO"
+
+[[agent]]
+id = "researcher"
+role = "Researcher"
+harness = "deep"
+
+[[harness]]
+id = "embedded"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "deep"
+kind = "built_in"
+
+[harness.inference]
+provider = "openrouter"
+"#,
+        );
+        assert!(harness_problems(&manifest).is_empty());
+        assert_eq!(manifest.default_harness_id(), "embedded");
+        assert_eq!(
+            manifest.harness_for("ceo").map(|h| h.id),
+            Some("embedded".to_string())
+        );
+        assert_eq!(
+            manifest.harness_for("researcher").map(|h| h.id),
+            Some("deep".to_string())
+        );
+        // The sub-table attached to the *second* entry, not the first — the
+        // array-of-tables shape that is easy to misread.
+        let deep = manifest.harness_for("researcher").expect("declared");
+        assert_eq!(
+            deep.inference.as_ref().and_then(|i| i.provider.clone()),
+            Some("openrouter".to_string())
+        );
+        assert!(
+            manifest
+                .effective_harnesses()
+                .iter()
+                .find(|h| h.id == "embedded")
+                .expect("declared")
+                .inference
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_agent_naming_an_undeclared_harness_is_rejected() {
+        let manifest = parse(&format!(
+            "{BASE}harness = \"ghost\"\n\n[[harness]]\nid = \"embedded\"\nkind = \"built_in\"\ndefault = true\n"
+        ));
+        let problems = harness_problems(&manifest);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("ghost") && problems[0].contains("ceo"));
+        assert!(
+            problems[0].contains("embedded"),
+            "names what IS declared: {}",
+            problems[0]
+        );
+    }
+
+    /// Issue #1245's detected-harness follow-up: whether `claude-agent-acp` is
+    /// installed is a fact about the **machine**, so binding to it must not
+    /// require a `company.toml` edit — the same manifest is opened from
+    /// machines where the answer differs. Accepted with a harness block
+    /// declared and without one, and it resolves to a `local` acp harness.
+    #[test]
+    fn a_coding_cli_is_bindable_without_being_declared() {
+        for tail in [
+            "",
+            "\n[[harness]]\nid = \"embedded\"\nkind = \"built_in\"\ndefault = true\n",
+        ] {
+            let manifest = parse(&format!("{BASE}harness = \"claude\"\n{tail}"));
+            assert!(
+                harness_problems(&manifest).is_empty(),
+                "`claude` needs no declaration ({tail:?}): {:?}",
+                harness_problems(&manifest)
+            );
+
+            let resolved = manifest.harness_for("ceo").expect("resolves");
+            assert_eq!(resolved.id, "claude");
+            assert_eq!(resolved.kind, "acp");
+            let acp = resolved.acp.expect("acp section");
+            assert_eq!(acp.transport, "local");
+            assert_eq!(acp.agent.as_deref(), Some("claude"));
+        }
+    }
+
+    /// The synthesized harness must never be the default: which harness an
+    /// *unbound* teammate runs on stays a blueprint decision, or something a
+    /// machine happens to have installed could silently redirect the roster.
+    #[test]
+    fn an_implicit_local_harness_is_never_the_default() {
+        let manifest = parse(&format!("{BASE}harness = \"claude\"\n"));
+        assert_ne!(manifest.default_harness_id(), "claude");
+        assert!(manifest.default_harness().is_built_in());
+        assert!(!Harness::implicit_local("claude").default);
+    }
+
+    /// A declared `[[harness]]` of the same id wins — otherwise a company that
+    /// deliberately pinned a model on its `claude` harness would silently get
+    /// the bare synthesized one instead.
+    #[test]
+    fn a_declared_harness_wins_over_the_synthesized_one() {
+        let manifest = parse(&format!(
+            "{BASE}harness = \"claude\"\n\n[[harness]]\nid = \"embedded\"\nkind = \"built_in\"\ndefault = true\n\n\
+             [[harness]]\nid = \"claude\"\nkind = \"acp\"\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"\nmodel = \"opus-4-5\"\n"
+        ));
+        assert!(harness_problems(&manifest).is_empty());
+        let resolved = manifest.harness_for("ceo").expect("resolves");
+        assert_eq!(
+            resolved.acp.expect("acp").model.as_deref(),
+            Some("opus-4-5"),
+            "the declared harness, not the synthesized one"
+        );
+    }
+
+    #[test]
+    fn duplicate_harness_ids_are_rejected() {
+        let manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\ndefault = true\n\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\n"
+        ));
+        let problems = harness_problems(&manifest);
+        assert!(
+            problems.iter().any(|p| p.contains("more than once")),
+            "{problems:?}"
+        );
+    }
+
+    /// Zero and two defaults are both errors. Zero would leave an agent naming
+    /// no harness with nowhere to run; two makes the answer depend on list
+    /// order, which is exactly what marking a default exists to avoid.
+    #[test]
+    fn there_must_be_exactly_one_default_harness() {
+        let none = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\n\n[[harness]]\nid = \"b\"\nkind = \"built_in\"\n"
+        ));
+        let problems = harness_problems(&none);
+        assert!(
+            problems.iter().any(|p| p.contains("no `[[harness]]` sets")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("`a`") && p.contains("`b`")),
+            "names the candidates: {problems:?}"
+        );
+
+        let two = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\ndefault = true\n\n[[harness]]\nid = \"b\"\nkind = \"built_in\"\ndefault = true\n"
+        ));
+        let problems = harness_problems(&two);
+        assert!(
+            problems.iter().any(|p| p.contains("2 `[[harness]]`")),
+            "{problems:?}"
+        );
+    }
+
+    /// A section on the wrong kind is an error, not an ignored key — both
+    /// directions.
+    #[test]
+    fn a_section_on_the_wrong_kind_is_an_error_not_an_ignored_key() {
+        let inference_on_acp = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"\n\n[harness.inference]\nprovider = \"openrouter\"\n"
+        ));
+        let problems = harness_problems(&inference_on_acp);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("[harness.inference]") && p.contains("own credential")),
+            "{problems:?}"
+        );
+
+        let acp_on_built_in = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"\n"
+        ));
+        let problems = harness_problems(&acp_on_built_in);
+        assert!(
+            problems.iter().any(|p| p.contains("[harness.acp]")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_harness_kind_is_rejected_without_confusing_follow_on_problems() {
+        let manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"telepathy\"\ndefault = true\n"
+        ));
+        let problems = harness_problems(&manifest);
+        assert_eq!(
+            problems.len(),
+            1,
+            "one problem, not a cascade: {problems:?}"
+        );
+        assert!(problems[0].contains("telepathy") && problems[0].contains("built_in"));
+    }
+
+    /// Each ACP transport requires its own addressing field and forbids the
+    /// other's, so a manifest cannot claim to spawn a local agent *and* name a
+    /// remote runner.
+    #[test]
+    fn acp_transports_require_their_own_addressing_field() {
+        let cases: &[(&str, &str)] = &[
+            ("transport = \"local\"\n", "names no `agent`"),
+            (
+                "transport = \"local\"\nagent = \"claude\"\nrunner = \"laptop\"\n",
+                "but names a `runner`",
+            ),
+            ("transport = \"runner\"\n", "names no `runner`"),
+            (
+                "transport = \"runner\"\nrunner = \"laptop\"\nagent = \"claude\"\n",
+                "but names an `agent`",
+            ),
+            ("transport = \"carrier_pigeon\"\n", "must be one of"),
+            (
+                "transport = \"local\"\nagent = \"emacs\"\n",
+                "must be one of",
+            ),
+        ];
+        for (acp, expected) in cases {
+            let manifest = parse(&format!(
+                "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"acp\"\ndefault = true\n\n[harness.acp]\n{acp}"
+            ));
+            let problems = harness_problems(&manifest);
+            assert!(
+                problems.iter().any(|p| p.contains(expected)),
+                "`{acp}` should report {expected:?}, got {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_acp_harness_of_each_transport_passes() {
+        for acp in [
+            "transport = \"local\"\nagent = \"claude\"\n",
+            "transport = \"runner\"\nrunner = \"stevens_laptop\"\n",
+        ] {
+            let manifest = parse(&format!(
+                "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"acp\"\ndefault = true\n\n[harness.acp]\n{acp}"
+            ));
+            assert!(
+                harness_problems(&manifest).is_empty(),
+                "`{acp}` should be valid: {:?}",
+                harness_problems(&manifest)
+            );
+        }
+    }
+
+    /// Issue #1245: `model` is a hint forwarded to the agent's own startup
+    /// lever, not a credential — so unlike `[harness.inference]` it is
+    /// perfectly valid on a `local` acp harness. It is rejected on `runner`
+    /// (no wire protocol yet) and when set to an empty string (nothing to
+    /// forward, and silently accepting it invites "my model setting does
+    /// nothing").
+    #[test]
+    fn model_is_valid_on_local_rejected_on_runner_and_must_not_be_empty() {
+        let cases: &[(&str, Option<&str>)] = &[
+            (
+                "transport = \"local\"\nagent = \"claude\"\nmodel = \"claude-opus-4-5\"\n",
+                None,
+            ),
+            (
+                "transport = \"runner\"\nrunner = \"laptop\"\nmodel = \"claude-opus-4-5\"\n",
+                Some("but names a `model`"),
+            ),
+            (
+                "transport = \"local\"\nagent = \"claude\"\nmodel = \"   \"\n",
+                Some("is set but empty"),
+            ),
+        ];
+        for (acp, expected) in cases {
+            let manifest = parse(&format!(
+                "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"acp\"\ndefault = true\n\n[harness.acp]\n{acp}"
+            ));
+            let problems = harness_problems(&manifest);
+            match expected {
+                None => assert!(problems.is_empty(), "`{acp}` should be valid: {problems:?}"),
+                Some(msg) => assert!(
+                    problems.iter().any(|p| p.contains(msg)),
+                    "`{acp}` should report {msg:?}, got {problems:?}"
+                ),
+            }
+        }
+    }
+
+    /// Issue #1245's per-agent follow-up: `agent.model` follows the exact
+    /// same doctrine as `[harness.acp].model` — valid on `local`, rejected on
+    /// `runner`, rejected when empty — plus one rule the harness-level field
+    /// has no need for: it is meaningless on a `built_in` harness, since
+    /// there is no ACP session to steer a model through.
+    #[test]
+    fn agent_model_follows_the_harness_level_models_own_doctrine() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "kind = \"built_in\"\ndefault = true",
+                "model = \"opus-4-5\"",
+                Some("has no ACP transport to forward it to"),
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"",
+                "model = \"opus-4-5\"",
+                None,
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"runner\"\nrunner = \"laptop\"",
+                "model = \"opus-4-5\"",
+                Some("uses `transport = \"runner\"`"),
+            ),
+            (
+                "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"",
+                "model = \"   \"",
+                Some("is set but empty"),
+            ),
+        ];
+        for (harness, agent_model, expected) in cases {
+            let manifest = parse(&format!(
+                "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n{agent_model}\n\n\
+                 [[harness]]\nid = \"a\"\n{harness}\n"
+            ));
+            let problems = manifest.validate();
+            match expected {
+                None => assert!(
+                    !problems.iter().any(|p| p.contains("model")),
+                    "{harness} / {agent_model} should be valid: {problems:?}"
+                ),
+                Some(msg) => assert!(
+                    problems.iter().any(|p| p.contains(*msg)),
+                    "{harness} / {agent_model} should report {msg:?}, got {problems:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn an_acp_harness_with_no_acp_section_is_rejected() {
+        let manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"acp\"\ndefault = true\n"
+        ));
+        let problems = harness_problems(&manifest);
+        assert!(
+            problems.iter().any(|p| p.contains("needs a `transport`")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn harness_ids_must_be_snake_case() {
+        let manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"My Harness\"\nkind = \"built_in\"\ndefault = true\n"
+        ));
+        let problems = harness_problems(&manifest);
+        assert!(
+            problems.iter().any(|p| p.contains("snake_case")),
+            "{problems:?}"
+        );
+    }
+
+    /// The per-file roster form carries `harness` through, so the two authoring
+    /// forms agree.
+    #[test]
+    fn a_per_file_agent_carries_its_harness_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(MANIFEST_FILE),
+            "[company]\nname = \"X\"\n\n[[harness]]\nid = \"embedded\"\nkind = \"built_in\"\ndefault = true\n\n[[harness]]\nid = \"deep\"\nkind = \"built_in\"\n",
+        )
+        .expect("write manifest");
+        let agents = dir.path().join(super::super::agent_file::AGENTS_DIR);
+        std::fs::create_dir_all(&agents).expect("agents dir");
+        std::fs::write(
+            agents.join("researcher.toml"),
+            "role = \"Researcher\"\nharness = \"deep\"\n",
+        )
+        .expect("write agent");
+
+        let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
+        assert_eq!(
+            manifest.harness_for("researcher").map(|h| h.id),
+            Some("deep".to_string())
+        );
     }
 }

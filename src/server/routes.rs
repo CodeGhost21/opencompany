@@ -58,6 +58,54 @@ fn console_dir_from_env() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+/// Stamps the cache policy the console's own file naming already implies.
+///
+/// The bundle is content-hashed: `index.html` names `index-<hash>.js`, and a
+/// build that changes the bytes changes the name. That makes the assets safe to
+/// keep forever and makes the shell the one file that must never be kept — it
+/// is the only thing that knows which hashes are current.
+///
+/// Without this the shell was served with an `etag` and no `cache-control`, so
+/// browsers applied heuristic freshness and held it across a deploy. The held
+/// shell asks for chunks the new image no longer contains; those requests fall
+/// through to the SPA fallback and answer with `index.html`, so the dynamic
+/// import receives HTML, throws, and unmounts the app — a blank page with no
+/// error anywhere a user can see it (issue #979).
+///
+/// Keyed on the response's own content type rather than the request path,
+/// because the SPA fallback serves the shell at paths that look like anything
+/// at all — including, in the failure above, paths under `/assets/`.
+fn cache_console_response(path: &str, mut response: Response) -> Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
+
+    let is_html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
+
+    // `no-cache` still allows the browser to keep the file; it requires a
+    // revalidation before reuse, which is what makes a deploy visible on the
+    // very next request. `no-store` would be stricter and slower for no gain.
+    let policy = if is_html {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    };
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static(policy));
+    // The page shell is an opaque-origin iframe, so its ES module imports send
+    // `Origin: null` even though the console and host share a URL origin. The
+    // module graph therefore needs explicit CORS permission. These SDK files
+    // are only the fixed React/site runtime; the company-authenticated bundle
+    // receives the same headers in `ops::pages`.
+    if path.starts_with("/pages-sdk/") && !is_html {
+        crate::server::ops::pages::apply_page_module_cors_headers(response.headers_mut());
+    }
+    response
+}
+
 /// Builds the Axum router, mounting the operator console at `/` when
 /// `OPENCOMPANY_CONSOLE_DIR` is configured.
 pub fn router(state: AppState) -> Router {
@@ -69,18 +117,21 @@ pub fn router(state: AppState) -> Router {
 fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router {
     let router = Router::new()
         .route("/healthz", get(healthz))
+        .route("/healthz/busy", get(busy))
         .route("/spec", get(spec))
         .route("/tiny", get(tiny))
         .merge(crate::server::operator::router())
         .merge(crate::server::ops::router())
-        .merge(crate::server::hooks::router())
+        .merge(crate::server::hooks_chargebee::router())
         .merge(crate::server::provision::router())
         .merge(crate::server::setup::router())
         .merge(crate::server::feedback::router())
+        .merge(crate::server::feedback_board::router())
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
-        .merge(crate::server::users::devices::router())
         .merge(crate::server::graphql::router());
+    #[cfg(feature = "acp")]
+    let router = router.merge(crate::server::acp::router());
     // tiny.place A2A inbound + discovery routes, only when the feature is on.
     #[cfg(feature = "tinyplace")]
     let router = router.merge(crate::server::a2a::router());
@@ -112,8 +163,9 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
                     if is_reserved_path(request.uri().path()) {
                         return StatusCode::NOT_FOUND.into_response();
                     }
+                    let path = request.uri().path().to_owned();
                     match serve.oneshot(request).await {
-                        Ok(response) => response.into_response(),
+                        Ok(response) => cache_console_response(&path, response.into_response()),
                         Err(err) => match err {},
                     }
                 }
@@ -202,13 +254,19 @@ impl Serving {
         self.listener.local_addr()
     }
 
-    /// Serves until the process ends or the task is dropped.
+    /// Serves until a termination signal arrives (see [`serve_on`]) or the task
+    /// is dropped.
     pub async fn run(self) -> Result<()> {
         serve_on(self.listener, self.state).await
     }
 }
 
-/// Serves on a listener the caller already bound.
+/// Serves on a listener the caller already bound, until a termination signal.
+///
+/// Returns `Ok(())` on a graceful shutdown, so the CLI's `serve` exits `0` on a
+/// rollout rather than reporting a failure it did not have. What "graceful"
+/// means here — and what it deliberately does not wait for — is spelled out on
+/// [`serve_on_until`].
 ///
 /// The one production serving path — `bind`/`serve` and the desktop app's own
 /// [`start_local`](crate::desktop::start_local) both end up here, so there is
@@ -227,16 +285,162 @@ impl Serving {
 /// loopback, so the peer this process observes reads as loopback regardless of
 /// where its own caller actually was).
 pub async fn serve_on(listener: TcpListener, state: AppState) -> Result<()> {
-    axum::serve(
+    serve_on_until(listener, state, crate::server::shutdown::signal()).await
+}
+
+/// [`serve_on`] with the termination signal supplied by the caller.
+///
+/// Exists for tests: a test cannot raise a real `SIGTERM` at its own process
+/// without every *other* test in the binary receiving it too, and the thing
+/// worth proving here is what happens *after* the signal, not that tokio
+/// delivers one.
+///
+/// ## The shutdown sequence
+///
+/// On the signal, in order:
+///
+/// 1. Every registered company stops accepting new cycles and the ones in
+///    flight are waited on, bounded by
+///    [`shutdown::grace_from_env`](crate::server::shutdown::grace_from_env).
+///    The server is deliberately **still serving** through this: the console's
+///    event stream is how an operator watches the turn land, and cutting it at
+///    the signal would hide the very work the drain exists to preserve. New
+///    cycles are refused with `503 Quiescing` in the meantime, which is what
+///    "stop accepting new work" means for a host whose work does not arrive on
+///    the connection it will be done on.
+/// 2. The listener stops accepting and open connections are given
+///    [`CONNECTION_GRACE`](crate::server::shutdown::CONNECTION_GRACE) to finish
+///    writing.
+/// 3. The process returns regardless. This is the ceiling that matters: the
+///    console's event stream never ends on its own, so waiting for connections
+///    to close on their own terms would hold the pod open until the kubelet's
+///    `SIGKILL` — trading a clean exit for the exact abrupt one this is here to
+///    remove.
+///
+/// Step 2's clock starts when the drain *returns*, not at the signal, so an idle
+/// host with an open event stream exits in about `CONNECTION_GRACE` rather than
+/// sitting out the whole bound. Total time from signal to exit is therefore at
+/// most `grace + CONNECTION_GRACE` — the number the pod's
+/// `terminationGracePeriodSeconds` has to stay above.
+///
+/// `/healthz` is untouched. Nothing in this path runs before the signal, and the
+/// signal only arrives at the end of a pod's life — the manager's
+/// wake-on-request proxy blocks on that endpoint during *boot*, which this
+/// cannot reach.
+pub async fn serve_on_until<S>(listener: TcpListener, state: AppState, signal: S) -> Result<()>
+where
+    S: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_on_until_with_grace(
+        listener,
+        state,
+        signal,
+        crate::server::shutdown::grace_from_env(),
+    )
+    .await
+}
+
+/// [`serve_on_until`] with the drain bound supplied by the caller.
+///
+/// Split out so a test can prove the ceiling without waiting the real
+/// twenty-five seconds for it — and without mutating process environment, which
+/// no test can do safely in a binary whose other tests share the process.
+pub(crate) async fn serve_on_until_with_grace<S>(
+    listener: TcpListener,
+    state: AppState,
+    signal: S,
+    grace: std::time::Duration,
+) -> Result<()>
+where
+    S: std::future::Future<Output = ()> + Send + 'static,
+{
+    use std::future::IntoFuture;
+
+    let drain_state = state.clone();
+    // Starts the ceiling's clock when the *drain* returns, not at the signal.
+    //
+    // Timing it from the signal instead would make the connection window
+    // whatever the drain left over — up to the whole of `grace` on an idle host
+    // — so a tenant with nothing in flight but an open event stream would sit
+    // there for the full bound before exiting. That is the rollout latency this
+    // whole change exists to reduce. Drained-then-two-seconds keeps the worst
+    // case identical (`grace` + `CONNECTION_GRACE`, since `drain` is itself
+    // bounded by `grace`) while letting the common case go quickly.
+    let (drained_tx, drained_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutting_down = async move {
+        signal.await;
+        crate::server::shutdown::arm_force_exit_on_second_signal();
+        crate::server::shutdown::drain(&drain_state, grace).await;
+        let _ = drained_tx.send(());
+    };
+
+    // `into_future` because `WithGracefulShutdown` is `IntoFuture`, not
+    // `Future`, and the ceiling below has to race a *pinned* server future.
+    let serving = axum::serve(
         listener,
         router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await?;
+    .with_graceful_shutdown(shutting_down)
+    .into_future();
+    tokio::pin!(serving);
+    // `Err` means the sender was dropped, which can only happen once the serve
+    // future is gone — at which point the other arm has already won.
+    let ceiling = async {
+        if drained_rx.await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep(crate::server::shutdown::CONNECTION_GRACE).await;
+    };
+
+    tokio::select! {
+        served = &mut serving => served?,
+        () = ceiling => tracing::warn!(
+            "connections were still open {}s after the drain finished; exiting anyway",
+            crate::server::shutdown::CONNECTION_GRACE.as_secs()
+        ),
+    }
     Ok(())
 }
 
 async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+/// Whether this workload is doing anything — the signal the manager consults
+/// before scaling the tenant to zero (opencompany-microservice#22).
+///
+/// The manager measures "idle" by inbound proxied traffic alone, so a company
+/// working through a long turn produces none of its own and looks exactly like
+/// one nobody has opened. Parking it there destroys the work in flight. This
+/// answers the question the manager cannot infer.
+///
+/// Deliberately a **sibling** of `/healthz` rather than a field on it. The
+/// wake-on-request proxy blocks on `/healthz` and gives up after its startup
+/// budget, so anything that makes that endpoint slower or heavier directly
+/// degrades every cold start — a hard constraint in the issue.
+///
+/// Asks each company runtime, which combines three sources — the per-company
+/// cycle lock, the workflow run supervisor, and the in-flight steer registry.
+/// No one of them sees all the work: the first version of this endpoint read
+/// only the last and therefore missed the top-level operator chat turn, which
+/// is the case #22 actually measured.
+///
+/// Holds no lock across an await and does no I/O. The cost is a non-blocking
+/// `try_lock`, a `RwLock` read to enumerate companies, and one `Mutex`
+/// acquisition each — the manager calls this once per idle tenant per scan
+/// against a short timeout, so anything that could block would stall the sweep.
+///
+/// Unauthenticated on purpose. It reveals one boolean about the workload the
+/// caller can already reach, and requiring a credential would mean the manager
+/// holding a per-tenant secret purely to ask whether to stop it.
+async fn busy(State(state): State<AppState>) -> Json<BusyResponse> {
+    let busy = state
+        .registry()
+        .list()
+        .into_iter()
+        .filter_map(|id| state.registry().get(&id))
+        .any(|runtime| runtime.is_busy());
+    Json(BusyResponse { busy })
 }
 
 async fn spec(State(state): State<AppState>) -> Json<crate::app::AppSpec> {
@@ -252,6 +456,11 @@ struct HealthResponse {
     status: &'static str,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct BusyResponse {
+    busy: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -263,7 +472,8 @@ mod tests {
     use super::*;
     use crate::AppConfig;
 
-    /// Writes a minimal console tree (just `index.html`) into a temp dir.
+    /// Writes a minimal console tree — the shell plus one hashed asset, which
+    /// is the shape the cache policy distinguishes between.
     fn console_fixture() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -271,8 +481,29 @@ mod tests {
             "<!doctype html><title>console</title>",
         )
         .unwrap();
+        std::fs::create_dir(dir.path().join("assets")).unwrap();
+        std::fs::write(
+            dir.path().join("assets").join("index-abc123.js"),
+            "export const x = 1;\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("pages-sdk")).unwrap();
+        std::fs::write(
+            dir.path().join("pages-sdk").join("react.mjs"),
+            "export const createElement = () => null;\n",
+        )
+        .unwrap();
         let path = dir.path().to_path_buf();
         (dir, path)
+    }
+
+    fn cache_control(response: &axum::response::Response) -> &str {
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .expect("the console fallback stamps a cache policy on every response")
+            .to_str()
+            .unwrap()
     }
 
     async fn body_text(response: axum::response::Response) -> String {
@@ -312,6 +543,107 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("<title>console</title>"));
+    }
+
+    #[tokio::test]
+    async fn the_shell_is_never_kept_without_revalidating() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        for path in ["/", "/some/spa/route"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(cache_control(&response), "no-cache", "for {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hashed_asset_is_kept_forever() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/index-abc123.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            cache_control(&response),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[tokio::test]
+    async fn page_sdk_modules_allow_credentialed_imports_from_opaque_frames() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pages-sdk/react.mjs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "null"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            response.headers().get(axum::http::header::VARY).unwrap(),
+            "Origin"
+        );
+    }
+
+    /// The failure that made issue #979 a blank page rather than a 404: a
+    /// stale shell asks for a chunk this build does not have, the SPA fallback
+    /// answers with `index.html`, and the browser is handed HTML where it
+    /// expected a module. Whatever else that response is, it must not be
+    /// cached as though it were the immutable asset it was addressed as —
+    /// which is why the policy is keyed on what came back, not what was asked
+    /// for.
+    #[tokio::test]
+    async fn a_missing_chunk_answers_with_the_shell_and_is_not_kept() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/KnowledgeGraph-fromlastbuild.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cache_control(&response), "no-cache");
         assert!(body_text(response).await.contains("<title>console</title>"));
     }
 
@@ -399,6 +731,68 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// An idle workload reports `busy: false`, so the manager parks it as it
+    /// always has.
+    ///
+    /// Note what this does *not* prove: with an empty registry the handler
+    /// iterates nothing and returns `false` without consulting any runtime, so
+    /// this cannot fail for an aggregation bug. The direction that matters —
+    /// that the endpoint can report `true` — is covered by
+    /// `is_busy_sees_every_source_of_work` in `company::runtime`, which
+    /// exercises the real signal against a real runtime, and by
+    /// `is_busy_fails_closed_on_a_poisoned_run_supervisor` alongside it.
+    #[tokio::test]
+    async fn busy_is_false_when_nothing_is_running() {
+        let app = router(AppState::new(AppConfig::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz/busy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["busy"], serde_json::Value::Bool(false), "{json}");
+    }
+
+    /// The wire shape the manager parses. It reads a top-level boolean `busy`
+    /// and treats anything else — a missing field, a rename, a string `"true"` —
+    /// as *not busy*, so a change here would silently stop protecting work in
+    /// flight rather than fail loudly.
+    #[tokio::test]
+    async fn busy_responds_with_the_shape_the_manager_parses() {
+        let app = router(AppState::new(AppConfig::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz/busy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json.get("busy")
+                .and_then(serde_json::Value::as_bool)
+                .is_some(),
+            "the manager reads a top-level boolean `busy`; got {json}"
+        );
     }
 
     #[tokio::test]
@@ -489,13 +883,36 @@ mod tests {
         assert_eq!(spec_body(restarted).await["instance_id"], id);
 
         let caps = body["capabilities"].as_array().expect("capabilities");
-        for expected in ["rest", "graphql", "sse", "devices"] {
+        for expected in ["rest", "graphql", "sse"] {
             assert!(caps.iter().any(|c| c == expected), "missing {expected}");
         }
         assert_eq!(body["storage"], "fs");
         // Unset by default rather than an empty string, so a client can tell
         // "unnamed" from "named the empty string".
         assert!(body.get("display_name").is_none());
+    }
+
+    #[tokio::test]
+    async fn spec_names_the_build_commit_beside_the_version() {
+        // `version` has read `0.1.0` for thousands of commits, so it alone
+        // cannot tell an operator which build a host is running. The commit is
+        // the same *kind* of fact — identical for every instance compiled from
+        // one artifact, and saying nothing about this host — which is why it
+        // sits on the unauthenticated handshake where `version` already does.
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        let body = spec_body(state).await;
+
+        let commit = body["build_commit"].as_str().expect("a build commit");
+        assert_eq!(commit, crate::BUILD_COMMIT);
+        assert!(!commit.is_empty(), "an absent stamp must read `unknown`");
+        assert!(
+            commit
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+            "{commit:?} is not a sanitized stamp"
+        );
+        assert_eq!(body["version"], crate::VERSION);
     }
 
     #[tokio::test]
@@ -531,5 +948,19 @@ mod tests {
             "the home path must not appear in /spec: {rendered}"
         );
         assert!(!rendered.contains("mongodb://"), "no connection strings");
+    }
+
+    #[tokio::test]
+    async fn spec_does_not_disclose_memory_engine_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        let body = spec_body(state).await;
+        // `/spec` is the unauthenticated manager handshake. Memory-provider
+        // identity, capability and reachability details belong to the
+        // operator-authenticated engine route instead.
+        assert!(
+            body.get("memory").is_none(),
+            "memory leaked through /spec: {body}"
+        );
     }
 }

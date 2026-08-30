@@ -35,17 +35,20 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::dns::DomainStatus;
+use crate::company::setup::AgentFocus;
 use crate::error::OpenCompanyError;
 use crate::ports::inbox::InboxMeta;
 use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
-use crate::ports::types::{Actor, ActorKind, BudgetOverride, CompanyRecord, OverlayAgent};
+use crate::ports::types::{
+    Actor, ActorKind, AgentOverride, BudgetOverride, CompanyRecord, OverlayAgent,
+};
 use crate::server::error::ApiError;
 use crate::server::ops::language;
 use crate::server::ops::{DOMAIN_KEY, ScopedCompany, scoped};
@@ -61,6 +64,23 @@ pub fn router() -> Router<AppState> {
         .merge(scoped(
             "/team/{agent_id}",
             super::team_agent::method_router().delete(remove_member),
+        ))
+        // Issue #1776: the same drafting for a teammate that does not exist
+        // yet — the Add-teammate form, which has no id to address. A static
+        // segment, so it shadows nothing: no `POST` is served on
+        // `/team/{agent_id}`, and a teammate whose id really is `draft` drafts
+        // at `/team/draft/draft`.
+        .merge(scoped(
+            "/team/draft",
+            post(super::team_agent::draft_new_profile),
+        ))
+        // Issue #1776: drafting a mandate or persona for one teammate. Its own
+        // path rather than another method on `/team/{agent_id}`, because it is
+        // not a write to that teammate — it reads the record and returns text,
+        // and a `POST` on the teammate's own path would read as one.
+        .merge(scoped(
+            "/team/{agent_id}/draft",
+            post(super::team_agent::draft_profile),
         ))
         .merge(scoped("/team/{agent_id}/inbox", put(toggle_inbox)))
         .merge(scoped(
@@ -117,9 +137,10 @@ struct TeamMemberDto {
     ///
     /// `companyAllow` repeats on every row, which is the payload cost of
     /// mirroring the detail shape exactly rather than inventing a leaner
-    /// parallel one. It is worth paying: an **empty `requested` means the
-    /// company's standard grant**, not "no tools", and a row that dropped the
-    /// ceiling would leave a client no way to say which it was looking at.
+    /// parallel one. It is worth paying: `requested` is three-state since issue
+    /// #1804 (`null` = the company's standard grant, `[]` = an explicit no-tools
+    /// grant, `[globs]` = narrow), and a row that dropped the ceiling would leave
+    /// a client no way to say which of the three it was looking at.
     tools: super::team_agent::AgentToolsDto,
     /// The desks this teammate sits on, resolved through the same helper the
     /// detail read uses (issue #601). Desks are the company's real grouping —
@@ -158,6 +179,27 @@ struct TeamMemberDto {
     /// When that cap was set (epoch millis). Paired with `budgetSetBy`.
     #[serde(skip_serializing_if = "Option::is_none")]
     budget_set_at_millis: Option<u64>,
+    /// The face this teammate wears, when somebody has chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload
+    /// (`docs/spec/runtime/avatars.md`). Absent means **nobody has chosen**, and
+    /// the console draws the mascot it hashes from the id.
+    ///
+    /// Skipped rather than defaulted for the reason `tier` is: absent is a real
+    /// answer here, and a client that could not tell it from a choice would have
+    /// no way to offer "reset to the default face".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
+    /// Whether this teammate came from the **global baseline**
+    /// (`docs/spec/runtime/globals.md`) rather than from this company — the
+    /// same `Agent::global` marker the merge itself sets (issue #1404).
+    ///
+    /// Always sent, never skipped. The console's first-run gate asks "has
+    /// anybody staffed this company?", and the baseline is appended to every
+    /// company whatever its manifest says, so a row that omitted this would be
+    /// counted as staff and first-run setup could never open. Absence has to
+    /// mean "this host predates the field", which the console reads as the old
+    /// behaviour; it must not also mean "not global".
+    global: bool,
 }
 
 /// The add-teammate body.
@@ -182,6 +224,38 @@ struct AddMember {
     /// only restrict the new teammate below what the company already allows.
     #[serde(default)]
     tools: Vec<String>,
+    /// An optional face for the new teammate — a `tiny:<flavour>` mascot or a
+    /// `blob:<nodeId>` upload (`docs/spec/runtime/avatars.md`), so a teammate can
+    /// be born wearing the face the operator picked in the create dialog rather
+    /// than flashing a hashed one until a second PATCH lands.
+    ///
+    /// A plain `Option` for the same reason `instructions` is one: at creation
+    /// there is nothing to reset to, so `null` and omitted are the same thing —
+    /// the hashed default.
+    #[serde(default)]
+    avatar: Option<String>,
+    /// The job shape that decides this teammate's tool belt, sent by the
+    /// first-run setup build-out (issue #1674). When present it derives the
+    /// grant list through
+    /// [`tools_for_focus`](crate::company::setup::tools_for_focus) — the same
+    /// host-side belt table the roster proposal uses — instead of `tools`, so a
+    /// setup-created teammate gets the belt its shape was approved with on the
+    /// review screen rather than inheriting the whole company default. An
+    /// unreadable value fails closed to the Writing belt, exactly as the
+    /// proposal's [`focus_from_wire`](crate::company::setup) does; the derived
+    /// list is still intersected with the company `[tools].allow` like any
+    /// other `tools` line, so this can only ever narrow. Takes no permission:
+    /// the setup flow that sends it is the same member-level add as before.
+    #[serde(default)]
+    focus: Option<String>,
+    /// Optional persona instructions for the new teammate (issue #1530), so a
+    /// teammate can be born with an overridden persona rather than needing a
+    /// second PATCH. A plain `Option` — at creation there is no blueprint to
+    /// reset to, so `null`/omitted both mean "no override" and a blank string is
+    /// dropped. Takes no permission: it can only add persona text to a teammate
+    /// this same call is creating.
+    #[serde(default)]
+    instructions: Option<String>,
 }
 
 /// The set-budget body.
@@ -210,7 +284,7 @@ pub(super) struct SetBudget {
 /// Deserializes into `Some(inner)` when the field is present (so an explicit
 /// `null` becomes `Some(None)`). Without a companion `#[serde(default)]` an
 /// omitted field stays an error — which is what [`SetBudget`] wants.
-pub(super) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -272,15 +346,18 @@ async fn list_team(company: ScopedCompany) -> Result<Json<Vec<TeamMemberDto>>, A
     };
     let members = record
         .map(|record| {
+            // Resolved through the record, so a manifest teammate an operator
+            // has edited from the console lists under the name, role and
+            // description it now has rather than the ones `company.toml`
+            // launched it with.
             let mut members: Vec<TeamMemberDto> = record
-                .manifest
-                .agents
-                .iter()
+                .effective_agents()
+                .into_iter()
                 .map(|agent| {
                     member_row(
                         &record,
                         &agent.id,
-                        None,
+                        agent.name.clone(),
                         agent.role.clone(),
                         agent.description.clone(),
                         enabled(&agent.id),
@@ -341,6 +418,15 @@ fn member_row(
         spent_today_usd: cap.and_then(|_| spent(agent_id)),
         budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.map(|entry| entry.at_millis),
+        // Resolved through the record, like every other overlay-backed field:
+        // one override row answers for a manifest teammate and an overlay one
+        // alike, so both arms of the list above get the chosen face with no
+        // second lookup to keep in step.
+        avatar: record.effective_avatar(agent_id),
+        // Through the same helper as the four above, for the same reason: the
+        // roster read is what the first-run gate is decided on, so a second
+        // copy of the provenance rule here is a second thing to forget.
+        global: super::team_agent::is_global(record, agent_id),
     }
 }
 
@@ -376,8 +462,9 @@ pub(super) async fn daily_spend_samples(
     Ok(Some(samples))
 }
 
-/// Every roster teammate's id — manifest agents first, then overlay teammates.
-/// The same union `CompanyRecord::is_roster_agent` accepts.
+/// Every roster teammate's id — manifest agents first, then overlay teammates,
+/// minus the ones the operator has removed. The same union
+/// `CompanyRecord::is_roster_agent` accepts.
 fn roster_ids(record: &CompanyRecord) -> impl Iterator<Item = &String> {
     record
         .manifest
@@ -385,6 +472,7 @@ fn roster_ids(record: &CompanyRecord) -> impl Iterator<Item = &String> {
         .iter()
         .map(|agent| &agent.id)
         .chain(record.overlay_agents.iter().map(|agent| &agent.id))
+        .filter(|id| !record.is_retired(id))
 }
 
 /// `POST {scope}/team` — add an operator-defined teammate, optionally with a
@@ -398,17 +486,47 @@ async fn add_member(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     // Setting a cap is admin-only, so an add that carries one is too — but an
     // add that does not keeps working for any member, exactly as before. The
     // check is deliberately conditional: adding this field must not quietly
     // take the existing capability away from members.
-    let author = match body.budget_usd_daily {
+    let mut author = match body.budget_usd_daily {
         Some(cap) => {
             if let Some(refusal) = validate_cap(cap) {
-                return Err(refusal);
+                return Err(refusal.into());
             }
             Some(require_admin(&headers, &state, &company.runtime, peer).await?)
+        }
+        None => None,
+    };
+
+    // A create-time face, resolved *before* the write lock below is taken.
+    //
+    // A `blob:` avatar streams up to 4 MiB from the workspace backend, and the
+    // bytes it resolves to do not depend on the record — so holding the
+    // per-company write lock across that I/O would let a slow or stalled remote
+    // store block every other roster and policy write, on a request any member
+    // can repeat. The immutable reference is resolved here instead, and the
+    // lock below is held only for the load-mutate-save of the record. (Same
+    // shape as `edit_agent` in `team_agent.rs`.)
+    //
+    // Blank is dropped rather than stored — "no choice" is the hashed default.
+    let resolved_avatar: Option<String> = match body
+        .avatar
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => {
+            let stored = crate::company::avatar::resolve(
+                company.runtime.workspace().as_ref(),
+                company.id(),
+                value,
+            )
+            .await
+            .map_err(|e| ApiError(e).into_response())?;
+            Some(stored)
         }
         None => None,
     };
@@ -420,17 +538,75 @@ async fn add_member(
 
     // Issue #661 / L5: trim + drop blank globs, mirroring the orchestrator
     // `add_agent` parse. Empty stays empty → the standard company-wide grant.
-    let tools: Vec<String> = body
-        .tools
-        .into_iter()
-        .map(|glob| glob.trim().to_string())
-        .filter(|glob| !glob.is_empty())
-        .collect();
+    //
+    // Issue #1674: a `focus` from the setup build-out derives the grant list
+    // host-side instead — the belt table lives in `src/company/setup.rs`, and
+    // the console has no business choosing a permission boundary. An unreadable
+    // focus fails closed to the Writing belt (`tools_for_focus`), never wider.
+    let mut tools: Vec<String> = match body.focus.as_deref().map(str::trim) {
+        Some(focus) if !focus.is_empty() => {
+            crate::company::setup::tools_for_focus(AgentFocus::from_wire(focus))
+        }
+        _ => body
+            .tools
+            .into_iter()
+            .map(|glob| glob.trim().to_string())
+            .filter(|glob| !glob.is_empty())
+            .collect(),
+    };
+    // Naming a BYO real-money namespace for a NEW teammate is a billing
+    // decision. A budget that spends money is already admin-only above; an
+    // explicit `chargebee`/`paypal`/`hosting` grant without a cap must be too —
+    // otherwise the day a company's ceiling includes `chargebee`, any member
+    // could mint a billing-capable teammate, while editing an existing
+    // teammate's `tools` is already admin-only (`team_agent.rs`). Focus-derived
+    // belts never name these namespaces, so only a hand-typed grant trips this.
+    if author.is_none()
+        && tools.iter().any(|grant| {
+            let one = std::slice::from_ref(grant);
+            crate::company::grants_chargebee_explicit(one)
+                || crate::company::grants_paypal_explicit(one)
+                || crate::company::grants_hosting_explicit(one)
+        })
+    {
+        author = Some(require_admin(&headers, &state, &company.runtime, peer).await?);
+    }
     let mut record = load_record(&company).await?;
+    // A teammate created with no stated grant does not inherit the BYO
+    // real-money namespaces (#788/#789), even though "empty" otherwise means
+    // the standard company-wide grant. A company holds `chargebee` because
+    // somebody named it so that ONE teammate could invoice; the next teammate
+    // an operator types into the console is not that teammate, and silence is
+    // not consent to bill a customer. `creation_default_grants` returns empty
+    // — leaving the inherit-everything contract untouched — for every company
+    // that grants none of them, which is all but a handful.
+    //
+    // Deliberately here rather than in the roster build: this materialises the
+    // narrowed list ONCE, at creation, so the stored teammate carries its own
+    // line. Narrowing at read time instead would silently re-widen the day an
+    // operator edited the teammate for an unrelated reason.
+    if tools.is_empty() {
+        match crate::company::creation_default_grants(&record.manifest.tools.allow) {
+            crate::company::CreationGrant::Standard => {}
+            crate::company::CreationGrant::Narrowed(narrowed) => tools = narrowed,
+            // Nothing safe to store: see `CreationGrant::NothingLeft`. Refusing
+            // is the honest answer and the operator can still create the
+            // teammate by naming its tools.
+            crate::company::CreationGrant::NothingLeft => {
+                return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
+                    "this company grants only billing namespaces, so a teammate created with no \
+                     `tools` would inherit them. State the teammate's tools explicitly."
+                        .to_string(),
+                ))
+                .into_response()
+                .into());
+            }
+        }
+    }
     let agent = OverlayAgent {
         // A readable id derived from the name, unique against the roster this
         // record already holds (issue #686). Minted here rather than pushed and
-        // renamed later: the id names the teammate's `Agents/<id>/` folder and
+        // renamed later: the id names the teammate's `agents/<id>/` folder and
         // stamps every artifact it authors, so it has to be right on the first
         // save. The surrounding write lock is what makes the uniqueness check
         // and the save below one atomic step.
@@ -439,8 +615,15 @@ async fn add_member(
         role: body.role,
         description: body.description,
         // Issue #661 / L5: the teammate's own grant, intersected with the
-        // company allow-list by the shared reads/roster build. Empty = standard.
-        tools,
+        // company allow-list by the shared reads/roster build. A teammate created
+        // with no stated (and no billing-narrowed) grant is stored as `None` —
+        // inherit the company's standard grant — not `Some(vec![])`, which since
+        // issue #1804 is an explicit deny-all. This create path expresses only
+        // "inherit" and "narrow"; the deny-all state is reachable by editing the
+        // teammate afterwards (`PATCH …/team/{id}` with `tools: []`).
+        tools: if tools.is_empty() { None } else { Some(tools) },
+        model: None,
+        harness: None,
     };
     record.overlay_agents.push(agent.clone());
     let attribution = author.map(|admin| BudgetOverride {
@@ -459,12 +642,33 @@ async fn add_member(
         // uniqueness.
         record.upsert_budget_override(entry);
     }
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    // Issue #1530: a create-time persona override, so a teammate can be born with
+    // an overridden persona. Trimmed-empty is dropped — a blank string is "no
+    // override", never a stored empty persona. Through the upsert for the same
+    // invariant-belongs-to-the-record reason as the budget above.
+    if let Some(instructions) = body
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .map(crate::company::prompt::cap_persona_instructions)
+        .filter(|text| !text.is_empty())
+    {
+        record.upsert_agent_override(AgentOverride {
+            agent_id: agent.id.clone(),
+            instructions: Some(instructions),
+            ..Default::default()
+        });
+    }
+    // The resolved face is applied to the record under the lock so the upsert
+    // lands in the same atomic save as the teammate itself.
+    if let Some(stored) = resolved_avatar.clone() {
+        record.upsert_agent_override(AgentOverride {
+            agent_id: agent.id.clone(),
+            avatar: Some(stored),
+            ..Default::default()
+        });
+    }
+    company.runtime.store().save(&record).await?;
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
@@ -493,6 +697,11 @@ async fn add_member(
         spent_today_usd: body.budget_usd_daily.map(|_| 0.0),
         budget_set_by: attribution.as_ref().map(|entry| entry.set_by.id.clone()),
         budget_set_at_millis: attribution.as_ref().map(|entry| entry.at_millis),
+        avatar: resolved_avatar,
+        // An operator just created this one, so it is by construction not from
+        // the baseline — the merge only ever appends to the manifest roster.
+        // It is also exactly the write that closes the first-run gate.
+        global: false,
     }))
 }
 
@@ -510,19 +719,48 @@ async fn remove_member(
         .load(company.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
-    // A manifest teammate is part of the version-controlled blueprint.
-    if record.manifest.agents.iter().any(|a| a.id == agent_id) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            language::MANIFEST_TEAMMATE_DELETE.to_string(),
-        )));
-    }
-    let before = record.overlay_agents.len();
-    record.overlay_agents.retain(|a| a.id != agent_id);
-    if record.overlay_agents.len() == before {
+    if !record.is_roster_agent(&agent_id) {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "teammate {agent_id}"
         ))));
     }
+    // The one refusal left: a company with nobody on it has no orchestrator, no
+    // one to answer a message and no way back from the console. Counted over the
+    // roster as it effectively stands, so the check sees the teammates that are
+    // actually there rather than the ones the blueprint declared.
+    if roster_ids(&record).count() <= 1 {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::LAST_TEAMMATE_DELETE.to_string(),
+        )));
+    }
+
+    let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
+    if is_manifest {
+        // A tombstone, not a manifest rewrite: `company.toml` and the global
+        // baseline merged into it are re-read on every rebuild, so a teammate
+        // "removed" by editing the roster would simply come back. Recorded here
+        // and filtered out by `CompanyRecord::effective_agents`, which is what
+        // takes the teammate off the roster, off its desks and out of the
+        // harness build rather than merely off the Team page.
+        record.retire_agent(&agent_id);
+    } else {
+        record.overlay_agents.retain(|a| a.id != agent_id);
+    }
+    // Desk seats an operator added are dropped with the teammate either way. A
+    // blueprint seat is left alone — `effective_desk_members` already filters a
+    // retired teammate out of it, and the manifest is not rewritten.
+    record
+        .overlay_desk_members
+        .retain(|member| member.agent_id != agent_id);
+    // The teammate's edit overlay goes with it too, for the same
+    // id-reuse reason the budget override below does: the id is a slug of the
+    // display name, so a later teammate can take this seat and would otherwise
+    // inherit a rename nobody made for it. A retired manifest teammate loses its
+    // edits as well — if it ever comes back it comes back as the blueprint
+    // declares it.
+    record
+        .overlay_agent_edits
+        .retain(|edit| edit.agent_id != agent_id);
     // Drop the teammate's budget override with it (issue #343). Since #686 the
     // id is a slug of the display name rather than a generated one, so removing
     // a teammate *frees its id*: re-adding the same name mints the same slug and
@@ -547,13 +785,13 @@ async fn set_budget(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<SetBudget>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
     // `Some(_)` is guaranteed by `SetBudget`'s missing-key rejection; the inner
     // option is the cap-or-uncap the operator asked for.
     let cap = body.budget_usd_daily.flatten();
     if let Some(refusal) = cap.and_then(validate_cap) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     let write_lock = company_write_lock(company.id());
@@ -561,7 +799,7 @@ async fn set_budget(
 
     let mut record = load_record(&company).await?;
     if let Some(refusal) = require_roster_teammate(&record, &agent_id) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     let entry = BudgetOverride {
@@ -576,12 +814,7 @@ async fn set_budget(
     // One override per teammate: replace in place rather than accumulating, so
     // `effective_budget`'s first-match read can never see a stale row.
     record.upsert_budget_override(entry);
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -600,7 +833,7 @@ async fn clear_budget(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
@@ -608,16 +841,11 @@ async fn clear_budget(
 
     let mut record = load_record(&company).await?;
     if let Some(refusal) = require_roster_teammate(&record, &agent_id) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
 
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
-    company
-        .runtime
-        .store()
-        .save(&record)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    company.runtime.store().save(&record).await?;
 
     updated_row(&company, &record, &agent_id).await
 }
@@ -651,15 +879,16 @@ fn validate_cap(cap: f64) -> Option<Response> {
 }
 
 /// Loads the addressed company's record, or 404s.
-async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::server::Rejection> {
     company
         .runtime
         .store()
         .load(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string()))
+                .into_response()
+                .into()
         })
 }
 
@@ -686,7 +915,7 @@ async fn updated_row(
     company: &ScopedCompany,
     record: &CompanyRecord,
     agent_id: &str,
-) -> Result<Json<TeamMemberDto>, Response> {
+) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
     let spend_today = daily_spend_samples(company, Some(record))
         .await
         .map_err(|e| e.into_response())?;
@@ -699,13 +928,16 @@ async fn updated_row(
         .runtime
         .inbox()
         .inboxes(company.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .into_iter()
         .any(|meta| meta.key == agent_id && meta.enabled);
 
-    // A manifest teammate is named by its role and carries no display name; an
-    // overlay teammate always has one. Same rule as `list_team`.
+    // Same rule as `list_team`, and resolved the same way: through the record,
+    // so a manifest teammate an operator has edited answers a budget write with
+    // the name, role and description it now has. Reading the raw manifest row
+    // here would make one card change identity depending on which route last
+    // touched it — a rename would show on the roster and vanish the moment a cap
+    // was set.
     let overlay = record.overlay_agents.iter().find(|a| a.id == agent_id);
     let (name, role, description) = match overlay {
         Some(agent) => (
@@ -715,12 +947,13 @@ async fn updated_row(
         ),
         None => {
             let agent = record
-                .manifest
-                .agents
-                .iter()
-                .find(|a| a.id == agent_id)
+                .effective_agent(agent_id)
                 .expect("roster membership was checked before the write");
-            (None, agent.role.clone(), agent.description.clone())
+            (
+                agent.name.clone(),
+                agent.role.clone(),
+                agent.description.clone(),
+            )
         }
     };
     Ok(Json(member_row(
@@ -816,11 +1049,28 @@ mod tests {
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
-        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        state_with(home, toml::from_str(manifest_toml).unwrap()).await
+    }
+
+    /// As above, but with the **global baseline merged in** — the roster every
+    /// company actually boots with (`docs/spec/runtime/globals.md`).
+    ///
+    /// Kept apart from `state_with_manifest` on purpose: most tests here are
+    /// about one hand-written teammate and are clearer without four extra rows,
+    /// while the provenance tests are meaningless without them.
+    async fn state_with_globals(home: &std::path::Path, manifest_toml: &str) -> AppState {
+        let mut manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        manifest.apply_globals();
+        state_with(home, manifest).await
+    }
+
+    async fn state_with(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
         let store = FsCompanyStore::new(home.to_path_buf());
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -832,9 +1082,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -1242,6 +1496,187 @@ mod tests {
         assert!(row["budgetSetBy"].is_string(), "{row}");
     }
 
+    /// Issue #1530: a teammate can be born with a persona override — the
+    /// create-time path writes it in the same save as the teammate, and the
+    /// agent detail reads it back as the effective instructions. Takes no
+    /// permission: any member may add a teammate with instructions.
+    #[tokio::test]
+    async fn add_member_with_instructions_persists_the_override() {
+        use crate::ports::UserRole;
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let member =
+            crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({
+                "name": "Jamie",
+                "role": "Growth",
+                "instructions": "Be terse and data-first."
+            })),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a member may add with instructions: {created}"
+        );
+        let jamie = created["id"].as_str().unwrap().to_string();
+
+        // Read the detail back, so this is the stored override rather than the
+        // handler's own answer.
+        let (status, detail) = send(
+            &state,
+            "GET",
+            &format!("/api/v1/company/team/{jamie}"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(
+            detail["instructions"], "Be terse and data-first.",
+            "{detail}"
+        );
+        assert_eq!(detail["instructionsOverridden"], true, "{detail}");
+    }
+
+    /// Issue #1674: a setup-created teammate carries its job shape (`focus`) so
+    /// it is created with the belt that shape was approved with on the review
+    /// screen, rather than inheriting the whole company default. `research` is
+    /// the read-only shape: its effective grants hold no `workspace.write`, and
+    /// a focus-less add still gets the standard company-wide grant.
+    #[tokio::test]
+    async fn a_teammate_created_with_a_focus_is_scoped_to_that_focus_belt() {
+        use crate::ports::UserRole;
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[tools]\n\
+             allow = [\"workspace.read\", \"workspace.write\", \"docs.*\", \
+             \"files.*\", \"web.*\", \"search\", \"mcp:*\"]\n",
+        )
+        .await;
+        let member =
+            crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+
+        // A Research teammate: reads the workspace and browses, but has no
+        // business writing the company's own guidance tree.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({
+                "name": "Jamie",
+                "role": "Researcher",
+                "focus": "research",
+            })),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let jamie = created["id"].as_str().unwrap().to_string();
+        let row = team_row(&state, &jamie).await;
+        let grants = |field: &str| {
+            row["tools"][field]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        let effective = grants("effective");
+        assert!(
+            effective.contains(&"workspace.read"),
+            "research reads the workspace: {effective:?}"
+        );
+        assert!(
+            !effective.contains(&"workspace.write"),
+            "research must not write the workspace it reports on: {effective:?}"
+        );
+        let requested = grants("requested");
+        assert!(
+            !requested.contains(&"workspace.write"),
+            "the stored belt is the research belt, not the company grant: {requested:?}"
+        );
+
+        // A focus-less add keeps the standard company-wide grant — the field
+        // takes no permission away from the generic add path.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Sam", "role": "Generalist"})),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let sam = created["id"].as_str().unwrap().to_string();
+        let row = team_row(&state, &sam).await;
+        let effective = row["tools"]["effective"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            effective.contains(&"workspace.write"),
+            "a focus-less add still inherits the company grant: {effective:?}"
+        );
+    }
+
+    /// Issue #788/#789: naming a BYO billing namespace for a NEW teammate is a
+    /// billing decision, and a member must not be able to make it. A budget
+    /// that spends money is already admin-only; an explicit `chargebee` grant
+    /// without a budget must be too — otherwise any member could mint a
+    /// billing-capable teammate the day the company ceiling includes one, while
+    /// editing an existing teammate's `tools` is already admin-only.
+    #[tokio::test]
+    async fn a_member_may_not_create_a_teammate_with_a_billing_grant() {
+        use crate::ports::UserRole;
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[tools]\n\
+             allow = [\"*\", \"workspace.*\", \"workspace.write\", \"media\", \"composio\", \
+             \"search\", \"mcp:*\", \"chargebee\"]\n",
+        )
+        .await;
+        let member =
+            crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+
+        let (status, body) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Jamie", "role": "Billing", "tools": ["chargebee"]})),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // The refused add must not have persisted a teammate.
+        let (list_status, team) = get_team(&state).await;
+        assert_eq!(list_status, StatusCode::OK, "{team}");
+        let rows = team.as_array().unwrap();
+        assert!(
+            rows.iter().all(|r| r["name"] != "Jamie"),
+            "a refused add must not persist a teammate: {team}"
+        );
+
+        // An admin can still mint the billing-capable teammate.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Dana", "role": "Billing", "tools": ["chargebee"]})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(created["id"], "dana", "{created}");
+    }
+
     /// An **overlay** teammate can be capped after the fact too — the case the
     /// pre-#343 read path hardcoded to `None` ("uncapped in v1").
     ///
@@ -1285,6 +1720,7 @@ mod tests {
                     cost_usd: 0.75,
                     kind: SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -1300,6 +1736,54 @@ mod tests {
             "capping the only console-added teammate must start the meter read \
              for the roster: {row}"
         );
+    }
+
+    /// A budget write answers with the teammate as it **effectively** stands,
+    /// not as the blueprint declared it.
+    ///
+    /// `updated_row` is a second place the roster is rendered, and it used to
+    /// read the raw manifest row. Once a manifest teammate became editable that
+    /// made one card change identity depending on which route last touched it:
+    /// a console rename showed on the Team page and then vanished the moment an
+    /// admin set a cap, because the budget response overwrote the row with the
+    /// name and role from `company.toml`.
+    #[tokio::test]
+    async fn a_budget_write_answers_with_the_edited_identity() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        // Rename a blueprint teammate through the console.
+        let (status, _) = send(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/analyst",
+            Some(json!({"role": "Managing Director", "description": "Runs the place."})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Then set a cap on the same teammate. The response is a roster row.
+        let (status, row) = put_budget(&state, "analyst", json!({"budgetUsdDaily": 4.0})).await;
+        assert_eq!(status, StatusCode::OK, "{row}");
+        assert_eq!(
+            row["role"], "Managing Director",
+            "the budget write answered with the blueprint's role, undoing the rename on the \
+             card the console re-renders from: {row}"
+        );
+        assert_eq!(row["description"], "Runs the place.", "{row}");
+
+        // And clearing the cap answers the same way — same helper, same defect.
+        let (status, cleared) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/team/analyst/budget",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert_eq!(cleared["role"], "Managing Director", "{cleared}");
     }
 
     /// Removing a teammate takes its override with it, so the record does not
@@ -1347,7 +1831,7 @@ mod tests {
 
     /// Issue #686 — a console-added teammate gets a readable snake_case id
     /// derived from its name, so its workspace folder reads
-    /// `Agents/dana_designer/` rather than `Agents/019fad5ada20-…/`.
+    /// `agents/dana_designer/` rather than `agents/019fad5ada20-…/`.
     ///
     /// A second teammate with the same name suffixes rather than being refused:
     /// duplicate display names were always accepted here, and taking that away
@@ -1545,6 +2029,7 @@ mod tests {
                         cost_usd: cost,
                         kind: SampleKind::Inference,
                         run_id: None,
+                        model: None,
                     },
                 )
                 .await
@@ -1565,6 +2050,7 @@ mod tests {
                     cost_usd: 9.00,
                     kind: SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -1613,6 +2099,7 @@ mod tests {
                     cost_usd: 9.00,
                     kind: SampleKind::Inference,
                     run_id: None,
+                    model: None,
                 },
             )
             .await
@@ -1806,5 +2293,175 @@ mod tests {
             "an empty manifest roster names nobody, so it does not fall through \
              to the overlay half: {row}"
         );
+    }
+
+    // --- Baseline provenance, and the first-run gate (issue #1404) ----------
+
+    /// The roster says which of its rows came from the global baseline.
+    ///
+    /// This is the field the console's first-run gate turns on. `apply_globals`
+    /// appends `globals/agents/*.toml` to **every** company whatever its
+    /// manifest says, so a company nobody has ever staffed still answers this
+    /// route with a non-empty list — and "is the roster empty?" therefore
+    /// answered `no` everywhere, which is what made first-run setup unreachable
+    /// in the shipped product.
+    ///
+    /// Asserted as "at least one row, all of them global" rather than against a
+    /// count or the four current ids: the baseline is meant to grow, and a test
+    /// that pins its contents here would fail for the wrong reason.
+    #[tokio::test]
+    async fn a_company_with_no_declared_roster_answers_with_the_baseline_only() {
+        let home_dir = home();
+        let state = state_with_globals(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+
+        let (status, body) = get_team(&state).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body.as_array().unwrap();
+        assert!(
+            !rows.is_empty(),
+            "the baseline is merged into every company, so this is never empty: {body}"
+        );
+        assert!(
+            rows.iter().all(|row| row["global"] == true),
+            "a company declaring no `[[agent]]` has nothing but baseline \
+             teammates, and every one of them must say so: {body}"
+        );
+    }
+
+    /// A teammate the company wrote, and one the operator adds, are both
+    /// `global: false` — beside a baseline that is `true` on the same read.
+    ///
+    /// Both halves are the point. The gate must stay shut for a company that
+    /// shipped with a roster (`docs/spec/runtime/company-setup.md`), and it must
+    /// close the moment setup creates the first teammate.
+    #[tokio::test]
+    async fn a_declared_or_operator_added_teammate_is_never_marked_global() {
+        let home_dir = home();
+        let state = state_with_globals(home_dir.path(), ROSTER).await;
+
+        let declared = team_row(&state, "analyst").await;
+        assert_eq!(
+            declared["global"], false,
+            "a `[[agent]]` the company wrote is the company's own: {declared}"
+        );
+
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Nova", "role": "Researcher"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(
+            created["global"], false,
+            "the create response answers the same way the read does: {created}"
+        );
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(team_row(&state, &id).await["global"], false);
+
+        // …and the baseline on the same roster still says otherwise, so the two
+        // are distinguishable rather than uniformly false.
+        let (_, body) = get_team(&state).await;
+        assert!(
+            body.as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["global"] == true),
+            "the baseline rows are on this roster too: {body}"
+        );
+    }
+
+    /// A baseline teammate — a blueprint row like any other, merged into every
+    /// company — can be deleted, and stays deleted across a reload. It is a
+    /// tombstone rather than a manifest rewrite, so this is the assertion that
+    /// says the blueprint being re-read on every load does not resurrect it.
+    #[tokio::test]
+    async fn a_baseline_teammate_can_be_deleted_and_stays_deleted() {
+        let home_dir = home();
+        let state = state_with_globals(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+
+        let (_, before) = get_team(&state).await;
+        let before = before.as_array().unwrap().clone();
+        assert!(
+            before.len() > 1,
+            "the baseline seeds more than one teammate: {before:?}"
+        );
+        let id = before[0]["id"].as_str().unwrap().to_string();
+
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            &format!("/api/v1/company/team/{id}"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, after) = get_team(&state).await;
+        let after = after.as_array().unwrap();
+        assert_eq!(after.len(), before.len() - 1, "{after:?}");
+        assert!(
+            !after.iter().any(|row| row["id"] == id.as_str()),
+            "the blueprint still declares it, so a re-read must not bring it \
+             back: {after:?}"
+        );
+    }
+
+    /// The one refusal the roster keeps: a company must not be left with nobody
+    /// on it. Without this the console could empty the roster entirely, which
+    /// has no orchestrator, nobody to answer a message, and no way back.
+    #[tokio::test]
+    async fn the_last_teammate_cannot_be_deleted() {
+        let home_dir = home();
+        let state = state_with_globals(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+
+        // Delete every teammate but one, which must succeed all the way down.
+        let (_, body) = get_team(&state).await;
+        let ids: Vec<String> = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect();
+        for id in &ids[..ids.len() - 1] {
+            let (status, _) = send(
+                &state,
+                "DELETE",
+                &format!("/api/v1/company/team/{id}"),
+                None,
+                Some(&admin_cookie()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "removing {id}");
+        }
+
+        let last = ids.last().unwrap();
+        let (status, refusal) = send(
+            &state,
+            "DELETE",
+            &format!("/api/v1/company/team/{last}"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal:?}");
+
+        let (_, after) = get_team(&state).await;
+        assert_eq!(after.as_array().unwrap().len(), 1, "{after}");
     }
 }

@@ -1,0 +1,77 @@
+# Repo-level Cargo configuration.
+
+# ────────────────────────────────────────────────────────────────────────────
+# Thread stack floor for the test harness (issue #895)
+# ────────────────────────────────────────────────────────────────────────────
+# `cargo test` on the gated feature set aborts the WHOLE test binary with
+#
+#   thread '…' has overflowed its stack
+#   fatal runtime error: stack overflow, aborting        (SIGABRT)
+#
+# unless the harness threads get more than libtest's 2 MiB default. Because it
+# is an abort rather than a failed assertion, every test after it in that binary
+# is skipped — so the visible damage is not one red test but a truncated run,
+# and the natural reading is "I broke the harness" rather than "this needs a
+# bigger stack". Two separate work streams lost time to exactly that.
+#
+# CI already set this, on the `Rust (openhuman, tinycortex)` job alone, so the
+# requirement was real, load-bearing and invisible to anyone running the suite
+# locally. Declaring it here makes a local run and CI agree BY CONSTRUCTION
+# rather than by tribal knowledge.
+#
+# ── Where the depth actually is ─────────────────────────────────────────────
+# Cumulative `async fn` composition, NOT recursion: a state machine is inlined
+# into its caller's, so a nested chain sums into one frame. On the gated build
+# the vendored OpenHuman turn chain dominates (`-Zprint-type-sizes`, test
+# profile):
+#
+#   run_turn_via_tinyagents_session          ~117 KiB
+#   with_turn_collector<run_chat_turn_graph> ~116 KiB
+#   run_chat_turn_graph                       ~58 KiB
+#   with_current_sandbox_mode                 ~56 KiB
+#
+# against a largest OpenCompany-owned future of ~32 KiB — which is not even on
+# this path. This is therefore not our depth to bound from here, and that was
+# tested rather than assumed: `Box::pin` on both `agent.turn(...)` awaits in
+# `CompanyAgent::run_with_steer` moved the threshold by nothing at all. The real
+# fix belongs upstream in OpenHuman.
+#
+# ── How the number below was chosen ─────────────────────────────────────────
+# Measured on aarch64-darwin, debug/test profile, by bisection:
+#
+#   * one test alone   — 2176 KiB aborts, 2304 KiB passes
+#   * WHOLE gated suite at default parallelism
+#     (`cargo test --locked --features openhuman,tinycortex --tests`)
+#                      — 2 MiB aborts, 3 MiB passes 4182/4182
+#
+# So the measured suite floor is 3 MiB, and 8 MiB is **2.7x** that. The margin
+# is not decoration; it covers three things the measurement cannot:
+#
+#   1. CI is x86-64 Linux, this was aarch64-darwin — frame layout differs.
+#   2. CI runners have more cores, so more harness threads run concurrently.
+#   3. Headroom for growth, because the failure mode of guessing low is not a
+#      clear error but an abort that hides every test behind it.
+#
+# It is deliberately NOT the 16 MiB the CI job uses. That value predates any
+# measurement and is ~5x the suite floor; the comment above it claims OpenHuman
+# "requires the same stack its production runtimes allocate", which this
+# measurement does not support. Re-examining it is its own change on its own
+# evidence — this file does not touch the CI job.
+#
+# If you raise this, say what you measured. An unexplained ceiling is the exact
+# ratchet #895 was filed about: silent headroom absorbs growth until the first
+# signal is again a local abort.
+#
+# `force` is deliberately absent (the default): an explicitly exported
+# `RUST_MIN_STACK` still wins, so CI's own value and a developer bisecting the
+# real depth both override this without editing the file.
+#
+# ── If you kept a cargo path-override here ──────────────────────────────────
+# This file used to be gitignored so a developer could drop in a path-override
+# pointing at a sibling openhuman checkout. It is tracked now, because a floor
+# that cannot ship is not a floor. Put that override in `$CARGO_HOME/config.toml`
+# or in a PARENT-directory `.cargo/config.toml` instead — Cargo merges both with
+# this file automatically, so nothing is lost and this file stays conflict-free.
+# The openhuman repo documents the same arrangement in its own `.cargo/config.toml`.
+[env]
+RUST_MIN_STACK = "8388608"

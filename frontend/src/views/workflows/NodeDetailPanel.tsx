@@ -2,16 +2,18 @@
 //
 // Extracted verbatim from `WorkflowsView.tsx` (issue #303).
 
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
+import { X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { WorkflowNode as WorkflowNodeModel } from "@/api/workflows";
+import { nodeKindLabel, type WorkflowNode as WorkflowNodeModel } from "@/api/workflows";
+import type { TeamMemberDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { nodeKindMeta } from "@/lib/workflow-sample";
 
-import { type NodeOutputView, parseNodeMessages } from "./run-output";
+import { type NodeOutputView, isRecord, parseNodeMessages } from "./run-output";
 
 /** A read-only inspector for a single graph node, overlaid on the canvas when
  * the operator clicks a node. Surfaces the fields already on the wire from
@@ -20,10 +22,13 @@ import { type NodeOutputView, parseNodeMessages } from "./run-output";
  * kind-specific config / error-handling policy. */
 export function NodeDetailPanel({
   node,
+  roster = [],
   output,
   onClose,
 }: {
   node: WorkflowNodeModel;
+  /** Roster names for resolving an agent node's machine id. */
+  roster?: TeamMemberDto[];
   /**
    * This node's output on the run being inspected (issue #596). `undefined`
    * means "not inspecting a run" — the panel then shows only the node's static
@@ -34,12 +39,29 @@ export function NodeDetailPanel({
   onClose: () => void;
 }) {
   const meta = nodeKindMeta(node.kind);
+  const kindLabel = nodeKindLabel(node.kind);
+  const teammate = node.agent ? roster.find((member) => member.id === node.agent) : undefined;
+  const teammateName = teammate ? teammate.name?.trim() || teammate.role : undefined;
   const hasConfig =
     node.config !== undefined && node.config !== null &&
     !(typeof node.config === "object" && Object.keys(node.config as object).length === 0);
 
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
   return (
-    <div className="absolute right-3 top-3 bottom-3 z-10 flex w-72 flex-col overflow-hidden rounded-xl border bg-card/95 shadow-lg backdrop-blur sm:w-80">
+    <div
+      // Issue #1231: the overlay's geometry is asserted, not assumed —
+      // `RevealSelectedNode` pans the canvas so the inspected node clears
+      // this box, and the e2e spec measures both.
+      data-testid="workflow-node-detail"
+      className="absolute right-3 top-3 bottom-3 z-10 flex w-72 flex-col overflow-hidden rounded-xl border bg-card/95 shadow-lg backdrop-blur sm:w-80"
+    >
       <div className="flex items-start justify-between gap-2 border-b px-3 py-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="text-base leading-none" aria-hidden>
@@ -47,22 +69,41 @@ export function NodeDetailPanel({
           </span>
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">{node.name}</div>
-            <div className="truncate text-2xs text-muted-foreground">{node.id}</div>
+            <div className="truncate text-2xs text-muted-foreground">{kindLabel}</div>
           </div>
         </div>
-        <Button variant="ghost" size="sm" className="-mr-1 h-7 px-2" onClick={onClose}>
-          Close
+        <Button
+          variant="ghost"
+          size="icon"
+          className="-mr-1 size-7"
+          onClick={onClose}
+          aria-label="Close"
+        >
+          <X className="size-4" />
         </Button>
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-3 text-sm">
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant="outline" className="font-normal">
-            {node.kind}
+            {kindLabel}
           </Badge>
           {node.requiresApproval && (
             <Badge variant="outline" className="border-status-blocked/40 bg-status-blocked-soft font-normal">
               requires approval
+            </Badge>
+          )}
+          {/* Issue #850. Only `false` is a statement — absent means "repeats",
+              which is the default and not worth a badge. Says what happens
+              rather than naming the field, because the operator's question is
+              what approving will do. */}
+          {node.repeatable === false && (
+            <Badge
+              variant="outline"
+              className="border-status-blocked/40 bg-status-blocked-soft font-normal"
+              data-testid="node-not-repeated"
+            >
+              not repeated on approval
             </Badge>
           )}
           {node.schedule && (
@@ -71,6 +112,10 @@ export function NodeDetailPanel({
             </Badge>
           )}
         </div>
+
+        <DetailField label="Node ID">
+          <p className="font-mono text-xs text-muted-foreground">{node.id}</p>
+        </DetailField>
 
         {/* A saved schedule must be visible, not write-only — otherwise an
             operator cannot tell a self-running workflow from a manual one. */}
@@ -88,8 +133,11 @@ export function NodeDetailPanel({
         )}
 
         {node.agent && (
-          <DetailField label="Assigned agent">
-            <p className="font-mono text-xs">{node.agent}</p>
+          <DetailField label="Assigned teammate">
+            <p className="text-sm">{teammateName ?? node.agent}</p>
+            {teammateName && teammateName !== node.agent && (
+              <p className="font-mono text-3xs text-muted-foreground">Roster ID: {node.agent}</p>
+            )}
           </DetailField>
         )}
 
@@ -135,7 +183,11 @@ export function NodeDetailPanel({
           !node.retry &&
           !node.schedule &&
           !node.destination &&
-          !node.requiresApproval && (
+          !node.requiresApproval &&
+          // Issue #850: `repeatable === false` renders the "not repeated on
+          // approval" badge above, so a node whose only detail is that
+          // declaration must not also claim it has no extra details.
+          node.repeatable !== false && (
             <p className="text-xs text-muted-foreground">
               This node has no extra details beyond its kind and name.
             </p>
@@ -165,10 +217,13 @@ function describeDestination(destination: NonNullable<WorkflowNodeModel["destina
  * The Output section of the node inspector (issue #596): what this node produced
  * on the run being inspected — markdown-rendered agent/tool messages, the raw
  * value behind a toggle, a "truncated" badge when the durable snapshot was
- * clipped, and an explicit empty state for a run that predates capture or
- * produced nothing.
+ * clipped, a "partial capture" badge when the run failed or blocked (issue
+ * #1008), and an explicit empty state for a run that genuinely has no snapshot.
+ *
+ * Exported for the unit test that pins the badges and the empty state without
+ * standing up the whole panel.
  */
-function OutputSection({ output }: { output: NodeOutputView }) {
+export function OutputSection({ output }: { output: NodeOutputView }) {
   if (output.state === "loading") {
     return (
       <DetailField label="Output">
@@ -189,9 +244,19 @@ function OutputSection({ output }: { output: NodeOutputView }) {
   }
 
   const messages = parseNodeMessages(output.value);
+  const artifacts = parseRunArtifacts(output.value);
   return (
     <DetailField label="Output">
       <div className="space-y-2" data-testid="node-output">
+        {output.partial && (
+          <Badge
+            variant="outline"
+            className="border-status-blocked/40 bg-status-blocked-soft font-normal"
+            data-testid="node-output-partial"
+          >
+            partial capture — run failed or blocked
+          </Badge>
+        )}
         {output.truncated && (
           <Badge
             variant="outline"
@@ -218,10 +283,32 @@ function OutputSection({ output }: { output: NodeOutputView }) {
               )}
             </div>
           ))
-        ) : (
+        ) : artifacts.length === 0 ? (
           <p className="text-xs text-muted-foreground" data-testid="node-output-none">
             This node produced no readable text — see the raw value below.
           </p>
+        ) : null}
+        {artifacts.length > 0 && (
+          <div className="space-y-1.5" data-testid="node-output-artifacts">
+            <p className="text-3xs uppercase tracking-wide text-muted-foreground">
+              Artifacts
+            </p>
+            {artifacts.map((artifact) => (
+              <a
+                key={`${artifact.workspaceNodeId}-${artifact.source}`}
+                className="block rounded-md border bg-muted/30 px-2 py-1.5 hover:border-primary/40"
+                href={`#/workspace/${encodeURIComponent(artifact.workspaceNodeId)}`}
+                data-testid="node-output-artifact"
+              >
+                <span className="block truncate text-xs font-medium text-primary">
+                  {artifact.title}
+                </span>
+                <span className="block truncate text-3xs text-muted-foreground">
+                  {artifact.source}
+                </span>
+              </a>
+            ))}
+          </div>
         )}
         <details>
           <summary className="cursor-pointer text-xs text-muted-foreground">
@@ -234,6 +321,27 @@ function OutputSection({ output }: { output: NodeOutputView }) {
       </div>
     </DetailField>
   );
+}
+
+interface RunArtifactView {
+  source: string;
+  title: string;
+  workspaceNodeId: string;
+}
+
+/** Reads the host's card-less run-artifact rows defensively. */
+function parseRunArtifacts(raw: unknown): RunArtifactView[] {
+  if (!isRecord(raw) || !Array.isArray(raw.artifacts)) return [];
+  return raw.artifacts.flatMap((row) => {
+    if (!isRecord(row)) return [];
+    const source = typeof row.source === "string" ? row.source : "";
+    const title = typeof row.title === "string" ? row.title : source;
+    const workspaceNodeId =
+      typeof row.workspaceNodeId === "string" ? row.workspaceNodeId : "";
+    return source && title && workspaceNodeId
+      ? [{ source, title, workspaceNodeId }]
+      : [];
+  });
 }
 
 /** A labelled block inside the node inspector. */

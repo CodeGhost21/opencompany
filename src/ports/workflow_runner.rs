@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::Result;
 use crate::company::WorkflowFile;
-use crate::ports::types::{CompanyId, WorkflowNodeStatus};
+use crate::ports::types::{CompanyId, StartedBy, WorkflowNodeStatus};
 
 /// The outcome of running one workflow to completion.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,6 +218,27 @@ pub struct WorkflowBlockedNode {
     /// zero, which is the ordinary case.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unparkable: usize,
+    /// How many of this node's [`approval_ids`](Self::approval_ids) the journal
+    /// no longer holds (issue #1143).
+    ///
+    /// **Computed on the read, never journaled.** Every writer leaves this zero
+    /// and it is skipped when zero, so a run's durable row is byte-for-byte what
+    /// it was; `list_runs` fills it in by asking the journal which of the ids
+    /// this node parked are still parked. It has to be derived rather than
+    /// stored for the same reason the sibling `WorkflowRun::approvals` receipt
+    /// is named for what was parked rather than what is outstanding: a stored
+    /// count of "still waiting" is a fresh lie the moment the queue moves.
+    ///
+    /// Semantically this is [`unparkable`](Self::unparkable) arrived at late.
+    /// Both mean the operator will never be asked and re-running is the only way
+    /// forward — the difference is only *when* that became true. A park is
+    /// unparkable at run time because the gate refused it; it is stranded
+    /// afterwards because the question did not survive (the park record is
+    /// `Durability::Process`, and the "the agent re-parks on its next attempt"
+    /// tolerance that justifies it does not hold for a run that already halted —
+    /// see #1145).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stranded: usize,
 }
 
 /// `skip_serializing_if` predicate for a count that is almost always zero.
@@ -307,6 +328,22 @@ pub struct WorkflowRunNodeRow {
     pub status: WorkflowNodeStatus,
     /// Wall-clock duration of the node's execution, in milliseconds.
     pub elapsed_ms: u64,
+    /// The node's non-fatal data-binding diagnostics (issue #1014): the config
+    /// path of every `=`-expression that resolved to `null` during this node's
+    /// execution — the engine's own list of the broken wiring behind a bad tool
+    /// call (see `tinyflows::expr::NullResolution::location`).
+    ///
+    /// **Paths only, never a resolved value.** A null resolution has no value by
+    /// definition, and only the config *location* rides here — the same
+    /// no-payload stance the row's `status`/`elapsed_ms` take, so nothing a
+    /// model or upstream node produced can leak onto the run response or the
+    /// journal-folded history.
+    ///
+    /// `#[serde(default)]` + `skip_serializing_if` so a row serialized before
+    /// this field existed folds back with an empty list, and a node with no
+    /// unresolved wiring serializes byte-for-byte as it did before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
 }
 
 /// What a workflow run's node did to the task board, as a closed set (issue
@@ -529,6 +566,24 @@ pub enum DeliveryReason {
     /// The destination kind is not one this runtime knows how to deliver to
     /// (unreachable through `parse_workflow`, which rejects unknown kinds).
     UnknownDestinationKind,
+    /// The run reached this `output` node and the node names no destination, so
+    /// there was nowhere to send its report (issue #925).
+    ///
+    /// `destination` is optional on the model because it postdates the node kind
+    /// — an `output` node without one is the shape every graph had before
+    /// [`WorkflowDestinationDef`](crate::company::WorkflowDestinationDef)
+    /// existed, and its report surfaced only in the console's run drawer. That
+    /// made "the author routed nothing on purpose" and "the author never
+    /// configured a destination" the *same* observation: an empty `deliveries`
+    /// list and a run summary reading `Finished — this run routed no reports.`
+    ///
+    /// This row is what tells them apart. It is deliberately a
+    /// [`Skipped`](DeliveryStatus::Skipped) rather than a
+    /// [`Failed`](DeliveryStatus::Failed): nothing broke and nothing was
+    /// attempted, so this is the same class as
+    /// [`AlreadyDelivered`](Self::AlreadyDelivered) — a report that was never
+    /// owed to an address, stated with its reason instead of by omission.
+    NoDestinationConfigured,
     /// This was a **dry run** (issue #542): the report was routed as far as its
     /// destination but deliberately not dispatched, so an operator can see
     /// *where* a report would have gone without anything actually leaving the
@@ -584,6 +639,9 @@ impl std::fmt::Display for DeliveryReason {
             Self::ChannelRefused => "the channel refused the message",
             Self::UnknownDestinationKind => {
                 "the destination kind is not one this runtime can deliver to"
+            }
+            Self::NoDestinationConfigured => {
+                "this output node has no destination, so there was nowhere to send its report"
             }
             Self::DryRun => {
                 "this was a test run, so the report was not sent — its destination is shown so you \
@@ -701,6 +759,25 @@ pub struct WorkflowRunContext {
     /// point (cron, resume) leaves it off — a scheduled or resumed run is always
     /// for real.
     pub dry_run: bool,
+    /// Who or what started this run (issue #1862 prerequisite). Rides the
+    /// run's [`WorkflowRunStarted`](crate::ports::types::CompanyEvent) event so
+    /// a parked blocker later has a fact — not a guess — to attribute its DM
+    /// to.
+    ///
+    /// [`new`](Self::new) derives it from `scheduled` via
+    /// [`StartedBy::from_scheduled`], which is deliberately the coarse
+    /// default: every current call through `new`/`begin` names a run
+    /// `scheduled: false` unless the cron fired it, even the ones an agent
+    /// triggered rather than an operator
+    /// ([`run_workflow`](crate::harness::built_in::orchestrator), which calls
+    /// [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) with
+    /// `scheduled: false` and so reads back as [`StartedBy::Operator`] here).
+    /// A caller that knows the real triggering agent should use
+    /// [`with_started_by`](Self::with_started_by) to override the default —
+    /// wiring that override into `run_workflow` itself is left to a follow-up
+    /// (issue #1861) precisely so this prerequisite slice does not have to
+    /// touch that call site.
+    pub started_by: StartedBy,
 }
 
 /// A one-way stop signal for one workflow run (issue #383).
@@ -805,7 +882,12 @@ impl RunCancel {
 /// [`RunCancel`] is a shared handle whose value changes under both sides, so
 /// including it would make two clones of one context compare unequal the moment
 /// one of them was cancelled. The id and the scheduled flag are what callers
-/// (and tests) actually mean by "the same run context".
+/// (and tests) actually mean by "the same run context". `started_by` (issue
+/// #1862 prerequisite) is deliberately left out of this comparison too, for
+/// the same reason: it is derived attribution riding alongside the identity,
+/// not part of it — two contexts for the same run id stay "the same context"
+/// to every existing caller of this `==` regardless of who is credited with
+/// starting it.
 impl PartialEq for WorkflowRunContext {
     fn eq(&self, other: &Self) -> bool {
         self.run_id == other.run_id && self.scheduled == other.scheduled
@@ -834,7 +916,21 @@ impl WorkflowRunContext {
             // flips it after the fact — which is exactly what `WorkflowSpawn`
             // does with the dry flag the run route hands it (issue #542).
             dry_run: false,
+            // Issue #1862 prerequisite: the coarse default, derived from
+            // `scheduled` alone. See the field doc for why callers that know
+            // the real triggering agent should override it with
+            // `with_started_by` instead of trusting this.
+            started_by: StartedBy::from_scheduled(scheduled),
         }
+    }
+
+    /// Overrides the [`started_by`](Self::started_by) this context was built
+    /// with (issue #1862 prerequisite) — for a caller that knows the real
+    /// triggering agent and wants the journal to say so, rather than settling
+    /// for [`new`](Self::new)'s `scheduled`-derived default.
+    pub fn with_started_by(mut self, started_by: StartedBy) -> Self {
+        self.started_by = started_by;
+        self
     }
 }
 
@@ -855,4 +951,57 @@ pub trait WorkflowRunner: Send + Sync {
         input: Value,
         ctx: &WorkflowRunContext,
     ) -> Result<WorkflowRun>;
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// A manual `new(false)` reads back [`StartedBy::Operator`] — the coarse
+    /// default every call through `new`/`begin` gets unless overridden (issue
+    /// #1862 prerequisite).
+    #[test]
+    fn new_with_scheduled_false_defaults_started_by_to_operator() {
+        let ctx = WorkflowRunContext::new(false);
+        assert_eq!(ctx.started_by, StartedBy::Operator);
+        assert!(!ctx.scheduled);
+    }
+
+    /// A cron-started `new(true)` reads back [`StartedBy::Schedule`] —
+    /// unambiguous, since only the scheduler ever sets `scheduled: true`.
+    #[test]
+    fn new_with_scheduled_true_defaults_started_by_to_schedule() {
+        let ctx = WorkflowRunContext::new(true);
+        assert_eq!(ctx.started_by, StartedBy::Schedule);
+        assert!(ctx.scheduled);
+    }
+
+    /// [`WorkflowRunContext::with_started_by`] overrides the `scheduled`-derived
+    /// default — the lever a caller that knows the real triggering agent uses
+    /// instead of settling for `new`'s coarse reading.
+    #[test]
+    fn with_started_by_overrides_the_default() {
+        let ctx =
+            WorkflowRunContext::new(false).with_started_by(StartedBy::Agent("ceo".to_string()));
+        assert_eq!(ctx.started_by, StartedBy::Agent("ceo".to_string()));
+        // Overriding the sender does not retroactively flip `scheduled` — the
+        // two are independent facts about the run.
+        assert!(!ctx.scheduled);
+    }
+
+    /// `started_by` does not participate in [`WorkflowRunContext`] equality
+    /// (see the `impl PartialEq` doc) — two contexts sharing a run id and
+    /// `scheduled` flag are "the same context" regardless of who is credited
+    /// with starting it.
+    #[test]
+    fn started_by_is_excluded_from_equality() {
+        let a = WorkflowRunContext::new(false).with_started_by(StartedBy::Operator);
+        let mut b =
+            WorkflowRunContext::new(false).with_started_by(StartedBy::Agent("ceo".to_string()));
+        b.run_id = a.run_id.clone();
+        assert_eq!(
+            a, b,
+            "differing started_by must not break the identity comparison"
+        );
+    }
 }

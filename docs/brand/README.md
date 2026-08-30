@@ -89,13 +89,17 @@ Full values, ramps and measured contrast: [`design-system/color.md`](../design-s
 
 ### The one hue we own
 
-**Indigo `#635BFF`.** It means *interactive or ours*: buttons, links, focus
+**Violet `#7153F0`.** It means *interactive or ours*: buttons, links, focus
 rings, the active nav row, the leading chart series, the logo. Nothing else.
 
-The discipline that makes it work is what indigo is **forbidden** from doing:
+A cool-warm hybrid, deliberately carrying more warmth than a generic indigo
+such as `#6366F1`.
 
-- It is never a status. A run is not indigo.
-- It is not a background wash. There are no indigo gradients, no glows, no
+The discipline that makes it work is what the brand hue is **forbidden** from
+doing:
+
+- It is never a status. A run is not violet.
+- It is not a background wash. There are no violet gradients, no glows, no
   tinted hero panels.
 - It is not used to make something look important. Hierarchy comes from size,
   weight and position first.
@@ -141,8 +145,8 @@ This is not hypothetical tidiness. Identity used to be drawn from the same
 palette as status, so a desk was tinted the exact green that means "done" and
 a category the red that means "failed".
 
-Where the two palettes do come close — identity violet against brand indigo,
-identity blue against running cyan — **form separates them**:
+Where the two palettes do come close — identity violet against the brand
+violet, identity blue against running cyan — **form separates them**:
 
 | | Shape |
 | --- | --- |
@@ -207,20 +211,47 @@ merely delights. Nothing loops, nothing bounces, nothing pulses except a live
 
 The wordmark is **OpenCompany**, set in Geist Semibold, sentence-cased with a
 capital C — never `Open Company`, `OPENCOMPANY`, or `opencompany` in prose
-(lowercase is correct only as an identifier: the crate, the CLI, `#635BFF`).
+(lowercase is correct only as an identifier: the crate, the CLI, `#7153f0`).
 
 **Usage:**
 
 - Clear space on all sides ≥ the cap height of the "O".
 - Minimum width 88px; below that use the mark alone.
-- On colour, use the white lockup. Never indigo-on-colour.
+- On colour, use the white lockup. Never violet-on-colour.
 - Never re-set it in another face, stretch it, add a gradient, outline it, or
   apply a shadow.
 
-> **Status:** the repository has no vector logo asset — only a raster in the
-> GitBook assets and `src-tauri/icons/icon.png`. An SVG wordmark and mark, plus
-> a favicon set, are outstanding. Until they exist, treat the type-set wordmark
-> above as the interim lockup.
+### The mark
+
+`logo/mark.svg` is the mark alone: two concentric stadiums reading as an `O`
+around a `C`, on a transparent ground and filled with `currentColor`, so it
+takes the colour of whatever it is placed in. Use it below the wordmark's 88px
+minimum, and anywhere the lockup would be too wide.
+
+`logo/icon.svg` is the application tile — the mark in white on a `#191919`
+rounded square, radius 80 at 350, the one place the mark appears locked to a
+background of its own. It is the source for the favicon set and the desktop
+app icon. `logo/icon-square.svg` is the same tile with the corners squared off,
+for the platforms that apply their own mask (the iOS home screen, Android
+maskable); handing those the pre-rounded tile rounds it twice and leaves dark
+fringes outside the mask.
+
+**These three SVGs are the authority.** Every raster the repository ships is
+generated from them by `scripts/brand/generate-icons.sh` — the favicon set and
+web manifest icons in `frontend/public/`, and the full desktop bundle set in
+`src-tauri/icons/`. Change a source and re-run the script; never hand-edit a
+generated PNG, or the set drifts apart one file at a time.
+
+> **Status:** the wordmark still has no vector asset — it remains type-set in
+> Geist Semibold, and an SVG lockup is outstanding. The mark, the tile and the
+> favicon set now exist as vectors above.
+>
+> At 16px the mark's concentric strokes merge into a blob: the gap between them
+> is under a pixel at that size. `favicon.ico` carries a 32px and a 48px frame
+> for the contexts that will take one, and the 16px frame is the honest limit
+> of this mark rather than a rendering fault. A simplified 16px variant —
+> dropping the inner stadium — would fix it, and needs a designer's call rather
+> than a script's.
 
 ---
 

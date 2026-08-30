@@ -70,9 +70,11 @@ mod test {
                 message_id: None,
                 task_id: None,
                 channel: "email".into(),
+                agent: None,
                 text: "hello".into(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             })
             .await
             .unwrap();
@@ -100,9 +102,11 @@ mod test {
                 message_id: None,
                 task_id: None,
                 channel: "email".into(),
+                agent: None,
                 text: "hi".into(),
                 steps: Vec::new(),
                 reply_to: None,
+                mentions: Vec::new(),
             })
             .await
             .unwrap_err();

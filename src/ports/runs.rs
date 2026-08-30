@@ -91,6 +91,17 @@ pub enum RunStatus {
     Failed,
     /// Terminal: the attempt was cancelled before it could settle.
     Cancelled,
+    /// Terminal: the workflow compiler **declined by design** to automate the
+    /// work — "better done once than built into a workflow" (issue #1809).
+    ///
+    /// Neither an error nor an ordinary success: the builder was asked whether
+    /// the card should become a workflow and its honest answer was "don't". It
+    /// used to settle `Failed` — which made a correct refusal indistinguishable
+    /// from a model timeout — and then `Succeeded` (#873), which hid it among
+    /// completed work. Its own terminal state keeps the external "work that
+    /// stopped" surface from bucketing the best thing the compiler does as the
+    /// product breaking, without pretending nothing happened.
+    Declined,
 }
 
 impl RunStatus {
@@ -104,6 +115,7 @@ impl RunStatus {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Declined => "declined",
         }
     }
 
@@ -123,6 +135,7 @@ impl RunStatus {
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
+            "declined" => Self::Declined,
             _ => return None,
         })
     }
@@ -131,7 +144,10 @@ impl RunStatus {
     /// status — a re-run is a *new* attempt with its own ordinal, never a
     /// resurrection of this one.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Declined
+        )
     }
 
     /// Which of the three coarse phases this status sits in: `active`,
@@ -198,7 +214,7 @@ impl RunStatus {
             Self::WaitingApproval | Self::Paused => {
                 next == Self::Running || next.is_parked() || next.is_terminal()
             }
-            Self::Succeeded | Self::Failed | Self::Cancelled => false,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Declined => false,
         }
     }
 }
@@ -223,10 +239,23 @@ pub struct RunRecord {
     /// The company that owns the attempt. Carried on the record as well as in
     /// the store key so an exported/streamed row is self-describing.
     pub company: CompanyId,
-    /// The board card this attempt is an attempt *at*.
-    pub task_id: String,
+    /// The board card this attempt is an attempt *at*, when there is one.
+    ///
+    /// Optional since issue #983: an operator chat turn is a recorded attempt at
+    /// *work*, and the work frequently opens no card. Serialized with
+    /// `skip_serializing_if` rather than as an explicit `null`, matching how
+    /// every other optional field on this record is written, so a dispatch row
+    /// is byte-identical to the ones written before the field could be absent —
+    /// and `#[serde(default)]` is what lets every row already on disk, which
+    /// carries a plain string here, still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     /// The desk/teammate the card was dispatched to.
     pub agent_id: String,
+    /// The conversation this attempt belongs to, when one raised it
+    /// (issue #983) — the only handle a card-less chat turn has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
     /// Which attempt at `task_id` this is, **1-based** — the first run of a card
     /// is `Attempt 1`. Assigned by the backend at create time; see
     /// [`RunStore::create_run`] for the concurrency contract.
@@ -242,6 +271,21 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event_seq: Option<EventSeq>,
     /// Epoch-millis the row was minted.
+    /// The workflow run whose node spawned this attempt, when one did.
+    ///
+    /// Absent for a card dispatch and a chat turn, which is *true* rather than
+    /// merely tolerated — those attempts belong to no workflow. Additive in the
+    /// same shape `task_id`/`chat_id` took, so a row written before this field
+    /// existed loads with `None` and re-serializes byte-identically. There is no
+    /// backfill to write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+    /// The graph node within that run.
+    ///
+    /// Falls back to the agent ref on a graph compiled before nodes carried a
+    /// first-class id — the same honest fallback the blocked-node rows use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub created_at_millis: u64,
     /// Epoch-millis the cycle actually began. `None` while `Pending`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -305,10 +349,93 @@ pub struct RunStepRecord {
 pub struct NewRun {
     /// The caller-minted run id.
     pub id: String,
-    /// The card being attempted.
-    pub task_id: String,
+    /// The card being attempted, when there is one.
+    ///
+    /// `None` for a run that attempts no card — an operator chat turn
+    /// (issue #983) frequently opens none, and inventing a synthetic card id to
+    /// keep this required would put a card on the board that nobody asked for
+    /// and that every `RunStore` consumer would then have to know was a
+    /// fiction. A card-less run still carries a status, a step trace, a cost and
+    /// an orphan reaper, which is the whole of what this store is for.
+    pub task_id: Option<String>,
     /// The desk it was dispatched to.
     pub agent_id: String,
+    /// The conversation the run belongs to, when one raised it (issue #983).
+    ///
+    /// What makes a card-less chat turn *findable*: without a `task_id` there is
+    /// no other handle on it, so a desk asking "what is running for me" would
+    /// have nothing to filter on. `None` for a dispatch, which is already
+    /// reachable through its card.
+    pub chat_id: Option<String>,
+    /// The workflow run whose node spawned this attempt, when one did.
+    ///
+    /// Absent for a card dispatch and a chat turn, which is *true* rather than
+    /// merely tolerated — those attempts belong to no workflow. Additive in the
+    /// same shape `task_id`/`chat_id` took, so a row written before this field
+    /// existed loads with `None` and re-serializes byte-identically. There is no
+    /// backfill to write.
+    pub workflow_run_id: Option<String>,
+    /// The graph node within that run.
+    ///
+    /// Falls back to the agent ref on a graph compiled before nodes carried a
+    /// first-class id — the same honest fallback the blocked-node rows use.
+    pub node_id: Option<String>,
+}
+
+impl NewRun {
+    /// A run that attempts a board card — the dispatch shape (issue #242).
+    pub fn for_task(
+        id: impl Into<String>,
+        task_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            task_id: Some(task_id.into()),
+            agent_id: agent_id.into(),
+            chat_id: None,
+            workflow_run_id: None,
+            node_id: None,
+        }
+    }
+
+    /// A run that attempts no card — the chat-turn shape (issue #983).
+    pub fn for_chat(
+        id: impl Into<String>,
+        chat_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            task_id: None,
+            agent_id: agent_id.into(),
+            chat_id: Some(chat_id.into()),
+            workflow_run_id: None,
+            node_id: None,
+        }
+    }
+
+    /// A run spawned by an `agent` node of a workflow run.
+    ///
+    /// Attempts no card and belongs to no conversation: a workflow node's turn
+    /// has neither, which is exactly why nothing could find these attempts
+    /// before — `RunStore` was joinable only by `task_id`/`chat_id`, so the run
+    /// a node spawned was addressable by nothing at all.
+    pub fn for_workflow_node(
+        id: impl Into<String>,
+        workflow_run_id: impl Into<String>,
+        node_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            task_id: None,
+            agent_id: agent_id.into(),
+            chat_id: None,
+            workflow_run_id: Some(workflow_run_id.into()),
+            node_id: Some(node_id.into()),
+        }
+    }
 }
 
 /// The settle of an attempt, as handed to [`RunStore::finish_run`].
@@ -352,6 +479,22 @@ impl RunOutcome {
 pub struct RunFilter {
     /// Only attempts at this card.
     pub task_id: Option<String>,
+    /// Only attempts spawned by this workflow run's nodes.
+    ///
+    /// The join the console needs: given a workflow run, which agent attempts
+    /// did it produce. Before this there was no handle on them at all — a
+    /// workflow node's turn has neither a card nor a conversation.
+    pub workflow_run_id: Option<String>,
+    /// Only attempts dispatched to this desk/teammate.
+    ///
+    /// The selector behind the console's per-teammate run history (issue
+    /// #1573). Deliberately a *store* predicate rather than something a reader
+    /// applies after the fact: a desk's attempts are a thin slice of a
+    /// long-lived company's history, and filtering a fetched page in the
+    /// console would make `limit` mean "the newest N runs in the company, of
+    /// which some happen to be this desk's" — which reads as "this teammate has
+    /// done nothing" for any desk that has been quiet lately.
+    pub agent_id: Option<String>,
     /// Only these statuses. Empty means "any status".
     pub statuses: Vec<RunStatus>,
     /// At most this many rows, applied *after* ordering. `None` is unbounded.
@@ -363,6 +506,14 @@ impl RunFilter {
     pub fn for_task(task_id: impl Into<String>) -> Self {
         Self {
             task_id: Some(task_id.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Narrows to one desk's attempts, whichever card (or none) they were at.
+    pub fn for_agent(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: Some(agent_id.into()),
             ..Self::default()
         }
     }
@@ -388,12 +539,22 @@ impl RunFilter {
         self
     }
 
-    /// Whether `run` passes the `task_id`/`statuses` predicates. The `limit` is
+    /// Whether `run` passes the `task_id`/`agent_id`/`statuses` predicates. The `limit` is
     /// **not** applied here — it is an ordering-dependent cap, so backends that
     /// filter in memory apply it after [`sort_newest_first`].
     pub fn matches(&self, run: &RunRecord) -> bool {
         if let Some(task_id) = &self.task_id
-            && &run.task_id != task_id
+            && run.task_id.as_deref() != Some(task_id.as_str())
+        {
+            return false;
+        }
+        if let Some(workflow_run_id) = &self.workflow_run_id
+            && run.workflow_run_id.as_deref() != Some(workflow_run_id.as_str())
+        {
+            return false;
+        }
+        if let Some(agent_id) = &self.agent_id
+            && run.agent_id != *agent_id
         {
             return false;
         }
@@ -401,6 +562,15 @@ impl RunFilter {
             return false;
         }
         true
+    }
+
+    /// Narrows to the attempts one workflow run's nodes spawned.
+    #[must_use]
+    pub fn for_workflow_run(workflow_run_id: impl Into<String>) -> Self {
+        Self {
+            workflow_run_id: Some(workflow_run_id.into()),
+            ..Self::default()
+        }
     }
 }
 
@@ -485,6 +655,28 @@ pub trait RunStore: Send + Sync {
     async fn list_run_steps(&self, company: &CompanyId, run_id: &str)
     -> Result<Vec<RunStepRecord>>;
 
+    /// Reads every run's steps in one call, keyed by run id.
+    ///
+    /// The Observatory index reads the traces of up to `limit` runs at once.
+    /// The provided implementation loops the per-run read, which is the right
+    /// shape for backends where one read is one indexed query (sqlite, MongoDB).
+    /// The filesystem backend overrides this: its per-run read scans and
+    /// deserializes the whole company-wide JSONL before filtering one run, so a
+    /// loop over N runs would rescan the company's unbounded step history N
+    /// times — quadratic in company history on the view operators poll. One
+    /// scan, indexed once, keeps the index cost linear.
+    async fn list_run_steps_for_runs(
+        &self,
+        company: &CompanyId,
+        run_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<RunStepRecord>>> {
+        let mut out = std::collections::HashMap::with_capacity(run_ids.len());
+        for id in run_ids {
+            out.insert(id.clone(), self.list_run_steps(company, id).await?);
+        }
+        Ok(out)
+    }
+
     // -- transitions (provided; legality enforced here) ----------------------
 
     /// `Pending` → `Running`, stamping the driving event's seq and the start
@@ -501,6 +693,24 @@ pub trait RunStore: Send + Sync {
         run.trigger_event_seq = Some(trigger_event_seq);
         // A resumed run keeps the moment it first started: `started_at_millis`
         // is when the attempt began, not when its latest leg did.
+        run.started_at_millis.get_or_insert_with(now_millis);
+        self.put_run(company, &run).await?;
+        Ok(run)
+    }
+
+    /// `Pending` → `Running` for an attempt that **no journal event drove**.
+    ///
+    /// A workflow `agent` node is the case this exists for: it is activated by
+    /// the engine walking a graph, not by a `TaskDispatched` the journal
+    /// recorded, so there is no seq to stamp. `trigger_event_seq` is already
+    /// `Option`, so leaving it `None` is the record's own way of saying "nothing
+    /// in the journal drove this" — passing a made-up seq (or `0`) would point
+    /// every workflow attempt at an unrelated event and quietly corrupt any
+    /// reader that follows it.
+    async fn begin_run_untriggered(&self, company: &CompanyId, id: &str) -> Result<RunRecord> {
+        let mut run = require_run(self, company, id).await?;
+        check_transition(&run, RunStatus::Running)?;
+        run.status = RunStatus::Running;
         run.started_at_millis.get_or_insert_with(now_millis);
         self.put_run(company, &run).await?;
         Ok(run)
@@ -655,7 +865,7 @@ mod test {
     /// Every status, so a table-driven test cannot silently miss a new variant
     /// (adding one without extending this list fails the exhaustiveness check
     /// in [`all_statuses_are_listed`]).
-    const ALL: [RunStatus; 7] = [
+    const ALL: [RunStatus; 8] = [
         RunStatus::Pending,
         RunStatus::Running,
         RunStatus::WaitingApproval,
@@ -663,6 +873,7 @@ mod test {
         RunStatus::Succeeded,
         RunStatus::Failed,
         RunStatus::Cancelled,
+        RunStatus::Declined,
     ];
 
     #[test]
@@ -677,7 +888,8 @@ mod test {
                 | RunStatus::Paused
                 | RunStatus::Succeeded
                 | RunStatus::Failed
-                | RunStatus::Cancelled => (),
+                | RunStatus::Cancelled
+                | RunStatus::Declined => (),
             };
         }
         let mut seen: Vec<&str> = ALL.iter().map(|s| s.as_str()).collect();
@@ -733,6 +945,7 @@ mod test {
         assert_eq!(RunStatus::Succeeded.phase(), "terminal");
         assert_eq!(RunStatus::Failed.phase(), "terminal");
         assert_eq!(RunStatus::Cancelled.phase(), "terminal");
+        assert_eq!(RunStatus::Declined.phase(), "terminal");
     }
 
     /// The trap this whole projection exists for: a parked run has **no**
@@ -826,7 +1039,8 @@ mod test {
         RunRecord {
             id: id.to_string(),
             company: CompanyId::new("alpha"),
-            task_id: "card".to_string(),
+            task_id: Some("card".to_string()),
+            chat_id: None,
             agent_id: "ceo".to_string(),
             attempt,
             status: RunStatus::Pending,
@@ -837,6 +1051,8 @@ mod test {
             error: None,
             usage: TokenUsage::default(),
             step_count: 0,
+            workflow_run_id: None,
+            node_id: None,
         }
     }
 
@@ -859,7 +1075,7 @@ mod test {
         let mut pending = run("a", 10, 1);
         let mut done = run("b", 10, 2);
         done.status = RunStatus::Succeeded;
-        done.task_id = "other".to_string();
+        done.task_id = Some("other".to_string());
 
         assert!(RunFilter::default().matches(&pending));
         assert!(RunFilter::default().matches(&done));

@@ -25,18 +25,24 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::events::EventStreamItem;
+use crate::ports::store::company_write_lock;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, OutboundMessage, OverlayDesk,
-    OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
+    Actor, ActorKind, ApprovalId, Attachment, CompanyEvent, CompanyId, CompanyRecord, EventSeq,
+    OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent,
+    TurnStep, Verdict,
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
-    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, history_for_desk,
+    CHAT_HISTORY_PAGE_LIMIT, MentionView, MessageView, ReactionView, Viewer, author_labels,
+    channel_attributed_replies, history_for_desk, project_mentions,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
@@ -52,6 +58,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/companies/{id}", get(company_status))
         .route("/api/v1/companies/{id}/chat", post(operator_chat))
         .route("/api/v1/companies/{id}/chat/history", get(chat_history))
+        .route(
+            "/api/v1/companies/{id}/chat/attribution-audit",
+            get(attribution_audit),
+        )
         // Set or clear one reaction on one message (issue #364). Not registered
         // through `scoped` because the two forms take different path tuples.
         .route(
@@ -63,14 +73,26 @@ pub fn router() -> Router<AppState> {
             "/api/v1/companies/{id}/approvals/{aid}",
             post(resolve_approval),
         )
+        .route(
+            "/api/v1/companies/{id}/approvals/{aid}/extend",
+            post(extend_approval),
+        )
         // Single-company aliases (no id; resolved via the sole registered company).
         .route("/api/v1/company/chat", post(operator_chat_single))
         .route("/api/v1/company/chat/history", get(chat_history_single))
+        .route(
+            "/api/v1/company/chat/attribution-audit",
+            get(attribution_audit_single),
+        )
         .route(
             "/api/v1/company/chat/messages/{seq}/reactions",
             post(react_to_message_single),
         )
         .route("/api/v1/company/approvals", get(list_approvals_single))
+        .route(
+            "/api/v1/company/approvals/{aid}/extend",
+            post(extend_approval_single),
+        )
         .route(
             "/api/v1/company/approvals/{aid}",
             post(resolve_approval_single),
@@ -125,6 +147,15 @@ struct DeskDto {
     /// the blueprint and cannot be removed at runtime). Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     overlay_members: Vec<String>,
+    /// How this desk's unmentioned messages find their answerer (issue #1835):
+    /// `"lead"` — `members[0]` leads and answers — or `"auto"`, a channel with
+    /// **no lead**, whose answerer is picked per message by best fit over the
+    /// membership. Omitted when `lead` (which is every manifest desk and every
+    /// desk created before the field existed), so old consoles and old wire
+    /// shapes are byte-for-byte unchanged. The console reads this to suppress
+    /// every lead affordance — crown, badge, Make-lead — on `auto` channels.
+    #[serde(skip_serializing_if = "ResponderMode::is_lead")]
+    responder: ResponderMode,
     /// Whether the whole desk was operator-created (an overlay desk) rather than
     /// declared in the manifest blueprint. The console offers a delete action
     /// only for these — blueprint desks cannot be deleted at runtime. Omitted
@@ -137,13 +168,8 @@ struct DeskDto {
 /// chats with any operator-added overlay members merged in (issue #72). Empty
 /// when the company defines none (the console then falls back to its static
 /// default threads).
-async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, Response> {
-    let record = scope
-        .runtime
-        .store()
-        .load(scope.id())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::server::Rejection> {
+    let record = scope.runtime.store().load(scope.id()).await?;
     let desks = record
         .map(|record| {
             // Manifest (blueprint) desks first, then operator-created overlay
@@ -163,31 +189,106 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, Response
                     description: chat.description.clone(),
                     members,
                     overlay_members,
+                    // Manifest desks are always lead-routed — the blueprint
+                    // syntax carries no responder field (issue #1835).
+                    responder: ResponderMode::Lead,
                     overlay_created: false,
                 }
             });
-            let overlay_desks = record.overlay_desks.iter().map(|desk| {
-                let members = record.effective_desk_members(&desk.id);
-                // For an overlay desk the founding members are `desk.members`;
-                // anything beyond them came from the desk-member overlay.
-                let overlay_members = members
-                    .iter()
-                    .filter(|m| !desk.members.contains(m))
-                    .cloned()
-                    .collect();
-                DeskDto {
-                    id: desk.id.clone(),
-                    name: desk.name.clone(),
-                    description: desk.description.clone(),
-                    members,
-                    overlay_members,
-                    overlay_created: true,
-                }
-            });
+            // An overlay desk standing where `#general` does is not projected:
+            // the console would show it as the company-wide line, offer the
+            // edit and delete controls a desk row carries, and every one of
+            // them would be refused (`is_general_channel`). The rule this file
+            // follows is not to offer a control that will be refused. Nothing
+            // is lost by hiding it — its transcript is already folded into
+            // `#general` by `is_general_chat`, and that channel's membership is
+            // the whole roster, a superset of whatever this desk held.
+            let overlay_desks = record
+                .overlay_desks
+                .iter()
+                .filter(|desk| !shadows_general_channel(desk))
+                .map(|desk| {
+                    let members = record.effective_desk_members(&desk.id);
+                    // For an overlay desk the founding members are `desk.members`;
+                    // anything beyond them came from the desk-member overlay.
+                    let overlay_members = members
+                        .iter()
+                        .filter(|m| !desk.members.contains(m))
+                        .cloned()
+                        .collect();
+                    DeskDto {
+                        id: desk.id.clone(),
+                        name: desk.name.clone(),
+                        description: desk.description.clone(),
+                        members,
+                        overlay_members,
+                        responder: desk.responder,
+                        overlay_created: true,
+                    }
+                });
             manifest_desks.chain(overlay_desks).collect()
         })
         .unwrap_or_default();
     Ok(Json(desks))
+}
+
+/// Whether `desk_id` names the built-in `#general` channel rather than a desk
+/// (issue #1743).
+///
+/// `#general` is the company-wide conversation this host has always folded
+/// every General spelling into — `general`, `General`, `main`, and the empty
+/// string all name it, which is exactly what
+/// [`is_general_chat`](crate::server::chat_history::is_general_chat) decides.
+/// It is deliberately **not** a desk: it has no lead, no hierarchy, and its
+/// membership is the whole roster derived at read time, so there is nothing for
+/// a desk mutation to change. Every one of them is therefore refused with a
+/// reason rather than answered with a bare `404`, which is a different fact —
+/// an id the host reserves is not an id nobody created.
+///
+/// Guarded on the **manifest** on purpose: a company whose blueprint really
+/// does declare a `[[group_chat]]` with one of those ids keeps behaving exactly
+/// as it did. This only ever replaces the "no such desk" answer; it never takes
+/// a desk away from a manifest that has one.
+///
+/// Deliberately *not* `desk_exists`, which also admits operator-created overlay
+/// desks. `create_desk` refuses these ids now, but it did not before issue
+/// #1743 — so an instance can be carrying a persisted overlay desk called
+/// `general` or `main`, and exempting it would leave the channel this issue
+/// promises is permanent staffable, reorderable and deletable after all. Such a
+/// desk is excluded from `GET .../desks` too ([`shadows_general_channel`]), so
+/// the refusal is never a control the console offered.
+fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
+    let declared = record
+        .manifest
+        .group_chats
+        .iter()
+        .any(|c| c.id == desk_id || c.name.eq_ignore_ascii_case(desk_id));
+    !declared && crate::server::chat_history::is_general_chat(Some(desk_id))
+}
+
+/// Whether an operator-created overlay desk stands where the built-in
+/// `#general` channel does (issue #1743).
+///
+/// **By id, and only by id** — because that is exactly what
+/// [`CompanyRecord::resolve_desk_id`](crate::ports::types::CompanyRecord::resolve_desk_id)
+/// refuses. It declines to match an overlay desk against a General key, so a
+/// desk merely *named* `General` no longer shadows anything: it is addressed by
+/// its own id, its lead still answers there, `delegate_to_desk` still reaches
+/// it, and every write to it still works. Hiding it here would take a live desk
+/// and its transcript out of Chat while the API kept routing to it — the
+/// mirror image of the defect this projection exists to prevent.
+///
+/// A desk whose **id** is a General spelling is a different matter: no key
+/// resolves it, so there is nothing left to address and every desk write aimed
+/// at it is refused. Creation refuses both spellings now, but neither was
+/// refused before, so both are reachable persisted state rather than a
+/// hypothesis.
+///
+/// Only overlay desks. A manifest desk answering to one of those spellings is
+/// the blueprint's own General desk, which this host has always honoured, and
+/// it keeps the company-wide line along with its row here.
+fn shadows_general_channel(desk: &crate::ports::types::OverlayDesk) -> bool {
+    crate::server::chat_history::is_general_chat(Some(&desk.id))
 }
 
 /// The path of a desk sub-resource (`desk_id`).
@@ -234,12 +335,30 @@ async fn add_desk_member(
     Json(body): Json<AddDeskMember>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). A manifest-only check meant a desk
     // created in the console could be reordered and deleted but never staffed
@@ -291,12 +410,30 @@ async fn set_desk_order(
     Json(body): Json<SetDeskOrder>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // The desk must exist — either a manifest blueprint group chat or an
     // operator-created overlay desk (#140). `desk_exists` covers both (the same
     // check `effective_desk_members` uses), so an operator-created desk can be
@@ -347,12 +484,30 @@ async fn remove_desk_member(
     Path(DeskMemberPath { desk_id, agent_id }): Path<DeskMemberPath>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // First validate that the desk exists at all — otherwise a caller supplying
     // an unknown desk_id gets a desk-scoped 404 rather than a confusing
     // member-scoped one (Greptile feedback). Existence spans both blueprint and
@@ -413,11 +568,18 @@ struct CreateDesk {
     /// omitted.
     #[serde(default)]
     id: Option<String>,
-    /// The desk's founding member ids, in order (the first becomes the lead).
+    /// The desk's founding member ids, in order (the first becomes the lead —
+    /// unless `responder` is `"auto"`, in which case order carries no rank).
     /// Each must resolve to a roster teammate. Optional — a desk can start empty
     /// and gain members through the desk-member overlay.
     #[serde(default)]
     members: Vec<String>,
+    /// How the desk routes its unmentioned messages (issue #1835). Absent means
+    /// `"lead"` — today's model, and what every existing caller sends — so the
+    /// org chart's create is unchanged. `"auto"` creates a leadless channel
+    /// whose answerer is picked per message.
+    #[serde(default)]
+    responder: ResponderMode,
 }
 
 /// Derives a snake_case desk id from a display name: lowercase, runs of
@@ -466,6 +628,16 @@ async fn create_desk(
     Json(body): Json<CreateDesk>,
 ) -> Result<(StatusCode, Json<DeskDto>), ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -489,6 +661,26 @@ async fn create_desk(
             "invalid desk id {id:?} — use lowercase letters, digits, and underscores"
         ))));
     }
+    // A desk that claimed one of the General spellings would shadow the
+    // built-in `#general` channel: the console would show two `#general` rows
+    // and the host would route messages addressed to it at this desk's lead
+    // instead of the orchestrator (issue #1743). Refused at creation, which
+    // costs nothing — no manifest can reach this path, so no existing company
+    // loses a desk.
+    //
+    // The **display name** is reserved for the same reason and not a weaker
+    // one: `resolve_desk_id` matches a desk by id *or* by case-insensitive
+    // name, so `{"id": "ops", "name": "General"}` shadows the channel just as
+    // thoroughly — `everyone_desk` folds the built-in `main` thread to
+    // `General`, that lookup then selects this desk, and `@everyone` on the
+    // company-wide line expands to its members instead of the roster.
+    if crate::server::chat_history::is_general_chat(Some(&id))
+        || crate::server::chat_history::is_general_chat(Some(&name))
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_RESERVED.to_string(),
+        )));
+    }
     if record.desk_exists(&id) {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
             "a desk with id {id:?} already exists"
@@ -507,6 +699,18 @@ async fn create_desk(
         }
     }
 
+    // An `auto` channel with nobody in it is unroutable by construction
+    // (issue #1835, codex review): the selector has no candidates and the
+    // first-member fallback has no first member, so an unmentioned message
+    // there would fall through to the orchestrator — contradicting the
+    // channel's own stated model. A *lead* desk may still start empty and be
+    // staffed from the org chart, exactly as before.
+    if !body.responder.is_lead() && members.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "a channel with per-message routing needs at least one member — with nobody in it, there is nobody to pick"
+                .to_string(),
+        )));
+    }
     let description = body
         .description
         .map(|d| d.trim().to_string())
@@ -516,6 +720,7 @@ async fn create_desk(
         name: name.clone(),
         description: description.clone(),
         members: members.clone(),
+        responder: body.responder,
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
@@ -529,6 +734,7 @@ async fn create_desk(
             description,
             members: effective,
             overlay_members: Vec::new(),
+            responder: body.responder,
             overlay_created: true,
         }),
     ))
@@ -544,6 +750,16 @@ async fn delete_desk(
     Path(DeskPath { desk_id }): Path<DeskPath>,
 ) -> Result<StatusCode, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
+    // Also take `company_write_lock`: this is a load-modify-save cycle over
+    // the whole record, exactly the shape every console `ops` writer
+    // serializes with that lock. `serial` alone only keeps this out of the
+    // way of a live agent cycle — it does nothing against a concurrent
+    // `ops` writer (e.g. `patch_company`'s rename), so without this a desk
+    // write that loaded the record before the rename landed can save the
+    // whole record back afterwards and silently revert it (PR #1875 review
+    // finding).
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
     let mut record = scope
         .runtime
         .store()
@@ -551,6 +767,14 @@ async fn delete_desk(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
 
+    // The built-in `#general` channel is not a desk and never was — refuse the
+    // write with the reason rather than letting it fall through to the
+    // desk-not-found answer below (issue #1743).
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
     // A manifest desk belongs to the blueprint — never deletable at runtime.
     if record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
         return Err(ApiError(OpenCompanyError::Conflict(
@@ -572,13 +796,33 @@ async fn delete_desk(
 
 /// Logs SSE stream teardown when the subscriber disconnects. Held inside the
 /// projection closure so it drops exactly when the response body is dropped.
-struct SseStreamGuard(CompanyId);
+///
+/// Also owns the label-refresh task's handle, so the periodic roster re-read
+/// dies with its connection instead of leaking for the process's lifetime.
+struct SseStreamGuard {
+    company: CompanyId,
+    /// One-shot stop signal for the label-refresh task. Sent before the handle
+    /// is aborted so the loop exits at its next sleep boundary rather than
+    /// waking once more to write a roster map nobody will read.
+    cancel: Option<oneshot::Sender<()>>,
+    label_refresh: Option<JoinHandle<()>>,
+}
 
 impl Drop for SseStreamGuard {
     fn drop(&mut self) {
-        tracing::debug!(company = %self.0, "operator SSE stream closed");
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(handle) = self.label_refresh.take() {
+            handle.abort();
+        }
+        tracing::debug!(company = %self.company, "operator SSE stream closed");
     }
 }
+
+/// How often an open SSE stream re-reads the roster, so a mention chip for a
+/// user added or renamed after the stream opened picks up the new label.
+const LABEL_REFRESH_EVERY: Duration = Duration::from_secs(60);
 
 /// `GET {scope}/events` — the company → operator attention feed (issue #66).
 ///
@@ -596,34 +840,120 @@ async fn company_events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let company = scope.id().clone();
     tracing::debug!(company = %company, "operator SSE stream opening");
-    let guard = SseStreamGuard(company.clone());
-    let durable = scope
-        .runtime
-        .events()
-        .subscribe(&company)
-        .filter_map(move |stored| {
-            // Keep the teardown guard alive for the life of the stream.
-            let _ = &guard;
-            let event =
-                project_event(&stored).map(|value| Ok(Event::default().data(value.to_string())));
-            std::future::ready(event)
-        });
+    let viewer = scope
+        .actor
+        .as_ref()
+        .map(|actor| Viewer::User(actor.id.clone()))
+        .unwrap_or(Viewer::Operator);
+    let subscription = scope.runtime.events().subscribe(&company);
+    // Roster display labels for mention chips. Held in a shared lock rather
+    // than captured once: the stream outlives membership changes that can add
+    // or rename a user, and a transiently failed initial read must not fix the
+    // map empty for the rest of the connection. A background task refreshes it
+    // on an interval, and the guard above aborts that task when the stream
+    // closes.
+    let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> = Arc::new(
+        std::sync::RwLock::new(author_labels(&scope.runtime).await.unwrap_or_default()),
+    );
+    let (cancel, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let label_refresh = {
+        let runtime = scope.runtime.clone();
+        let shared = Arc::clone(&authors);
+        tokio::spawn(async move {
+            let mut cancel = cancel_rx;
+            loop {
+                // The guard's one-shot fires when the stream closes, so the
+                // loop stops at the next boundary instead of waking once more
+                // to attempt a write nobody will read.
+                tokio::select! {
+                    _ = tokio::time::sleep(LABEL_REFRESH_EVERY) => {}
+                    _ = &mut cancel => return,
+                }
+                if let Ok(fresh) = author_labels(&runtime).await {
+                    *shared
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+                }
+            }
+        })
+    };
+    let guard = SseStreamGuard {
+        company: company.clone(),
+        cancel: Some(cancel),
+        label_refresh: Some(label_refresh),
+    };
+    let durable = subscription.filter_map(move |item| {
+        // Keep the teardown guard alive for the life of the stream.
+        let _ = &guard;
+        let authors = authors
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let event = project_stream_item_for_viewer(&item, &authors, &viewer)
+            .map(|value| Ok(Event::default().data(value.to_string())));
+        std::future::ready(event)
+    });
     // Merge the transient live turn-progress bus (tool_call/tool_result frames a
     // turn emits while it runs — see [`crate::turn_stream`]) onto the same feed.
     // These are ephemeral and never journaled; the console switches on `type`
     // just like the durable projections. On a company with no active turn this
     // stream is simply quiet.
-    let live = crate::turn_stream::subscribe(&company).map(|frame| {
-        Ok::<Event, Infallible>(
-            Event::default().data(serde_json::to_string(&frame).unwrap_or_default()),
-        )
-    });
+    //
+    // A typing frame authored by this very connection is dropped here rather
+    // than by the console: the bus fans a ping out to every subscriber of the
+    // company, including its sender, so without this a composer would echo its
+    // own "You are typing…" line back at itself for the length of the ping's
+    // TTL. Presence is left alone — a console does not render its own dot from
+    // the live feed, so there is nothing to echo.
+    let self_id = scope.actor.as_ref().map(|a| a.id.clone());
+    let live = crate::turn_stream::subscribe(&company)
+        .filter_map(move |frame| {
+            let drop = is_own_typing_frame(&frame, self_id.as_deref());
+            std::future::ready(if drop { None } else { Some(frame) })
+        })
+        .map(|frame| {
+            Ok::<Event, Infallible>(
+                Event::default().data(serde_json::to_string(&frame).unwrap_or_default()),
+            )
+        });
     let stream = futures::stream::select(durable, live);
     Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     )
+}
+
+/// Whether a live frame is a typing ping authored by the very connection about
+/// to receive it.
+///
+/// The typing bus fans one ping out to every subscriber in the company,
+/// including its sender — there is no per-listener addressing beneath it — so
+/// without this check a console's own composer would echo its own "You are
+/// typing…" line back at itself for the length of the ping's TTL. Presence
+/// frames are left alone: a console never renders its own dot from the live
+/// feed, so there is nothing there to echo.
+fn is_own_typing_frame(frame: &crate::turn_stream::LiveFrame, self_id: Option<&str>) -> bool {
+    matches!(
+        frame,
+        crate::turn_stream::LiveFrame::Typing(typing)
+            if self_id == Some(typing.user_id.as_str())
+    )
+}
+
+/// Projects a live subscription item into the operator stream's safe wire
+/// shape. A gap is an unpersisted control frame, deliberately structural-only.
+fn project_stream_item_for_viewer(
+    item: &EventStreamItem,
+    authors: &std::collections::HashMap<String, String>,
+    viewer: &Viewer,
+) -> Option<serde_json::Value> {
+    match item {
+        EventStreamItem::Event(stored) => project_event_for_viewer(stored, authors, viewer),
+        EventStreamItem::Gap { missed } => Some(serde_json::json!({
+            "type": "stream_gap",
+            "missed": missed,
+        })),
+    }
 }
 
 /// Projects a stored event into the safe SSE wire shape, or `None` to drop it.
@@ -643,7 +973,16 @@ async fn company_events(
 ///
 /// Adding a variant to [`CompanyEvent`] therefore drops it by default; it
 /// reaches the console only by being listed here on purpose.
+#[cfg(test)]
 fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
+    project_event_for_viewer(stored, &std::collections::HashMap::new(), &Viewer::Operator)
+}
+
+fn project_event_for_viewer(
+    stored: &StoredEvent,
+    authors: &std::collections::HashMap<String, String>,
+    viewer: &Viewer,
+) -> Option<serde_json::Value> {
     use serde_json::json;
 
     let envelope = |ty: &str| {
@@ -662,6 +1001,8 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             steps,
             task_id,
             parent,
+            mentions,
+            ..
         } => {
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
@@ -683,6 +1024,18 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // an ordinary chat reply so the legacy wire shape is unchanged.
             if let Some(task_id) = task_id {
                 o["taskId"] = json!(task_id);
+            }
+            // Project the same viewer-relative metadata as chat/history. The
+            // stream must carry complete ChatMentionDto values because the live
+            // row is already durable and hydration intentionally skips it.
+            let projected = project_mentions(mentions, authors, viewer);
+            if !projected.is_empty() {
+                o["mentions"] = json!(
+                    projected
+                        .into_iter()
+                        .map(ChatMentionDto::from)
+                        .collect::<Vec<_>>()
+                );
             }
             o
         }
@@ -816,14 +1169,41 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             }
             o
         }
+        // The actor is still dropped — see the deny-by-default note above and
+        // `projects_approval_resolved_without_the_actor`. What crosses the wire
+        // is one bit derived from it.
         CompanyEvent::ApprovalResolved {
             approval_id,
             verdict,
-            ..
+            by,
         } => {
             let mut o = envelope("approval_resolved");
             o["approvalId"] = json!(approval_id.as_ref());
             o["verdict"] = json!(verdict);
+            // Issue #971: say when the HOST resolved it, not a person.
+            //
+            // An expiry appends `ApprovalResolved { verdict: Deny, by: System }`
+            // — a default-deny on silence, which is a real resolution and has
+            // to be one (#305, #469). But this frame carried only the verdict,
+            // so the console toasted **"Approval denied"** and an operator was
+            // told they had declined something they never saw. That was a rare
+            // false attribution while the deadline was a week; shortening it to
+            // 24 hours makes it routine, which is what turns a latent wording
+            // bug into a defect worth fixing in the same change.
+            //
+            // **A flag, deliberately not `by`.** Sending the actor would be the
+            // obvious fix and is the wrong one: the projection is deny-by-default
+            // and an assertion below pins that no actor and no user id reaches
+            // this feed. A boolean derived from `by.kind` answers the console's
+            // question — "did a person decide this?" — while carrying nothing
+            // identifying. That assertion is EXTENDED to cover this field, never
+            // replaced.
+            //
+            // Skipped when false, so an operator's own decision serializes
+            // exactly as it did before and an old console is unaffected.
+            if by.kind == ActorKind::System {
+                o["automatic"] = json!(true);
+            }
             o
         }
         CompanyEvent::LifecycleChanged { from, to, .. } => {
@@ -1002,11 +1382,18 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             workflow_id,
             run_id,
             scheduled,
+            started_by,
         } => {
             let mut o = envelope("workflow_run_started");
             o["workflowId"] = json!(workflow_id);
             o["runId"] = json!(run_id);
             o["scheduled"] = json!(scheduled);
+            // Issue #1862 prerequisite: forwarded only when present, so a run
+            // journaled before this field existed (or one that genuinely has
+            // no sender) projects exactly as it did before.
+            if let Some(started_by) = started_by {
+                o["startedBy"] = json!(started_by);
+            }
             o
         }
         // Issue #382: the live per-node START bracket, the counterpart of the
@@ -1032,6 +1419,12 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             node_id,
             status,
             elapsed_ms,
+            // Issue #1014: the null-resolved config paths ride the durable event
+            // and the run-response history, but the live operator SSE frame
+            // stays the three structural scalars it already was — the console
+            // surfaces diagnostics from the run-detail drawer, not this stream.
+            diagnostics: _,
+            agent_run_id,
         } => {
             let mut o = envelope("workflow_node_finished");
             o["workflowId"] = json!(workflow_id);
@@ -1039,6 +1432,83 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["nodeId"] = json!(node_id);
             o["status"] = json!(status);
             o["elapsedMs"] = json!(elapsed_ms);
+            // A fourth structural id, on the same terms as the three above: it
+            // is reachable by this same operator through `GET {scope}/runs`, and
+            // it is what lets a console watching the canvas open the node's step
+            // trace directly rather than searching for which attempt was its.
+            // Omitted entirely when the node opened none, so a frame for a
+            // non-agent node is byte-identical to what it was.
+            if let Some(agent_run_id) = agent_run_id {
+                o["agentRunId"] = json!(agent_run_id);
+            }
+            o
+        }
+        // Issue #983: a turn was accepted, so a console watching the
+        // conversation can show it as under way instead of showing the
+        // operator's question with nothing after it. Three keys, all
+        // structural, and every one already reachable by the same operator
+        // through `GET {scope}/runs`.
+        //
+        // Deliberately **no message text and no actor**: the text is on the
+        // `OperatorMessage` this brackets — which stays dropped, see the
+        // module note above — and `by` is a user id, dropped here exactly as
+        // every other attributed arm drops it. The console reacts by reading
+        // the row it already knows how to read.
+        CompanyEvent::TurnStarted {
+            turn_id,
+            chat_id,
+            parent,
+            ..
+        } => {
+            let mut o = envelope("turn_started");
+            o["turnId"] = json!(turn_id);
+            o["chatId"] = json!(chat_id);
+            // Omitted rather than null for a turn answering the channel
+            // itself, so "is this in a thread?" is a presence check — the same
+            // discipline `agent_reply` above uses for the same field.
+            if let Some(parent) = parent {
+                o["parentId"] = json!(parent.value().to_string());
+            }
+            o
+        }
+        // The closing bracket. Structural for a sharper reason than its
+        // sibling: the event's `error` is a failure reason in our own words
+        // that can name internals, and this stream is the one place it must
+        // not be forwarded to. A console learns *that* the turn is over here
+        // and reads *why* from the run row, which is tenant-scoped.
+        CompanyEvent::TurnFailed { turn_id, .. } => {
+            let mut o = envelope("turn_settled");
+            o["turnId"] = json!(turn_id);
+            o
+        }
+        // Issue #1015: the push half of attempt status. Structural, and for the
+        // same sharper reason as `turn_settled` directly above — `error` is a
+        // failure reason in our own words that can name internals, so the
+        // console learns *that* the attempt moved here and reads *why* from the
+        // run row, which is tenant-scoped.
+        //
+        // `from` rides along so a consumer holding a row can tell a live frame
+        // from a replayed or out-of-order one, which a bare `to` cannot. It is
+        // omitted rather than null on the mint, where there is no prior state —
+        // the same presence-check discipline `turn_started`'s `parentId` uses.
+        CompanyEvent::RunStatusChanged {
+            run_id,
+            task_id,
+            attempt,
+            from,
+            to,
+            ..
+        } => {
+            let mut o = envelope("run_status_changed");
+            o["runId"] = json!(run_id);
+            o["attempt"] = json!(attempt);
+            o["status"] = json!(to);
+            if let Some(task_id) = task_id {
+                o["taskId"] = json!(task_id);
+            }
+            if let Some(from) = from {
+                o["from"] = json!(from);
+            }
             o
         }
         // Not an attention signal, or carries a raw payload we never put on the
@@ -1088,17 +1558,17 @@ async fn company_status(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<CompanyStatus>, Response> {
+) -> Result<Json<CompanyStatus>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     runtime
         .status()
         .await
         .map(Json)
-        .map_err(|e| ApiError(e).into_response())
+        .map_err(|e| ApiError(e).into_response().into())
 }
 
 /// The operator's chat request body.
@@ -1125,13 +1595,83 @@ struct ChatMessage {
     /// rather than a silently-dropped thread.
     #[serde(default)]
     parent: Option<String>,
-    /// Whether an actionable request in this message opens a one-off card or a
-    /// workflow card (issue #580). The operator chooses explicitly (decision
-    /// D2a); absent means `once`, so an ordinary chat request is unchanged. Only
-    /// consulted when the message actually carries a task intent — a greeting or
-    /// a question opens no card regardless.
+    /// What this message is **for** (issues #580, #1152) — whether an
+    /// actionable request opens a one-off card or a workflow card, or whether
+    /// the operator is saying it is not a request for work at all.
+    ///
+    /// The operator chooses explicitly (decision D2a); absent means `once`, so
+    /// an ordinary chat request is unchanged. `once` and `workflow` are only
+    /// consulted when the message actually carries a task intent — a greeting
+    /// or a question opens no card regardless; `chat` is consulted whatever the
+    /// triage said, because withholding is the whole point of it.
+    ///
+    /// **One field, one choice.** The `chat` word rides the existing
+    /// `deliverable` key rather than arriving as a second `intent` field, so a
+    /// body cannot assert "build me the workflow" and "just chatting" about the
+    /// same message — the split-brain #1035 closed, pointed the other way.
     #[serde(default)]
-    deliverable: Option<crate::ports::tasks::TaskDeliverable>,
+    deliverable: Option<crate::ports::types::MessageIntent>,
+    /// Return as soon as the turn has been accepted and given an id, instead of
+    /// holding the request open for the whole turn (issue #983).
+    ///
+    /// A turn's duration is unbounded, so the synchronous shape is broken by
+    /// construction and no timeout value fixes it: five concurrent messages
+    /// queued on the per-company serial lock all 504'd at the edge while the
+    /// work ran on invisibly. This is the response path that removes the wait —
+    /// the turn is journaled and given a durable row before this returns, so the
+    /// operator reads its progress and its answer back rather than holding a
+    /// socket open for them.
+    ///
+    /// **Opt-in, and compatible in both directions.** A caller that omits it
+    /// gets today's synchronous response byte-for-byte. A newer console talking
+    /// to an *older* host sends it and the old host ignores the unknown field
+    /// (this struct has no `deny_unknown_fields`) and answers the full
+    /// synchronous 200 — which is exactly why the console must decide what
+    /// happened from the response's **shape**, not from what it asked for.
+    ///
+    /// Deliberately not the default. A trivial turn settles in 4–6s, and a fast
+    /// synchronous answer is genuinely better when it fits; the eventual right
+    /// shape is a hybrid that answers synchronously up to N seconds and then
+    /// hands back a 202, which needs this turn record to exist first.
+    #[serde(default)]
+    detach: bool,
+    /// Who this message names, as the console's picker resolved them.
+    ///
+    /// Three states, and they are three different instructions:
+    ///
+    /// * **Absent** — the caller has no picker (`curl`, the API, a console
+    ///   predating this field). The host extracts mentions from the text
+    ///   itself, so `@engineer` still works from the command line.
+    /// * **Present and non-empty** — the caller resolved these against a roster
+    ///   it had loaded. Re-validated here against the live one and demoted, not
+    ///   trusted; a stale picker must not be able to address a turn to a
+    ///   teammate the company no longer has.
+    /// * **Present and empty** — the caller ran its picker and found nothing.
+    ///   Honoured as the answer it is: the host does not then guess on its
+    ///   behalf and chip an `@word` the author deliberately left unresolved.
+    ///
+    /// Additive in both directions, on exactly the terms `detach` documents
+    /// above: this struct has no `deny_unknown_fields`, so a newer console
+    /// against an older host degrades to host-side extraction, and an older
+    /// console against a newer host gets extraction too.
+    #[serde(default)]
+    mentions: Option<Vec<crate::ports::types::Mention>>,
+    /// The workspace node ids of files attached to this message (issue #1682).
+    ///
+    /// **Ids only, and nothing else is trusted.** The client uploads each file
+    /// first (`POST {scope}/chat/upload`), gets back a `node_id`, and lists
+    /// those ids here. The host re-resolves each within this company's own
+    /// workspace and takes the name / mime / size from the store — so a foreign
+    /// or spoofed reference cannot cross a company boundary or misdescribe its
+    /// payload (see `resolve_attachments`). An id that resolves to no binary
+    /// node in this company is a `400`.
+    ///
+    /// Additive in both directions: this struct has no `deny_unknown_fields`,
+    /// so a newer console against an older host has its ids ignored and its
+    /// message still posts, and an older console omits the field entirely — an
+    /// absent list is an empty one, the exact pre-#1682 wire shape.
+    #[serde(default)]
+    attachments: Vec<String>,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1157,17 +1697,156 @@ struct ChatResponse {
     /// exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     still_awaiting: Option<usize>,
+    /// The durable turn row this message opened (issue #983), additive on the
+    /// synchronous response exactly as `runId` was added to the workflow run
+    /// response — so a caller that never asked to detach can still read the
+    /// turn back from `GET {scope}/runs/{turn_id}` afterwards.
+    ///
+    /// `None` when the run store refused to mint a row: record-keeping does not
+    /// get to fail the work it records, so the turn still ran and still answered
+    /// here. A caller that finds it missing has the reply in hand anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+    /// The same discriminator [`ResolveReceiptDto::outcome`] carries, for the
+    /// non-detached resolve the Approvals page makes (issue #1449).
+    ///
+    /// The page never sees a `ResolveReceiptDto` — that shape is the *detached*
+    /// answer, which only the inline chat card asks for — so without this the
+    /// one surface the bug was reproduced on had no way to learn its click had
+    /// been refused, whatever the receipt said.
+    ///
+    /// Only ever set by a resolve, and omitted by every host predating it, which
+    /// a console reads as "this host cannot tell me" and words its confirmation
+    /// exactly as it did before rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
+}
+
+/// The `detach: true` response (issue #983): the turn's id and the durable id of
+/// the operator's own message, handed back before the cycle has taken the
+/// per-company lock.
+///
+/// **`detached` is the discriminator, and it is a constant `true` on purpose.**
+/// A newer console pointed at an older host sends `detach` and gets the *full
+/// synchronous* body back, because the old host ignores the unknown field. So
+/// the console cannot tell the two apart by what it asked for — only by what
+/// came back. `responses` present means the turn already settled; `detached`
+/// present means read it back. A field that is only ever `true` is what makes
+/// that a presence check rather than a guess.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DetachedChatResponse {
+    /// The turn's durable row, to poll on `GET {scope}/runs/{turn_id}`.
+    ///
+    /// Not optional, unlike [`ChatResponse::turn_id`]: this body is only ever
+    /// produced when the row exists (the handler falls through to the
+    /// synchronous settle when the run store refused one), because the console
+    /// arms its poll from this id and that poll is the detached turn's sole
+    /// delivery path when `/events` is buffered or unavailable.
+    turn_id: String,
+    /// The durable id the operator's own message was journaled under.
+    ///
+    /// Never optional here, unlike on the synchronous response: since issue #983
+    /// the append happens at accept time, so by the time this body exists the
+    /// message is already in the transcript. That is what lets the console
+    /// reconcile its optimistic bubble immediately instead of at settle.
+    message_id: String,
+    detached: bool,
+}
+
+/// The two shapes `POST {scope}/chat` can answer with.
+///
+/// An enum rather than a bare [`Response`] so the two bodies stay typed and the
+/// status codes live in one place: `200` for the settled turn the route has
+/// always returned, `202 Accepted` for a turn that has been accepted and started
+/// but has not finished — which is precisely what `202` means.
+enum ChatOk {
+    Settled(Box<ChatResponse>),
+    Detached(DetachedChatResponse),
+}
+
+impl IntoResponse for ChatOk {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Settled(body) => Json(body).into_response(),
+            Self::Detached(body) => (StatusCode::ACCEPTED, Json(body)).into_response(),
+        }
+    }
+}
+
+/// The canonical assignee for a card opened from a chat message: whoever the
+/// thread was addressed to (issue #982).
+///
+/// `""` — today's unconditional behaviour, and still the answer for most
+/// messages — for an unaddressed message, for a key that names nothing on the
+/// roster, for an ambiguous one, and for a company record that will not load.
+/// A teammate resolves to their canonical id; a **desk** resolves to the desk
+/// id, never to its lead: a desk assignment is ownership, and
+/// [`AssigneeResolution::canonical`] is where that invariant lives (issue #214),
+/// so this reads it rather than restating it. An empty desk resolves to the desk
+/// too, which dispatch refuses visibly with a reason — a better outcome than the
+/// silent misroute this replaces.
+///
+/// The `dm:` fallback is tried **last** and only on a key that resolved to
+/// nothing, so it can never take a thread that routes somewhere today.
+async fn addressed_assignee(runtime: &Arc<CompanyRuntime>, chat: Option<&str>) -> String {
+    use crate::runtime::assignee::{self, AssigneeResolution};
+
+    let Some(chat) = chat.map(str::trim).filter(|c| !c.is_empty()) else {
+        return String::new();
+    };
+    let company = match runtime.store().load(runtime.id()).await {
+        Ok(Some(company)) => company,
+        Ok(None) => {
+            tracing::warn!(
+                company = %runtime.id(),
+                "no company record while assigning a chat card; leaving it unassigned"
+            );
+            return String::new();
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                company = %runtime.id(),
+                "failed to read the roster while assigning a chat card; leaving it unassigned"
+            );
+            return String::new();
+        }
+    };
+    let mut resolution = assignee::resolve(&company, chat);
+    if matches!(resolution, AssigneeResolution::Unknown(_))
+        && let Some(key) = assignee::dm_key(chat)
+    {
+        resolution = assignee::resolve(&company, key);
+    }
+    if let Some(reason) = resolution.rejection() {
+        tracing::debug!(
+            company = %runtime.id(),
+            chat = %chat,
+            reason = %reason,
+            "[chat] the addressed thread names nobody the card can be handed to"
+        );
+    }
+    resolution.canonical().unwrap_or_default().to_string()
 }
 
 /// Runs one operator-chat cycle, returning the report and, when a complaint
 /// intent captured feedback, the note that was captured (so the caller can emit
 /// the `feedback.created` webhook).
+///
+/// Takes the [`AcceptedTurn`] rather than a thread parent since issue #983: the
+/// message this cycle runs is already journaled, so the parent it carries is a
+/// fact about the event rather than something this function decides.
 async fn run_chat(
     runtime: Arc<CompanyRuntime>,
     message: ChatMessage,
     by: Option<Actor>,
-    parent: Option<EventSeq>,
+    accepted: &AcceptedTurn,
 ) -> Result<(CycleReport, Option<String>), ApiError> {
+    // Re-checked here rather than only at accept: this is also reachable
+    // directly, and a lifecycle can change between accepting a turn and running
+    // it. `accept_chat_turn` runs the same check *before* the append, so a
+    // refusal never leaves a message in the transcript that no turn answers.
     runtime.ensure_running().await?;
     // Whether this is a workflow copilot thread (issue #416): a conversation
     // ABOUT one graph, not a request to the company. Read once, because both
@@ -1240,8 +1919,30 @@ async fn run_chat(
     // inside the `!confined` guard — a copilot thread still opens nothing,
     // because a message *about* a graph is not a request to build one.
     let workflow_requested =
-        !confined && message.deliverable == Some(crate::ports::tasks::TaskDeliverable::Workflow);
-    if let Some(title) = (!confined)
+        !confined && message.deliverable == Some(crate::ports::types::MessageIntent::Workflow);
+    // Issue #1152: and the other direction — the operator said this message is
+    // NOT a request for work ("Just chatting"), so no deterministic path may
+    // card it whatever the triage read in the words.
+    //
+    // The operator could already *mint* a card the classifier declined
+    // (`workflow_requested`, above) and could never *withhold* one. That
+    // asymmetry is the bug: a message the triage happens to read as `Track` —
+    // "we should probably rewrite the pricing page some day" — opened a card,
+    // assigned it to a desk, and there was no control anywhere that said
+    // otherwise. This is that control, and it is the same kind of evidence the
+    // override above is: a positive statement by the person who wrote the
+    // message, which is better than a lexical guess about it.
+    //
+    // **No `!confined` term, deliberately.** `workflow_requested` needs one
+    // because it *mints* a card, and minting one on a workflow copilot thread —
+    // a conversation ABOUT one graph — is exactly what #416 suppresses. This
+    // only ever *subtracts*, and on a copilot thread the branch below is already
+    // suppressed, so a `!confined` term here would be inert at best and would
+    // read as though the two were symmetrical.
+    let not_work = message
+        .deliverable
+        .is_some_and(crate::ports::types::MessageIntent::is_chat);
+    if let Some(title) = (!confined && !not_work)
         .then(|| crate::company::task_intent::triage_message(&message.text))
         .and_then(|triage| match triage {
             crate::company::task_intent::MessageTriage::Track(title) => Some(title),
@@ -1286,15 +1987,36 @@ async fn run_chat(
         } else {
             crate::ports::tasks::COLUMN_TODO
         };
+        // Issue #982: the card is handed to whoever the operator addressed, and
+        // it is resolved HERE — before the single `upsert_task` below, which is
+        // the write that fires the planning pass. That ordering is the whole of
+        // the fix. A card born blank is a card the planning pass is entitled to
+        // fill in from a content match of its title against teammate roles, and
+        // that guess is what a DM to a named teammate was losing to; patching
+        // the assignee on afterwards would not fix it, it would race it, and
+        // cost a second board event besides.
+        //
+        // Best-effort in exactly one direction: every case that does not resolve
+        // to a real teammate or desk degrades to `""`, which is what this site
+        // wrote unconditionally before. A chat must never 400 and must never
+        // lose its card over who it was addressed to.
+        let assignee = addressed_assignee(&runtime, message.chat.as_deref()).await;
         let record = crate::ports::tasks::TaskRecord {
             id: crate::ports::generate_id(),
             title,
             note,
             column: column.to_string(),
             priority: "medium".to_string(),
-            assignee: String::new(),
+            assignee,
             updated_at_millis: crate::ports::now_millis(),
-            origin_chat_id: None,
+            // Issue #982: the thread this card was opened from, so the settle
+            // marker lands back in the conversation that asked for the work
+            // rather than only on the board. This is the field #151 added for
+            // exactly that (`relay_reply` answers in the origin thread), and the
+            // console already renders a marker in a DM channel — nothing there
+            // changes. `None` for an unaddressed message, which is every card
+            // this site opened before and therefore no change for one.
+            origin_chat_id: message.chat.clone(),
             parent_task_id: None,
             // Nothing has run yet, so there is no deliverable to point at
             // (issue #339). The first successful settle stamps it.
@@ -1306,34 +2028,465 @@ async fn run_chat(
             // "build me a workflow for X" (deliverable: "workflow") routes the
             // card through the builder pass when it reaches In Progress. Nothing
             // here infers the choice from the text (decision D2a).
-            deliverable: message.deliverable.unwrap_or_default(),
+            planning_attempts: Vec::new(),
+            deliverable: message
+                .deliverable
+                .and_then(crate::ports::types::MessageIntent::deliverable)
+                .unwrap_or_default(),
             workflow_proposal: None,
-            origin_run_id: None,
+            // Issue #983: the turn that opened it. A card raised from chat used
+            // to be the *only* visible sign that a long turn was under way, and
+            // it had nothing pointing back at the turn — so an operator looking
+            // at a card in Planning could not reach the attempt working it, and
+            // a turn that opened a card was indistinguishable from one that
+            // opened none. `origin_workflow_id` stays `None`: there is no graph
+            // behind a chat turn, and inventing one would be a lie the board
+            // then carries forever.
+            origin_run_id: accepted.turn_id.clone(),
             origin_workflow_id: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
         }
     }
+    // Issue #983: the message is already in the journal — `accept_chat_turn`
+    // appended it when the request was accepted, which is the whole point, so
+    // `chat/history` is right from that instant rather than from whenever this
+    // cycle wins the per-company serial lock. The cycle is handed the seq it
+    // landed under and skips the append; everything downstream, `input_seqs` and
+    // the response's `messageId` included, is keyed on that same seq.
     let report = runtime
-        .run_cycle(vec![CompanyEvent::OperatorMessage {
-            text: message.text,
-            by,
-            // Thread the addressed desk through so the orchestrator brain can
-            // route to that desk's lead member (issue #53).
-            chat: message.chat,
-            // …and the message being replied to, so the thread is a fact about
-            // the transcript rather than about one browser (issue #364).
-            parent,
-            // Issue #845: and the once-vs-workflow choice, so the turn that
-            // answers this message knows whether the builder pass owns the
-            // authoring. Without it the turn ran blind and denied a capability
-            // that was being exercised on the very same message — see the field
-            // docs on `CompanyEvent::OperatorMessage`.
-            deliverable: message.deliverable,
-        }])
+        .run_journaled_cycle(
+            vec![(accepted.message_seq, accepted.message_event.clone())],
+            accepted.turn_id.clone(),
+        )
         .await?;
     Ok((report, feedback_note))
+}
+
+/// What accepting a chat turn produced, before any of the turn's work runs
+/// (issue #983).
+///
+/// The three facts that have to exist the moment a request is accepted, rather
+/// than whenever the turn eventually gets the lock: the operator's message is in
+/// the transcript, a durable row says a turn is owed, and the journal carries a
+/// line saying the company took the work on.
+struct AcceptedTurn {
+    /// The seq the operator's message was appended under. The turn's own
+    /// `messageId`, and what the pre-journaled cycle is keyed on.
+    message_seq: EventSeq,
+    /// The event itself, so the cycle can hand the brain what was journaled
+    /// rather than a reconstruction of it.
+    message_event: CompanyEvent,
+    /// The turn's durable row, when one could be minted. `None` means the run
+    /// store refused — the turn still runs, untracked, because record-keeping
+    /// does not get to fail the work it records.
+    turn_id: Option<String>,
+}
+
+/// Journals an operator message and mints the turn owed for it (issue #983).
+///
+/// # Everything that can refuse, refuses first
+///
+/// `ensure_running` (a lifecycle an operator chose — paused, archived) and
+/// `ensure_accepting` (a runtime being replaced) are both checked **before** the
+/// append. Ordered the other way, a refused request would still leave the
+/// operator's question in the transcript with nothing that will ever answer it —
+/// which is worse than the pre-#983 behaviour, not better, because a message
+/// that is visibly there and permanently unanswered reads as lost work.
+///
+/// # The row is `Pending`, deliberately
+///
+/// `create_run` here, `begin_run` inside the cycle once it actually holds the
+/// serial lock. So `Pending` means "queued behind other turns" — the serial
+/// train five concurrent messages produce — and `Running` means "owns the lock".
+/// Starting the row here would collapse the two and hide exactly the wait an
+/// operator on a busy company is trying to understand.
+///
+/// The row is a [`RunRecord`](crate::ports::runs::RunRecord) rather than a store
+/// of its own, which is what makes this small: it inherits transition legality,
+/// the step trace, `list_stale_active`, the boot reaper — whose boot-only proof
+/// holds verbatim for a chat turn, since a turn is a process-local
+/// `tokio::spawn` serialising on the same per-company mutex — and the
+/// `GET {scope}/runs` / `GET {scope}/runs/{run_id}` routes that already exist.
+/// There is no new route here, and no new poll endpoint to design.
+///
+/// Best-effort on the row and on the transcript line, never on the append: the
+/// message is the thing the operator can lose, and the other two are how we
+/// describe it.
+/// Resolves the client's attachment `node_id`s to durable [`Attachment`]s
+/// (issue #1682).
+///
+/// The whole security posture of chat attachments lives here. The client hands
+/// this route ids only; every name / mime / size on the journaled event is read
+/// from the company's own workspace tree, never from the request — so a client
+/// cannot claim a `report.pdf` is a `photo.png`, nor pretend a two-byte file is
+/// two gigabytes. Each id must resolve to a **binary** node in *this* company's
+/// tree: a foreign id (the IDOR a shared, guessable ULID would otherwise open),
+/// one that names a prose note, or one that names nothing is a `400`, on the
+/// same terms a bad thread `parent` is. The tree scan is the same read
+/// `upload()` does to re-fetch a just-stored node, so no new store surface is
+/// introduced.
+///
+/// Preserves the caller's order and refuses on the first bad id, so the message
+/// is never journaled with a partial or reordered attachment list.
+///
+/// Also reads and extracts each attachment's text where the format and size
+/// allow it (issue #1682, codex review finding) — see
+/// [`extracted_attachment_text`]. A sequential loop rather than
+/// `node_ids.iter().map(..).collect()`: extraction reads bytes and must
+/// `.await`, and a chat message carries at most a small handful of
+/// attachments, so there is no throughput this would meaningfully cost.
+async fn resolve_attachments(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node_ids: &[String],
+) -> Result<Vec<Attachment>, ApiError> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Codex review finding: an unbounded, unduplicated list turns one `/chat`
+    // POST into an attacker-controlled multiplier on the extraction work
+    // below — each id, however many times it repeats, is a tree scan plus up
+    // to `MAX_ATTACHMENT_EXTRACT_BYTES` of reads and a parse. Refused before
+    // either cost is paid, on the same terms a malformed `parent` is.
+    if node_ids.len() > MAX_CHAT_ATTACHMENTS {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "a message may carry at most {MAX_CHAT_ATTACHMENTS} attachments, got {}",
+            node_ids.len()
+        ))));
+    }
+    // Deduplicated, order preserved: attaching the same file twice to one
+    // message is never a meaningful distinct attachment, so a repeated id
+    // resolves — and, more to the point, extracts — exactly once rather than
+    // once per repetition.
+    let mut seen = std::collections::HashSet::with_capacity(node_ids.len());
+    let node_ids: Vec<&String> = node_ids.iter().filter(|id| seen.insert(*id)).collect();
+    let tree = runtime.workspace().tree(id).await?;
+    let mut resolved = Vec::with_capacity(node_ids.len());
+    for node_id in node_ids {
+        let node = tree
+            .iter()
+            .find(|n| &n.id == node_id && n.is_binary())
+            .ok_or_else(|| {
+                ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "attachment {node_id} is not a file in this company's workspace"
+                )))
+            })?;
+        let extracted_text = extracted_attachment_text(runtime, id, node).await;
+        resolved.push(Attachment {
+            node_id: node.id.clone(),
+            name: node.name.clone(),
+            // A binary node always carries both — `is_binary()` is exactly
+            // `mime.is_some()`, and the store computes `size` alongside it —
+            // so the defaults are unreachable and exist only to keep this
+            // total without an `unwrap` a later store change could break.
+            mime: node.mime.clone().unwrap_or_default(),
+            size: node.size.unwrap_or(0),
+            extracted_text,
+        });
+    }
+    Ok(resolved)
+}
+
+/// The most attachments one chat message may carry (codex review finding).
+///
+/// The composer stages one file at a time (v1), so this is nowhere near the
+/// operator's own path — it exists to bound what an unbounded client
+/// request could otherwise force `resolve_attachments` to do: a tree scan
+/// and an extraction pass per id, and extraction is not free
+/// ([`MAX_ATTACHMENT_EXTRACT_BYTES`] of reads and a parse). Generous enough
+/// for the multi-file UI the wire shape (`Vec<Attachment>`) already allows
+/// room for, small enough that even the worst case — every id resolving and
+/// maxing out the extraction cap — stays bounded per request.
+const MAX_CHAT_ATTACHMENTS: usize = 20;
+
+/// The largest attachment [`resolve_attachments`] reads for extraction, in
+/// bytes.
+///
+/// Well below [`crate::ingest::MAX_DOCUMENT_BYTES`] on purpose — that cap is
+/// for the dedicated memory-drop page, where reading a large document is the
+/// whole point of the request. A chat attachment's extraction instead runs
+/// inline in the synchronous `/chat` POST, so it stays small enough that an
+/// otherwise-instant send never feels stuck parsing a PDF.
+const MAX_ATTACHMENT_EXTRACT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The most extracted text one attachment contributes to the wire, in chars.
+///
+/// [`crate::brain::medulla::wire::WireEvent::body`] caps at 200000 chars and
+/// carries the operator's own words too, so no single attachment may be free
+/// to crowd out the rest of the turn.
+const MAX_ATTACHMENT_EXTRACT_CHARS: usize = 6_000;
+
+/// Reads and extracts one binary node's text where the format and size allow
+/// it, `None` otherwise (issue #1682, codex review finding).
+///
+/// `None` covers three cases alike — an image or other format nothing here
+/// parses, a scan with no text layer, and a payload over
+/// [`MAX_ATTACHMENT_EXTRACT_BYTES`] — because for "does the brain have
+/// something to read" a caller does not need to tell them apart. Reuses
+/// [`crate::ingest::extract`], the same PDF/DOCX/PPTX/XLSX/plain-text
+/// pipeline the memory-drop page already runs, so a chat attachment's actual
+/// words ride the durable [`Attachment`] rather than leaving a hosted or
+/// sidecar brain with only a node id and no device tool that resolves it.
+///
+/// Best-effort: any read failure (a race with a delete, a transient store
+/// error) answers `None` rather than failing the send — the reference alone
+/// still reaches the transcript and the journal.
+async fn extracted_attachment_text(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node: &crate::ports::workspace::WorkspaceNode,
+) -> Option<String> {
+    let size = node.size?;
+    if size == 0 || size > MAX_ATTACHMENT_EXTRACT_BYTES {
+        return None;
+    }
+    let (_, stream) = runtime
+        .workspace()
+        .read_bytes(id, &node.id)
+        .await
+        .ok()
+        .flatten()?;
+    let bytes = drain_bounded(stream, MAX_ATTACHMENT_EXTRACT_BYTES).await?;
+    // The extraction pipeline is synchronous CPU work — PDF/DOCX/PPTX/XLSX
+    // parsing — that can run for a while on a document near the size cap, and
+    // this runs inline in the `/chat` POST. Dispatch it to the blocking pool
+    // rather than stalling a Tokio worker (codex review finding). The owned
+    // pieces are cloned out of the borrowed node first: `spawn_blocking`
+    // requires its closure's captures to be `'static`.
+    let name = node.name.clone();
+    let mime = node.mime.clone();
+    tokio::task::spawn_blocking(move || {
+        match crate::ingest::extract(&name, mime.as_deref(), &bytes) {
+            crate::ingest::Extracted::Text(text) => Some(crate::ledger::budget::truncate(
+                &text,
+                MAX_ATTACHMENT_EXTRACT_CHARS,
+            )),
+            crate::ingest::Extracted::Empty | crate::ingest::Extracted::Unsupported(_) => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Drains a [`BlobStream`](crate::ports::workspace::BlobStream) into a
+/// buffer, `None` if it ever exceeds `cap` or errors partway through (codex
+/// review finding).
+///
+/// Split out from [`extracted_attachment_text`] so the one property that
+/// matters here — a stream error discards what was read, rather than handing
+/// extraction a truncated payload that looks complete — is directly testable
+/// against a synthetic stream, without a real workspace store behind it.
+///
+/// A stream error mid-read used to fall straight through to extraction on
+/// whatever partial bytes had been collected: `while let Ok(Some(chunk)) =
+/// stream.try_next().await` cannot tell "the stream ended" from "the stream
+/// errored", so it just stopped accumulating either way. A truncated payload
+/// is not a smaller version of the file; it can parse into plausible-looking
+/// but wrong or incomplete text (a document missing its ending, a multi-byte
+/// sequence cut mid-codepoint) with nothing marking it as partial once it
+/// reaches the brain. "No readable text" is honest; a guess dressed as a
+/// read is not.
+async fn drain_bounded(
+    mut stream: crate::ports::workspace::BlobStream,
+    cap: u64,
+) -> Option<Vec<u8>> {
+    use futures::TryStreamExt;
+
+    let mut bytes = Vec::new();
+    loop {
+        match stream.try_next().await {
+            Ok(Some(chunk)) => {
+                bytes.extend_from_slice(&chunk);
+                // Belt-and-braces against a store whose streamed length
+                // disagrees with the metadata length its caller expected —
+                // never buffer past the cap just because the node claimed to
+                // be under it.
+                if bytes.len() as u64 > cap {
+                    return None;
+                }
+            }
+            Ok(None) => return Some(bytes),
+            Err(_) => return None,
+        }
+    }
+}
+
+async fn accept_chat_turn(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    message: &ChatMessage,
+    by: Option<&Actor>,
+    parent: Option<EventSeq>,
+    desk: &str,
+) -> Result<AcceptedTurn, ApiError> {
+    runtime.ensure_running().await?;
+    runtime.ensure_accepting().map_err(ApiError)?;
+
+    // Issue #1682: resolve the client's attachment ids to durable references
+    // before the journal write, so a bad reference refuses the send outright —
+    // on the same terms a malformed `parent` does — rather than journaling a
+    // message that points at a file this company does not have.
+    let attachments = resolve_attachments(runtime, id, &message.attachments).await?;
+
+    let message_event = CompanyEvent::OperatorMessage {
+        text: message.text.clone(),
+        by: by.cloned(),
+        // Thread the addressed desk through so the orchestrator brain can
+        // route to that desk's lead member (issue #53).
+        chat: message.chat.clone(),
+        // …and the message being replied to, so the thread is a fact about
+        // the transcript rather than about one browser (issue #364).
+        parent,
+        // Issue #845: and the once-vs-workflow choice, so the turn that
+        // answers this message knows whether the builder pass owns the
+        // authoring. Without it the turn ran blind and denied a capability
+        // that was being exercised on the very same message — see the field
+        // docs on `CompanyEvent::OperatorMessage`.
+        deliverable: message.deliverable,
+        // Resolved before the journal write, so the durable record and the
+        // routing decision that follows read the same list. The picker's answer
+        // when it sent one, extraction from the text when it did not — and
+        // either way re-validated against the live roster.
+        mentions: runtime
+            .resolve_mentions(&message.text, message.mentions.clone(), by)
+            .await,
+        // Issue #1682: the store-resolved references, so the durable record
+        // carries the name/mime/size the store computed and never the client's
+        // claim. Empty on a message with no attachment, which skips the field.
+        attachments,
+    };
+    let message_seq = runtime
+        .events()
+        .append(id, message_event.clone())
+        .await
+        .map_err(ApiError)?;
+
+    // The durable half of a mention (issue: mentions).
+    //
+    // The SSE feed only reaches a browser that is open, so without this a
+    // mention is invisible to everyone who was not watching when it landed —
+    // which is most of the point of mentioning somebody. Filed here, right
+    // after the journal write, so the notification and the message share a
+    // sequence and a turn that later fails still leaves the mention recorded.
+    //
+    // Deliberately not fatal: a notification store that will not answer must
+    // not fail somebody's message. The mention still renders as a chip and is
+    // still in the transcript; only the badge is missing, and the warning says
+    // so.
+    if let CompanyEvent::OperatorMessage { mentions, .. } = &message_event
+        && !mentions.is_empty()
+    {
+        runtime
+            .notify_mentions(id, mentions, &message_seq, by, desk)
+            .await;
+    }
+
+    let turn_id = crate::ports::generate_id();
+    let turn_id = match runtime
+        .runs()
+        .create_run(
+            id,
+            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk),
+        )
+        .await
+    {
+        Ok(run) => Some(run.id),
+        Err(err) => {
+            tracing::warn!(
+                company = %id,
+                turn = %turn_id,
+                error = %err,
+                "[runs] could not open a turn row; the turn runs untracked"
+            );
+            None
+        }
+    };
+
+    // The transcript line. Separate from the row on purpose: the row answers
+    // "what is the status", and this answers "was a turn accepted for this
+    // message at all" — which the log cannot otherwise say, because an
+    // `OperatorMessage` with no reply after it is indistinguishable from a
+    // chatter message that legitimately produced none.
+    if let Some(turn_id) = turn_id.clone()
+        && let Err(err) = runtime
+            .events()
+            .append(
+                id,
+                CompanyEvent::TurnStarted {
+                    turn_id,
+                    chat_id: desk.to_string(),
+                    parent,
+                    by: by.cloned(),
+                },
+            )
+            .await
+    {
+        tracing::warn!(
+            company = %id,
+            error = %err,
+            "could not journal a turn's acceptance; its row still records it"
+        );
+    }
+
+    Ok(AcceptedTurn {
+        message_seq,
+        message_event,
+        turn_id,
+    })
+}
+
+/// Settles a chat turn's durable row, and says so in the transcript when it
+/// failed (issue #983).
+///
+/// Runs inside the spawned turn, beside the reply journaling and for the same
+/// reason: a client that walked away must not take the record with it. A turn
+/// whose row is left active is not silently forgiven either — the boot reaper
+/// fails it on the next start, on exactly the proof it uses for a dispatch.
+async fn settle_chat_turn(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    turn_id: Option<&str>,
+    failure: Option<&ApiError>,
+) {
+    let Some(turn_id) = turn_id else { return };
+    let outcome = match failure {
+        None => crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Succeeded),
+        Some(err) => crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Failed)
+            .with_error(err.0.to_string()),
+    };
+    if let Err(err) = runtime.runs().finish_run(id, turn_id, outcome).await {
+        tracing::warn!(
+            company = %id,
+            turn = %turn_id,
+            error = %err,
+            "[runs] could not settle a turn row; the next boot reaps it"
+        );
+    }
+    // Only a failure gets a transcript line. A turn that answered has an
+    // `AgentReply` right there saying so, and a second "it finished" line would
+    // be one more thing to read for no information.
+    if let Some(failure) = failure
+        && let Err(err) = runtime
+            .events()
+            .append(
+                id,
+                CompanyEvent::TurnFailed {
+                    turn_id: turn_id.to_string(),
+                    error: failure.0.to_string(),
+                },
+            )
+            .await
+    {
+        tracing::warn!(
+            company = %id,
+            turn = %turn_id,
+            error = %err,
+            "could not journal a turn's failure; its row still records it"
+        );
+    }
 }
 
 /// Runs a chat cycle and emits any implied webhooks, rendering the responses.
@@ -1343,7 +2496,7 @@ async fn chat_and_emit(
     runtime: Arc<CompanyRuntime>,
     message: ChatMessage,
     by: Option<Actor>,
-) -> Result<Json<ChatResponse>, ApiError> {
+) -> Result<ChatOk, ApiError> {
     // The default desk for an unaddressed message.
     let desk = message
         .chat
@@ -1357,11 +2510,230 @@ async fn chat_and_emit(
         Some(raw) => Some(parse_message_id(raw)?),
         None => None,
     };
-    let (mut report, feedback_note) = run_chat(runtime.clone(), message, by, parent).await?;
+    // The turn runs on its own task, and the replies are journaled there too
+    // (issue #882). Both used to sit in this handler's future, which hyper drops
+    // the moment the peer goes away — and a reverse proxy in front of a hosted
+    // tenant goes away the moment it decides the upstream is too slow. A turn
+    // slower than that timeout was therefore cancelled mid-flight: tokens spent,
+    // side effects half-applied, and no `AgentReply` ever appended, so the
+    // operator's DM history held their question and no answer and the turn could
+    // neither be read back nor resumed.
+    //
+    // Awaiting the handle is drop-safe — dropping it abandons the *waiting*, not
+    // the work — so this answers exactly as it did before and needs no wire
+    // change to survive the disconnect. Same shape as the approval path
+    // (`CompanyRuntime::resolve_approval_spawned`, issue #380 defect 3) and the
+    // workflow runner (`WorkflowSpawn::spawn_admitted`), which is why a 504'd
+    // workflow run kept executing while a 504'd chat turn did not.
+    // Issue #983: the operator's message reaches the journal here, before the
+    // turn is spawned and therefore before it queues on the per-company serial
+    // lock. It used to be appended inside that lock, so five concurrent messages
+    // became a serial train in which the fifth operator's question was invisible
+    // — a reload showed an empty conversation — until the four ahead of it had
+    // finished. A durable row and a transcript line are minted alongside it, so
+    // a turn killed with the pod becomes a `Failed` row and a `TurnFailed` line
+    // rather than permanent silence.
+    let accepted = accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
+    // Read off the accepted turn before it moves onto the task: both are facts
+    // the accept already established, so the 202 can carry them without waiting
+    // for a cycle that has not even taken the lock yet.
+    let turn_id = accepted.turn_id.clone();
+    let message_id = accepted.message_seq.value().to_string();
+    let detach = message.detach;
+    let turn = spawn_chat_turn(ChatTurn {
+        runtime,
+        company: id.clone(),
+        desk,
+        message,
+        by,
+        parent,
+        accepted,
+    });
+
+    if detach && let Some(turn_id) = turn_id.as_ref() {
+        // Nothing here waits on the turn. The webhook fan-out still owes the
+        // report, so it moves onto its own task rather than being dropped — a
+        // detached turn must not silently stop notifying subscribers. Same shape
+        // as the detached approval resolve below (issue #561).
+        //
+        // The turn task is otherwise left to itself: it journals its own replies
+        // and settles its own row (issue #983), which is what the operator reads
+        // back. Detaching is the entire point.
+        //
+        // The row is what the detached contract is built on: the console arms
+        // its poll from this `202`'s `turnId` (issue #983), and that poll is
+        // the only delivery path when `/events` is buffered or unavailable
+        // (`opencompany-microservice#23`) — which is exactly the state #983
+        // exists for. A `202` with no row would strand the reply until reload,
+        // so a detach whose row the run store refused falls through to the
+        // synchronous settle below instead: the console learns it never
+        // detached, and the reply arrives in the body like any settled turn.
+        let state = state.clone();
+        let company = id.clone();
+        tokio::spawn(async move {
+            match join_chat_turn(turn).await {
+                Ok((report, feedback_note)) => {
+                    emit_cycle_webhooks(&state, &company, &report).await;
+                    if let Some(note) = feedback_note {
+                        emit_feedback_webhook(&state, &company, &note).await;
+                    }
+                }
+                // A failed turn already settled its row as `Failed` and wrote a
+                // `TurnFailed` transcript line, which is what the operator sees;
+                // there is no report to fan out. Logged because nothing else
+                // reports it once the request is gone.
+                Err(err) => {
+                    tracing::error!(%company, detail = %err.0, "[chat] a detached turn did not finish");
+                }
+            }
+        });
+        return Ok(ChatOk::Detached(DetachedChatResponse {
+            turn_id: turn_id.clone(),
+            message_id,
+            detached: true,
+        }));
+    }
+
+    let (report, feedback_note) = join_chat_turn(turn).await?;
+    let responses = report.responses.clone();
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
     }
+    Ok(ChatOk::Settled(Box::new(ChatResponse {
+        // The operator's own message is the cycle's single input event, so its
+        // sequence is the first the cycle journaled (issue #364).
+        message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
+        responses,
+        // A chat turn is nobody's sign-off, so this stays absent here.
+        still_awaiting: None,
+        turn_id,
+        // …and it resolves nothing, so there is no resolve outcome to report.
+        outcome: None,
+    })))
+}
+
+/// Everything a chat turn needs once it is off the request's future.
+///
+/// A struct rather than six positional arguments because the spawn boundary is
+/// exactly where a mis-ordered pair of `String`s would compile and then journal
+/// replies against the wrong desk.
+struct ChatTurn {
+    runtime: Arc<CompanyRuntime>,
+    company: CompanyId,
+    desk: String,
+    message: ChatMessage,
+    by: Option<Actor>,
+    parent: Option<EventSeq>,
+    /// What accepting the turn already wrote (issue #983): the journaled
+    /// message, and the row this task owes a settle.
+    accepted: AcceptedTurn,
+}
+
+/// Runs a chat turn and journals its replies on a task of its own (issue #882).
+///
+/// The journal write belongs on this side of the spawn, not back in the handler.
+/// Spawning only the cycle would still lose the answer: the turn would finish,
+/// and the `AgentReply` append that makes it readable — and that the `agent_reply`
+/// SSE frame is derived from — would die with the dropped handler future. The
+/// work is not recorded until it is journaled, so both halves move together.
+fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<String>), ApiError>> {
+    tokio::spawn(async move {
+        let ChatTurn {
+            runtime,
+            company,
+            desk,
+            message,
+            by,
+            parent,
+            accepted,
+        } = turn;
+        let turn_id = accepted.turn_id.clone();
+        // Issue #983: the settle lives on this side of the spawn for the same
+        // reason the reply journaling does — a proxy that gave up must not leave
+        // a row claiming to be live. Both outcomes settle: an error here is a
+        // turn that was accepted and produced no answer, which is precisely the
+        // state that used to be indistinguishable from silence.
+        let outcome = run_chat(Arc::clone(&runtime), message, by, &accepted).await;
+        let (mut report, feedback_note) = match outcome {
+            Ok(both) => both,
+            Err(err) => {
+                // A turn that aborts — most often a tool call that exceeded its
+                // wall-clock budget — was only ever logged server-side. To the
+                // operator watching the thread, the teammate simply vanished
+                // mid-answer with no word. Journal a visible system line in the
+                // same desk thread the reply would have gone to, naming the
+                // failure and what to do next. Same shape and author as the
+                // continuation-failure notice (SYSTEM_AUTHOR): a direct
+                // `AgentReply` so it round-trips through history like any other
+                // reply, and is distinguishable on disk from a real teammate
+                // bubble. `err.0` is the inner error (it carries `Display`);
+                // the `ApiError` newtype does not.
+                let notice = CompanyEvent::AgentReply {
+                    parent,
+                    chat_id: desk.clone(),
+                    agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                    text: format!(
+                        "This turn couldn't be finished — something went wrong or \
+                         a step took too long ({}). Nothing was left half-done. \
+                         Send the message again to retry; if it keeps failing, \
+                         try breaking it into a smaller request.",
+                        err.0
+                    ),
+                    steps: Vec::new(),
+                    task_id: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                };
+                if let Err(journal_err) = runtime.events().append(&company, notice).await {
+                    tracing::warn!(
+                        company = %company,
+                        error = %journal_err,
+                        "an aborted chat turn could not be reported to the operator"
+                    );
+                }
+                settle_chat_turn(&runtime, &company, turn_id.as_deref(), Some(&err)).await;
+                return Err(err);
+            }
+        };
+        journal_chat_replies(&runtime, &company, &desk, parent, &mut report).await;
+        settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
+        Ok((report, feedback_note))
+    })
+}
+
+/// Awaits a spawned chat turn, turning a task that never finished into an error.
+///
+/// Mirrors [`crate::company::runtime::join_follow_up`]: a panicked or aborted
+/// task is a background-task failure rather than a silent empty reply.
+async fn join_chat_turn(
+    turn: JoinHandle<Result<(CycleReport, Option<String>), ApiError>>,
+) -> Result<(CycleReport, Option<String>), ApiError> {
+    match turn.await {
+        Ok(result) => result,
+        Err(err) => Err(ApiError(OpenCompanyError::BackgroundTask(format!(
+            "the chat turn did not finish: {err}"
+        )))),
+    }
+}
+
+/// Journals each reply against the addressed desk.
+///
+/// Runs inside the spawned turn (issue #882) so the record survives a client or
+/// proxy that gave up waiting.
+///
+/// `pub(crate)` since issue #1846 review (Codex #3870168362): the budget-pause
+/// redeem route (`server::ops::budget_pause`) re-enters `run_cycle`/
+/// `run_journaled_cycle` directly rather than through `spawn_chat_turn`, so it
+/// has no other path to this — and used to skip it entirely, discarding the
+/// redeemed turn's `CycleReport` and leaving its answer never journaled.
+pub(crate) async fn journal_chat_replies(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    desk: &str,
+    parent: Option<EventSeq>,
+    report: &mut CycleReport,
+) {
     // Journal each reply against the addressed desk so desk history can be read
     // back (GraphQL `Chat.history`, WS2c). Single-responder in v1.
     //
@@ -1371,11 +2743,34 @@ async fn chat_and_emit(
     // made against a bubble the operator can still see names something every
     // other reader can resolve.
     for response in &mut report.responses {
+        // Scanned host-side from the reply text — the console's picker never
+        // touched this message. The author is passed so a teammate naming
+        // itself in its own answer does not chip itself.
+        let reply_mentions = runtime
+            .resolve_mentions(
+                &response.text,
+                None,
+                response
+                    .agent
+                    .as_deref()
+                    .map(|agent| Actor {
+                        kind: ActorKind::Agent,
+                        id: agent.to_string(),
+                    })
+                    .as_ref(),
+            )
+            .await;
         let journaled = runtime
             .events()
             .append(
                 id,
                 CompanyEvent::AgentReply {
+                    // Who this reply names. Rendered as chips and — unlike an
+                    // operator message's — never consulted by dispatch, which
+                    // is the mention-loop fuse.
+                    mentions: reply_mentions.clone(),
+                    // Zero, and stays zero while that edge does not exist.
+                    mention_depth: 0,
                     // The answer joins the thread its question was asked in,
                     // rather than opening one under the question (issue #364).
                     parent,
@@ -1389,8 +2784,16 @@ async fn chat_and_emit(
                     // which is the lineage an operator wants and costs no
                     // schema change.
                     task_id: response.task_id.clone(),
-                    chat_id: desk.clone(),
-                    agent_id: response.channel.clone(),
+                    chat_id: desk.to_string(),
+                    // Issue #885: the author, falling back to the channel only
+                    // when the producer did not name one. `agent_id`'s contract
+                    // is "the agent that produced the reply"; `channel` is the
+                    // destination, so copying it here journaled every bubble on
+                    // the operator channel as though the operator wrote it.
+                    agent_id: response
+                        .agent
+                        .clone()
+                        .unwrap_or_else(|| response.channel.clone()),
                     text: response.text.clone(),
                     // Persist the per-bubble timeline so a history reload
                     // rehydrates the tool calls, not just the text.
@@ -1403,21 +2806,26 @@ async fn chat_and_emit(
         // its durable id, which the console reads as "not saved" and refuses to
         // thread or react on — the honest degradation.
         match journaled {
-            Ok(seq) => response.message_id = Some(seq.value().to_string()),
+            Ok(seq) => {
+                response.message_id = Some(seq.value().to_string());
+                // The durable half of a reply's mention, same as an operator
+                // message's (issue: mentions). Without this an `@user` an agent
+                // types back renders as a chip and nothing else — the badge and
+                // the notification both silently missing for whoever it named,
+                // which is worst for exactly the person it is meant to reach:
+                // offline when the reply lands.
+                if !reply_mentions.is_empty() {
+                    runtime
+                        .notify_mentions(id, &reply_mentions, &seq, None, desk)
+                        .await;
+                }
+            }
             Err(err) => tracing::warn!(
                 error = %err,
                 "failed to journal a chat reply; the bubble has no durable id"
             ),
         }
     }
-    Ok(Json(ChatResponse {
-        // The operator's own message is the cycle's single input event, so its
-        // sequence is the first the cycle journaled (issue #364).
-        message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
-        responses: report.responses,
-        // A chat turn is nobody's sign-off, so this stays absent here.
-        still_awaiting: None,
-    }))
 }
 
 /// Parses a message id from the wire into the sequence position it names.
@@ -1446,7 +2854,7 @@ async fn chat_actor(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Option<Actor>, Response> {
+) -> Result<Option<Actor>, crate::server::Rejection> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
     // `peer` is threaded from every one of this function's callers, all the
@@ -1457,10 +2865,10 @@ async fn chat_actor(
         .await
         .map_err(|_| unauthorized_response())?;
     if let Some(resp) = authorize_address(state, &auth, company) {
-        return Err(resp);
+        return Err(resp.into());
     }
     if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp);
+        return Err(resp.into());
     }
     Ok(match auth {
         GqlAuth::User(user) => Some(Actor {
@@ -1486,13 +2894,13 @@ async fn operator_chat(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<Json<ChatResponse>, Response> {
+) -> Result<ChatOk, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     let by = chat_actor(&headers, &state, &company, peer).await?;
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     chat_and_emit(&state, &company, runtime, message, by)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// `POST /api/v1/company/chat` (single-company alias).
@@ -1501,13 +2909,13 @@ async fn operator_chat_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<Json<ChatResponse>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<ChatOk, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     let by = chat_actor(&headers, &state, &id, peer).await?;
     chat_and_emit(&state, &id, runtime, message, by)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// Query params for `GET .../chat/history`.
@@ -1544,6 +2952,16 @@ struct ChatHistoryMessageDto {
     at_millis: f64,
     /// Whether it is the operator's own message.
     mine: bool,
+    /// Whether a **person** wrote this line rather than the runtime (issue
+    /// #1734). See [`MessageView::by_person`] for why nothing downstream can
+    /// derive it — in particular why `channel == "operator"` cannot, the echo
+    /// brain naming its own outbound channel that too.
+    ///
+    /// Omitted when `false`, which is every agent reply and every message
+    /// journaled before the field existed, so the legacy shape is unchanged and
+    /// a console reading `undefined` gets today's behaviour.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    by_person: bool,
     /// The scrubbed processing steps behind a company reply, so a rehydrated
     /// transcript renders the same timeline the live turn showed. Omitted when
     /// empty (operator messages, tool-less replies) — keeps the legacy shape.
@@ -1565,6 +2983,81 @@ struct ChatHistoryMessageDto {
     /// per emoji. Omitted when nobody has, keeping the legacy shape.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     reactions: Vec<ChatReactionDto>,
+    /// Who this message names, in reading order. Omitted when it names nobody
+    /// — which is every message journaled before mentions existed — so the
+    /// legacy shape is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<ChatMentionDto>,
+    /// Files attached to this message (issue #1682), each a reference into the
+    /// company workspace with the store-computed name / mime / size. Omitted
+    /// when the message carries none — which is every reply, every system pill,
+    /// and every operator message journaled before the field existed — so the
+    /// legacy shape is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<ChatAttachmentDto>,
+}
+
+/// One file attached to a history message (issue #1682). Mirrors `Attachment`
+/// in `frontend/src/lib/chat.ts`, and carries only store-authored metadata —
+/// the id the payload is reachable at, and the name / mime / size the store
+/// computed. The bytes are fetched separately through the hardened
+/// `GET …/workspace/blob/{nodeId}` route.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatAttachmentDto {
+    /// The workspace node id the payload is stored under — what the console
+    /// hands the blob route to download or preview it.
+    node_id: String,
+    /// The stored file's display name.
+    name: String,
+    /// The stored payload's media type, so the console decides download-vs-
+    /// preview without fetching the bytes.
+    mime: String,
+    /// The stored payload's exact length in bytes.
+    size: u64,
+}
+
+impl From<Attachment> for ChatAttachmentDto {
+    fn from(attachment: Attachment) -> Self {
+        Self {
+            node_id: attachment.node_id,
+            name: attachment.name,
+            mime: attachment.mime,
+            size: attachment.size,
+        }
+    }
+}
+
+/// One mention on a history message. Mirrors `Mention` in
+/// `frontend/src/lib/chat.ts`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatMentionDto {
+    /// The literal span the author typed, so the renderer highlights the text
+    /// as written rather than the target's current name.
+    text: String,
+    /// Byte offset of `text` in the message body.
+    offset: usize,
+    /// Who was named, as a display label — never a raw user id.
+    label: String,
+    /// Whether the reading viewer is the one named (or was named by
+    /// `@everyone`).
+    mine: bool,
+    /// Whether this mention renders but pings nobody.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    quiet: bool,
+}
+
+impl From<MentionView> for ChatMentionDto {
+    fn from(view: MentionView) -> Self {
+        Self {
+            text: view.text,
+            offset: view.offset,
+            label: view.label,
+            mine: view.mine,
+            quiet: view.quiet,
+        }
+    }
 }
 
 /// One person's reaction on a history message. Mirrors `Reaction` in
@@ -1599,6 +3092,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
             text: view.text,
             at_millis: view.at_millis,
             mine: view.mine,
+            by_person: view.by_person,
             steps: view.steps,
             task_id: view.task_id,
             parent_id: view.parent_id,
@@ -1606,6 +3100,16 @@ impl From<MessageView> for ChatHistoryMessageDto {
                 .reactions
                 .into_iter()
                 .map(ChatReactionDto::from)
+                .collect(),
+            mentions: view
+                .mentions
+                .into_iter()
+                .map(ChatMentionDto::from)
+                .collect(),
+            attachments: view
+                .attachments
+                .into_iter()
+                .map(ChatAttachmentDto::from)
                 .collect(),
         }
     }
@@ -1650,7 +3154,7 @@ async fn history_viewer(
     state: &AppState,
     company: &CompanyId,
     peer: Option<std::net::SocketAddr>,
-) -> Result<Viewer, Response> {
+) -> Result<Viewer, crate::server::Rejection> {
     let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
@@ -1666,18 +3170,15 @@ async fn chat_history_response(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let viewer = history_viewer(headers, state, company, peer).await?;
-    let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref()).await?;
     let limit = query
         .limit
         .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
         .min(CHAT_HISTORY_PAGE_LIMIT);
-    let messages = history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let messages =
+        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit).await?;
     Ok(Json(
         messages
             .into_iter()
@@ -1695,9 +3196,9 @@ async fn chat_history(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     chat_history_response(&state, &company, runtime, &headers, peer, query).await
 }
 
@@ -1707,10 +3208,77 @@ async fn chat_history_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
-) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<Vec<ChatHistoryMessageDto>>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     chat_history_response(&state, &id, runtime, &headers, peer, query).await
+}
+
+/// The wire shape of `GET {scope}/chat/attribution-audit` (issue #885).
+#[derive(Debug, serde::Serialize)]
+struct AttributionAuditDto {
+    /// Every `AgentReply` in the journal.
+    replies: usize,
+    /// Those whose stored author names no roster teammate.
+    affected: usize,
+    /// The distinct bad values with a count each, so an operator can see whether
+    /// they are all `operator` (the #885 shape) or whether something else is
+    /// also writing a non-agent into the field.
+    by_agent_id: std::collections::BTreeMap<String, usize>,
+}
+
+/// `GET {scope}/chat/attribution-audit` — the blast radius of issue #885.
+///
+/// Exists because "we do not know how many rows are wrong" is not an acceptable
+/// end state for a data-integrity bug, and the answer needs a journal to count
+/// against — which no test fixture and no source checkout has.
+///
+/// **Counts, never repairs.** The overwritten author is not recoverable from
+/// anything on disk; see [`channel_attributed_replies`] for the full argument.
+///
+/// Gated by the same reader check the sibling transcript route uses, and returns
+/// strictly less: counts and agent-id strings, never message text.
+async fn attribution_audit_response(
+    state: &AppState,
+    company: &CompanyId,
+    runtime: Arc<CompanyRuntime>,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
+    let _viewer = history_viewer(headers, state, company, peer).await?;
+    let record = runtime
+        .store()
+        .load(runtime.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
+    let audit = channel_attributed_replies(&runtime, &record).await?;
+    Ok(Json(AttributionAuditDto {
+        replies: audit.replies,
+        affected: audit.affected,
+        by_agent_id: audit.by_agent_id,
+    }))
+}
+
+async fn attribution_audit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
+    let company = CompanyId::new(&id);
+    let runtime = lookup(&state, &id)?;
+    attribution_audit_response(&state, &company, runtime, &headers, peer).await
+}
+
+/// `GET /api/v1/company/chat/attribution-audit` (single-company alias).
+async fn attribution_audit_single(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+) -> Result<Json<AttributionAuditDto>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
+    let id = runtime.id().clone();
+    attribution_audit_response(&state, &id, runtime, &headers, peer).await
 }
 
 /// Body for `POST {scope}/chat/messages/{seq}/reactions` (issue #364).
@@ -1772,19 +3340,15 @@ async fn react_to_message(
     peer: Option<std::net::SocketAddr>,
     seq: String,
     body: ReactionBody,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let by = chat_actor(headers, state, company, peer).await?;
-    let message_seq = parse_message_id(&seq).map_err(IntoResponse::into_response)?;
-    validate_emoji(&body.emoji).map_err(IntoResponse::into_response)?;
+    let message_seq = parse_message_id(&seq)?;
+    validate_emoji(&body.emoji)?;
     // The target must be a message. Without this the route would happily hang a
     // reaction off an approval, a lifecycle change, or a sequence position that
     // has never existed — none of which any reader could render, and all of
     // which would sit in the log forever claiming otherwise.
-    let target = runtime
-        .events()
-        .read_from(company, message_seq, 1)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+    let target = runtime.events().read_from(company, message_seq, 1).await?;
     let is_message = target
         .first()
         .filter(|stored| stored.seq == message_seq)
@@ -1796,7 +3360,9 @@ async fn react_to_message(
         });
     if !is_message {
         return Err(
-            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}"))).into_response(),
+            ApiError(OpenCompanyError::NotFound(format!("no chat message {seq}")))
+                .into_response()
+                .into(),
         );
     }
     runtime
@@ -1810,8 +3376,7 @@ async fn react_to_message(
                 by,
             },
         )
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1823,9 +3388,9 @@ async fn react_to_message_scoped(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, crate::server::Rejection> {
     let company = CompanyId::new(&id);
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     react_to_message(&state, &company, runtime, &headers, peer, seq, body).await
 }
 
@@ -1836,8 +3401,8 @@ async fn react_to_message_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
-) -> Result<StatusCode, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<StatusCode, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
 }
@@ -1847,17 +3412,20 @@ async fn list_approvals(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ApprovalSummary>>, Response> {
+) -> Result<Json<Vec<ApprovalSummary>>, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     // Membership got you the list; role decides whether you may read what is in
-    // it (issue #618).
+    // it (issue #618). Ownership is resolved before either (#1891): the queue
+    // is joined to cards by its consumers, and since the board card decides in
+    // place, handing out the raw park stamp would let an operator resolve
+    // another card's request from this one.
     Ok(Json(crate::server::approval_visibility::for_principal(
         &auth,
-        runtime.pending_approvals(),
+        runtime.pending_approvals_resolved().await,
     )))
 }
 
@@ -1865,19 +3433,20 @@ async fn list_approvals(
 async fn list_approvals_single(
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-) -> Result<Json<Vec<ApprovalSummary>>, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Json<Vec<ApprovalSummary>>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     // The sole company IS the addressed one, so the principal is checked
     // against it exactly as on the `{id}` form.
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    // Same contents rule as the `{id}` form (issue #618) — the two handlers are
-    // the same read behind two addressing forms, and a redaction applied to one
-    // of them would be a hole rather than a boundary.
+    // Same contents rule as the `{id}` form (issue #618) — and the same
+    // ownership resolution (#1891). The two handlers are the same read behind
+    // two addressing forms, and either applied to only one of them would be a
+    // hole rather than a boundary.
     Ok(Json(crate::server::approval_visibility::for_principal(
         &auth,
-        runtime.pending_approvals(),
+        runtime.pending_approvals_resolved().await,
     )))
 }
 
@@ -1891,10 +3460,6 @@ async fn list_approvals_single(
 struct ResolveApproval {
     /// `approve` or `deny`.
     verdict: Verdict,
-    /// An optional operator note (reserved; not yet surfaced to the brain).
-    #[allow(dead_code)]
-    #[serde(default)]
-    note: Option<String>,
     /// An optional payload edit; overlaid onto the parked effect on `approve`.
     #[serde(default)]
     amended_payload: Option<serde_json::Value>,
@@ -1952,8 +3517,6 @@ enum ResolveScope {
 /// request leaves the approval parked and journals no verdict. The contradictions
 /// are refused rather than resolved in the caller's favour:
 ///
-/// * **with a deny** — a scope describes what an approval grants, and a deny
-///   grants nothing. Honouring one would be inventing consent out of a refusal.
 /// * **with `amended_payload`** — an argument edit is by definition an
 ///   exact-call approval ("this, but with my correction"), and a standing grant
 ///   admits any arguments. The two say opposite things about the same request.
@@ -1977,10 +3540,7 @@ fn grant_scope(body: &ResolveApproval) -> Result<GrantScope, ApiError> {
             Ok(GrantScope::Once)
         }
         ResolveScope::Tool => {
-            if body.verdict == Verdict::Deny {
-                return Err(bad("a scope cannot accompany a deny verdict"));
-            }
-            if body.amended_payload.is_some() {
+            if body.verdict == Verdict::Approve && body.amended_payload.is_some() {
                 return Err(bad(
                     "amended_payload cannot accompany scope \"tool\": editing the arguments \
                      approves one exact call, while a standing grant admits any arguments",
@@ -2021,6 +3581,7 @@ struct StandingGrantDto {
     agent: String,
     /// The tool it admits.
     tool: String,
+    verdict: Verdict,
     /// Who granted it: a signed-in user, or the platform credential.
     granted_by: Actor,
     /// Epoch-millis it was granted.
@@ -2037,6 +3598,16 @@ struct StandingGrantDto {
     /// the pre-#457 shape is byte-identical for every other tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
+    /// The authored workflow allowed to redeem it (issue #1098), when the grant
+    /// is to a workflow rather than a teammate.
+    ///
+    /// On the wire for the same reason `scope` is: `agent` is empty on a
+    /// workflow permission, so without this the console would read the row as a
+    /// nameless teammate and could not tell two workflows holding the same
+    /// tool/scope apart. Absent — not `null` — on every teammate grant, so the
+    /// pre-#1098 wire shape is byte-identical for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<String>,
 }
 
 impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
@@ -2045,10 +3616,12 @@ impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
             id: g.id.to_string(),
             agent: g.agent,
             tool: g.tool,
+            verdict: g.verdict,
             granted_by: g.granted_by,
             at_millis: g.at_millis,
             expires_at_millis: g.expires_at_millis,
             scope: g.scope,
+            workflow: g.workflow,
         }
     }
 }
@@ -2125,6 +3698,21 @@ struct ResolveReceiptDto {
     /// the action" for all four. This is what lets it say the true thing
     /// instead. `0` means this decision released the turn.
     still_awaiting: usize,
+    /// **Which** of the end states this resolve actually reached (issue #1449):
+    /// `"settled"`, `"already_resolved"`, or `"expired"`.
+    ///
+    /// `already_resolved` above is kept and still means what it always did —
+    /// there was nothing left to resolve — so a console predating this field
+    /// behaves byte for byte as it did. What it could never express is
+    /// `expired`: the approval **was** still parked, and the host default-denied
+    /// it because its deadline had passed. Before this the receipt had no shape
+    /// for that at all, so the console rendered the one thing it could — the
+    /// success line — over a decision the host had refused.
+    ///
+    /// A string rather than a second boolean because the states are mutually
+    /// exclusive: two booleans can spell combinations that cannot happen, and
+    /// every reader would have to know which ones are real.
+    outcome: &'static str,
 }
 
 async fn run_resolve(
@@ -2165,6 +3753,10 @@ async fn run_resolve(
     // what decrements the turn's counter — has not run yet, so this still counts
     // the approval just decided and `decisions_still_awaited` subtracts it.
     let still_awaiting = runtime.decisions_still_awaited(&id);
+    // Issue #1449: which end state this actually reached, read off the receipt
+    // rather than assumed from the fact that no error was returned. A resolve
+    // can succeed as a request and still not be the operator's decision.
+    let outcome = receipt.outcome();
 
     if body.detach {
         // Nothing here waits on the turn. The webhook fan-out still owes the
@@ -2187,6 +3779,7 @@ async fn run_resolve(
             recorded: true,
             already_resolved: receipt.already_resolved(),
             still_awaiting,
+            outcome,
         })
         .into_response());
     }
@@ -2197,6 +3790,10 @@ async fn run_resolve(
         message_id: None,
         responses: report.responses,
         still_awaiting: Some(still_awaiting),
+        outcome: Some(outcome),
+        // A resolve runs a follow-up cycle, not an operator turn, so it opens no
+        // turn row of its own.
+        turn_id: None,
     })
     .into_response())
 }
@@ -2207,16 +3804,16 @@ async fn resolve_approval(
     State(state): State<AppState>,
     Path((id, aid)): Path<(String, String)>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Response, Response> {
+) -> Result<Response, crate::server::Rejection> {
     let company = CompanyId::new(&id);
     if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp);
+        return Err(resp.into());
     }
-    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    let runtime = lookup(&state, &id)?;
     let actor = resolving_actor(auth);
     run_resolve(&state, &company, runtime, aid, body, actor)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// Who is resolving this approval (issue #374).
@@ -2244,19 +3841,87 @@ async fn resolve_approval_single(
     State(state): State<AppState>,
     Path(aid): Path<String>,
     Json(body): Json<ResolveApproval>,
-) -> Result<Response, Response> {
-    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+) -> Result<Response, crate::server::Rejection> {
+    let runtime = sole(&state)?;
     let id = runtime.id().clone();
     if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp);
+        return Err(resp.into());
     }
     if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp);
+        return Err(resp.into());
     }
     let actor = resolving_actor(auth);
     run_resolve(&state, &id, runtime, aid, body, actor)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| IntoResponse::into_response(error).into())
+}
+
+/// The answer to an extend: the approval's new deadline, so the console can
+/// redraw the countdown without re-fetching the whole approvals list.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtendReceiptDto {
+    /// Always `true` — a failure is an error response instead. Present so the
+    /// body is self-describing rather than an empty object.
+    extended: bool,
+    /// The approval's new default-deny instant (epoch-millis), the extension
+    /// time plus the gate's current TTL — the same number the card now projects.
+    expires_at_millis: f64,
+}
+
+async fn run_extend(
+    runtime: Arc<CompanyRuntime>,
+    approval_id: String,
+    actor: Actor,
+) -> Result<Response, ApiError> {
+    runtime.ensure_running().await?;
+    let id = ApprovalId::new(approval_id);
+    // `extend_approval` refuses an unknown/already-decided id with `NotFound`,
+    // which maps to 404 — so an operator extending something that has since
+    // resolved or expired is told, not silently answered 200.
+    let expires_at_millis = runtime.extend_approval(&id, actor).await?;
+    Ok(Json(ExtendReceiptDto {
+        extended: true,
+        expires_at_millis: expires_at_millis as f64,
+    })
+    .into_response())
+}
+
+/// `POST /api/v1/companies/{id}/approvals/{aid}/extend` (issue #1805).
+async fn extend_approval(
+    CompanyAuth(auth): CompanyAuth,
+    State(state): State<AppState>,
+    Path((id, aid)): Path<(String, String)>,
+) -> Result<Response, crate::server::Rejection> {
+    let company = CompanyId::new(&id);
+    if let Some(resp) = authorize_address(&state, &auth, &company) {
+        return Err(resp.into());
+    }
+    let runtime = lookup(&state, &id)?;
+    let actor = resolving_actor(auth);
+    run_extend(runtime, aid, actor)
+        .await
+        .map_err(|error| IntoResponse::into_response(error).into())
+}
+
+/// `POST /api/v1/company/approvals/{aid}/extend` (single-company alias).
+async fn extend_approval_single(
+    CompanyAuth(auth): CompanyAuth,
+    State(state): State<AppState>,
+    Path(aid): Path<String>,
+) -> Result<Response, crate::server::Rejection> {
+    let runtime = sole(&state)?;
+    let id = runtime.id().clone();
+    if let Some(resp) = authorize_address(&state, &auth, &id) {
+        return Err(resp.into());
+    }
+    if let Some(resp) = refuse_until_password_changed(&auth) {
+        return Err(resp.into());
+    }
+    let actor = resolving_actor(auth);
+    run_extend(runtime, aid, actor)
+        .await
+        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 #[cfg(test)]
@@ -2267,7 +3932,6 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
-    use crate::ports::types::CompanyRecord;
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
     use crate::store::FsCompanyStore;
@@ -2300,14 +3964,29 @@ mod test {
         config: AppConfig,
         brain: Option<Arc<dyn crate::ports::brain::Brain>>,
     ) -> AppState {
+        build_state_with_brain_and_manifest(home, lifecycle, config, brain, manifest()).await
+    }
+
+    /// [`build_state_with_brain`], with the company manifest chosen by the
+    /// caller — the approval **deadline** lives in `[policy]`, so a test about
+    /// what a past-deadline card answers has to be able to set it (issue #1449).
+    async fn build_state_with_brain_and_manifest(
+        home: &std::path::Path,
+        lifecycle: &str,
+        config: AppConfig,
+        brain: Option<Arc<dyn crate::ports::brain::Brain>>,
+        manifest: CompanyManifest,
+    ) -> AppState {
         // Pre-seed a record so the builder preserves the requested lifecycle.
         let store = FsCompanyStore::new(home.to_path_buf());
         let id = CompanyId::new("acme");
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
-                manifest: manifest(),
+                manifest: manifest.clone(),
                 ledger: Vec::new(),
                 lifecycle: lifecycle.to_string(),
                 overlay_agents: Vec::new(),
@@ -2317,19 +3996,124 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
 
-        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest()).with_id(id.clone());
+        let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest).with_id(id.clone());
         if let Some(brain) = brain {
             builder = builder.with_brain(brain);
         }
         let runtime = builder.build().await.unwrap();
         let state = AppState::new(config);
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// A run store that refuses every verb — the persistence layer mid-outage.
+    /// `accept_chat_turn` treats a refused row best-effort, so this store is
+    /// what probes the other half of that promise: the turn still runs and the
+    /// request still gets an answer, it just cannot be a pollable `202`.
+    struct FailingRunStore;
+
+    #[async_trait::async_trait]
+    impl crate::ports::runs::RunStore for FailingRunStore {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<crate::ports::runs::RunRecord> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn get_run(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<crate::ports::runs::RunRecord>> {
+            Ok(None)
+        }
+        async fn put_run(
+            &self,
+            _company: &CompanyId,
+            _run: &crate::ports::runs::RunRecord,
+        ) -> crate::Result<()> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &crate::ports::runs::RunFilter,
+        ) -> crate::Result<Vec<crate::ports::runs::RunRecord>> {
+            Ok(Vec::new())
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// [`state_with_company`] with the run store swapped for one that refuses
+    /// every verb — the setup for the rowless-turn tests.
+    async fn state_with_failing_runs(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(id.clone())
+            .with_runs(Arc::new(FailingRunStore))
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
         state.registry().insert(id, Arc::new(runtime));
         crate::server::test_support::seed_fixed_admin(&state, "acme").await;
         state
@@ -2349,7 +4133,10 @@ mod test {
                     .uri("/api/v1/company/chat")
                     .header("cookie", crate::server::test_support::fixed_cookie("acme"))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"text":"hi"}"#))
+                    // Issue #1725: not "hi". A bare pleasantry is answered by
+                    // the runtime without a turn, so the echo brain — which is
+                    // what this asserts is wired up — never sees it.
+                    .body(Body::from(r#"{"text":"ship the landing page"}"#))
                     .unwrap(),
             )
             .await
@@ -2358,7 +4145,10 @@ mod test {
 
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["responses"][0]["text"], "You said: hi");
+        assert_eq!(
+            value["responses"][0]["text"],
+            "You said: ship the landing page"
+        );
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 
@@ -2419,6 +4209,503 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
+    }
+
+    /// Issue #1725, through the route an operator actually hits: "hi" comes
+    /// back answered, with no card, no steps, and no turn behind it.
+    ///
+    /// The unit-level proof that the brain is not called lives in
+    /// `runtime::cycle`'s `a_bare_greeting_answers_without_calling_the_brain`,
+    /// where a counting brain can be injected. This one pins that the chat
+    /// handler reaches that path at all — the two are separate failures, and a
+    /// correct fast path nothing routes to leaves the bug where it was.
+    ///
+    /// The echo brain answers `"You said: <text>"`, so the assertion below is
+    /// also the evidence: a canned greeting means the brain never ran.
+    #[tokio::test]
+    async fn a_bare_greeting_is_answered_without_a_turn() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["responses"][0]["text"],
+            crate::company::task_intent::SmallTalk::Hello.reply(),
+            "a greeting is answered by the runtime, not by a turn"
+        );
+        // The console showed "1 step" for a greeting on staging. There is no
+        // step to show, so the field is omitted entirely.
+        assert!(
+            value["responses"][0]["steps"].is_null(),
+            "no tool ran: {}",
+            value["responses"][0]
+        );
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "a greeting opens no card"
+        );
+    }
+
+    // ── Issue #982: the card goes to whoever was addressed ──────────────────
+
+    /// A roster with three teammates and one desk, so a chat can be addressed
+    /// to something that exists.
+    ///
+    /// The ids are the ones the smoke that found #982 used, and the roles are
+    /// deliberately distinct words, so a test can address one teammate in a
+    /// message whose text points at another.
+    fn roster_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[agent]]
+id = "backend_engineer"
+role = "Backend Engineer"
+
+[[agent]]
+id = "designer"
+role = "Designer"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["backend_engineer"]
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap()
+    }
+
+    /// [`state_with_company`] over [`roster_manifest`]. Written out rather than
+    /// threaded through the shared builders above, which several other suites
+    /// call with the roster-less fixture.
+    async fn state_with_roster(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: roster_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), roster_manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// [`roster_manifest`] plus a **memberless** desk — one that exists on the
+    /// roster but has nobody seated on it, the `EmptyDesk` shape `mention_context`
+    /// still has to canonicalize.
+    fn memberless_desk_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[agent]]
+id = "backend_engineer"
+role = "Backend Engineer"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["backend_engineer"]
+
+[[group_chat]]
+id = "sales"
+name = "Sales"
+members = []
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap()
+    }
+
+    /// [`roster_manifest`] plus a desk **literally named** `dm:engineering`,
+    /// beside the ordinary `engineering` desk — the shape `mention_context`
+    /// must resolve **as sent** instead of stripping the `dm:` prefix away.
+    fn dm_prefixed_desk_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[agent]]
+id = "backend_engineer"
+role = "Backend Engineer"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["backend_engineer"]
+
+[[group_chat]]
+id = "dm:engineering"
+name = "Dm Engineering"
+members = ["backend_engineer"]
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap()
+    }
+
+    /// [`state_with_roster`] over [`memberless_desk_manifest`].
+    async fn state_with_memberless_desk(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: memberless_desk_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), memberless_desk_manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// [`state_with_roster`] over [`dm_prefixed_desk_manifest`].
+    async fn state_with_dm_prefixed_desk(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: dm_prefixed_desk_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), dm_prefixed_desk_manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// One chat request, optionally addressed to a thread.
+    fn chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/chat")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "text": text, "chat": chat }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    /// The message the smoke sent: an actionable ask whose *text* points at one
+    /// teammate, addressed to a different one.
+    const CROSSED: &str = "build the backend deployment pipeline";
+
+    /// The card a chat opens is handed to the teammate the operator addressed.
+    ///
+    /// The fixture is the whole test. `CROSSED` names *backend* work and is
+    /// addressed to the **product manager**, so the two candidate answers are
+    /// distinguishable: pre-fix this card was born blank and the planning pass
+    /// filled it from a content match of the title against teammate roles —
+    /// which is exactly the wrong answer here. A message whose text and
+    /// addressee agree would pass on pre-fix code and prove nothing; that is
+    /// what the two "right" rows of the issue's table were.
+    #[tokio::test]
+    async fn chat_addressed_to_a_teammate_assigns_that_teammate() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        assert!(
+            matches!(
+                crate::company::task_intent::triage_message(CROSSED),
+                crate::company::task_intent::MessageTriage::Track(_)
+            ),
+            "fixture must be a message the handler cards, or this proves nothing"
+        );
+
+        let r = app
+            .oneshot(chat_to(CROSSED, Some("product_manager")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "an actionable ask opens one card");
+        assert_eq!(
+            tasks[0].assignee, "product_manager",
+            "the card belongs to the teammate the operator addressed"
+        );
+        assert_ne!(
+            tasks[0].assignee, "backend_engineer",
+            "…and not to whoever the message text happens to name"
+        );
+    }
+
+    /// A desk-addressed chat is assigned to the **desk**, not to its lead.
+    ///
+    /// Writing the lead would erase the desk from the board the moment the card
+    /// was created — the invariant `AssigneeResolution::canonical` holds for
+    /// every other write site (issue #214), now held here too.
+    #[tokio::test]
+    async fn chat_addressed_to_a_desk_assigns_the_desk() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .oneshot(chat_to(CROSSED, Some("engineering")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].assignee, "engineering",
+            "picking a desk IS the operator's routing decision"
+        );
+    }
+
+    /// Everything that addresses nobody in particular still opens a blank card:
+    /// no thread at all, the empty string, the console's legacy fallback desk
+    /// id, and the default "General" desk this company does not have.
+    ///
+    /// This pins the direction of the change — *more* cards are operator-chosen,
+    /// none fewer — and it is the clause that keeps the orchestrator's own queue
+    /// working: a blank assignee is what hands a card to it.
+    #[tokio::test]
+    async fn an_unaddressed_chat_leaves_the_card_unassigned() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        for thread in [None, Some(""), Some("main"), Some(DEFAULT_DESK)] {
+            let r = app.clone().oneshot(chat_to(CROSSED, thread)).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "thread {thread:?}");
+        }
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 4, "one card per message: {tasks:?}");
+        for card in &tasks {
+            assert_eq!(
+                card.assignee, "",
+                "an unaddressed message leaves the card for the orchestrator"
+            );
+        }
+    }
+
+    /// A thread key that names nothing on the roster is not an error: the card
+    /// is opened, unassigned, exactly as it was before this route resolved
+    /// anything. A chat must never 400 — and must never lose its card — over who
+    /// it was addressed to.
+    #[tokio::test]
+    async fn an_unknown_addressee_leaves_the_card_unassigned() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .oneshot(chat_to(CROSSED, Some("nobody_by_that_name")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "an unknown thread is not a 400");
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "…and the card is still opened");
+        assert_eq!(tasks[0].assignee, "", "…with nobody guessed onto it");
+    }
+
+    /// The card remembers the thread it was opened from, so the marker that says
+    /// it settled lands back in the conversation that asked for the work.
+    ///
+    /// `origin_chat_id` is the field issue #151 added for exactly this, and the
+    /// console already renders the marker in whatever channel it names — the
+    /// route was simply never filling it in. An unaddressed message still opens
+    /// a card with no origin, which is every card this route opened before.
+    #[tokio::test]
+    async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .clone()
+            .oneshot(chat_to(CROSSED, Some("dm:designer")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(
+            tasks[0].origin_chat_id.as_deref(),
+            Some("dm:designer"),
+            "the thread as the console addressed it"
+        );
+
+        let r = app
+            .oneshot(chat_to("draft the investor update", None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        let unaddressed = tasks
+            .iter()
+            .find(|c| c.title == "Draft the investor update")
+            .expect("the second card");
+        assert_eq!(
+            unaddressed.origin_chat_id, None,
+            "an unaddressed message has no thread to answer in"
+        );
+    }
+
+    /// The console mints a DM channel id as `dm:<teammate-id>`, and that form is
+    /// documented as a valid channel key — so it has to address the teammate
+    /// here as well as in the responder lookup.
+    #[tokio::test]
+    async fn a_console_dm_channel_id_addresses_the_teammate() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .oneshot(chat_to(CROSSED, Some("dm:designer")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].assignee, "designer");
     }
 
     /// Issue #845: an explicit "Build me the workflow" opens a card even when
@@ -2500,6 +4787,101 @@ mod test {
         );
     }
 
+    /// Issue #1152: an explicit "Just chatting" **withholds** the card the
+    /// triage would otherwise have opened.
+    ///
+    /// The mirror of the test above, and the asymmetry it closes. Since #845 the
+    /// operator could override the classifier *upward* — mint a card it
+    /// declined — and there was no control anywhere that overrode it downward.
+    /// So a message the lexical layer reads as `Track` ("can you build the
+    /// landing page?" asked rhetorically, while thinking out loud) opened a
+    /// card, assigned it to a desk, and started a planning pass, and the only
+    /// recourse was to go to the board and delete it.
+    ///
+    /// The fixture's verdict is asserted `Track` **first**, in the strongest
+    /// direction available: the `chat` run is made before any other, on an empty
+    /// board, and the unmarked run right after it opens the card on the very
+    /// same words. So "zero cards" is the intent doing the work, not a message
+    /// the classifier was never going to card.
+    #[tokio::test]
+    async fn just_chatting_withholds_the_card_the_triage_would_have_opened() {
+        use crate::ports::tasks::TaskDeliverable;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        // Work by construction — the request frame beats the interrogative, so
+        // the triage names a title and the card branch fires.
+        let text = "can you build the landing page?";
+        assert!(
+            matches!(
+                crate::company::task_intent::triage_message(text),
+                crate::company::task_intent::MessageTriage::Track(_)
+            ),
+            "fixture must be a message the handler cards, or this proves nothing"
+        );
+
+        let chat = |intent: Option<&str>| {
+            let body = match intent {
+                Some(i) => format!(
+                    r#"{{"text":{},"deliverable":"{i}"}}"#,
+                    serde_json::json!(text)
+                ),
+                None => format!(r#"{{"text":{}}}"#, serde_json::json!(text)),
+            };
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        // `chat`: the operator's statement outranks the classifier's `Track`.
+        let r = app.clone().oneshot(chat(Some("chat"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "the message is still answered");
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "a message sent as chat must open no card, whatever the triage read"
+        );
+
+        // The same words, unmarked: the card the run above withheld.
+        let r = app.clone().oneshot(chat(None)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "an unmarked message is unchanged — this is what the `chat` run withheld"
+        );
+        assert_eq!(tasks[0].deliverable, TaskDeliverable::Once);
+
+        // …and so are both work words, on the same words again.
+        let r = app.clone().oneshot(chat(Some("once"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            runtime.tasks().list(&id).await.unwrap().len(),
+            2,
+            "`once` is unchanged"
+        );
+
+        let r = app.oneshot(chat(Some("workflow"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 3, "`workflow` is unchanged");
+        assert!(
+            tasks
+                .iter()
+                .any(|t| t.deliverable == TaskDeliverable::Workflow),
+            "and still routes its card to the builder pass: {tasks:?}"
+        );
+    }
+
     /// Issue #576: **who** asked decides whether the card self-promotes.
     ///
     /// The promotion buys a planning pass, which is a model call. A person
@@ -2559,19 +4941,28 @@ mod test {
             let id = CompanyId::new("acme");
             let runtime = state.registry().get(&id).unwrap();
 
-            run_chat(
-                runtime.clone(),
-                ChatMessage {
-                    text: ask.to_string(),
-                    chat: None,
-                    parent: None,
-                    deliverable: None,
-                },
-                by,
+            let message = ChatMessage {
+                mentions: None,
+                text: ask.to_string(),
+                chat: None,
+                parent: None,
+                deliverable: None,
+                detach: false,
+                attachments: Vec::new(),
+            };
+            let accepted = accept_chat_turn(
+                &runtime,
+                &id,
+                &message,
+                by.as_ref(),
                 None,
+                crate::server::ops::language::DEFAULT_DESK,
             )
             .await
-            .expect("the chat cycle runs");
+            .expect("the turn is accepted");
+            run_chat(runtime.clone(), message, by, &accepted)
+                .await
+                .expect("the chat cycle runs");
 
             let tasks = runtime.tasks().list(&id).await.unwrap();
             assert_eq!(tasks.len(), 1, "{label}: one ask opens one card");
@@ -2605,6 +4996,8 @@ mod test {
         .unwrap();
 
         let record = CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),
             ledger: Vec::new(),
@@ -2616,9 +5009,13 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -2626,13 +5023,18 @@ mod test {
             .unwrap();
 
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(FsContextStore::new(home.to_path_buf())),
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
             audit_root: home.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -2660,13 +5062,18 @@ mod test {
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -2688,7 +5095,10 @@ mod test {
                     .uri("/api/v1/company/chat")
                     .header("cookie", crate::server::test_support::fixed_cookie("acme"))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"text":"hi"}"#))
+                    // Issue #1725: not "hi". A bare pleasantry is answered by
+                    // the runtime without a turn, so it would reach no brain at
+                    // all — which is the opposite of what this asserts.
+                    .body(Body::from(r#"{"text":"ship the landing page"}"#))
                     .unwrap(),
             )
             .await
@@ -2699,15 +5109,18 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let text = value["responses"][0]["text"].as_str().unwrap();
         // The mock provider's `mock: ` prefix proves the message went through an
-        // openhuman agent turn; the trailing `hi` is the operator message the
-        // agent forwarded (the agent prepends a date/time context line). Crucially
-        // it is NOT the echo brain's `"You said: hi"`.
+        // openhuman agent turn; the trailing words are the operator message the
+        // agent forwarded (the agent prepends a date/time context line).
+        // Crucially it is NOT the echo brain's `"You said: …"`.
         assert!(text.starts_with("mock: "), "not an agent reply: {text:?}");
         assert!(
-            text.trim_end().ends_with("hi"),
+            text.trim_end().ends_with("ship the landing page"),
             "message not forwarded: {text:?}"
         );
-        assert_ne!(text, "You said: hi", "still routing through the echo brain");
+        assert_ne!(
+            text, "You said: ship the landing page",
+            "still routing through the echo brain"
+        );
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 
@@ -2730,6 +5143,8 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -2741,9 +5156,13 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -2806,6 +5225,282 @@ mod test {
         assert_eq!(desks[0]["members"][0], "ceo");
         assert_eq!(desks[0]["members"][1], "eng");
         assert_eq!(desks[0]["overlayMembers"][0], "eng");
+    }
+
+    /// `add_desk_member` must serialize its load-modify-save cycle against
+    /// `company_write_lock`, exactly like every other console load-modify-save
+    /// write (`put_logo`, `set_lifecycle`, `patch_company`) — otherwise it can
+    /// silently revert a concurrent rename: `patch_company` is guarded by
+    /// `company_write_lock` alone, so a desk write racing in on only the
+    /// unrelated `serial` cycle lock can load the pre-rename record and save
+    /// the whole thing back after the rename lands (PR #1875 review finding).
+    /// Proven the same way `put_logo_serializes_against_the_company_write_lock`
+    /// proves it: hold the lock externally, drive the real handler through the
+    /// router, and demand it cannot finish while the lock is held.
+    #[tokio::test]
+    async fn add_desk_member_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks/studio/members")
+                        .header("cookie", &cookie_for_task)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"agent_id":"eng"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        // The handler must be blocked behind the held lock — give it every
+        // chance to (wrongly) race ahead before declaring it stuck.
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "add_desk_member completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("add_desk_member never resumed after the lock was released")
+            .expect("add_desk_member task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// `set_desk_order` must serialize against `company_write_lock` too — same
+    /// load-modify-save shape and same finding as `add_desk_member`'s own test
+    /// above (PR #1875 review finding, round 9: the earlier fix covered five
+    /// handlers but this coverage only proved it for one).
+    #[tokio::test]
+    async fn set_desk_order_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+        seed_overlay_eng(&app, &cookie).await;
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            put_desk_order(
+                &app_for_task,
+                &cookie_for_task,
+                "studio",
+                r#"{"ordered_member_ids":["eng","ceo"]}"#,
+            )
+            .await
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "set_desk_order completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("set_desk_order never resumed after the lock was released")
+            .expect("set_desk_order task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// `remove_desk_member` must serialize against `company_write_lock` too
+    /// (PR #1875 review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn remove_desk_member_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+        seed_overlay_eng(&app, &cookie).await;
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/api/v1/company/desks/studio/members/eng")
+                        .header("cookie", &cookie_for_task)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "remove_desk_member completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("remove_desk_member never resumed after the lock was released")
+            .expect("remove_desk_member task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// `create_desk` must serialize against `company_write_lock` too (PR #1875
+    /// review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn create_desk_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie_for_task)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"name":"Growth","members":["eng"]}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "create_desk completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("create_desk never resumed after the lock was released")
+            .expect("create_desk task panicked");
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    /// `delete_desk` must serialize against `company_write_lock` too (PR #1875
+    /// review finding, round 9 — see
+    /// `set_desk_order_serializes_against_the_company_write_lock`'s own doc).
+    #[tokio::test]
+    async fn delete_desk_serializes_against_the_company_write_lock() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let id = CompanyId::new("acme");
+
+        // Create the overlay desk to delete before taking the lock — this
+        // test proves serialization on the delete path, not the create path.
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let lock = company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let app_for_task = app.clone();
+        let cookie_for_task = cookie.clone();
+        let mut task = tokio::spawn(async move {
+            app_for_task
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/api/v1/company/desks/growth")
+                        .header("cookie", &cookie_for_task)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "delete_desk completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent `ops` writers"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("delete_desk never resumed after the lock was released")
+            .expect("delete_desk task panicked");
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     /// Removing an overlay member drops it from the merged view; a manifest
@@ -3072,6 +5767,402 @@ mod test {
         assert_eq!(arr[0]["id"], "studio"); // manifest desk first
         assert_eq!(arr[1]["id"], "growth_desk");
         assert_eq!(arr[1]["overlayCreated"], true);
+    }
+
+    /// Every desk mutation aimed at the built-in `#general` channel is refused
+    /// with a reason, under **every** spelling the host folds into the General
+    /// conversation (issue #1743).
+    ///
+    /// The point of the assertion is the pair: a `409` **and** the sentence.
+    /// Before this, each of these was a bare `404`/`CompanyNotFound` — "there
+    /// is no such desk" — which is a different and wrong claim. `#general` is
+    /// not missing; it is reserved, and the caller needs to be told which.
+    ///
+    /// There is no `PATCH …/desks/{id}` route on this host at all, so this is
+    /// the complete desk mutation surface: delete, staff, unstaff, reorder.
+    #[tokio::test]
+    async fn every_desk_mutation_aimed_at_general_is_refused_with_a_reason() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for spelling in ["general", "General", "GENERAL", "main", "Main"] {
+            let cases: [(&str, String, &str); 4] = [
+                ("DELETE", format!("/api/v1/company/desks/{spelling}"), ""),
+                (
+                    "POST",
+                    format!("/api/v1/company/desks/{spelling}/members"),
+                    r#"{"agent_id":"eng"}"#,
+                ),
+                (
+                    "DELETE",
+                    format!("/api/v1/company/desks/{spelling}/members/ceo"),
+                    "",
+                ),
+                (
+                    "PUT",
+                    format!("/api/v1/company/desks/{spelling}/order"),
+                    r#"{"ordered_member_ids":["ceo"]}"#,
+                ),
+            ];
+            for (method, uri, body) in cases {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("cookie", &cookie)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::CONFLICT,
+                    "{method} {uri} must be refused, not answered 404"
+                );
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(
+                    text.contains("company-wide channel"),
+                    "{method} {uri} must say why: got {text}"
+                );
+            }
+        }
+    }
+
+    /// A desk create that would shadow the built-in channel is refused (409),
+    /// whichever spelling it asks for and whether the id is given explicitly or
+    /// derived from the name (issue #1743).
+    ///
+    /// Shadowing is not a cosmetic collision: a desk named `general` would take
+    /// over routing for the company-wide line, so a message meant for the
+    /// orchestrator would be answered by that desk's lead instead.
+    #[tokio::test]
+    async fn a_desk_cannot_be_created_that_would_shadow_the_general_channel() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for body in [
+            r#"{"name":"Anything","id":"general"}"#,
+            r#"{"name":"Anything","id":"main"}"#,
+            r#"{"name":"General"}"#,
+            r#"{"name":"Main"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("reserved"),
+                "body {body} must be told the id is reserved"
+            );
+        }
+
+        // Nothing was created: the desk list still holds only the manifest desk.
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1);
+        assert_eq!(desks[0]["id"], "studio");
+    }
+
+    /// `#general` is **not** a desk, and `GET …/desks` says so by not listing it
+    /// (issue #1743).
+    ///
+    /// This is the guarantee that keeps every desk-shaped surface honest
+    /// without any of them needing a special case: the org chart, the assignee
+    /// picker and the desk counts all read this route, so a channel that is
+    /// absent here can never be offered a rename, a delete, a lead or a seat.
+    /// The console's own no-affordance requirement falls out of it rather than
+    /// being enforced by hiding buttons.
+    #[tokio::test]
+    async fn the_general_channel_is_not_a_desk_and_is_not_listed_as_one() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        for desk in desks.as_array().unwrap() {
+            let id = desk["id"].as_str().unwrap();
+            assert!(
+                !crate::server::chat_history::is_general_chat(Some(id)),
+                "the desk list must not carry the built-in channel, found {id}"
+            );
+        }
+    }
+
+    /// An overlay desk carrying an explicit, unreserved id but the reserved
+    /// **display name** shadows the channel just as thoroughly (issue #1743).
+    ///
+    /// `resolve_desk_id` matches a desk by id *or* by case-insensitive name, so
+    /// `{"id": "ops", "name": "General"}` is selected when
+    /// `HarnessBrain::everyone_desk` folds the built-in `main` thread to
+    /// `General` — and `@everyone` on the company-wide line then expands to
+    /// that desk's members instead of the roster. The id check alone missed it
+    /// because the id is only *derived* from the name when none is supplied.
+    #[tokio::test]
+    async fn a_desk_cannot_take_the_general_display_name_under_another_id() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for body in [
+            r#"{"id":"ops","name":"General"}"#,
+            r#"{"id":"ops","name":"general"}"#,
+            r#"{"id":"ops","name":"Main"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "body {body}");
+        }
+
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1, "nothing was created");
+    }
+
+    /// An overlay desk carrying a reserved **display name** under its own id is
+    /// still a desk, and is still projected (issue #1743).
+    ///
+    /// `resolve_desk_id` declines to match an overlay desk against a General
+    /// key at all, so `{id: "ops", name: "General"}` shadows nothing: `ops`
+    /// resolves it, its lead answers there, `delegate_to_desk` reaches it, and
+    /// every desk write to it is allowed. Hiding it would take a live desk and
+    /// its transcript out of Chat while the API went on routing to it — the
+    /// mirror image of the defect this projection exists to prevent, and a
+    /// worse one, because nothing would say where the conversation went.
+    ///
+    /// Creation still refuses that display name
+    /// ([`a_desk_cannot_take_the_general_display_name_under_another_id`]); this
+    /// is only about state already on disk.
+    #[tokio::test]
+    async fn an_overlay_desk_named_general_under_its_own_id_is_still_projected() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        {
+            let id = CompanyId::new("acme");
+            let runtime = state.registry().get(&id).unwrap();
+            let store = runtime.store();
+            let mut record = store.load(&id).await.unwrap().unwrap();
+            record.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "ops".to_string(),
+                name: "General".to_string(),
+                description: None,
+                responder: Default::default(),
+                members: vec!["ceo".to_string()],
+            });
+            // The resolver is the reason this row is safe to project.
+            assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+            assert_eq!(record.resolve_desk_id("General"), None);
+            assert_eq!(record.resolve_desk_id("main"), None);
+            store.save(&record).await.unwrap();
+        }
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desks = get_desks(&app, &cookie).await;
+        let ops = desks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "ops")
+            .unwrap_or_else(|| panic!("the desk must still be listed: {desks}"));
+        assert_eq!(ops["name"], "General");
+        assert_eq!(ops["overlayCreated"], true);
+
+        // And it takes desk writes under its own id, like any other desk.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks/ops/members")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"eng"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // While the General *key* still names the channel, not this desk.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/General")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// An overlay desk persisted **before** the ids were reserved is still not
+    /// the built-in channel (issue #1743).
+    ///
+    /// `create_desk` accepted `general` and `main` until this issue, so this is
+    /// state an upgraded instance can be carrying. Guarding the immutability
+    /// checks on `desk_exists` would have exempted it — leaving the channel
+    /// this issue promises is permanent staffable, reorderable and deletable
+    /// after all, which is the whole claim rather than an edge of it.
+    #[tokio::test]
+    async fn a_pre_existing_overlay_desk_does_not_become_the_general_channel() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        // Persisted as an upgraded instance would be carrying it — through the
+        // store the handlers read, not through the create route, which now
+        // refuses this id.
+        {
+            let id = CompanyId::new("acme");
+            let runtime = state.registry().get(&id).unwrap();
+            let store = runtime.store();
+            let mut record = store.load(&id).await.unwrap().unwrap();
+            record.overlay_desks.push(crate::ports::types::OverlayDesk {
+                id: "general".to_string(),
+                name: "Legacy general".to_string(),
+                description: None,
+                responder: Default::default(),
+                members: vec!["ceo".to_string()],
+            });
+            store.save(&record).await.unwrap();
+        }
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Not projected, so no desk surface can offer it a control at all.
+        let desks = get_desks(&app, &cookie).await;
+        for desk in desks.as_array().unwrap() {
+            assert_ne!(
+                desk["id"], "general",
+                "a shadowing overlay desk must not be listed: {desks}"
+            );
+        }
+
+        // And every write aimed at it is refused with the channel's reason,
+        // not answered as if it were an ordinary desk.
+        for (method, uri, body) in [
+            (
+                "POST",
+                "/api/v1/company/desks/general/members",
+                Some(r#"{"agent_id":"eng"}"#),
+            ),
+            ("DELETE", "/api/v1/company/desks/general", None),
+        ] {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", &cookie);
+            if body.is_some() {
+                req = req.header("content-type", "application/json");
+            }
+            let response = app
+                .clone()
+                .oneshot(req.body(body.map_or_else(Body::empty, Body::from)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{method} {uri}");
+        }
+    }
+
+    /// A company whose **blueprint** really declares a desk with one of those
+    /// ids keeps it, and keeps every write that has always worked on it
+    /// (issue #1743).
+    ///
+    /// The reservation replaces the "no such desk" answer and nothing else. A
+    /// guard that refused on the id alone would have taken a desk away from
+    /// every company that authored one, which is a migration, not a feature.
+    #[tokio::test]
+    async fn a_manifest_desk_named_general_is_left_exactly_as_it_was() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n\
+             [[group_chat]]\nid = \"general\"\nname = \"General\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // It is listed as the desk it is.
+        let desks = get_desks(&app, &cookie).await;
+        assert_eq!(desks.as_array().unwrap().len(), 1);
+        assert_eq!(desks[0]["id"], "general");
+
+        // Staffing it still works — the pre-#1743 behaviour, unchanged.
+        let add = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks/general/members")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"eng"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(add.status(), StatusCode::NO_CONTENT);
+
+        // And deleting it is still refused as a *blueprint* desk, with the
+        // blueprint's reason rather than the reserved-channel one.
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/general")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(delete.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("blueprint"));
     }
 
     /// Create-desk validation: an empty name is 400, an id colliding with a
@@ -3483,6 +6574,8 @@ mod test {
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "General".to_string(),
@@ -3498,6 +6591,8 @@ mod test {
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "main".to_string(),
@@ -3554,6 +6649,8 @@ mod test {
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "main".to_string(),
@@ -3612,6 +6709,35 @@ mod test {
         let state = state_with_company(&home, "running").await;
         let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
+        // The card has to actually be on the board: the history projection
+        // reports `taskId` only for a card that still exists, so that a chip
+        // cannot come back pointing at a card someone deleted (issue #984).
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-77".to_string(),
+                    title: "Draft the launch note".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_TODO.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: 1,
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
         for (text, task_id) in [
             ("opened one", Some("t-77".to_string())),
             ("just talking", None),
@@ -3621,6 +6747,8 @@ mod test {
                 .append(
                     runtime.id(),
                     CompanyEvent::AgentReply {
+                        mentions: Vec::new(),
+                        mention_depth: 0,
                         parent: None,
                         task_id,
                         chat_id: "main".to_string(),
@@ -3714,6 +6842,8 @@ mod test {
                     .append(
                         runtime.id(),
                         CompanyEvent::AgentReply {
+                            mentions: Vec::new(),
+                            mention_depth: 0,
                             parent: None,
                             task_id: None,
                             chat_id: "workflow-copilot:weekly_report".to_string(),
@@ -3763,6 +6893,8 @@ mod test {
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    mentions: Vec::new(),
+                    mention_depth: 0,
                     parent: None,
                     task_id: None,
                     chat_id: "General".to_string(),
@@ -3913,6 +7045,208 @@ mod test {
         assert!(
             ids.contains(&reply),
             "reply id absent from history: {ids:?}"
+        );
+    }
+
+    /// `detach: true` answers `202` with the ids the accept already established,
+    /// claims nothing about a turn that has not settled, and — the half that
+    /// removes the 504 from the operator's path — arrives while the turn is
+    /// demonstrably still going (issue #983).
+    #[tokio::test]
+    async fn a_detached_turn_answers_202_before_the_turn_finishes() {
+        let home_dir = home();
+        // The same blocking brain the queue tests use: it parks inside the cycle
+        // until released, so the turn is provably unfinished when the response
+        // below is read.
+        let (brain, entered, release) = BlockingChatBrain::new();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(brain),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"do the long thing","detach":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(body["detached"], true, "{body}");
+        assert!(
+            body["turnId"].as_str().is_some_and(|s| !s.is_empty()),
+            "the turn id is what the console polls: {body}"
+        );
+        assert!(
+            body["messageId"].as_str().is_some_and(|s| !s.is_empty()),
+            "the message is journaled at accept, so its id is knowable here: {body}"
+        );
+        // The whole point: this body is not allowed to look settled. A console
+        // that found `responses` here would render an empty answer as the reply.
+        assert!(
+            body.get("responses").is_none(),
+            "a detached response must not look settled: {body}"
+        );
+        assert!(
+            body.get("stillAwaiting").is_none(),
+            "a detached response must not look settled: {body}"
+        );
+
+        // And the turn really had not finished when that body was written — the
+        // brain is still parked, holding the cycle open.
+        entered.acquire().await.expect("the turn entered").forget();
+        let statuses: Vec<String> = turn_rows(&runtime)
+            .await
+            .into_iter()
+            .map(|(_, status)| status)
+            .collect();
+        assert!(
+            statuses.iter().any(|s| s == "running" || s == "pending"),
+            "the response beat the turn, which is the point: {statuses:?}"
+        );
+
+        // It settles on its own, with nobody waiting on it.
+        release.add_permits(1);
+        until("the detached turn never settled", async || {
+            turn_rows(&runtime)
+                .await
+                .iter()
+                .any(|(_, status)| status == "succeeded")
+        })
+        .await;
+    }
+
+    /// The wire-compat guarantee in the other direction: a caller that sends no
+    /// `detach` gets exactly the response it always got — a `200` carrying the
+    /// settled turn — plus the additive `turnId`. An older console is untouched.
+    #[tokio::test]
+    async fn a_body_without_detach_still_gets_the_synchronous_response() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // `post_chat` asserts the 200 itself — the legacy status is part of what
+        // this test is pinning.
+        let body = post_chat(&app, &cookie, r#"{"text":"hi"}"#).await;
+
+        assert!(
+            body["responses"].as_array().is_some_and(|r| !r.is_empty()),
+            "the settled shape carries the replies: {body}"
+        );
+        assert!(
+            body["messageId"].as_str().is_some(),
+            "the legacy durable id is unchanged: {body}"
+        );
+        assert!(
+            body.get("detached").is_none(),
+            "the synchronous response must not carry the detach discriminator: {body}"
+        );
+        assert!(
+            body["turnId"].as_str().is_some(),
+            "`turnId` is additive on the synchronous response too: {body}"
+        );
+    }
+
+    /// The detached turn is not fire-and-forget: the message it journaled at
+    /// accept, and the answer the spawned task journals afterwards, both land in
+    /// the durable transcript. This is the backstop the console re-reads, and
+    /// the reason a dropped frame is not a lost answer.
+    #[tokio::test]
+    async fn a_detached_turn_still_journals_its_question_and_its_answer() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"detached hello","detach":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mine = body["messageId"].as_str().unwrap().to_string();
+
+        // The turn owns its own settle, so wait for the answer to appear rather
+        // than for a handle this route deliberately does not hold.
+        let mut history = Vec::new();
+        for _ in 0..100 {
+            history = get_history(&app, &cookie, "").await;
+            if history
+                .iter()
+                .any(|m| m["text"].as_str() == Some("You said: detached hello"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let ids: Vec<&str> = history.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&mine.as_str()),
+            "the id handed back at 202 must resolve in history: {ids:?}"
+        );
+        assert!(
+            history
+                .iter()
+                .any(|m| m["text"].as_str() == Some("You said: detached hello")),
+            "the detached turn's answer never reached the transcript: {history:?}"
+        );
+    }
+
+    /// **Issue #1000 — the floor of the `202` contract.** A detached response
+    /// is a promise the console can poll, and the poll starts from the body's
+    /// `turnId`; a `202` carrying no row is a promise a buffered-`/events`
+    /// tenant cannot collect, which strands the reply until reload. So when the
+    /// turn's row cannot be minted, the route must not answer `202` at all: it
+    /// settles the turn synchronously instead, handing the console the answer —
+    /// a state the console renders natively, being the same shape an older host
+    /// (one that ignored `detach`) has always returned.
+    #[tokio::test]
+    async fn a_detached_request_without_a_turn_row_settles_synchronously() {
+        let home_dir = home();
+        let state = state_with_failing_runs(home_dir.path()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let body = post_chat(&app, &cookie, r#"{"text":"rowless detach","detach":true}"#).await;
+
+        // The settled shape, not the empty 202: the console is handed the
+        // answer, never a turn id it cannot act on.
+        assert!(
+            body.get("detached").is_none(),
+            "a rowless turn must not claim it can be read back: {body}"
+        );
+        assert!(
+            body["responses"].as_array().is_some_and(|r| !r.is_empty()),
+            "the synchronous fallback still delivers the reply: {body}"
         );
     }
 
@@ -4578,6 +7912,138 @@ mod test {
         );
     }
 
+    // -- Extend the deadline (issue #1805) ----------------------------------
+
+    /// Parks one effect in BOTH the gate and the journal under a fixed id, at a
+    /// controllable instant — the gate is what `extend_approval` asks whether an
+    /// id is live, and the journal is what projects the deadline, so an extend
+    /// test needs both seeded exactly as a real park leaves them.
+    async fn park_for_extend(
+        runtime: &Arc<CompanyRuntime>,
+        id: &str,
+        at_millis: u64,
+    ) -> ApprovalId {
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+        let approval = ApprovalId::new(id);
+        let effect = crate::ports::types::Effect {
+            kind: "payment.send".into(),
+            group: crate::ports::types::EffectGroup::Spend,
+            amount_usd: Some(1_200.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "to": "vendor@example.test" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at_millis);
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at_millis,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        approval
+    }
+
+    fn extend_request_with_cookie(approval_id: &ApprovalId, cookie: String) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/company/approvals/{approval_id}/extend"))
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn extend_request(approval_id: &ApprovalId) -> Request<Body> {
+        extend_request_with_cookie(
+            approval_id,
+            crate::server::test_support::fixed_cookie("acme"),
+        )
+    }
+
+    async fn body_json(response: Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The keystone (issue #1805): extending a parked approval pushes its
+    /// deadline out to a fresh full window, and the receipt names the new one —
+    /// the console can redraw the countdown without re-fetching the list.
+    #[tokio::test]
+    async fn extending_a_parked_approval_moves_its_deadline() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        // Parked long ago, so its original deadline is `1_000 + ttl`.
+        let id = park_for_extend(&runtime, "appr-ext", 1_000).await;
+        let before = runtime.pending_approvals()[0]
+            .expires_at_millis
+            .expect("a deadline is projected");
+
+        let app = router(state);
+        let response = app.oneshot(extend_request(&id)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+
+        let after = runtime.pending_approvals()[0]
+            .expires_at_millis
+            .expect("a deadline is still projected");
+        assert!(
+            after > before,
+            "the deadline moved out: before={before} after={after}"
+        );
+        assert!(body["extended"].as_bool().unwrap());
+        assert_eq!(
+            body["expiresAtMillis"].as_f64().unwrap() as u64,
+            after,
+            "the receipt's deadline is the one the card now projects"
+        );
+    }
+
+    /// Extending something that is not parked — an unknown id, or one already
+    /// resolved or expired — is a 404, not a 200 over nothing.
+    #[tokio::test]
+    async fn extending_an_unknown_approval_is_404() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let app = router(state);
+        let response = app
+            .oneshot(extend_request(&ApprovalId::new("does-not-exist")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The route is guarded by the same company auth as resolve: a member — an
+    /// authenticated user of the company — may extend a deadline, exactly as
+    /// they may resolve. Keeping a stalled run alive is not an admin-only lever.
+    #[tokio::test]
+    async fn a_member_may_extend_an_approval_deadline() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = park_for_extend(&runtime, "appr-member-ext", 1_000).await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(extend_request_with_cookie(
+                &id,
+                crate::server::test_support::member_cookie("acme"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     /// The dotted kind the stalled brain parks once its follow-up turn gets
     /// past the barrier. Parking journals durably (`record_parked`), so its
     /// presence in `pending_approvals()` is proof the continuation reached the
@@ -4805,6 +8271,477 @@ mod test {
         );
     }
 
+    /// The reply a stalled chat turn produces once released.
+    const SLOW_TURN_REPLY: &str = "the slow turn's answer";
+
+    /// A brain that stalls on the operator's **first** turn — the chat lane,
+    /// rather than the approval follow-up `StalledContinuationBrain` stalls on.
+    struct StalledChatBrain {
+        /// Fires once the turn is under way, which is the moment the field
+        /// report's proxy gave up and closed the connection.
+        entered: Arc<tokio::sync::Notify>,
+        /// The test's permission for that turn to finish.
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for StalledChatBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            let mut channel_responses = Vec::new();
+            for event in &req.events {
+                if matches!(event, CompanyEvent::OperatorMessage { .. }) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    channel_responses.push(crate::ports::types::OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: None,
+                        text: SLOW_TURN_REPLY.into(),
+                        steps: Vec::new(),
+                        reply_to: None,
+                        mentions: Vec::new(),
+                    });
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses,
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "stalled chat",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// Whether the turn's answer reached the durable journal.
+    async fn reply_journaled(runtime: &Arc<CompanyRuntime>) -> bool {
+        runtime
+            .events()
+            .read_from(runtime.id(), EventSeq::new(0), 10_000)
+            .await
+            .unwrap()
+            .iter()
+            .any(|stored| {
+                matches!(
+                    &stored.event,
+                    CompanyEvent::AgentReply { text, .. } if text == SLOW_TURN_REPLY
+                )
+            })
+    }
+
+    /// Waits for the released turn to journal its reply.
+    async fn await_reply_journaled(runtime: &Arc<CompanyRuntime>) -> bool {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !reply_journaled(runtime).await {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// **Issue #882.** A chat turn whose caller walks away mid-flight must still
+    /// finish and still journal its answer.
+    ///
+    /// This is the chat-lane twin of
+    /// `a_dropped_connection_does_not_cancel_the_follow_up_cycle`. Both the
+    /// cycle and the `AgentReply` append used to live inside the request future,
+    /// so a turn slower than nginx's read timeout was cancelled mid-flight and
+    /// the answer was never written. The operator's DM history then held their
+    /// question and nothing else — the turn could not be read back on reload and
+    /// could not be resumed, which is what #882 reported. Workflow runs survived
+    /// the identical 504 precisely because they are spawned.
+    ///
+    /// `Router::oneshot` reproduces the cancellation by the same mechanism hyper
+    /// uses: the handler future is owned by the future the caller polls, so
+    /// dropping the latter drops the former.
+    #[tokio::test]
+    async fn a_dropped_connection_does_not_lose_the_chat_turns_work() {
+        let home_dir = home();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(StalledChatBrain {
+                entered: entered.clone(),
+                release: release.clone(),
+            })),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        // Send the turn, then let the connection die once it is under way —
+        // exactly what the proxy does when it decides the upstream is too slow.
+        let mut chatting = Box::pin(app.clone().oneshot(chat_request("run the seo audit")));
+        tokio::select! {
+            _ = &mut chatting => panic!("the chat answered before the turn began"),
+            _ = entered.notified() => {}
+        }
+        drop(chatting);
+
+        // Nothing is journaled yet: the turn is still stalled inside the brain.
+        assert!(
+            !reply_journaled(&runtime).await,
+            "the reply was journaled before the turn was released"
+        );
+
+        // Issue #983: the turn was recorded the instant it was accepted, and
+        // the record is what a re-read resolves — so at this point the operator
+        // has walked away and the turn is still `Running` rather than absent.
+        let row = turn_rows(&runtime)
+            .await
+            .pop()
+            .expect("accepting the turn minted a row");
+        assert_eq!(
+            row.1, "running",
+            "a turn whose caller is gone must still read as under way"
+        );
+
+        // The work must survive the caller giving up.
+        release.notify_one();
+        assert!(
+            await_reply_journaled(&runtime).await,
+            "the chat turn died with the dropped connection: the operator's \
+             message is journaled, the answer is not, and the turn can neither \
+             be read back nor resumed (issue #882)"
+        );
+
+        // Issue #983: and so must the settle. The row is written by the spawned
+        // task, not by the handler, so a dropped connection leaving it
+        // `Running` forever would be the #882 bug one layer down — the turn
+        // finishes, the answer lands, and the status surface still claims work
+        // is in flight until the next boot reaps it.
+        until("the settle died with the dropped connection", async || {
+            turn_rows(&runtime)
+                .await
+                .iter()
+                .all(|(_, status)| status == "succeeded")
+        })
+        .await;
+    }
+
+    // ── Issue #983: an accepted turn exists and can be read back ────────────
+
+    /// A brain that blocks every operator turn on a semaphore the test holds.
+    ///
+    /// Deliberately a `Semaphore` rather than a `Notify`: these tests run two
+    /// turns at once and release both, and `notify_one` wakes exactly one
+    /// waiter while `notify_waiters` wakes only those already parked. Permits
+    /// are held whether or not anybody is waiting yet, so the release cannot
+    /// race the turns into a hang.
+    struct BlockingChatBrain {
+        /// One permit added per turn that has entered the brain.
+        entered: Arc<tokio::sync::Semaphore>,
+        /// The test's permission for a turn to finish — one permit each.
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl BlockingChatBrain {
+        fn new() -> (
+            Arc<Self>,
+            Arc<tokio::sync::Semaphore>,
+            Arc<tokio::sync::Semaphore>,
+        ) {
+            let entered = Arc::new(tokio::sync::Semaphore::new(0));
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            (
+                Arc::new(Self {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                }),
+                entered,
+                release,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for BlockingChatBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            let mut channel_responses = Vec::new();
+            for event in &req.events {
+                if let CompanyEvent::OperatorMessage { text, .. } = event {
+                    self.entered.add_permits(1);
+                    self.release.acquire().await.expect("released").forget();
+                    channel_responses.push(crate::ports::types::OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: None,
+                        text: format!("answered: {text}"),
+                        steps: Vec::new(),
+                        reply_to: None,
+                        mentions: Vec::new(),
+                    });
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses,
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "blocking chat",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// Polls `f` until it holds, or fails the test.
+    async fn until(label: &str, mut f: impl AsyncFnMut() -> bool) {
+        let ok = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !f().await {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(ok, "{label}");
+    }
+
+    /// The operator messages `chat/history` currently shows for the main desk.
+    async fn history_texts(app: &axum::Router) -> Vec<String> {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/chat/history")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        body.as_array()
+            .expect("the history route answers with an array")
+            .iter()
+            .filter_map(|m| m["text"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The company's turn rows, id → status.
+    async fn turn_rows(runtime: &Arc<CompanyRuntime>) -> Vec<(String, String)> {
+        let mut rows = runtime
+            .runs()
+            .list_runs(runtime.id(), &crate::ports::runs::RunFilter::default())
+            .await
+            .unwrap();
+        rows.sort_by_key(|r| r.created_at_millis);
+        rows.into_iter()
+            .map(|r| (r.id, r.status.to_string()))
+            .collect()
+    }
+
+    /// **Issue #983 — the direct regression for the observed empty history.**
+    ///
+    /// The operator's message used to be appended *inside* the per-company
+    /// serial lock, so a message sent while another turn held that lock did not
+    /// exist anywhere until the turn ahead of it finished. Reloading during a
+    /// long turn showed an empty conversation: the operator could not see their
+    /// own question, could not tell whether it had been received, and re-sent it.
+    ///
+    /// The blocking first turn is what makes this a real test. With a single
+    /// turn the lock is free and the cycle appends immediately, so the bug is
+    /// invisible — which is exactly why it survived. Two turns reproduce the
+    /// serial train the field report saw with five.
+    #[tokio::test]
+    async fn a_queued_message_is_in_the_transcript_before_its_turn_runs() {
+        let home_dir = home();
+        let (brain, entered, release) = BlockingChatBrain::new();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(brain),
+        )
+        .await;
+        let app = router(state);
+
+        // Turn one takes the lock and stops inside the brain.
+        let first = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(chat_request("the first question")).await }
+        });
+        entered.acquire().await.expect("turn one entered").forget();
+
+        // Turn two is accepted while turn one still owns the lock.
+        let second = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(chat_request("the second question")).await }
+        });
+
+        until(
+            "the queued message never reached the transcript",
+            async || {
+                history_texts(&app)
+                    .await
+                    .iter()
+                    .any(|t| t == "the second question")
+            },
+        )
+        .await;
+
+        // …and it is there while its turn is provably not finished: no answer
+        // has been journaled for either message.
+        let texts = history_texts(&app).await;
+        assert!(
+            texts.contains(&"the first question".to_string()),
+            "the running turn's own message is missing: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.starts_with("answered:")),
+            "a turn finished before the assertion could run: {texts:?}"
+        );
+
+        release.add_permits(2);
+        for turn in [first, second] {
+            let response = turn.await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    /// One POST journals **exactly one** `OperatorMessage`, and the response's
+    /// `messageId` is that message's own sequence.
+    ///
+    /// The pin for the pre-journaled cycle path. The route now appends the
+    /// message itself and hands the cycle the seq; a cycle that appended again
+    /// would double every operator message in every transcript, and one that
+    /// reported a seq of its own would hand the console an id that resolves to
+    /// the wrong line — both silent, both only visible here.
+    #[tokio::test]
+    async fn one_post_journals_one_message_and_reports_its_seq() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(chat_request("just the one"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        let journaled: Vec<(EventSeq, String)> = runtime
+            .events()
+            .read_from(runtime.id(), EventSeq::new(0), 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::OperatorMessage { text, .. } => Some((s.seq, text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            journaled.len(),
+            1,
+            "one POST must journal one message, got {journaled:?}"
+        );
+        assert_eq!(journaled[0].1, "just the one");
+        assert_eq!(
+            body["messageId"].as_str(),
+            Some(journaled[0].0.value().to_string().as_str()),
+            "messageId must resolve to the message's own line"
+        );
+    }
+
+    /// **Issue #983 — the direct regression for the serial train.**
+    ///
+    /// The per-company cycle lock is held for a whole turn with unbounded
+    /// waiters, so five concurrent messages became a queue and the fifth
+    /// inherited the whole queue's latency. Nothing recorded that, so an
+    /// operator watching a slow company could not tell "my turn is queued" from
+    /// "my turn is wedged" from "nothing was received".
+    ///
+    /// The two statuses are what makes the wait legible, which is why the row
+    /// is created at accept and started only once the cycle holds the lock.
+    /// Collapsing them — starting the row where it is created — would make both
+    /// turns read `Running`, and this assertion is what stops that.
+    #[tokio::test]
+    async fn a_queued_turn_is_pending_while_the_running_one_holds_the_lock() {
+        let home_dir = home();
+        let (brain, entered, release) = BlockingChatBrain::new();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(brain),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let first = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(chat_request("first")).await }
+        });
+        entered.acquire().await.expect("turn one entered").forget();
+        let second = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(chat_request("second")).await }
+        });
+
+        // Compared as a sorted pair rather than in row order: two POSTs a
+        // millisecond apart can tie on `created_at_millis`, and what is being
+        // asserted is that the two turns hold *different* statuses at once, not
+        // which row the store lists first.
+        until(
+            "the second turn never queued behind the first",
+            async || {
+                let mut statuses: Vec<String> = turn_rows(&runtime)
+                    .await
+                    .into_iter()
+                    .map(|(_, status)| status)
+                    .collect();
+                statuses.sort();
+                statuses == ["pending", "running"]
+            },
+        )
+        .await;
+
+        release.add_permits(2);
+        for turn in [first, second] {
+            assert_eq!(turn.await.unwrap().unwrap().status(), StatusCode::OK);
+        }
+
+        until("both turns must reach a terminal status", async || {
+            turn_rows(&runtime)
+                .await
+                .iter()
+                .all(|(_, status)| status == "succeeded")
+        })
+        .await;
+        assert_eq!(turn_rows(&runtime).await.len(), 2, "one row per POST");
+    }
+
     /// The same proof over a **real socket**, so the keystone rests on hyper's
     /// actual behaviour rather than on `oneshot` being a good model of it.
     ///
@@ -4898,7 +8835,7 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0, "outcome": "settled" })
         );
 
         // The answer really did precede the work: the turn is only now under
@@ -5076,13 +9013,102 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0, "outcome": "already_resolved" })
         );
         assert_eq!(
             c.runtime.grants.live_count(),
             1,
             "re-approving minted no second grant"
         );
+    }
+
+    /// **Issue #1449 on the wire.** A card past its deadline answers `expired`,
+    /// on both response shapes, and journals no approval against the operator.
+    ///
+    /// The two shapes matter independently. The **detached** receipt is what the
+    /// inline chat card reads; the **synchronous** `ChatResponse` is what the
+    /// Approvals page reads — the surface the defect was reported on — and it
+    /// never sees a receipt at all, so a discriminator that only rode on the
+    /// receipt would have left the reproduced bug in place.
+    #[tokio::test]
+    async fn a_resolve_past_the_deadline_answers_expired_on_both_shapes() {
+        let home_dir = home();
+        // `approval_ttl_hours = 0`: anything parked is past its deadline the
+        // instant it lands, which is the state an operator meets when they get
+        // to a queue late.
+        let expiring: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\napproval_ttl_hours = 0\n",
+        )
+        .unwrap();
+        let state = build_state_with_brain_and_manifest(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(StalledContinuationBrain {
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(tokio::sync::Notify::new()),
+                parked: gated_tool_call(),
+            })),
+            expiring,
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app.clone().oneshot(chat_request("do it")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let approval_id = runtime.pending_approvals()[0].id.clone();
+
+        // The detached shape.
+        let detached = app
+            .clone()
+            .oneshot(resolve_request(
+                &approval_id,
+                serde_json::json!({"verdict":"approve","detach":true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(detached.status(), StatusCode::OK);
+        let bytes = to_bytes(detached.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["outcome"], "expired",
+            "the host default-denied this; the receipt has to be able to say so, got {value}"
+        );
+        assert_eq!(
+            runtime.grants.live_count(),
+            0,
+            "and it minted nothing, as it always did"
+        );
+
+        // The synchronous shape, on a second card of the same company.
+        let response = app
+            .clone()
+            .oneshot(chat_request("do it again"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let second = runtime.pending_approvals()[0].id.clone();
+        let sync = app
+            .clone()
+            .oneshot(resolve_request(
+                &second,
+                serde_json::json!({"verdict":"approve"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sync.status(), StatusCode::OK);
+        let bytes = to_bytes(sync.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("responses").is_some_and(|r| r.is_array()),
+            "still a ChatResponse, got {value}"
+        );
+        assert_eq!(
+            value["outcome"], "expired",
+            "the Approvals page's own shape carries it too, got {value}"
+        );
+        assert_eq!(runtime.grants.live_count(), 0);
     }
 
     /// Both scope forms carry `detach` identically — the `/companies/{id}` route
@@ -5109,7 +9135,7 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0, "outcome": "settled" })
         );
         assert!(await_continuation(&c.runtime).await);
         assert_eq!(c.runtime.grants.live_count(), 1);
@@ -5214,9 +9240,25 @@ mod test {
     }
 
     #[test]
+    fn projects_a_gap_with_structural_fields_only() {
+        let value = super::project_stream_item_for_viewer(
+            &EventStreamItem::Gap { missed: 44 },
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+        )
+        .expect("a gap must reach the console");
+        assert_eq!(
+            value,
+            serde_json::json!({ "type": "stream_gap", "missed": 44 })
+        );
+    }
+
+    #[test]
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "General".into(),
@@ -5245,13 +9287,48 @@ mod test {
         assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
     }
 
-    /// A threaded reply carries its parent onto the live frame (issue #364), so
-    /// a console watching the stream folds it under the same row a reload would
-    /// — otherwise a thread answer arrives live in the channel and then jumps
-    /// into the thread on the next refresh.
+    #[test]
+    fn projects_agent_reply_with_viewer_mention_metadata() {
+        use crate::ports::types::{Mention, MentionTarget};
+        let stored = stored(CompanyEvent::AgentReply {
+            mentions: vec![
+                Mention {
+                    target: MentionTarget::User { id: "u-1".into() },
+                    text: "@Ada".into(),
+                    offset: 0,
+                    quiet: false,
+                },
+                Mention {
+                    target: MentionTarget::Everyone,
+                    text: "@everyone".into(),
+                    offset: 5,
+                    quiet: true,
+                },
+            ],
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "@Ada @everyone".into(),
+            steps: Vec::new(),
+        });
+        let authors = std::collections::HashMap::from([(String::from("u-1"), String::from("Ada"))]);
+        let value = super::project_event_for_viewer(&stored, &authors, &Viewer::User("u-1".into()))
+            .expect("agent_reply is an attention signal");
+        assert_eq!(
+            value["mentions"],
+            serde_json::json!([
+                { "text": "@Ada", "offset": 0, "label": "Ada", "mine": true },
+                { "text": "@everyone", "offset": 5, "label": "everyone", "mine": true, "quiet": true },
+            ])
+        );
+    }
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: Some(EventSeq::new(4)),
             task_id: None,
             chat_id: "General".into(),
@@ -5261,6 +9338,96 @@ mod test {
         }))
         .expect("agent_reply is an attention signal");
         assert_eq!(v["parentId"], "4");
+    }
+
+    /// Issue #983: the accept frame carries the turn, the desk and the thread —
+    /// and **nothing else**.
+    ///
+    /// The negative half is what this test is for. `TurnStarted` is the first
+    /// frame on this stream that brackets an operator's own message, so it is
+    /// the obvious place for somebody to "helpfully" add the text or the asker
+    /// — which is exactly the payload the deny-by-default projection exists to
+    /// keep off the wire, and which `OperatorMessage` is dropped to avoid.
+    #[test]
+    fn projects_turn_started_with_structural_keys_only() {
+        use crate::ports::types::{Actor, ActorKind};
+        let v = super::project_event(&stored(CompanyEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+            chat_id: "General".into(),
+            parent: Some(EventSeq::new(4)),
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "u-1".into(),
+            }),
+        }))
+        .expect("an accepted turn is an attention signal");
+        assert_eq!(v["type"], "turn_started");
+        assert_eq!(v["turnId"], "turn-1");
+        assert_eq!(v["chatId"], "General");
+        assert_eq!(v["parentId"], "4");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["type", "seq", "atMillis", "turnId", "chatId", "parentId"],
+            "the accept frame grew a key: {v}"
+        );
+
+        // A turn answering the channel itself omits the thread rather than
+        // sending null, so the console's check is a presence check.
+        let v = super::project_event(&stored(CompanyEvent::TurnStarted {
+            turn_id: "turn-2".into(),
+            chat_id: "General".into(),
+            parent: None,
+            by: None,
+        }))
+        .expect("an accepted turn is an attention signal");
+        assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
+    }
+
+    /// The settle frame says a turn is over and **not why**.
+    ///
+    /// `TurnFailed::error` is a reason in our own words that can name
+    /// internals; the console learns the reason from the tenant-scoped run row.
+    #[test]
+    fn projects_turn_settled_without_the_failure_reason() {
+        let v = super::project_event(&stored(CompanyEvent::TurnFailed {
+            turn_id: "turn-1".into(),
+            error: "connection to db-primary.internal refused".into(),
+        }))
+        .expect("a settled turn is an attention signal");
+        assert_eq!(v["type"], "turn_settled");
+        assert_eq!(v["turnId"], "turn-1");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["type", "seq", "atMillis", "turnId"],
+            "the settle frame grew a key: {v}"
+        );
+    }
+
+    /// The operator's own message is **still** dropped (issue #983).
+    ///
+    /// Pinned because #983 added the two arms above right beside it, and the
+    /// natural next step — "the console needs the message too, project it" —
+    /// would put operator-authored free text onto this stream for the first
+    /// time. It does not need it: the message is already in the POST's own
+    /// response and in `chat/history`, which is the point of journaling it at
+    /// accept time. If somebody later decides otherwise, they say so here.
+    #[test]
+    fn projects_nothing_for_the_operators_own_message() {
+        assert!(
+            super::project_event(&stored(CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                text: "the operator's own words".into(),
+                by: None,
+                chat: Some("General".into()),
+                parent: None,
+                deliverable: None,
+                attachments: Vec::new(),
+            }))
+            .is_none(),
+            "the operator's own message must not reach the console over SSE"
+        );
     }
 
     /// A reaction is deliberately NOT on the attention stream (issue #364).
@@ -5339,6 +9506,8 @@ mod test {
     #[test]
     fn projects_agent_reply_omits_empty_steps() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: None,
             chat_id: "General".into(),
@@ -5361,6 +9530,8 @@ mod test {
     #[test]
     fn projects_task_id_only_when_the_event_is_correlated() {
         let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
             parent: None,
             task_id: Some("t-1".into()),
             chat_id: "t-1".into(),
@@ -5566,6 +9737,54 @@ mod test {
         assert!(
             !v.to_string().contains("secret-user-id"),
             "user id leaked onto the wire"
+        );
+        // Issue #971: and a person's decision carries no `automatic` flag, so
+        // the console's "an operator decided this" reading of its absence is
+        // the correct one.
+        assert!(
+            v.get("automatic").is_none(),
+            "a user's own decision is not automatic"
+        );
+    }
+
+    /// **T6 (issue #971).** A host-side expiry says so, without saying who.
+    ///
+    /// The defect: an expiry appends `ApprovalResolved { Deny, System }`, this
+    /// frame dropped the actor, and the console toasted "Approval denied" — so
+    /// an operator was told they had declined a request they never saw. With a
+    /// 24-hour deadline that stops being rare.
+    ///
+    /// The assertion above is **extended here, not replaced**: the new field is
+    /// a bit derived from `by.kind`, and the no-actor / no-user-id property it
+    /// is derived from has to keep holding, so it is re-asserted on this arm
+    /// with a `System` actor whose id is equally secret.
+    #[test]
+    fn projects_a_host_side_expiry_as_automatic_without_the_actor() {
+        let v = super::project_event(&stored(CompanyEvent::ApprovalResolved {
+            approval_id: ApprovalId::new("ap-2"),
+            verdict: Verdict::Deny,
+            by: Actor {
+                kind: ActorKind::System,
+                // Even the system actor's id stays off the feed: the console
+                // needs the *fact* that no person decided this, not the name of
+                // the internal path that did.
+                id: "expiry".into(),
+            },
+        }))
+        .expect("approval_resolved is an attention signal");
+        assert_eq!(v["type"], "approval_resolved");
+        assert_eq!(v["approvalId"], "ap-2");
+        assert_eq!(v["verdict"], "deny");
+        assert_eq!(
+            v["automatic"], true,
+            "the console must be able to say the deadline passed rather than \
+             attributing the deny to whoever is looking at it"
+        );
+        // The extended property, restated on this arm.
+        assert!(v.get("by").is_none(), "actor must not be projected");
+        assert!(
+            !v.to_string().contains("expiry"),
+            "the actor id must not reach the wire on this arm either"
         );
     }
 
@@ -5781,6 +10000,7 @@ mod test {
                 tools: vec!["publish_artifact".into()],
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -5827,12 +10047,31 @@ mod test {
             workflow_id: "digest".into(),
             run_id: "run-1".into(),
             scheduled: true,
+            started_by: None,
         }))
         .expect("workflow_run_started reaches the console");
         assert_eq!(started["type"], "workflow_run_started");
         assert_eq!(started["workflowId"], "digest");
         assert_eq!(started["runId"], "run-1");
         assert_eq!(started["scheduled"], true);
+        assert!(
+            started.get("startedBy").is_none(),
+            "no sender projects no key: {started}"
+        );
+
+        // Issue #1862 prerequisite: when the journal carries a sender, the SSE
+        // frame forwards it under `startedBy`.
+        let started_with_sender = super::project_event(&stored(CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            scheduled: false,
+            started_by: Some(crate::ports::types::StartedBy::Agent("ceo".into())),
+        }))
+        .expect("workflow_run_started reaches the console");
+        assert_eq!(
+            started_with_sender["startedBy"],
+            serde_json::json!({"agent": "ceo"})
+        );
 
         let node = super::project_event(&stored(CompanyEvent::WorkflowNodeFinished {
             workflow_id: "digest".into(),
@@ -5840,6 +10079,8 @@ mod test {
             node_id: "ceo".into(),
             status: crate::ports::types::WorkflowNodeStatus::Error,
             elapsed_ms: 1234,
+            diagnostics: Vec::new(),
+            agent_run_id: None,
         }))
         .expect("workflow_node_finished reaches the console");
         assert_eq!(node["type"], "workflow_node_finished");
@@ -5960,11 +10201,13 @@ mod test {
         // still drops everything it dropped before.
         let dropped = [
             CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
                 parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
+                attachments: Vec::new(),
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),
@@ -6041,6 +10284,38 @@ mod test {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// The composer's own typing pings must not echo back to it — the bus has
+    /// no per-listener addressing, so this filter is the only thing standing
+    /// between "you typed" and a fresh "Alice is typing…" line under your own
+    /// cursor.
+    #[test]
+    fn a_typing_frame_from_the_viewer_is_dropped_and_from_anybody_else_is_kept() {
+        let mine = crate::turn_stream::LiveFrame::Typing(crate::turn_stream::TypingFrame {
+            kind: "typing",
+            user_id: "u1".into(),
+            chat_id: "engineering".into(),
+            parent_id: None,
+            at_millis: 0,
+        });
+        assert!(super::is_own_typing_frame(&mine, Some("u1")));
+        assert!(!super::is_own_typing_frame(&mine, Some("u2")));
+        assert!(
+            !super::is_own_typing_frame(&mine, None),
+            "a machine credential with nobody behind it authors nothing to echo"
+        );
+
+        let presence = crate::turn_stream::LiveFrame::Presence(crate::turn_stream::PresenceFrame {
+            kind: "presence",
+            user_id: "u1".into(),
+            status: "online",
+            at_millis: 0,
+        });
+        assert!(
+            !super::is_own_typing_frame(&presence, Some("u1")),
+            "presence is left alone — only typing echoes"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Standing permissions (issue #374)
     // -----------------------------------------------------------------------
@@ -6052,6 +10327,10 @@ mod test {
     /// must be refused at the edge, so the fact that resolving a missing
     /// approval would otherwise be a harmless no-op never gets a chance to mask
     /// a body that should not have been accepted.
+    ///
+    /// A deny may now ride the tool scope (issue #1458 — a standing refusal),
+    /// so that pairing is asserted as *accepted* at the bottom rather than
+    /// listed among the refusals.
     #[tokio::test]
     async fn a_contradictory_or_unbounded_scope_is_refused() {
         let home_dir = home();
@@ -6059,10 +10338,6 @@ mod test {
 
         let day: u64 = 24 * 60 * 60 * 1000;
         for (label, body) in [
-            (
-                "a scope cannot ride a deny",
-                format!(r#"{{"verdict":"deny","scope":"tool","expires_in_millis":{day}}}"#),
-            ),
             (
                 "an argument edit and a standing grant contradict",
                 format!(
@@ -6143,6 +10418,26 @@ mod test {
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A deny riding the tool scope is no longer a contradiction: it mints a
+        // standing refusal (issue #1458). Same edge validation as an approve —
+        // duration mandatory, bounded, and the missing approval resolves as a
+        // no-op — so it is accepted exactly where a matching approve would be.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/approvals/appr-missing")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"verdict":"deny","scope":"tool","expires_in_millis":{day}}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     /// The default body — no `scope` key at all — is accepted exactly as before.
@@ -6215,7 +10510,9 @@ mod test {
             .grant_standing(crate::runtime::grants::StandingGrant {
                 id: crate::runtime::grants::GrantId::new("g1"),
                 agent: "ops".into(),
+                workflow: None,
                 tool: "workspace_write".into(),
+                verdict: Verdict::Approve,
                 granted_by: Actor {
                     kind: ActorKind::User,
                     id: "user-7".into(),
@@ -6314,6 +10611,14 @@ mod test {
         rt: Arc<std::sync::OnceLock<Arc<CompanyRuntime>>>,
         /// Fail the continuation cycle, to exercise defect 4.
         fail_continuation: bool,
+        /// Stamp a workflow run id onto every parked effect (issue #1092), so
+        /// the park records the shape a workflow node's gated tool call has:
+        /// explicitly unlinked from any card, and carrying a run.
+        run_id: Option<String>,
+        /// An `@mention` to append to every continuation reply. Exercises the
+        /// durable half of a reply's mention: the re-issue's reply journaling
+        /// must badge the person it names, same as the `/chat` path.
+        continuation_mention: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -6339,6 +10644,7 @@ mod test {
                             let mut effect = gated_tool_call();
                             effect.payload =
                                 crate::policy::test_support::composio_unclassified_args_numbered(i);
+                            effect.run_id = self.run_id.clone();
                             host.park_effect(effect).await?;
                         }
                     }
@@ -6354,13 +10660,20 @@ mod test {
                             continue;
                         };
                         rt.grants.consume(&grant.agent, &grant.tool, &grant.args);
+                        let mut text = format!("re-issued {approval_id}");
+                        if let Some(mention) = &self.continuation_mention {
+                            text.push(' ');
+                            text.push_str(mention);
+                        }
                         responses.push(crate::ports::types::OutboundMessage {
                             message_id: None,
                             task_id: None,
                             channel: grant.agent.clone(),
-                            text: format!("re-issued {approval_id}"),
+                            agent: None,
+                            text,
                             steps: Vec::new(),
                             reply_to: None,
+                            mentions: Vec::new(),
                         });
                     }
                     _ => {}
@@ -6393,6 +10706,19 @@ mod test {
         chat: Option<&str>,
         fail_continuation: bool,
     ) -> MultiParkCompany {
+        multi_park_company_run(home, parks, chat, fail_continuation, None, None).await
+    }
+
+    /// [`multi_park_company`], with the parked effects stamped as a workflow
+    /// run (issue #1092).
+    async fn multi_park_company_run(
+        home: &std::path::Path,
+        parks: usize,
+        chat: Option<&str>,
+        fail_continuation: bool,
+        run_id: Option<&str>,
+        continuation_mention: Option<&str>,
+    ) -> MultiParkCompany {
         let decisions = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cycles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let rt_slot: Arc<std::sync::OnceLock<Arc<CompanyRuntime>>> =
@@ -6407,6 +10733,8 @@ mod test {
                 cycles: cycles.clone(),
                 rt: rt_slot.clone(),
                 fail_continuation,
+                run_id: run_id.map(str::to_string),
+                continuation_mention: continuation_mention.map(str::to_string),
             })),
         )
         .await;
@@ -6466,12 +10794,54 @@ mod test {
             .collect()
     }
 
+    /// The authors of every journaled `AgentReply`, in order (issue #966).
+    ///
+    /// Separate from [`agent_replies`] because that one folds the author away.
+    async fn agent_reply_authors(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
+        use crate::ports::types::EventSeq;
+        runtime
+            .events()
+            .read_from(runtime.id(), EventSeq::new(0), 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::AgentReply { agent_id, .. } => Some(agent_id),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn approve_detached(id: &ApprovalId) -> Request<Body> {
         resolve_request(id, serde_json::json!({"verdict":"approve","detach":true}))
     }
 
-    /// Waits for the follow-up work a detached resolve spawned to settle.
-    async fn settle(runtime: &Arc<CompanyRuntime>) {
+    /// Waits for the follow-up work a detached resolve spawned to settle:
+    /// first for the turn to unblock, then for its continuation to have
+    /// journaled `expected_replies` `AgentReply` rows.
+    ///
+    /// # Condition, not clock (issue #1071)
+    ///
+    /// The second half used to be `sleep(400ms)` with a comment admitting what
+    /// it was — "the continuation itself runs on a spawned task; let it finish".
+    /// `ContinuationQueue::waiting()` drops to zero when the turn is
+    /// **unblocked**, which is strictly earlier than when the continuation's
+    /// replies are **written**, so the gap had to be covered by something. A
+    /// fixed sleep covers it only on a machine fast enough that day: on a loaded
+    /// CI runner the assertions read the event log first and came back short —
+    /// `3` replies instead of `4`, or `[]` instead of `["ceo"]` — on branches
+    /// with nothing to do with this code.
+    ///
+    /// Raising the sleep is the tempting fix and only moves the threshold. This
+    /// waits for the thing the caller is about to assert, the same way the first
+    /// half already waits for `waiting()`, under the same 10-second cap. A test
+    /// that is going to check for N replies has no reason to proceed before N
+    /// replies exist, and every reason not to.
+    ///
+    /// The count is the caller's because only the caller knows it. Passing a
+    /// number smaller than the assertion would reintroduce the race quietly, so
+    /// pass exactly what is asserted.
+    async fn settle(runtime: &Arc<CompanyRuntime>, expected_replies: usize) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while runtime.continuations.waiting() > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -6479,8 +10849,13 @@ mod test {
         })
         .await
         .expect("the turn never unblocked");
-        // The continuation itself runs on a spawned task; let it finish.
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while agent_replies(runtime).await.len() < expected_replies {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the continuation never journaled {expected_replies} replies"));
     }
 
     /// **The keystone (issue #469).** A turn that parks four sign-offs, all
@@ -6511,7 +10886,7 @@ mod test {
         for handle in handles {
             assert_eq!(handle.await.unwrap().status(), StatusCode::OK);
         }
-        settle(&c.runtime).await;
+        settle(&c.runtime, 4).await;
 
         assert_eq!(
             c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
@@ -6563,7 +10938,7 @@ mod test {
                 );
             }
         }
-        settle(&c.runtime).await;
+        settle(&c.runtime, 4).await;
 
         assert_eq!(
             c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
@@ -6590,13 +10965,151 @@ mod test {
             let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
-        settle(&c.runtime).await;
+        settle(&c.runtime, 2).await;
 
         let replies = agent_replies(&c.runtime).await;
         assert_eq!(replies.len(), 2, "both re-issues answered");
         assert!(
             replies.iter().all(|r| r.starts_with("sales|")),
             "the continuation must land in the channel the approval was raised in, got {replies:?}"
+        );
+    }
+
+    /// **Issue #1092.** A workflow node's parked call, once approved, answers
+    /// on its run — never as a direct message from the teammate that ran it.
+    ///
+    /// This is the wiring test for `continuation_fallback_chat_id`: the unit
+    /// tests pin what the fallback *returns*, and this pins that
+    /// `publish_continuation` actually uses it, through a real park, a real
+    /// resolve and the journal the console reads back.
+    ///
+    /// The assertion is written against the agent id rather than only for the
+    /// run id, because that is the regression: the leak put the re-issued
+    /// turn's narration into `chat/history?desk=<teammate>`, where it rendered
+    /// as an unprompted DM.
+    #[tokio::test]
+    async fn a_workflow_parks_continuation_answers_on_the_run_not_in_a_dm() {
+        let home_dir = home();
+        let c =
+            multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None).await;
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(approve_detached(&c.approvals[0]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        settle(&c.runtime, 1).await;
+
+        let replies = agent_replies(&c.runtime).await;
+        assert_eq!(replies.len(), 1, "the re-issue answered once");
+        let (chat_id, _) = replies[0].split_once('|').expect("chat_id|text");
+        assert_eq!(
+            chat_id, "run-1092",
+            "a workflow park's continuation belongs to its run, got {replies:?}"
+        );
+        // The regression, stated as itself: before this fix the fallback was
+        // the answering teammate's own id, so this is what the leaked row held.
+        assert_ne!(
+            chat_id, "ceo",
+            "the re-issue must not be journaled as a DM from the teammate that ran it"
+        );
+    }
+
+    /// **Codex P1 (pass 2).** A continuation's reply is journaled through
+    /// `publish_continuation`, not the `/chat` turn — so a mention an agent
+    /// types back in an approval follow-up used to render as a chip and
+    /// nothing else: no badge, no durable row, exactly the person it is meant
+    /// to reach (offline when the reply lands) getting neither.
+    ///
+    /// Both paths file through the same writer now; this pins that an `@user`
+    /// in a continuation reply lands as a mention notification whose audience
+    /// carries the person named, under the chat the continuation answered in.
+    #[tokio::test]
+    async fn a_continuation_reply_that_mentions_a_user_files_a_notification() {
+        let home_dir = home();
+        let c = multi_park_company_run(
+            home_dir.path(),
+            1,
+            Some("sales"),
+            false,
+            None,
+            Some("@harness-admin"),
+        )
+        .await;
+
+        let users = c
+            .runtime
+            .users()
+            .list_users(&CompanyId::new("acme"))
+            .await
+            .unwrap();
+        let admin = users
+            .iter()
+            .find(|u| u.email == "harness-admin@example.test")
+            .expect("the fixed admin is seeded");
+        assert_eq!(
+            admin.status,
+            crate::ports::users::UserStatus::Active,
+            "the admin must be an active, mentionable target"
+        );
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(approve_detached(&c.approvals[0]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        settle(&c.runtime, 1).await;
+        // The notification is filed inside `publish_continuation`, after the
+        // reply is journaled — `settle` only waits for the reply. A loaded CI
+        // runner can reach this point before the notification append finishes,
+        // so poll for it (issue #1665, Codex P1 regression).
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = c
+                    .runtime
+                    .notifications()
+                    .list(&CompanyId::new("acme"), &admin.id)
+                    .await
+                    .unwrap();
+                if notes.iter().any(|n| n.notification.kind == "mention") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the mention notification never appeared");
+
+        let notes = c
+            .runtime
+            .notifications()
+            .list(&CompanyId::new("acme"), &admin.id)
+            .await
+            .unwrap();
+        let mentions: Vec<_> = notes
+            .into_iter()
+            .filter(|n| n.notification.kind == "mention")
+            .collect();
+        assert_eq!(
+            mentions.len(),
+            1,
+            "the continuation's mention must badge the person it names"
+        );
+        let note = &mentions[0].notification;
+        assert_eq!(note.context.as_deref(), Some("sales"));
+        assert_eq!(
+            note.title, "Someone mentioned you in sales",
+            "a continuation has no author, so the generic label is the honest one"
+        );
+        assert!(
+            note.audience
+                .as_ref()
+                .is_some_and(|a| a.contains(&admin.id)),
+            "the named user must be in the notification's audience"
         );
     }
 
@@ -6625,7 +11138,7 @@ mod test {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            settle(&c.runtime).await;
+            settle(&c.runtime, 1).await;
             agent_replies(&c.runtime)
                 .await
                 .into_iter()
@@ -6665,7 +11178,7 @@ mod test {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        settle(&c.runtime).await;
+        settle(&c.runtime, 1).await;
 
         assert_eq!(
             c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
@@ -6695,7 +11208,7 @@ mod test {
                 "the verdict is durable regardless of what the turn then does"
             );
         }
-        settle(&c.runtime).await;
+        settle(&c.runtime, 1).await;
 
         let replies = agent_replies(&c.runtime).await;
         assert_eq!(
@@ -6710,6 +11223,574 @@ mod test {
         assert!(
             replies[0].contains("approving again is safe"),
             "the notice has to say what to do about it, got {replies:?}"
+        );
+        // Issue #966, asserted on the journaled row rather than on the
+        // constructor: this drives the real approve path, so it pins that
+        // `announce_continuation_failure` *calls* the named notice. Asserting
+        // the constructor alone leaves the call site free to go back to an
+        // inline `AgentReply` authored by the operator channel — a correct
+        // system row byte-identical to one the pre-#885 defect damaged.
+        let authors = agent_reply_authors(&c.runtime).await;
+        assert_eq!(
+            authors,
+            vec![crate::ports::SYSTEM_AUTHOR.to_string()],
+            "the runtime authored this notice, so it must not be stored under its destination"
+        );
+    }
+
+    /// Codex review finding: a stream that errors mid-read used to fall
+    /// straight through to extraction on whatever partial bytes it had
+    /// collected. This pins the fix directly against a synthetic stream,
+    /// without needing a real workspace store behind it — a chunk, then an
+    /// error, must discard everything read so far rather than handing back
+    /// a truncated payload that looks complete.
+    #[tokio::test]
+    async fn drain_bounded_discards_everything_on_a_mid_stream_error() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> = vec![
+            Ok(Bytes::from_static(b"the first chunk read fine")),
+            Err(crate::error::OpenCompanyError::Store(
+                "transient read failure".to_string(),
+            )),
+        ];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(drain_bounded(synthetic, 1_000_000).await, None);
+    }
+
+    /// The success twin: a stream with no error drains to its bytes, in
+    /// order, across however many chunks it arrives in.
+    #[tokio::test]
+    async fn drain_bounded_concatenates_every_chunk_when_the_stream_never_errors() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> = vec![
+            Ok(Bytes::from_static(b"hello ")),
+            Ok(Bytes::from_static(b"world")),
+        ];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(
+            drain_bounded(synthetic, 1_000_000).await,
+            Some(b"hello world".to_vec())
+        );
+    }
+
+    /// A stream that never errors but exceeds the cap is also discarded, not
+    /// truncated — the belt-and-braces the doc comment describes.
+    #[tokio::test]
+    async fn drain_bounded_discards_when_the_stream_exceeds_the_cap() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let items: Vec<crate::error::Result<Bytes>> =
+            vec![Ok(Bytes::from_static(b"way more than the cap allows"))];
+        let synthetic: crate::ports::workspace::BlobStream = Box::pin(stream::iter(items));
+
+        assert_eq!(drain_bounded(synthetic, 4).await, None);
+    }
+
+    /// A brain whose every reply names `@everyone` — the fixed shape for
+    /// proving an agent reply's mentions file a notification, same as an
+    /// operator message's already does.
+    struct MentioningReplyBrain;
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for MentioningReplyBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            let mut channel_responses = Vec::new();
+            for event in &req.events {
+                if matches!(event, CompanyEvent::OperatorMessage { .. }) {
+                    channel_responses.push(crate::ports::types::OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: None,
+                        text: "cc @everyone on this".into(),
+                        steps: Vec::new(),
+                        reply_to: None,
+                        mentions: Vec::new(),
+                    });
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses,
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "mentioning reply",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// **The Codex P1 finding:** `journal_chat_replies` resolved an agent
+    /// reply's mentions and stored them on `CompanyEvent::AgentReply`, but never
+    /// called `notify_mentions` — so an `@user` an agent typed *back* rendered
+    /// as a chip and left the named person with no durable notification and no
+    /// rail badge, unlike the operator's own message a few lines above it in
+    /// the very same function. Missing it worst for exactly the person it is
+    /// meant to reach: offline when the reply lands.
+    #[tokio::test]
+    async fn a_mention_in_an_agent_reply_notifies_the_person_it_names() {
+        let home_dir = home();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(MentioningReplyBrain)),
+        )
+        .await;
+        // A second person for `@everyone` to reach — the sender is always
+        // excluded from their own broadcast, so proving this needs somebody
+        // else on the roster.
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let app = router(state.clone());
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        let member_id = runtime
+            .users()
+            .list_users(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.email == "harness-member@example.test")
+            .expect("seeded member")
+            .id;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"status?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = runtime.notifications().list(&id, &member_id).await.unwrap();
+                if !notes.is_empty() {
+                    return notes;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the mentioned member was notified");
+
+        assert_eq!(notified.len(), 1);
+        assert_eq!(
+            notified[0].notification.kind, "mention",
+            "the reply's @everyone mention has to file the same kind of row an \
+             operator message's does"
+        );
+    }
+
+    /// **The Codex P1 finding:** the context a DM mention stores was decided by
+    /// the human user directory, but a DM's thread id is a roster teammate's
+    /// agent id — which no user record has — so a mention in a normal DM stored
+    /// the bare id. The console's rail keys a DM by `dm:<teammate-id>` (and the
+    /// console sends that bare id as the `chat` for a DM), so no rail row
+    /// displayed the badge and opening the DM could neither match nor clear it.
+    #[tokio::test]
+    async fn a_mention_in_a_dm_stores_the_console_dm_channel_id() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        // A second person for the broadcast to reach — the author is always
+        // excluded from their own `@everyone`.
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let app = router(state.clone());
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        let member_id = runtime
+            .users()
+            .list_users(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.email == "harness-member@example.test")
+            .expect("seeded member")
+            .id;
+
+        // A message addressed to the `designer` DM thread — the bare roster
+        // teammate id, exactly what the console sends for a DM.
+        let response = app
+            .clone()
+            .oneshot(chat_to("cc @everyone on this", Some("designer")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let notes = runtime.notifications().list(&id, &member_id).await.unwrap();
+                if !notes.is_empty() {
+                    return notes;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the mentioned member was notified");
+
+        // The offline echo brain answers the same text, so `@everyone` may land
+        // twice — once for the operator's message, once for the echoed reply.
+        // The count is incidental; the invariant is that *every* mention filed
+        // out of this exchange is keyed to the console's `dm:designer` channel,
+        // not the bare roster thread id.
+        assert!(!notified.is_empty(), "the mentioned member was notified");
+        let contexts: Vec<_> = notified
+            .iter()
+            .map(|n| n.notification.context.as_deref())
+            .collect();
+        assert!(
+            contexts.iter().all(|c| *c == Some("dm:designer")),
+            "every mention in a DM has to store the console's DM channel id, \
+             not the bare roster thread id — got {contexts:?}"
+        );
+    }
+
+    /// [`mention_context`] canonicalizes a **`dm:`-prefixed** noncanonical key
+    /// too. An API client can address a DM with the console's channel shape but
+    /// a noncanonical payload — `dm:BACKEND_ENGINEER` for the teammate whose id
+    /// is `backend_engineer`. The routing resolves that case-insensitively, so
+    /// the stored context has to carry the canonical agent id: filing the raw
+    /// key under `dm:BACKEND_ENGINEER` badges a rail channel that does not
+    /// exist, and opening the actual DM can never clear it. Pre-fix, the
+    /// `dm:`-prefixed branch returned the key verbatim and bypassed
+    /// `assignee::resolve` entirely.
+    #[tokio::test]
+    async fn mention_context_canonicalizes_prefixed_dm_keys() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A case-variant of the teammate's id, carrying the `dm:` prefix the
+        // console mints.
+        assert_eq!(
+            runtime
+                .mention_context(&id, &[], "dm:BACKEND_ENGINEER")
+                .await,
+            "dm:backend_engineer",
+            "a `dm:`-prefixed noncanonical teammate key has to store dm:<agent-id>"
+        );
+        // The already-canonical shape stays unchanged — the resolution must
+        // not move a key that was already right.
+        assert_eq!(
+            runtime
+                .mention_context(&id, &[], "dm:backend_engineer")
+                .await,
+            "dm:backend_engineer",
+            "a canonical dm:<teammate-id> key is kept as-is"
+        );
+        // A `dm:` key whose bare half names a desk (the desk-first ordering the
+        // routing uses) files under the desk id, not a nonexistent `dm:<desk>`.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:Engineering").await,
+            "engineering",
+            "a `dm:` key that resolves to a desk has to store the desk id"
+        );
+    }
+
+    /// A desk id that collides with a **human user id** still files under the
+    /// desk. `assignee::resolve`'s desk-first ordering — the same one
+    /// `responder_for` uses — outranks the user directory, and the directory
+    /// must not get a say ahead of it. Pre-fix, a `users` pre-check ran before
+    /// the resolution and returned `dm:<id>` for any bare key matching a human,
+    /// so a mention aimed at a desk whose id happened to match a human id would
+    /// badge a nonexistent DM channel and could never be cleared from the desk
+    /// it was meant for.
+    #[tokio::test]
+    async fn mention_context_a_human_id_matching_a_desk_id_stays_a_desk() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A human whose id collides with the `engineering` desk's id. The human
+        // directory must not win: the message is aimed at the desk.
+        let human = crate::ports::users::UserRecord {
+            id: "engineering".to_string(),
+            email: "human@example.test".to_string(),
+            display_name: None,
+            avatar: None,
+            role: crate::ports::users::UserRole::Member,
+            status: crate::ports::users::UserStatus::Active,
+            password_hash: None,
+            must_change_password: false,
+            created_at_millis: crate::ports::now_millis(),
+            last_seen_at_millis: None,
+            updated_at_millis: crate::ports::now_millis(),
+        };
+
+        assert_eq!(
+            runtime
+                .mention_context(&id, std::slice::from_ref(&human), "engineering")
+                .await,
+            "engineering",
+            "a desk id that matches a human id files under the desk, not dm:<id>"
+        );
+        assert_eq!(
+            runtime
+                .mention_context(&id, std::slice::from_ref(&human), "dm:engineering")
+                .await,
+            "engineering",
+            "the same collision through a dm:-prefixed key still files under the desk"
+        );
+        // A DM the human is actually a teammate of still badges as a DM.
+        assert_eq!(
+            runtime
+                .mention_context(&id, &[human], "dm:backend_engineer")
+                .await,
+            "dm:backend_engineer",
+            "a real DM channel is unaffected by the collision guard"
+        );
+    }
+
+    /// [`mention_context`] resolves a `dm:`-prefixed key **as sent** before
+    /// stripping the prefix, so a desk literally named `dm:engineering` keeps
+    /// that id. Pre-fix, the unconditional strip resolved `engineering` instead
+    /// and filed the badge under the wrong transcript — the exact claim
+    /// [`assignee::dm_key`]'s contract warns about.
+    #[tokio::test]
+    async fn mention_context_a_desk_literally_named_dm_prefix_keeps_its_id() {
+        let home_dir = home();
+        let state = state_with_dm_prefixed_desk(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // The literal `dm:engineering` desk resolves as sent; stripping would
+        // misroute to the plain `engineering` desk.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "dm:engineering").await,
+            "dm:engineering",
+            "a desk literally named dm:<…> keeps its id — the raw key resolves first"
+        );
+        // The un-prefixed desk is untouched by the collision.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "engineering").await,
+            "engineering",
+            "the un-prefixed desk still resolves to its own id"
+        );
+        // A genuine DM still re-keys onto the rail's DM channel.
+        assert_eq!(
+            runtime
+                .mention_context(&id, &[], "dm:backend_engineer")
+                .await,
+            "dm:backend_engineer",
+            "a real DM channel is unaffected by the literal dm: desk"
+        );
+    }
+
+    /// [`mention_context`] stores the **canonical** id for a key typed in a
+    /// noncanonical shape — a desk by its display name, a teammate by a
+    /// case-variant of their id. `assignee::resolve` already returns canonical
+    /// ids (issue #214); storing the raw key instead would file the badge under
+    /// a channel id the rail never has, so it could neither render nor clear.
+    #[tokio::test]
+    async fn mention_context_stores_canonical_ids_for_noncanonical_keys() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        // A desk addressed by its display name files under the desk's id —
+        // `"Engineering"` names the desk whose id is `engineering`.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Engineering").await,
+            "engineering",
+            "a desk named by its display name has to store the desk id, not the raw key"
+        );
+        // A teammate addressed by a case-variant of their id files under the
+        // canonical agent id, re-keyed into the console's DM channel space.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "BACKEND_ENGINEER").await,
+            "dm:backend_engineer",
+            "a teammate named by a noncanonical key has to store dm:<agent-id>"
+        );
+    }
+
+    /// [`mention_context`] files a mention in the General desk — the default an
+    /// unaddressed message lands in — under the console's canonical main-thread
+    /// id even when this company has no desk named/id `General`. This fixture's
+    /// only desk is `engineering`, so every general-chat spelling would
+    /// otherwise fall through to the raw string and badge a rail row that does
+    /// not exist (issue #1665 follow-up).
+    #[tokio::test]
+    async fn mention_context_maps_unresolvable_general_spellings_to_main() {
+        let home_dir = home();
+        let state = state_with_roster(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        for general in ["General", "general", "main", ""] {
+            assert_eq!(
+                runtime.mention_context(&id, &[], general).await,
+                crate::server::chat_history::MAIN_THREAD_ID,
+                "a mention in the General desk ({general:?}) has to store the console's \
+                 main-thread id, which the rail aliases onto its first rendered desk \
+                 channel"
+            );
+        }
+        // A desk that does resolve keeps its canonical id — the general-chat
+        // mapping must not swallow a real desk.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Engineering").await,
+            "engineering",
+            "a real desk keeps its canonical id even when its name looks general"
+        );
+    }
+
+    /// [`mention_context`] canonicalizes a **memberless** desk too. A desk that
+    /// exists but has nobody seated on it is still a real desk with a real rail
+    /// channel, so a key typed as its display name must file under its canonical
+    /// id: `"Sales"` has to badge `#sales`, and opening `#sales` has to clear it.
+    /// Pre-fix, `EmptyDesk` fell through the same wildcard as `Unknown` and
+    /// stored the raw key — a channel id no desk renders, so the badge was
+    /// invisible and could never clear.
+    #[tokio::test]
+    async fn mention_context_canonicalizes_a_memberless_desk() {
+        let home_dir = home();
+        let state = state_with_memberless_desk(home_dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Sales").await,
+            "sales",
+            "a memberless desk named by its display name has to store the desk id, \
+             not the raw key — the rail's channel id is `sales`"
+        );
+        // The desk that does have a lead keeps behaving as before.
+        assert_eq!(
+            runtime.mention_context(&id, &[], "Engineering").await,
+            "engineering",
+            "a desk with a lead still stores its canonical id"
+        );
+    }
+
+    /// Issue #1835, both wire directions. A create that never mentions
+    /// `responder` — every existing caller, and the org chart today — answers
+    /// and lists with **no** `responder` key at all, so old consoles see the
+    /// pre-#1835 shape byte-for-byte. A create with `responder: "auto"`
+    /// answers and lists `"auto"`, and the mode survives the store round-trip
+    /// rather than collapsing back to a lead desk.
+    #[tokio::test]
+    async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/company/desks")
+                            .header("cookie", &cookie)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::CREATED);
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            }
+        };
+
+        let lead = post(r#"{"name":"Growth desk","members":["eng"]}"#).await;
+        assert!(
+            lead.get("responder").is_none(),
+            "a mode never stated must not appear on the wire: {lead}"
+        );
+        let auto =
+            post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
+        assert_eq!(auto["responder"], "auto", "{auto}");
+
+        // The list re-reads the store, so this is the round-trip half: the
+        // manifest desk and the defaulted create stay keyless, the channel
+        // keeps its mode.
+        let desks = get_desks(&app, &cookie).await;
+        let arr = desks.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert!(arr[0].get("responder").is_none(), "manifest desk: {desks}");
+        assert!(
+            arr[1].get("responder").is_none(),
+            "defaulted create: {desks}"
+        );
+        assert_eq!(arr[2]["responder"], "auto", "{desks}");
+    }
+
+    /// Issue #1835, codex review: an `auto` channel cannot be created empty —
+    /// the selector would have no candidates and the first-member fallback no
+    /// first member, so its unmentioned messages would silently fall to the
+    /// orchestrator, contradicting the channel's own model. A **lead** desk
+    /// keeps its right to start empty and be staffed from the org chart.
+    /// Revert the guard in `create_desk` and the first assertion answers 201.
+    #[tokio::test]
+    async fn an_auto_channel_cannot_be_created_empty_but_a_lead_desk_still_can() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let post = |body: &'static str| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/desks")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let refused = post(r#"{"name":"Launch week","responder":"auto"}"#).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            body.contains("at least one member"),
+            "the refusal names the reason, not a generic 400: {body}"
+        );
+
+        let empty_lead = post(r#"{"name":"Someday desk"}"#).await;
+        assert_eq!(
+            empty_lead.status(),
+            StatusCode::CREATED,
+            "an empty lead desk is still legal — it gains members from the org chart"
         );
     }
 }

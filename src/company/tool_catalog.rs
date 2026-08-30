@@ -55,7 +55,7 @@ pub struct CatalogEntry {
     /// Whether a catch-all `*` confers this entry.
     ///
     /// The three real-money / third-party-credential namespaces (`media`,
-    /// `composio`, `search`) and the bound-repository namespace (`repo`) must be
+    /// `composio`, `search`) must be
     /// named explicitly, so a console that renders `*` as "everything" without
     /// this flag would tell an operator they had granted something they had not.
     pub covered_by_wildcard: bool,
@@ -81,10 +81,13 @@ const BUILTIN_DESCRIPTIONS: &[(&str, &str)] = &[
         "Reach connected third-party accounts (Gmail, Slack, GitHub).",
     ),
     ("search", "Search the web. Billed per search."),
-    ("repo", "Read a bound source repository."),
     ("docs", "Read and write documents."),
     ("files", "Read and write files in the agent's sandbox."),
     ("workspace", "Read the company's shared workspace."),
+    (
+        "pages",
+        "Define and edit the company's internal dashboard pages.",
+    ),
 ];
 
 /// Builds the company's tool catalog: built-ins, then MCP servers, then Composio
@@ -152,7 +155,7 @@ pub fn catalog(manifest: &CompanyManifest) -> Vec<CatalogEntry> {
 /// Four namespaces are **not** answerable by the generic glob matcher, and this
 /// is the one place that difference has to be honoured rather than assumed. The
 /// generic matcher says a catch-all `*` covers everything, but `media`,
-/// `composio`, `search` and `repo` each carry a rule that `*` deliberately does
+/// `composio` and `search` each carry a rule that `*` deliberately does
 /// not confer them — they spend real money, reach a tenant's third-party
 /// accounts, or materialize a third party's source inside a sandbox, so they
 /// must be opted into by name.
@@ -166,7 +169,6 @@ fn namespace_granted(allow: &[String], namespace: &str) -> bool {
         "media" => crate::company::grants_media_explicit(allow),
         "composio" => crate::company::grants_composio_explicit(allow),
         "search" => crate::company::grants_search_explicit(allow),
-        "repo" => crate::company::grants_repo_explicit(allow),
         _ => crate::runtime::builder::allow_covers(allow, namespace),
     }
 }
@@ -178,17 +180,14 @@ fn namespace_granted(allow: &[String], namespace: &str) -> bool {
 /// does not in fact cover. The test below pins this set against the predicates
 /// themselves, so a fifth opt-in namespace cannot be added in one place only.
 fn wildcard_covers(namespace: &str) -> bool {
-    !matches!(namespace, "media" | "composio" | "search" | "repo")
+    !matches!(namespace, "media" | "composio" | "search")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::company::GATEABLE_NAMESPACES;
-    use crate::company::{
-        grants_composio_explicit, grants_media_explicit, grants_repo_explicit,
-        grants_search_explicit,
-    };
+    use crate::company::{grants_composio_explicit, grants_media_explicit, grants_search_explicit};
 
     fn manifest(toml: &str) -> CompanyManifest {
         toml::from_str(toml).expect("valid toml")
@@ -244,10 +243,9 @@ mod tests {
         assert!(!grants_media_explicit(&wildcard));
         assert!(!grants_composio_explicit(&wildcard));
         assert!(!grants_search_explicit(&wildcard));
-        assert!(!grants_repo_explicit(&wildcard));
 
         for (namespace, _) in BUILTIN_DESCRIPTIONS {
-            let expected = !matches!(*namespace, "media" | "composio" | "search" | "repo");
+            let expected = !matches!(*namespace, "media" | "composio" | "search");
             assert_eq!(
                 wildcard_covers(namespace),
                 expected,

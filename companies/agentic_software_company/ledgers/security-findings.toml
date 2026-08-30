@@ -1,0 +1,112 @@
+# Security findings: what is known to be exploitable, and what is being done.
+#
+# Deliberately its own axis rather than high-priority cards. A finding has a
+# disclosure clock, a severity that is not a priority, and an audience that is
+# not the roster — and a board that mixed the two would put "SQL injection in
+# the export endpoint" in a public column next to "tidy the settings page".
+
+title = "Security findings"
+purpose = """
+Vulnerabilities and weaknesses known to this company: where, how bad, whether \
+anyone outside knows, and what has been shipped about it. Read it before \
+touching auth, payments, uploads or anything customer-isolating.\
+"""
+written_by = "`record_entry` to raise or re-assess a finding, `close_entry` when it is fixed, mitigated or judged not exploitable"
+writers = ["security_engineer", "backend_engineer", "product_manager"]
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "finding"
+role = "title"
+required = true
+description = "What an attacker could do, stated as the outcome and not the code smell."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "severity"
+role = "prose"
+required = true
+description = "critical / high / medium / low, judged on what it lets somebody do — not on how hard it was to find."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "surface"
+role = "prose"
+description = "The endpoint, dependency or flow it lives in."
+
+[[field]]
+name = "reported_by"
+role = "prose"
+description = "Internal review, a scanner, or somebody outside — which decides whether there is a clock."
+
+[[field]]
+name = "exploitability"
+role = "prose"
+description = "What an attacker needs first. A finding requiring database access already is not the same as one requiring a URL."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — the fix, the mitigation, or why it is not exploitable. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "The task, the patch, the advisory, the release it went out in."
+
+[[status]]
+name = "triaging"
+
+[[status]]
+name = "fixing"
+aliases = ["confirmed"]
+
+[[status]]
+name = "fixed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "mitigated"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "not_exploitable"
+label = "Not exploitable"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Confirmed and unfixed"
+blurb = "Real, reproducible, and still there. Anything critical here outranks feature work."
+statuses = ["fixing"]
+order = "recent"
+
+[[section]]
+heading = "Triaging"
+blurb = "Reported, not yet confirmed. Say what would settle it."
+statuses = ["triaging"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Fixed, mitigated, or judged not exploitable — each with the reason and the \
+release it went out in. A `not_exploitable` row with no reasoning is the one \
+that gets re-reported by the next scanner and re-dismissed from memory.\
+"""
+statuses = ["fixed", "mitigated", "not_exploitable"]
+cap = 20

@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ports::types::{
-    ApprovalId, CompanyId, Effect, EventSeq, OutboundMessage, TemplateProvenance,
+    ApprovalId, CompanyId, Effect, EffectGroup, EventSeq, OutboundMessage, TemplateProvenance,
 };
 
 /// Which board task an approval was parked for (issue #333).
@@ -86,6 +86,9 @@ pub struct CompanyStatus {
     pub id: CompanyId,
     /// The display name.
     pub name: String,
+    /// The operator-set company logo, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_url: Option<String>,
     /// Lifecycle state, e.g. `running`, `paused`, `archived`.
     pub lifecycle: String,
     /// The number of approvals currently awaiting the operator.
@@ -120,7 +123,47 @@ pub struct ApprovalSummary {
     /// The USD amount involved, if any.
     pub amount_usd: Option<f64>,
     /// Epoch-millis the effect was parked.
+    ///
+    /// Stamped by `CycleRunner::park` in the same turn that composed the
+    /// effect's arguments, so it dates the PAYLOAD, not the queue: it is read
+    /// back off the journal record on replay rather than re-stamped, so a host
+    /// restart does not reset it to boot time. That is what lets the console
+    /// say how old the content is rather than how long the card has sat
+    /// (issue #1024).
     pub at_millis: u64,
+    /// Epoch-millis this approval default-denies if nobody decides it
+    /// (issue #971) — `at_millis` plus the gate's TTL.
+    ///
+    /// **Projected, not a second source of truth.** The deadline is the gate's
+    /// (`[policy].approval_ttl_hours`, defaulting to 24 hours), and the gate
+    /// re-checks it on every resolve; this is that same number said out loud so
+    /// a card can show it. Computing it a second way in the console — or on the
+    /// GraphQL side — would be a deadline the host does not enforce, which is
+    /// worse than no deadline at all: an operator would read "in 3h", act on
+    /// it, and be refused.
+    ///
+    /// It is the honest half of shortening the deadline. An approval that
+    /// vanishes is only acceptable if the card said when it would, so nothing
+    /// disappears unannounced.
+    ///
+    /// Omitted when absent, the additive pattern the fields below follow: an
+    /// old console ignores the key and a new one reads its absence as "this
+    /// host does not report deadlines" and renders the card exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_millis: Option<u64>,
+    /// The consequence group of the parked effect (issue #1024).
+    ///
+    /// Copied off [`Effect::group`], which the harness derives from the tool
+    /// AND its arguments — so a `composio_execute` carrying `GMAIL_SEND_EMAIL`
+    /// arrives here as [`EffectGroup::Send`], not as the catch-all its tool
+    /// name alone would suggest.
+    ///
+    /// The console needs it to tell an effect that leaves the company from one
+    /// that does not, and it cannot be derived client-side: for a harness tool
+    /// call `kind` is the TOOL NAME, so a console keying on `kind` would miss
+    /// exactly the outbound sends this exists to mark. Sending the host's own
+    /// classification keeps that judgement in one place.
+    pub group: EffectGroup,
     /// Which board task this approval was parked for (issue #333).
     ///
     /// Three states, and the Task Detail read depends on telling them apart:
@@ -204,6 +247,34 @@ pub struct ApprovalSummary {
     /// behind this card", which is the truth for every chat and scheduler park.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
+    /// Which workflow the parked [`workflow.approve`] gate is asking about
+    /// (issue #395), when the effect is one.
+    ///
+    /// The console's run address needs **both** halves — a run id alone cannot
+    /// name a page, so this sits beside [`workflow_run_id`](Self::workflow_run_id)
+    /// as the second half of the join.
+    ///
+    /// # Why this is a top-level field and not read from the payload
+    ///
+    /// The id also appears in the parked effect's payload (the `workflow_id`
+    /// key), but [`payload`](Self::payload) is a redacted *rendering*
+    /// (`approval_display`), and role redaction (issue #618) strips it from a
+    /// member reader entirely. [`workflow_run_id`](Self::workflow_run_id)
+    /// survives that redaction, and this must too, or the member holding up a
+    /// stalled workflow would lose the one address that says where it is —
+    /// exactly the stalled-work visibility issue #468 exists to protect.
+    ///
+    /// Projected from the raw parked effect
+    /// ([`gate_workflow_id`](crate::runtime::workflow_resume::gate_workflow_id)),
+    /// never from the display payload, for the same reason the projection's own
+    /// comment gives: a fact must be read as a fact, not as a rendering that
+    /// redaction rules could silently change.
+    ///
+    /// Absent on every non-gate approval (a chat turn, a scheduler tick) and on
+    /// a tool call parked *by* a workflow — only native `workflow.approve`
+    /// effects carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
     /// Whether the operator may grant this tool **broadly** — one standing
     /// permission covering any arguments until a deadline (issue #374).
     ///
@@ -228,6 +299,10 @@ pub struct ApprovalSummary {
     /// approve-once behaviour by construction.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub broadly_grantable: bool,
+    /// Whether this tool may be denied standing. Unlike a grant, a refusal is
+    /// safe for every agent or workflow tool because it can only narrow access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub broadly_deniable: bool,
     /// Whether [`payload`](Self::payload) and [`amount_usd`](Self::amount_usd)
     /// were withheld from *this reader* because of their role (issue #618).
     ///

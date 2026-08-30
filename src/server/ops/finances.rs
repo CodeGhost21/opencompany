@@ -94,6 +94,8 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -105,9 +107,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -164,6 +170,24 @@ mod tests {
         assert_eq!(dto["netUsd"], 0.0);
         assert!(dto["byCategory"].as_array().unwrap().is_empty(), "{dto}");
         assert!(dto["transactions"].as_array().unwrap().is_empty(), "{dto}");
+    }
+
+    /// A manifest with no `[budget]` answers `budgetUsd: null` — "no cap set" —
+    /// so the console can tell it apart from an explicit zero-dollar cap.
+    #[tokio::test]
+    async fn no_budget_projects_null_budget_usd() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_ledger(
+            &home,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+            Vec::new(),
+        )
+        .await;
+
+        let (status, dto) = get_finances(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["budgetUsd"], Value::Null, "{dto}");
     }
 
     /// A ledger with a spend and a revenue entry this month projects the

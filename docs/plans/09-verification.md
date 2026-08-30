@@ -71,10 +71,10 @@ Per-surface additions:
   the TOML on disk; unknown id → null.
 - **Chat threading** — `{message, chat}` routes to the desk and journals
   `AgentReply`; unknown desk → 400; `Chat.history` returns both directions.
-- **Connections** — `start` returns an authorize URL (mock provider config);
-  callback exchanges the signed state and stores the token; `disconnect`
-  clears the secret; **no token material in any response body** (assert
-  serialized JSON).
+- **Connections** — `start` returns the dated `410 native_oauth_retired`
+  response; callback returns a `410` explanatory page without reading `state`
+  or exchanging `code`; `disconnect` clears historical secrets; **no token
+  material in any response body** (assert serialized JSON).
 - **Domain/SMTP** — PUT domain → generated records; verify with mock resolver
   (both outcomes); PUT smtp writes to `SecretStore` and the read surface
   exposes host/username only; smtp test with mock `MailSender`.
@@ -138,7 +138,7 @@ is substantially merged, add `frontend/e2e/` covering exactly:
 2. Conversation: send → reply renders in the right desk;
 3. Approvals: pending → approve → confirmation;
 4. Workspace: create + edit note → survives reload;
-5. Tasks: drag between columns → survives reload.
+5. Tasks: Ledgers → `tasks`, drag between columns → survives reload.
 
 ## 5. Per-workstream exit criteria
 

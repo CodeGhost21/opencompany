@@ -89,11 +89,11 @@ test("the Workspace tab reads and writes the host's store, not localStorage", as
   }[];
   await openWorkspace(page);
 
-  // The harness company seeds `README.md` + `Standards.md`, so a real seeded
+  // The harness company seeds `readme.md` + `standards.md`, so a real seeded
   // note must be on screen. It came from the company bundle, not the console.
-  const seeded = tree.find((n) => n.name === "README.md");
+  const seeded = tree.find((n) => n.name === "readme.md");
   expect(seeded, "the harness company must seed a workspace").toBeTruthy();
-  await expect(page.getByTestId("workspace-tree")).toContainText("README", {
+  await expect(page.getByTestId("workspace-tree")).toContainText("readme", {
     timeout: 30_000,
   });
 
@@ -245,11 +245,12 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
 
   await page.getByTestId("workspace-migration-import").click();
 
-  // The receipt names what was actually imported, per kind (#500). Two notes
-  // and one folder — not the flat list's length, and not the import folder the
-  // console creates to hold them, which is packaging rather than content.
+  // The receipt names what was actually imported, per kind (#500) — two notes
+  // and one folder, not the flat list's length — and where it went (#1472).
+  // The import folder itself is still packaging rather than content, so it is
+  // named as the destination and stays out of the tally.
   await expect(page.locator("[data-sonner-toast] [data-title]").first()).toHaveText(
-    "Imported 2 notes and 1 folder.",
+    "Imported 2 notes and 1 folder into “imported-from-this-browser”.",
     { timeout: 30_000 },
   );
 
@@ -262,7 +263,7 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
     kind: string;
     parentId?: string | null;
   }[];
-  const folder = nodes.find((n) => n.kind === "folder" && n.name === "Imported from this browser");
+  const folder = nodes.find((n) => n.kind === "folder" && n.name === "imported-from-this-browser");
   expect(folder, "the import must land in its own folder").toBeTruthy();
   const note = nodes.find((n) => n.name === `${rescued}.md`);
   expect(note, "the user's note must be imported").toBeTruthy();

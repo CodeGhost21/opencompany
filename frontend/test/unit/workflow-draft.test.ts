@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WorkflowDraftFromDescription, WorkflowGraph } from "@/api/workflows";
-import { draftBanners } from "@/lib/workflow-draft";
+import { draftBanners, draftLanding } from "@/lib/workflow-draft";
 
 /**
  * The create-time copilot's banner reducer (issue #813).
@@ -15,6 +15,7 @@ import { draftBanners } from "@/lib/workflow-draft";
 const GRAPH: WorkflowGraph = {
   id: "weekly-digest",
   name: "Weekly digest",
+  version: null,
   nodes: [],
   edges: [],
 };
@@ -63,5 +64,54 @@ describe("draftBanners", () => {
 
     const noReason = draftBanners({ automatable: false });
     expect(noReason.reason).toBe("This is better done once than built into a workflow.");
+  });
+});
+
+/**
+ * What a landed copilot draft may do to the form it came back to (issue #1052).
+ *
+ * The defect was a consent problem, not a missing guard: `runDraft` took its
+ * `window.confirm` *before* a request that takes seconds, while the operator is
+ * invited to keep typing through it. The answer therefore authorised replacing a
+ * form that no longer existed by the time it arrived — and a draft abandoned by
+ * cancelling could hydrate the *next* open.
+ *
+ * These pin the decision itself. Proving it through the dialog would need a slow
+ * request, a rendered form and a stubbed `window.confirm`; the branch that
+ * matters is three lines of reasoning about two epochs and a dirty flag.
+ */
+describe("draftLanding", () => {
+  it("applies when nothing would be lost", () => {
+    expect(draftLanding({ requestedEpoch: 3, currentEpoch: 3, dirtyNow: false })).toBe("apply");
+  });
+
+  /**
+   * The bug's core case: the form was clean when the request went out and the
+   * operator typed while it ran. Dirtiness is read at landing, so this asks.
+   */
+  it("asks when the operator has made the form dirty since the request", () => {
+    expect(draftLanding({ requestedEpoch: 3, currentEpoch: 3, dirtyNow: true })).toBe("confirm");
+  });
+
+  /**
+   * Cancel mid-draft, reopen: the reset effect bumped the epoch, so the
+   * abandoned response must not fill in the fresh form.
+   */
+  it("drops a response whose dialog has moved on", () => {
+    expect(draftLanding({ requestedEpoch: 3, currentEpoch: 4, dirtyNow: false })).toBe("drop");
+  });
+
+  /**
+   * Staleness outranks dirtiness. A response for a form that is gone must not
+   * raise a confirm about a form the operator is no longer looking at — a
+   * question nobody can place is worse than silence.
+   */
+  it("drops rather than asking when the dialog moved on AND the form is dirty", () => {
+    expect(draftLanding({ requestedEpoch: 3, currentEpoch: 4, dirtyNow: true })).toBe("drop");
+  });
+
+  /** Epochs only ever move forward, but the rule is inequality, not ordering. */
+  it("treats any epoch change as stale, in either direction", () => {
+    expect(draftLanding({ requestedEpoch: 4, currentEpoch: 3, dirtyNow: false })).toBe("drop");
   });
 });

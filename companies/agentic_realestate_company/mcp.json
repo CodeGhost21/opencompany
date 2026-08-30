@@ -1,0 +1,11 @@
+{
+  "$comment": "Deal files, leases and tenant correspondence live in a shared workspace.",
+  "mcpServers": {
+    "notion": {
+      "url": "https://mcp.notion.com/mcp",
+      "description": "The workspace this company's documents already live in. Needs a token.",
+      "enabled": false,
+      "authSecret": "mcp/notion/auth"
+    }
+  }
+}

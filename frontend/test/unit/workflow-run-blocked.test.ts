@@ -153,6 +153,7 @@ describe("a blocked node on the canvas", () => {
     const graph: WorkflowGraph = {
       id: "feature_pipeline",
       name: "Feature pipeline",
+      version: null,
       nodes: [
         { id: "start", kind: "trigger", name: "Start" },
         { id: "spec", kind: "agent", name: "Spec", agent: "ceo" },
@@ -171,6 +172,7 @@ describe("a blocked node on the canvas", () => {
         workflowId: "feature_pipeline",
         runId: "run-1",
         scheduled: false,
+        startedBy: "operator",
       },
       {
         type: "workflow_node_finished",

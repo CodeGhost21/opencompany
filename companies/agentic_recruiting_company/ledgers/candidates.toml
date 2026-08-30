@@ -1,0 +1,105 @@
+# People in a process, and what was actually decided about each.
+#
+# The most sensitive record this company keeps. It exists so that decisions are
+# made against the search's stated bar and are recorded in terms somebody could
+# defend — which is both the fair thing and the legally durable thing. Vague
+# rejection reasons are the specific mechanism by which bias enters a hiring
+# process undetected.
+
+title = "Candidates"
+purpose = """
+Everybody in a process: which search, what stage, what the evidence said against \
+the stated bar, and why each decision was made. Read it before contacting \
+anybody — re-approaching somebody rejected last month is the commonest and \
+worst-received mistake here.\
+"""
+written_by = "`record_entry` to add or advance a candidate, `close_entry` when they are hired, rejected or withdraw"
+writers = ["candidate_sourcer", "resume_analyst", "interviewer", "offer_generator", "scheduler"]
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "candidate"
+role = "title"
+required = true
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "search"
+role = "refs"
+required = true
+
+[[field]]
+name = "evidence"
+role = "prose"
+description = "What they demonstrated against the search's stated signals. Evidence, not impressions."
+
+[[field]]
+name = "gaps"
+role = "prose"
+description = "Which must-have is not yet evidenced, and what would evidence it."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = """
+Why they closed, stated against the bar and specific enough to defend. \
+\"Not a fit\" is not a reason and must never be one. Required when it closes.\
+"""
+
+[[status]]
+name = "sourced"
+
+[[status]]
+name = "in_process"
+label = "In process"
+aliases = ["screening", "interviewing", "offer"]
+
+[[status]]
+name = "hired"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "rejected"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "withdrew"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "In process"
+blurb = "Live. Each should name which must-have is not yet evidenced."
+statuses = ["in_process"]
+order = "recent"
+
+[[section]]
+heading = "Sourced"
+blurb = "Identified, not yet contacted or screened."
+statuses = ["sourced"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Hired, rejected, or withdrew — each with a reason stated against the bar. \
+\"Not a fit\" is not a reason: a vague rejection is the specific mechanism by \
+which bias enters a process undetected, and it is also indefensible later.\
+"""
+statuses = ["hired", "rejected", "withdrew"]
+cap = 20

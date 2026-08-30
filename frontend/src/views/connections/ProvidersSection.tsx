@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, ChevronRight, Loader2, LogIn, Search, Unplug } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  ChevronRight,
+  Loader2,
+  LogIn,
+  Search,
+  ShieldCheck,
+  Unplug,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -12,6 +21,13 @@ import {
   visibleProviderRows,
   type ProviderCategory,
 } from "@/lib/composio-catalog";
+import {
+  accountSummary,
+  connectedProviderCount,
+  grantStanding,
+  tallyAccounts,
+  tileDelivers,
+} from "@/lib/provider-grid";
 import type { GridProvider } from "@/lib/provider-grid";
 import { cn } from "@/lib/utils";
 
@@ -25,20 +41,42 @@ interface Props {
   /** Nothing to authorize against — no credential of any tier resolves. */
   noCredential: boolean;
   /**
-   * Whether the company grants the `composio` tool namespace.
+   * Whether the company grants the `composio` tool namespace, as a tri-state
+   * (issue #1478): `true` granted, `false` not granted, `undefined` couldn't
+   * check (an older host, or response-shape drift through an unvalidated cast).
    *
    * A caveat, never a gate (issue #582). A connection made without it is real —
    * the account is linked and the tile is honest to say so — but no agent
    * receives its tools until the grant exists, and the operator has to be told
    * that where they can see the connected badge, not only in a section above.
+   * `undefined` must not render as `false`: an unchecked grant is not a denied
+   * one.
    */
-  granted: boolean;
+  granted: boolean | undefined;
+  /**
+   * The Composio catalog probe timed out (issue #1478). Distinct from an empty
+   * catalog: the host did not answer, so "no providers to offer" would be a
+   * confident claim assembled from a request that never completed.
+   */
+  probeFailed: boolean;
   /** Open mode: any slug the backend permits is reachable, so offer the hatch. */
   openMode: boolean;
   /** Why the catalog on screen is not the backend's real one, when it is not. */
   degraded: string | null;
   /** The host has not answered yet. */
   loading: boolean;
+  /**
+   * Grant the `composio` tool namespace (issue #1796).
+   *
+   * A callback rather than a write of its own, for the reason stated below: this
+   * grid decides nothing and calls nothing. What it contributes is the *place* —
+   * the operator reading "connected" next to a tile is the one who needs to know
+   * their agents still cannot use it, and the fix belongs where the complaint
+   * is, not only in a section further up the page.
+   */
+  onGrant?: () => void;
+  /** Whether that grant is in flight, so the control can say so. */
+  granting?: boolean;
   onConnect: (provider: GridProvider) => void;
   onDisconnect: (provider: GridProvider) => void;
   /** Open a connected provider's detail view (issue #404). */
@@ -47,7 +85,7 @@ interface Props {
 }
 
 /**
- * The Connections page's one provider grid (issue #582).
+ * The OAuth page's one provider grid (issue #582).
  *
  * The page used to carry two: this tile grid (then inside `ComposioSection`,
  * fed by `GET …/composio/connections`) and a categorised grid of eleven
@@ -74,9 +112,12 @@ export function ProvidersSection({
   busy,
   noCredential,
   granted,
+  probeFailed,
   openMode,
   degraded,
   loading,
+  onGrant,
+  granting = false,
   onConnect,
   onDisconnect,
   onOpen,
@@ -99,7 +140,9 @@ export function ProvidersSection({
     if (!categories.includes(category)) setCategory("All");
   }, [categories, category]);
 
-  const connectedCount = providers.filter((p) => p.connected).length;
+  // One count, shared with the header badge in ConnectionsView (issue #1407).
+  const connectedCount = connectedProviderCount(providers);
+  const grant = grantStanding(granted);
 
   if (loading) {
     return (
@@ -114,7 +157,7 @@ export function ProvidersSection({
     <section className="space-y-3">
       <SectionHeading count={connectedCount} />
       <Card>
-        <CardContent className="space-y-2 py-4">
+        <CardContent className="space-y-2">
           {noCredential && (
             <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
               {canManage
@@ -122,19 +165,55 @@ export function ProvidersSection({
                 : "No credential is available for this company yet, so there is nothing to authorize against. An admin has to set the company's credential before providers can be connected."}
             </p>
           )}
-          {!granted && connectedCount > 0 && (
+          {grant === "not-granted" && connectedCount > 0 && (
             // Stated here rather than only in the credential section above,
             // because this is where the connected badges are: the operator
             // reading "connected" is the one who needs to know their agents
             // still cannot use it. The connection itself is real — the grant
-            // governs the tool belt, not the handshake (issue #582).
+            // governs the tool belt, not the handshake (issue #582). Fires only
+            // on an explicit not-granted, never on an unchecked grant (#1478).
+            <div
+              className="flex flex-col gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground"
+              data-testid="providers-not-granted"
+            >
+              <span className="flex items-start gap-2">
+                <AlertTriangle className="mt-px size-3 shrink-0" />
+                <span>
+                  These accounts are connected, but this company does not grant the{" "}
+                  <span className="font-mono">composio</span> tool namespace, so its teammates will
+                  not receive their tools yet.
+                </span>
+              </span>
+              {canManage && onGrant ? (
+                <div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={granting}
+                    onClick={onGrant}
+                    data-testid="providers-not-granted-action"
+                  >
+                    {granting ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="size-4" />
+                    )}
+                    Grant composio
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          )}
+          {grant === "unknown" && connectedCount > 0 && (
+            // Couldn't read the grant (issue #1478). Neither assert it is granted
+            // nor tell the operator to widen a grant that may already be set —
+            // say only that this could not be checked.
             <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
               <AlertTriangle className="mt-px size-3 shrink-0" />
               <span>
-                These accounts are connected, but this company does not grant the{" "}
-                <span className="font-mono">composio</span> tool namespace, so its agents will not
-                receive their tools yet. Add <span className="font-mono">composio</span> to the
-                company&apos;s tool grants.
+                Couldn&apos;t check whether this company grants the{" "}
+                <span className="font-mono">composio</span> tool namespace, so whether teammates
+                receive these tools is unknown.
               </span>
             </p>
           )}
@@ -200,9 +279,10 @@ export function ProvidersSection({
             className="grid gap-2"
             style={{
               // Uniform rows so a grid of 123 tiles reads as a grid and not as
-              // ragged masonry — the tile is a fixed slot, and the label clamps.
+              // ragged masonry — the tile is a fixed slot, and both the label
+              // and the access disclosure clamp (issue #1474).
               gridTemplateColumns: "repeat(auto-fill, minmax(8.5rem, 1fr))",
-              gridAutoRows: "5.5rem",
+              gridAutoRows: "8.5rem",
             }}
           >
             {visible.map((row) => (
@@ -213,6 +293,7 @@ export function ProvidersSection({
                 busy={busy === row.providerId}
                 anyBusy={busy !== null}
                 noCredential={noCredential}
+                granted={granted}
                 onConnect={() => onConnect(row)}
                 onDisconnect={() => onDisconnect(row)}
                 onOpen={() => onOpen(row)}
@@ -220,17 +301,35 @@ export function ProvidersSection({
             ))}
           </ul>
 
-          {providers.length === 0 && (
+          {probeFailed && (
+            // The catalog probe timed out (issue #1478): the host did not answer,
+            // so this is "couldn't check", not "no providers". Shown in place of
+            // the empty-catalog copy below, which would otherwise assemble a
+            // confident instruction — possibly to set a credential already set —
+            // out of a request that never completed.
+            <p
+              className="flex items-start gap-2 rounded-md bg-status-blocked-soft p-2 text-xs text-status-blocked-text"
+              data-testid="providers-probe-failed"
+            >
+              <AlertTriangle className="mt-px size-3 shrink-0" />
+              <span>
+                Couldn&apos;t reach this company&apos;s provider catalog in time, so what it offers
+                is unknown. Reload to try again — anything already connected still appears here.
+              </span>
+            </p>
+          )}
+          {providers.length === 0 && !probeFailed && (
             // The honest empty state (issue #822). This grid used to fall back
             // to eleven hardcoded tiles whenever the backend offered no catalog,
             // so a host with Composio switched off looked like a page full of
             // connectable providers — and every one of those Connects stored a
             // credential no agent reads (#396). With the fallback gone, a host
             // with no catalog has nothing to show, and saying why beats a bare
-            // "No provider in All."
+            // "No provider in All." Withheld when the probe merely timed out
+            // (issue #1478) — that is unknown, not empty.
             <p className="py-2 text-xs text-muted-foreground" data-testid="providers-empty">
               This host has no providers to offer yet. They come from Composio,
-              which runs the sign-in and turns the result into tools your agents
+              which runs the sign-in and turns the result into tools your teammates
               actually receive
               {canManage
                 ? " — set the company's credential above to see its catalog here."
@@ -291,9 +390,9 @@ export function ProvidersSection({
 function SectionHeading({ count }: { count: number | null }) {
   return (
     <div className="space-y-1">
-      <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+      <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
         Providers
-      </h3>
+      </h2>
       <p className="text-sm text-muted-foreground">
         Every account this company can act through, and which are wired.
         {count !== null && count > 0 && ` ${count} connected.`}
@@ -332,6 +431,7 @@ function ProviderTile({
   busy,
   anyBusy,
   noCredential,
+  granted,
   onConnect,
   onDisconnect,
   onOpen,
@@ -341,10 +441,16 @@ function ProviderTile({
   busy: boolean;
   anyBusy: boolean;
   noCredential: boolean;
+  granted: boolean | undefined;
   onConnect: () => void;
   onDisconnect: () => void;
   onOpen: () => void;
 }) {
+  // Whether this connected tile's tools actually reach teammates (issue #1407).
+  // A real connection whose `composio` grant is explicitly absent is
+  // connected-but-not-delivering, so it must not wear the success colour — the
+  // banner above already explains it. An unchecked grant is NOT demoted.
+  const delivers = tileDelivers(row, granted);
   // `managed` and `unavailable` render no action at all — that is the whole
   // point of routing the tile (issue #599): a button that could only 400 is
   // never drawn. Composio is the only remaining kind that draws one, since the
@@ -362,12 +468,31 @@ function ProviderTile({
   // answer than the tile's badge.
   const openable =
     row.route.kind === "composio" && (!row.connected || row.accounts.length > 0);
-  const state = row.connected
-    ? row.accounts.length > 1
-      ? `${row.accounts.length} accounts connected`
+  // One rule for counting accounts, shared with the detail panel (issue #923).
+  // Two reads used to meet here and disagree: the count was
+  // `row.accounts.length` — every account, whatever its state — while the badge
+  // gating it was `row.connected`, which the host defines as *at least one
+  // account ACTIVE*. So a Gmail holding one live account and five mid-handshake
+  // ones said "6 accounts connected", and a Notion holding three mid-handshake
+  // ones and no live one said "not connected" two inches above the three
+  // accounts it holds. Both now count through `tallyAccounts`.
+  const { live, pending } = tallyAccounts(row.accounts);
+  // The connected wording, before the delivery caveat. A tile can be genuinely
+  // connected and still not deliver (issue #1407), so the "not delivered" suffix
+  // is appended to whichever of these applies rather than replacing it.
+  const connectedState =
+    live > 1
+      ? // Only the live ones. A host predating #404 sends no accounts at all
+        // while still reporting the toolkit connected, which is why the `via`
+        // wording below stays the answer for "connected, nothing to count".
+        (accountSummary(row.accounts) ?? "connected")
       : row.via.length > 0
         ? `connected via ${row.via.join(" + ")}`
-        : "connected"
+        : "connected";
+  const state = row.connected
+    ? delivers
+      ? connectedState
+      : `${connectedState} · tools not delivered`
     : busy
       ? "signing in"
       : row.unverified
@@ -376,18 +501,32 @@ function ProviderTile({
           ? "managed by the platform"
           : row.route.kind === "unavailable"
             ? "not available here"
-            : "not connected";
+            : pending > 0
+              ? // Accounts held, none of them usable. "not connected" here is
+                // what contradicted the list below — an account mid-handshake
+                // is not the absence of an account.
+                (accountSummary(row.accounts) ?? "not connected")
+              : "not connected";
 
   const shell = cn(
     "flex size-full flex-col items-start justify-between gap-1 rounded-lg border p-2.5 text-left",
-    row.connected ? "border-status-done/30 bg-status-done-soft" : "border-border bg-card",
+    row.connected
+      ? // A connected-but-not-delivering tile drops the success colour so it
+        // does not contradict the "tools reach nobody" banner (issue #1407).
+        delivers
+        ? "border-status-done/30 bg-status-done-soft"
+        : "border-border bg-muted/40"
+      : "border-border bg-card",
   );
+  // The connected glyph's tone follows delivery too, so a demoted tile is not
+  // green-checked under a neutral shell.
+  const connectedTone = delivers ? "text-status-done-text" : "text-muted-foreground";
 
   const glyph = row.connected ? (
     openable ? (
       // Non-interactive: the whole tile is the control that opens it, and a
       // button inside that button is not a thing the DOM allows.
-      <ChevronRight className="size-3.5 shrink-0 text-status-done-text" aria-hidden="true" />
+      <ChevronRight className={cn("size-3.5 shrink-0", connectedTone)} aria-hidden="true" />
     ) : canManage && row.canDisconnect ? (
       <button
         type="button"
@@ -406,7 +545,7 @@ function ProviderTile({
       </button>
     ) : (
       <Check
-        className="size-3.5 shrink-0 text-status-done-text"
+        className={cn("size-3.5 shrink-0", connectedTone)}
         // Connected, with nothing this console can address: either the viewer
         // cannot manage it, or the host answered the connection list without
         // `accounts` (it predates #696), so there is no id to revoke and no
@@ -437,7 +576,10 @@ function ProviderTile({
         <span
           className={cn(
             "block truncate text-3xs",
-            row.connected ? "text-status-done-text" : "text-muted-foreground",
+            // Delivery-aware, same as the glyph: a connected tile that reaches
+            // nobody drops the success colour rather than green-texting its
+            // account line under the "tools not delivered" state (issue #1407).
+            connectedTone,
           )}
         >
           {row.account ?? state}
@@ -464,7 +606,7 @@ function ProviderTile({
           type="button"
           onClick={onOpen}
           title={title}
-          aria-label={`Open ${row.label}. ${state}.`}
+          aria-label={`Open ${row.label}. ${state}. Typical access: ${permissionHint(row.category)}.`}
           // Deliberately NOT prefixed `provider-`: `connections-one-list.spec.ts`
           // counts `[data-testid^='provider-']` nodes to prove a provider
           // renders exactly one tile, and a nested node sharing that prefix
@@ -473,11 +615,26 @@ function ProviderTile({
           className={cn(
             shell,
             "transition-colors hover:border-foreground/20",
-            row.connected ? "hover:bg-status-done/10" : "hover:bg-accent",
+            // Hover follows delivery too: a connected-but-not-delivering tile
+            // hovers neutral, matching its demoted shell, instead of flashing the
+            // success tint the "tools reach nobody" banner contradicts (#1407).
+            delivers
+              ? "hover:bg-status-done/10"
+              : row.connected
+                ? "hover:bg-muted/70"
+                : "hover:bg-accent",
             "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
           )}
         >
           {body}
+          {/* The hint is a broad category-derived guess — Composio decides the
+              real consent scopes and does not publish them here. Saying
+              "Permission requested" would present that guess as the actual
+              grant; "Typical access" labels it as the general shape instead
+              (issue #1474). */}
+          <p className="mt-2 line-clamp-2 text-left text-xs text-muted-foreground">
+            Typical access: {permissionHint(row.category)}.
+          </p>
         </button>
       ) : connectable ? (
         <button
@@ -485,7 +642,7 @@ function ProviderTile({
           disabled={anyBusy || (row.route.kind === "composio" && noCredential)}
           onClick={onConnect}
           title={row.description || undefined}
-          aria-label={`Connect ${row.label}. ${state}. Authorises: ${permissionHint(row.category)}.`}
+          aria-label={`Connect ${row.label}. ${state}. Typical access: ${permissionHint(row.category)}.`}
           className={cn(
             shell,
             "transition-colors hover:border-foreground/20 hover:bg-accent",

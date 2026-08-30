@@ -22,11 +22,18 @@ pub mod advance;
 /// the safety net, and bounded so an agent-authored blob cannot reach a
 /// browser unbounded. See [`approval_display`].
 pub mod approval_display;
+/// Which card owns a parked approval on the queue read (#1891).
+pub mod approval_ownership;
 /// Brain-agnostic resolution of a task card's `assignee` against the full
 /// roster — teammates, overlay teammates and desks (issue #205). Shared by the
 /// harness dispatch path and the REST write boundary so the board's assignee
 /// means one thing. See [`assignee`].
 pub mod assignee;
+/// Issue #899 (Stage 1): the workflow id and trigger input each **blocked agent
+/// node** needs to re-dispatch its run when the operator approves a call gated
+/// inside its tool loop — the agent-node companion to [`workflow_gates`]. See
+/// [`blocked_nodes`].
+pub mod blocked_nodes;
 /// Issue #464: [`BoardAnnouncer`] — the [`TaskStore`](crate::ports::tasks::TaskStore)
 /// decorator that announces a board write on the company event log, so a card
 /// opened by *anything* reaches a watching console without a reload. Emitted at
@@ -57,6 +64,11 @@ pub mod delegation;
 /// catalog, and desk-lead resolver shared by BOTH the harness and hosted paths.
 /// Compiled in every build (the hosted brain ships in the default build).
 pub mod delegation_tools;
+/// The write guard on the `derived/` folder: a
+/// [`WorkspaceStore`](crate::ports::WorkspaceStore) decorator that refuses a
+/// hand-written edit to a file a ledger renders, and names the tool that
+/// actually writes the row.
+pub mod derived_guard;
 /// Single-use grants minted when an operator approves a blocked tool call
 /// (issue #243). Compiled in every build: the journal records and their replay
 /// are feature-independent, so a company that ran under the harness stays
@@ -70,27 +82,35 @@ pub mod grants;
 pub mod handover;
 pub mod journal;
 pub mod mailbox_poller;
+/// Issue #971: [`MaintenanceTicker`] — the process-wide minute loop that retires
+/// expired approvals, expired grants and stale fire claims for EVERY registered
+/// company, not only those with a manifest `[[schedule]]`. See [`maintenance`].
+pub mod maintenance;
+/// Resolving `@name` in chat to a teammate, a person, a desk, or the whole
+/// room — and deciding what that addresses. Pure and brain-agnostic, for the
+/// same reason [`delegation_tools`] is. See [`mentions`].
+pub mod mentions;
 /// Issue #290: replacing a registered company's runtime in place, so first-time
 /// BYOK setup takes effect without a process restart. See [`rebuild`].
 pub mod rebuild;
 pub mod registry;
-/// Issue #245 (operator half): [`RepoManager`] — binding real repositories to a
-/// company and keeping a host-side bare mirror of each one, with the credential
-/// path complete and **no agent surface at all**. Compiled in every build; the
-/// forge REST seam it takes is optional, so the default build makes no network
-/// call of its own. See [`repo_manager`].
-pub mod repo_manager;
 /// Issue #383: [`RunSupervisor`] — the live set of workflow runs an operator can
 /// still stop, so `POST …/workflows/runs/{runId}/cancel` has something to reach.
 /// Compiled in every build: it is a plain map of stop signals and touches no
 /// engine. See [`run_supervisor`].
+pub mod run_events;
 pub mod run_supervisor;
 pub mod scheduler;
-/// Issue #203: the Telegram `getUpdates` long-polling listener — the inbound
-/// path that needs no public URL, mirroring OpenHuman. See [`telegram_poller`].
-pub mod telegram_poller;
 pub mod tools;
+/// Issue #983: settling chat turns a previous host process left open, the
+/// transcript-side twin of the run reaper. See [`turn_sweep`].
+pub mod turn_sweep;
 pub mod types;
+/// Issue #978: which gate node each parked workflow approval is deciding, and
+/// the trigger input its run paused with — the two facts a run-scoped
+/// continuation needs and the journal cannot give back once an approval has
+/// resolved. See [`workflow_gates`].
+pub mod workflow_gates;
 /// Issue #228: the single place a finished workflow run is journaled, shared by
 /// the console's run route and the cron [`WorkflowScheduler`] so a run's history
 /// is uniform no matter what started it. See [`workflow_outcome`].
@@ -115,24 +135,27 @@ pub mod workspace_quota;
 pub use advance::{SYSTEM_ATTRIBUTION, advance_settled_card, append_result};
 pub use board_events::{BoardAnnouncer, CHANGE_OPENED, CHANGE_REMOVED, CHANGE_UPDATED};
 pub use builder::{RuntimeBuilder, company_id_from_name};
-pub use channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
+pub use channel::{
+    DeskChannel, OPERATOR_CHANNEL, OperatorChannel, is_deliverable_channel,
+    undeliverable_channel_message,
+};
 pub use cron::{CivilTime, CronExpr};
 pub use cycle::CycleRunner;
+pub use derived_guard::DerivedGuardWorkspace;
 pub use handover::RuntimeHandover;
+pub use maintenance::MaintenanceTicker;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;
-#[cfg(feature = "github")]
-pub use repo_manager::HttpRepoHost;
-pub use repo_manager::RepoManager;
 pub use run_supervisor::{RunGuard, RunSupervisor};
 pub use scheduler::{
     CATCHUP_WINDOW_MINUTES, Clock, CompanyScheduler, FakeClock, PRUNE_CUTOFF_MINUTES, SystemClock,
     missed_instant,
 };
 pub use tools::StubToolProvider;
+pub use turn_sweep::{TURN_INTERRUPTED_BY_RESTART, sweep_interrupted_turns};
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
 pub use workflow_outcome::{
-    delivered_by_unsettled_runs, record_run_finished, sweep_interrupted_runs,
+    FailedRun, delivered_by_unsettled_runs, record_run_finished, sweep_interrupted_runs,
 };
 pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;

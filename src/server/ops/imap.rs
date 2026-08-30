@@ -3,46 +3,131 @@
 //! always compiled and only `LettreMailSender` is gated behind `smtp`.
 use serde::{Deserialize, Serialize};
 
+use crate::ports::types::SecretValue;
+
 /// Credentials for polling one IMAP mailbox — **secret** (`password`).
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// The password is a [`SecretValue`] rather than a `String`, so *both*
+/// rendering surfaces are guarded by the type instead of by an impl on this
+/// struct. Before issue #1770 the `Debug` half was hand-written and tested
+/// while the derived `Serialize` emitted the plaintext — the same blind spot
+/// #1741 found on `SecretValue` itself, and the reason the fix belongs on the
+/// field's type: a `#[derive(Debug, Serialize)]` here is now safe, and so is
+/// the next struct that embeds one of these.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImapCredentials {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: String,
-}
-
-impl std::fmt::Debug for ImapCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never the password.
-        f.debug_struct("ImapCredentials")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("username", &self.username)
-            .finish_non_exhaustive()
-    }
+    pub password: SecretValue,
 }
 
 #[cfg(test)]
 mod credential_tests {
     use super::*;
 
+    /// Issue #1770. The `Debug` half of this struct was hand-written *and*
+    /// tested; the derived `Serialize` over a plain `String` password had no
+    /// guard and no test, so `serde_json::to_value` over these credentials —
+    /// or over anything embedding them — emitted the plaintext.
+    ///
+    /// The assertions go through containers `ImapCredentials` knows nothing
+    /// about, because the guard now lives on the field's *type*: a struct with
+    /// a plain `#[derive(Serialize)]`, plus `Option`, `Vec`, a map value and
+    /// `#[serde(flatten)]` (a genuinely different serde code path), across
+    /// both `to_string` and `to_value` (also different code paths in
+    /// `serde_json`), and both `{:?}` and `{:#?}`.
     #[test]
-    fn debug_never_prints_the_password() {
+    fn planted_password_never_reaches_debug_or_serialize() {
+        use std::collections::BTreeMap;
+
+        // Obviously fake, and distinctive enough that a substring hit is a
+        // real hit. Same sentinel as the other planted-secret tests.
+        const FAKE_SECRET: &str = "NOT-A-REAL-KEY-planted-for-tests";
+
+        // Case-**insensitive**: a leak that arrives case-mangled is still a
+        // leak, and an exact-case search reads it as clean.
+        fn leaks(rendering: &str) -> bool {
+            rendering
+                .to_ascii_lowercase()
+                .contains(&FAKE_SECRET.to_ascii_lowercase())
+        }
+
+        // Sanity: the detector detects. Without this every assertion below
+        // could be vacuous and still read as green.
+        assert!(
+            leaks(&format!("password={}", FAKE_SECRET.to_ascii_lowercase())),
+            "the leak detector cannot see a lowercased sentinel; every \
+             assertion below would be vacuous"
+        );
+
+        /// The next struct somebody writes: derives `Serialize` and `Debug`
+        /// with no idea a credential is in there.
+        #[derive(Debug, Serialize)]
+        struct UnsuspectingConfig {
+            label: String,
+            primary: ImapCredentials,
+            optional: Option<ImapCredentials>,
+            many: Vec<ImapCredentials>,
+            by_name: BTreeMap<String, ImapCredentials>,
+            #[serde(flatten)]
+            nested: Nested,
+        }
+
+        /// Flattened, so serde uses `FlatMapSerializer` rather than the
+        /// ordinary struct serializer.
+        #[derive(Debug, Serialize)]
+        struct Nested {
+            inner: ImapCredentials,
+        }
+
         let creds = ImapCredentials {
             host: "imap.example.com".into(),
             port: 993,
             username: "acme@opencompany.work".into(),
-            password: "SUPER-SECRET-PW-123".into(),
+            password: SecretValue(FAKE_SECRET.to_string()),
         };
+        let config = UnsuspectingConfig {
+            label: "tenant mailbox".to_string(),
+            primary: creds.clone(),
+            optional: Some(creds.clone()),
+            many: vec![creds.clone(), creds.clone()],
+            by_name: BTreeMap::from([("acme".to_string(), creds.clone())]),
+            nested: Nested {
+                inner: creds.clone(),
+            },
+        };
+
+        for rendering in [
+            serde_json::to_string(&creds).expect("serializes"),
+            serde_json::to_value(&creds)
+                .expect("serializes")
+                .to_string(),
+            serde_json::to_string(&config).expect("serializes"),
+            serde_json::to_value(&config)
+                .expect("serializes")
+                .to_string(),
+        ] {
+            assert!(!leaks(&rendering), "plaintext reached serde: {rendering}");
+        }
+        for rendering in [
+            format!("{creds:?}"),
+            format!("{creds:#?}"),
+            format!("{config:?}"),
+            format!("{config:#?}"),
+        ] {
+            assert!(!leaks(&rendering), "plaintext reached Debug: {rendering}");
+        }
+
+        // Still diagnosable: everything that is not the credential survives.
         let rendered = format!("{creds:?}");
-        assert!(
-            !rendered.contains("SUPER-SECRET-PW-123"),
-            "the password leaked into Debug: {rendered}"
-        );
-        assert!(rendered.contains("imap.example.com"));
-        assert!(rendered.contains("993"));
-        assert!(rendered.contains("acme@opencompany.work"));
+        assert!(rendered.contains("imap.example.com"), "{rendered}");
+        assert!(rendered.contains("993"), "{rendered}");
+        assert!(rendered.contains("acme@opencompany.work"), "{rendered}");
+
+        // And the credential itself is still reachable by the one named door,
+        // so the poller can still log in.
+        assert_eq!(creds.password.expose(), FAKE_SECRET);
     }
 }
 
@@ -116,6 +201,16 @@ impl AsyncImapReceiver {
     /// process, which is fine, we only need *a* provider installed.
     fn tls_connector() -> Result<tokio_rustls::TlsConnector, OpenCompanyError> {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        #[cfg(test)]
+        if std::env::var_os("OPENCOMPANY_MAIL_TEST_INSECURE_TLS").is_some() {
+            let config = tokio_rustls::rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(std::sync::Arc::new(TestOnlyCertificateVerifier))
+                .with_no_client_auth();
+            return Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
+                config,
+            )));
+        }
         let root_store: tokio_rustls::rustls::RootCertStore =
             webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect();
         let config = tokio_rustls::rustls::ClientConfig::builder()
@@ -142,7 +237,7 @@ impl AsyncImapReceiver {
 
         let client = async_imap::Client::new(tls_stream);
         let mut session = client
-            .login(&creds.username, &creds.password)
+            .login(&creds.username, creds.password.expose())
             .await
             .map_err(|(e, _)| OpenCompanyError::Store(format!("imap login: {e}")))?;
 
@@ -273,6 +368,72 @@ impl MailReceiver for AsyncImapReceiver {
     }
 }
 
+// The CI-only Stalwart fixture creates its own certificate. Keep its explicit
+// opt-out from certificate validation test-only: production builds always use
+// the Mozilla root set configured above.
+#[cfg(all(test, feature = "imap"))]
+#[derive(Debug)]
+struct TestOnlyCertificateVerifier;
+
+#[cfg(all(test, feature = "imap"))]
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for TestOnlyCertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &tokio_rustls::rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+    {
+        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        use tokio_rustls::rustls::SignatureScheme;
+
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
+}
+
 #[cfg(all(test, feature = "imap"))]
 mod imap_tests {
     use super::*;
@@ -308,6 +469,7 @@ mod imap_tests {
 /// ```
 #[cfg(all(test, feature = "imap", feature = "smtp"))]
 mod live_smoke {
+    use crate::ports::types::SecretValue;
     use crate::server::ops::imap::AsyncImapReceiver;
     use crate::server::ops::mailer::{
         MailCredentials, MailReceiver, MailSender, OutboundEmail, TenantMailboxConfig,
@@ -317,9 +479,22 @@ mod live_smoke {
     #[tokio::test]
     #[ignore = "live: needs OPENCOMPANY_MAIL_* + a real Stalwart mailbox"]
     async fn send_then_receive_roundtrip() {
-        let cfg = TenantMailboxConfig::from_env()
+        let mut cfg = TenantMailboxConfig::from_env()
             .expect("OPENCOMPANY_MAIL_* parse failed")
             .expect("set OPENCOMPANY_MAIL_ADDRESS + the SMTP/IMAP vars first");
+
+        // Stalwart's ephemeral CI container has a self-signed certificate.
+        // This knob only exists in test builds, and leaves production's TLS
+        // verification path unchanged. SMTP stays plaintext in that fixture;
+        // IMAPS still performs a real TLS handshake via the test-only verifier.
+        // The fixture's plaintext SMTP listener advertises no AUTH mechanism,
+        // so the round trip is unauthenticated on that leg and authenticated on
+        // IMAP — matching how the container is provisioned above.
+        if std::env::var_os("OPENCOMPANY_MAIL_TEST_INSECURE_TLS").is_some() {
+            cfg.smtp.security = crate::server::ops::smtp::SmtpSecurity::None;
+            cfg.smtp.username.clear();
+            cfg.smtp.password = SecretValue(String::new());
+        }
 
         let token = format!(
             "SMOKE-{}",

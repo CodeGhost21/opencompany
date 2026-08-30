@@ -1,0 +1,112 @@
+# Companies the firm invested in, and how each is actually doing.
+#
+# The record that decays fastest. A firm knows its portfolio well for a quarter
+# after investing and then relies on whatever the founders volunteer — which is
+# systematically better than reality, because founders who are struggling send
+# shorter updates. A row with a date on the last real update makes that decay
+# visible.
+
+title = "Portfolio"
+purpose = """
+Every investment: the terms, how the company is actually doing, what it needs, \
+and when anybody last had a real conversation with it. Read it before the \
+quarterly, and record what you learn when you learn it.\
+"""
+written_by = "`record_entry` to add or update a position, `close_entry` on exit or write-off"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "company"
+role = "title"
+required = true
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "invested"
+role = "number"
+description = "Amount, and the round."
+
+[[field]]
+name = "last_contact"
+role = "date"
+description = "When somebody last had a real conversation. A stale date here is itself the signal — quiet companies are rarely quiet because things are going well."
+
+[[field]]
+name = "how_they_are"
+role = "prose"
+description = "Honestly. Founders who are struggling send shorter updates, so the absence of bad news is not good news."
+
+[[field]]
+name = "runway"
+role = "prose"
+description = "Months, and what it depends on. The number that decides whether anything else matters."
+
+[[field]]
+name = "asks"
+role = "prose"
+description = "What they need from the firm. An unanswered ask is the fastest way to be excluded from the next round's information."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — exit, acquisition, or write-off. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "healthy"
+
+[[status]]
+name = "watch"
+label = "Watch"
+
+[[status]]
+name = "struggling"
+
+[[status]]
+name = "exited"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "written_off"
+label = "Written off"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Needs attention"
+blurb = "Struggling or on watch. A stale `last_contact` on a healthy row belongs here too."
+statuses = ["struggling", "watch"]
+order = "recent"
+
+[[section]]
+heading = "Healthy"
+blurb = "Performing, with the date somebody last actually spoke to them."
+statuses = ["healthy"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Exited or written off, each with the reason. The write-offs are where a firm \
+learns whether its diligence asked the right question — which is why the \
+reason has to be specific.\
+"""
+statuses = ["exited", "written_off"]
+cap = 20

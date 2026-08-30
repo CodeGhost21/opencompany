@@ -32,6 +32,21 @@ live cognition is gated.
 
 The CLI mirrors several of these as flags — see the [CLI reference](cli.md).
 
+### Agent workspace checkpoints
+
+Automatic Git history for each agent's private filesystem workspace is opt-in
+in the data directory's `config.toml`:
+
+```toml
+[workspace]
+git_enabled = true
+```
+
+OpenCompany creates a baseline commit, then checkpoints changes after tool
+calls, including shell commands. Calls that change nothing create no commit.
+The Git object database is stored beside the working tree rather than among the
+agent's files. The default is `false`.
+
 ### Bind precedence
 
 Where a flag and a variable name the same thing, the flag wins. For the

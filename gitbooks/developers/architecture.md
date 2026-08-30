@@ -48,12 +48,13 @@ src/runtime/            CompanyRuntime, CycleRunner, cron scheduler, registry
 src/server/             Axum HTTP router and handlers
 src/server/users/       Human sign-in: magic link, passwords, sessions, invites
 src/openhuman/          OpenHuman launcher seams
-src/tiny/               TinyAgents/OpenHuman status surface
+src/tiny/               Tinyagents/OpenHuman status surface
 src/bin/opencompany.rs  CLI entrypoint
 companies/              Business definitions (a company.toml + docs each)
 frontend/               Company-agnostic operator console (Vite + React)
 vendor/openhuman/       OpenHuman git submodule
-vendor/tinyagents/      TinyAgents git submodule
+vendor/openhuman/vendor/tinyagents/
+                        TinyAgents inherited from OpenHuman
 ```
 
 ## Design goals

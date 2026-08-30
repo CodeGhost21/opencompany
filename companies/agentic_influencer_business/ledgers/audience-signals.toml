@@ -1,0 +1,99 @@
+# What the audience is telling this business, beyond the view count.
+#
+# A creator business gets two kinds of feedback: metrics, which are precise and
+# say little about why, and comments, which say why and are unrepresentative.
+# Neither is usable alone. This ledger is where the two are reconciled into
+# something worth changing the content for.
+
+title = "Audience signals"
+purpose = """
+What the audience is responding to and asking for: where the signal came from, \
+how strong it is, and whether the numbers agree. Read it before changing format \
+or direction — the loudest comment is not the audience.\
+"""
+written_by = "`record_entry` to raise or update a signal, `close_entry` when it is acted on or found unrepresentative"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "signal"
+role = "title"
+required = true
+description = "What the audience is saying or doing."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "where"
+role = "prose"
+required = true
+description = "Comments, retention curve, replies, a survey. Each has a different bias."
+
+[[field]]
+name = "strength"
+role = "prose"
+description = "How many, out of what. Twelve comments out of a hundred thousand views is twelve people."
+
+[[field]]
+name = "numbers_agree"
+role = "prose"
+description = "Whether the metrics bear it out. When comments and retention disagree, retention is describing what people did."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — acted on, or found unrepresentative. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "noticed"
+
+[[status]]
+name = "confirmed"
+
+[[status]]
+name = "acted_on"
+label = "Acted on"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "unrepresentative"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Confirmed"
+blurb = "Backed by scale or by the numbers. Worth changing something for."
+statuses = ["confirmed"]
+order = "recent"
+
+[[section]]
+heading = "Noticed"
+blurb = "Seen, not checked. Loud is not the same as common."
+statuses = ["noticed"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Acted on, or found unrepresentative — each with the reason. Kept because the \
+same request returns constantly, and knowing it was checked is what stops the \
+channel being redesigned around twelve people.\
+"""
+statuses = ["acted_on", "unrepresentative"]
+cap = 20

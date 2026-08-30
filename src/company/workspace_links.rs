@@ -27,6 +27,15 @@ pub(crate) fn link_target(name: &str) -> &str {
     name.strip_suffix(".md").unwrap_or(name)
 }
 
+/// The form two link targets are compared in: the workspace naming rule,
+/// applied to both sides.
+///
+/// One function so a link and the note it points at are always reduced the same
+/// way — the failure this replaces was exactly two sides reducing differently.
+fn link_key(target: &str) -> String {
+    crate::company::workspace_names::kebab_name(target)
+}
+
 /// Reads one workspace node with its content and inbound `[[wikilink]]`
 /// backlinks, or `None` when the id names nothing in this company's tree.
 ///
@@ -42,12 +51,19 @@ pub(crate) async fn file_with_backlinks(
     let Some((node, content)) = store.read(company, id).await? else {
         return Ok(None);
     };
-    // Lowercased to match the console, which resolves a wiki link through
-    // `fileByTitle` with both sides lowercased (`frontend/src/lib/workspace.ts`).
-    // Comparing case-sensitively here would let `[[Voice]]` render as a resolved
-    // link to `voice.md` while `voice.md` reported no backlink — the two halves
-    // of one feature disagreeing about the same link.
-    let target = link_target(&node.name).to_ascii_lowercase();
+    // Normalized to match the console, which resolves a wiki link through
+    // `fileByTitle` against the same rule (`frontend/src/lib/workspace.ts`).
+    // Comparing literally here would let `[[Voice]]` render as a resolved link
+    // to `voice.md` while `voice.md` reported no backlink — the two halves of
+    // one feature disagreeing about the same link.
+    //
+    // The rule is the workspace naming rule itself
+    // ([`crate::company::workspace_names`]), not merely a lowercasing: a note is
+    // stored as `close-checklist.md` while people, and the seeded prose,
+    // reasonably write `[[Close checklist]]`. Link text is how a document reads;
+    // the file name is what the tree is kept in, and those two need not be the
+    // same string for the link to resolve.
+    let target = link_key(link_target(&node.name));
 
     // Backlinks: scan every other file node's content for a `[[target]]` link.
     let mut backlinks = Vec::new();
@@ -58,11 +74,120 @@ pub(crate) async fn file_with_backlinks(
         if let Some((other_node, other_content)) = store.read(company, &other.id).await?
             && extract_wikilinks(&other_content)
                 .iter()
-                .any(|link| link.to_ascii_lowercase() == target)
+                .any(|link| link_key(link) == target)
         {
             backlinks.push(other_node);
         }
     }
 
     Ok(Some((node, content, backlinks)))
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::ports::workspace::WorkspaceOrigin;
+    use crate::store::FsOps;
+
+    async fn note(
+        ws: &Arc<dyn WorkspaceStore>,
+        company: &CompanyId,
+        name: &str,
+        body: &str,
+    ) -> String {
+        let id = crate::ports::generate_id();
+        ws.create(
+            company,
+            &crate::ports::workspace::WorkspaceNode {
+                id: id.clone(),
+                name: name.to_string(),
+                kind: NodeKind::File,
+                parent_id: None,
+                updated_at_millis: 1,
+                created_by: WorkspaceOrigin::Operator,
+                updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
+                adopted: false,
+            },
+            Some(body),
+        )
+        .await
+        .expect("create");
+        id
+    }
+
+    /// Link text is how a document reads; the file name is what the tree is
+    /// kept in. `[[Close checklist]]` therefore has to find `close-checklist.md`
+    /// — otherwise the lowercase-dashed naming rule would have silently
+    /// unresolved every wiki link in every seeded company on the day it landed.
+    #[tokio::test]
+    async fn a_link_written_as_prose_backlinks_a_dashed_note() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+
+        let target = note(&ws, &company, "close-checklist.md", "# Close").await;
+        note(
+            &ws,
+            &company,
+            "readme.md",
+            "Follow the [[Close checklist]] every month.",
+        )
+        .await;
+
+        let (_, _, backlinks) = file_with_backlinks(ws.as_ref(), &company, &target)
+            .await
+            .expect("reads")
+            .expect("the note exists");
+
+        assert_eq!(
+            backlinks
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["readme.md"],
+        );
+    }
+
+    /// The converse, for a company that predates the rule: a note still named
+    /// `Close checklist.md` is found by a link written in the new spelling.
+    #[tokio::test]
+    async fn a_dashed_link_backlinks_a_legacy_note() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+
+        let target = note(&ws, &company, "Close checklist.md", "# Close").await;
+        note(&ws, &company, "readme.md", "See [[close-checklist]].").await;
+
+        let (_, _, backlinks) = file_with_backlinks(ws.as_ref(), &company, &target)
+            .await
+            .expect("reads")
+            .expect("the note exists");
+
+        assert_eq!(backlinks.len(), 1, "{backlinks:?}");
+    }
+
+    /// Two notes that differ by more than separators stay unlinked — the rule
+    /// normalizes spelling, it does not make matching fuzzy.
+    #[tokio::test]
+    async fn an_unrelated_link_is_not_a_backlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+
+        let target = note(&ws, &company, "close-checklist.md", "# Close").await;
+        note(&ws, &company, "readme.md", "See [[open-checklist]].").await;
+
+        let (_, _, backlinks) = file_with_backlinks(ws.as_ref(), &company, &target)
+            .await
+            .expect("reads")
+            .expect("the note exists");
+
+        assert!(backlinks.is_empty(), "{backlinks:?}");
+    }
 }

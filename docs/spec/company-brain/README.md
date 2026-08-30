@@ -17,7 +17,7 @@ CompanyBrain
 ├── identity   CompanyId (ULID), Ed25519 keypair, tiny.place @handle, Agent Card
 ├── charter    name, output, mission, human_role, policies (mutable at runtime)
 ├── roster     teammates: id, role, description, tier hint, tool grants, budgets
-├── memory     compressed cycle traces (~20:1 working memory) + task results
+├── memory     compressed cycle traces + task results
 ├── context    addressable chunks (the RLM environment: put/list/peek/search)
 ├── world      event log (append-only), ledger, open tasks, approval queue
 └── feedback   inbox of feedback items + links to filed GitHub issues
@@ -36,8 +36,9 @@ vocabulary (glossary: Cycle, Pass, Dispatch):
 
 1. **Drain** pending events (batched — a burst of webhooks becomes one
    cycle).
-2. **Load** working memory: recent compressed traces, the context index,
-   roster and charter.
+2. **Load** the company record and charter. Cycle-level working memory is not
+   implemented: traces are retained for inspection, but no brain consumes them
+   until a real compression and recall design exists.
 3. **Think**: `Brain::run_cycle`. The orchestrator tier reviews everything
    and loops refine → delegate → dispatch. Mid-cycle callbacks come back to
    the host: tool calls (grant-checked against the manifest), context ops,

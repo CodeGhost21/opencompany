@@ -189,23 +189,40 @@ one account into a broken toolkit: when the console revokes an account, and when
 whatever credential the company's *declared provider* wants — an OpenRouter
 `sk-or-…`, a raw BYOK token, an `openai_compatible` key. It is provider-scoped,
 not an identity, and handing it to the TinyHumans backend would present one
-vendor's credential to another. The two coincide only when the declared provider
-is `managed`, and even then they are the same value for different reasons.
+vendor's credential to another.
+
+Since `managed`'s removal the two never coincide, which makes the separation
+cleaner rather than looser. A company holding **no** inference key rides the
+subscription on the platform's own credential — resolved from this host's
+identity, not from `inference/key` — and a company that sets one is naming an
+OpenRouter account that has nothing to do with TinyHumans. See
+[providers.md](providers.md).
+
+There is one such slot **per harness**: the default harness keeps the flat
+`inference/key`, and every named one uses `harness/<id>/inference/key`. The
+asymmetry is deliberate — the `SecretStore` has no rename, so namespacing the
+default too would orphan the stored credential of every company already
+running.
 
 ## What this does not cover
 
-- **The native OAuth catalog.** `…/connections/{provider}/start` still resolves
-  through `HostConnectRoutes` — a stored provider token, else a *projected*
-  instance identity, else this host's own registered provider application. That
-  precedence is unchanged, so `source: "company"` never appears on a native-only
-  provider. That path is entangled with the inert-catalog question in #396 and is
-  left alone deliberately rather than papered over.
+- **Legacy native OAuth credentials.** #838 retires
+  `…/connections/{provider}/start`: through 2026-09-30 it answers a dated
+  `410 native_oauth_retired`, then #1023 removes it. The callback likewise
+  explains an in-flight browser redirect without exchanging its code. Existing
+  `oauth/{provider}` values remain readable and revocable, but no agent can use
+  them and no credential tier treats a configured host provider app as a route.
 - **Chat inference and embeddings.** Both still resolve from the environment via
   `hosted_endpoint_from_env`. Moving them onto this seam is issue #585; when it
   lands they inherit the rotation guarantee by construction, because the seam is
   already here.
-- **Media generation and `web_search`.** Deliberately environment-only: those run
-  on the *platform's* managed credential, never a company-controlled one.
+- **Media generation and managed `web_search`.** Deliberately environment-only:
+  those run on the *platform's* managed credential, never a company-controlled
+  one. Search additionally has a **company-controlled** surface beside it — a
+  BYO provider key in that company's own secret store, which replaces the
+  managed tool for that company and is billed to its own account. It is a
+  separate credential with separate rules, not a tier of this seam; see
+  [search.md](search.md).
 
 ## Known limits, recorded deliberately
 
@@ -217,3 +234,20 @@ is `managed`, and even then they are the same value for different reasons.
 - **Two companies pasting the same key share one entity.** That cannot be
   prevented client-side; it is a deployment caveat, the same one the BYO Composio
   token already carries.
+- **Media generation does not read the projected tier.** `web_search`, chat
+  inference and embeddings all resolve through `TinyhumansTokenSource`, so a
+  hosted tenant's rotating pod token reaches them. `media_backend_from_env` does
+  not: it reads `OPENCOMPANY_MEDIA_KEY`, else a static `TINYHUMANS_API_KEY`, and
+  a projected token file alone leaves media unwired. This is a migration miss
+  from #189 rather than a decision, but it cannot be closed here — the upstream
+  media client takes a `String` bearer for the life of the process, so flattening
+  a 600-second projected token into it would trade "never works" for "works for
+  ten minutes". Fixing it properly means giving that client a resolvable
+  credential upstream, the same shape `SearchBackend` already has. Until then a
+  hosted deployment that wants media must also carry a **non-projected** key, and
+  `PlatformCredentialStatus::boot_warning` says so at boot (#879). That key
+  should be `OPENCOMPANY_MEDIA_KEY`, the supported per-surface override. A static
+  `TINYHUMANS_API_KEY` would also work, but it is the `docker compose` credential
+  and the explicitly unsupported self-host hatch; reaching for it here would make
+  that hatch load-bearing on the hosted path, which is a decision for whoever
+  closes the upstream gap rather than a workaround to settle by default.

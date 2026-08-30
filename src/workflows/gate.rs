@@ -53,6 +53,16 @@
 //! TTL and the operator would be told the agent did not act, about a call no
 //! agent ever made.
 //!
+//! That argument is about the **single-use** grant and only it, which is why
+//! issue #1098 could open the standing arm without touching this one. A
+//! [`StandingGrant`](crate::runtime::grants::StandingGrant) is never redeemed by
+//! anybody: it is matched at the gate, before the call, and the call then
+//! proceeds in place. Nothing has to be re-dispatched, so "nothing would ever
+//! redeem it" is not a property of it. `consume_grant` therefore stays closed on
+//! this path permanently and
+//! [`standing_grant_allows`](crate::harness::policy::ApprovalPolicy) does not —
+//! the asymmetry is the safety argument, not an oversight to tidy up.
+//!
 //! And the seam says so itself. [`ToolInvoker::invoke`](tinyflows::caps::ToolInvoker)
 //! receives `(slug, args, conn)` — no node id, no run state. It cannot name the
 //! node on a card, and on a continuation it could not recognise a call the
@@ -95,15 +105,22 @@
 //!
 //! # Deliberate deviations, stated rather than quietly satisfied
 //!
-//! * **Standing grants cannot apply "identically on both paths"** (a criterion
-//!   in #460's body). A standing grant is scoped to a teammate
-//!   ([`admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)) and
-//!   a `tool_call` node has no teammate — it acts as the company. This module
-//!   therefore matches grants against a synthetic `workflow:{id}` principal,
-//!   which nothing mints for today, so the answer is always **fail-closed**: a
-//!   teammate's standing grant does not open a workflow node's gate. Widening
-//!   that is a consent decision for the maintainer, not one to make by
-//!   defaulting.
+//! * **Standing grants now apply on this path too** (issue #1098). #460 left
+//!   this fail-closed and named the reason: a standing grant was scoped to a
+//!   teammate, a `tool_call` node has none, and *"widening that is a consent
+//!   decision for the maintainer, not one to make by defaulting."* #1098 is that
+//!   decision taken. The workflow is now a real grant subject
+//!   ([`GrantSubject::Workflow`](crate::runtime::grants::GrantSubject)), so a
+//!   permission the operator gave *this workflow* opens its gates until the
+//!   deadline — which is what stops a scheduled run re-asking the same question
+//!   every time it fires.
+//!
+//!   Three things did **not** widen with it. A *teammate's* grant still does not
+//!   open a workflow node's gate: the two subjects are separate namespaces and a
+//!   workflow named like a teammate matches nothing of theirs. The permission is
+//!   still refused unless the call is grantable on its own arguments, so
+//!   `shell` and `http_request` keep asking every run. And the **single-use**
+//!   arm is untouched — see the note below.
 //! * **A `Deny` verdict is not enforced here.** Under `readonly`,
 //!   [`ApprovalPolicy::check`] denies external effects outright. Honouring that
 //!   would be a *new refusal* on a path that runs today, i.e. exactly the
@@ -113,12 +130,12 @@
 //! * **An authored `requires_approval = false` does not win.** The policy adds
 //!   a gate the author did not ask for; an author cannot opt their node out of
 //!   the company's approval policy.
-//! * **`sub_workflow` children are not gated.** tinyflows cannot resume a child
-//!   across the boundary (`nodes/integration/sub_workflow.rs`), and a paused
-//!   child *halts the parent* with an unresumable error. Gating a child would
-//!   convert a working run into a dead one with no card to decide, so children
-//!   keep today's behaviour. Filed as its own issue (#617) rather than left in
-//!   a merged PR body; it needs engine work to close.
+//! * **`sub_workflow` children are gated by their resolver.** The child is
+//!   translated inside tinyflows after this pass has handled the top-level
+//!   graph, so [`StoreWorkflowResolver`](super::caps::resolver::StoreWorkflowResolver)
+//!   applies the same policy and grants before returning it. tinyflows surfaces
+//!   the pause to the parent with a namespaced node id and forwards approval on
+//!   the continuation (issue #617).
 //! * **Dry runs are not gated.** Every effect is stubbed
 //!   ([`dry_run`](super::caps)), so there is nothing to approve, and pausing
 //!   would stop a dry run from walking the rest of the graph — which is the one
@@ -131,8 +148,9 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicy, ToolPolicyDecision, To
 use openhuman_core::openhuman as oh;
 
 use crate::company::Policy;
-use crate::harness::policy::ApprovalPolicy;
+use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::runtime::grants::GrantSet;
 
 /// The tool name an `http_request` node's call is classified as (issue #614).
 ///
@@ -238,15 +256,35 @@ pub(crate) async fn apply_policy_gates(
     record: &CompanyRecord,
     workflow_id: &str,
     run_id: &str,
+    grants: &GrantSet,
 ) -> Vec<GatedCall> {
-    let gated = policy_gates(
+    apply_policy_gates_with_policy(
         graph,
-        &record.manifest.policy,
+        &record.effective_policy(),
         &record.id,
         workflow_id,
         run_id,
+        grants,
     )
-    .await;
+    .await
+}
+
+/// Applies the workflow policy gate using the effective policy already selected
+/// for this run.
+///
+/// A `sub_workflow` child is translated later by the resolver, after the
+/// top-level runner has applied its pass. The resolver has the run's effective
+/// policy and grants but not the original [`CompanyRecord`], so it uses this
+/// shared mutation half rather than reimplementing policy classification.
+pub(crate) async fn apply_policy_gates_with_policy(
+    graph: &mut WorkflowGraph,
+    policy: &Policy,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+    grants: &GrantSet,
+) -> Vec<GatedCall> {
+    let gated = policy_gates(graph, policy, company, workflow_id, run_id, Some(grants)).await;
 
     // Written LAST and unconditionally: the policy's gate outranks an authored
     // `requires_approval`, in both directions. An author may add a gate the
@@ -275,26 +313,41 @@ pub(crate) fn policy_hitl_disabled(_graph: &mut WorkflowGraph) -> Vec<GatedCall>
 /// Which of `graph`'s nodes the company's policy would stop — **classification
 /// only**, no mutation.
 ///
-/// Split out from [`apply_policy_gates`] for issue #617's audit line: a
-/// `sub_workflow` child is resolved and run inside the engine, so its nodes
-/// never reach the gate pass and a call the policy would park at the top level
-/// runs unparked one level down. The resolver cannot *fix* that — the engine
-/// cannot resume across the boundary — but it can ask the same question and say
-/// what it found, so an operator reviewing what was approved is not left with a
-/// hole they cannot account for. One classifier, so the audit line and the gate
-/// can never disagree about the same call.
+/// `grants` is the company's live permission set (issue #1098). The top-level
+/// runner and the `sub_workflow` resolver both pass `Some`, so a standing
+/// permission the operator gave this workflow is honoured consistently at every
+/// nesting level.
 pub(crate) async fn policy_gates(
     graph: &WorkflowGraph,
     company_policy: &Policy,
     company: &CompanyId,
     workflow_id: &str,
     run_id: &str,
+    grants: Option<&GrantSet>,
 ) -> Vec<GatedCall> {
     // The manifest's `[policy]` verbatim — same mode, same `always_approve`,
     // same `auto_approve_under_usd` the roster runs under. No per-agent budget:
     // a workflow node is not a teammate, and the company-wide ceiling is
     // enforced elsewhere.
-    let policy = ApprovalPolicy::new(company_policy, None).for_authored_workflow_nodes();
+    //
+    // Issue #1098: bound to the workflow, so the standing-permission arm has a
+    // subject to match on. Built **once** for the whole graph rather than per
+    // node — the subject is the workflow, and every node of it spends the same
+    // permission. The agent stays unbound, so the single-use arm stays closed.
+    //
+    // The queue is private-but-grant-sharing for the reason the module note
+    // gives: `check` pushes its projected effect onto `requests`, and a shared
+    // queue would have `park_gated_calls` or the chat cycle drain it into a
+    // second, tool-call-shaped card for a decision this pass already carded.
+    // The grants half must still be the company's real one or the permission is
+    // invisible to the pass that has to honour it.
+    let policy = ApprovalPolicy::new(company_policy, None)
+        .for_authored_workflow_nodes()
+        .with_workflow(workflow_id);
+    let policy = match grants {
+        Some(grants) => policy.with_requests(ApprovalRequestQueue::with_grants(grants.clone())),
+        None => policy,
+    };
     let mut gated = Vec::new();
 
     for node in &graph.nodes {
@@ -392,14 +445,20 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
         // gating here would park the same call twice.
         NodeKind::Agent
         // Capabilities that are explicit stubs today: `CodeRunner`,
-        // `MemoryProvider`, and the `ShellRunner` (new in tinyflows 0.6.1) are
-        // wired to error / left `None` (see `caps`), so there is no call to
-        // classify. **These are the next three to gate** — sandboxed code, a
-        // memory *write*, and a shell script are all effectful — and the
-        // decision belongs with whoever wires the capability, in the same PR.
+        // `MemoryProvider`, the `ShellRunner` (new in tinyflows 0.6.1), and the
+        // `ApprovalProvider` (new in a later tinyflows 0.8.x) are wired to
+        // error / left `None` (see `caps`), so there is no call to classify.
+        // `Approval` falls back to pausing the run for the host to settle
+        // through `engine::resume` rather than reaching anywhere on its own,
+        // which is why it belongs in this group rather than being classified
+        // like `tool_call`/`http_request`. **These are the next four to
+        // gate** — sandboxed code, a memory *write*, a shell script, and a
+        // wired approval notification are all effectful — and the decision
+        // belongs with whoever wires the capability, in the same PR.
         | NodeKind::Code
         | NodeKind::Memory
         | NodeKind::Shell
+        | NodeKind::Approval
         // A child graph is resolved and run *inside* the engine
         // (`run_sub_workflow`), so its nodes never pass this function at all —
         // this arm is not what excludes them. The module docs give the reason
@@ -421,7 +480,10 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
         | NodeKind::SplitOut
         | NodeKind::Switch
         | NodeKind::Transform
-        | NodeKind::Trigger => None,
+        | NodeKind::Trigger
+        // Terminal sink: discards its input and activates nothing further.
+        // Pure control flow, like the group above.
+        | NodeKind::Void => None,
     }
 }
 
@@ -594,6 +656,8 @@ description = "Runs Acme."
         ))
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -605,9 +669,13 @@ description = "Runs Acme."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -657,7 +725,14 @@ description = "Runs Acme."
     #[tokio::test]
     async fn a_consequential_call_gates_under_supervised() {
         let mut g = graph(vec![tool_node("run-it", "shell")]);
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), ["run-it"]);
         assert_eq!(gated.len(), 1);
@@ -677,7 +752,14 @@ description = "Runs Acme."
     async fn full_autonomy_leaves_the_graph_untouched() {
         let before = graph(vec![tool_node("run-it", "shell")]);
         let mut after = before.clone();
-        let gated = apply_policy_gates(&mut after, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut after,
+            &company("full", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty());
         assert_eq!(after.nodes[0].config, before.nodes[0].config);
@@ -700,7 +782,14 @@ description = "Runs Acme."
         node.config = json!({ "slug": "shell", "args": { "command": "=previous.output" } });
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("full", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), vec!["run-it"]);
         assert_eq!(gated.len(), 1, "{gated:?}");
@@ -726,7 +815,14 @@ description = "Runs Acme."
         node.config = json!({ "method": "POST", "url": "=item.endpoint" });
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("full", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gated.len(), 1, "{gated:?}");
         assert_eq!(
@@ -754,7 +850,14 @@ description = "Runs Acme."
             tool_node("read", "file_read"),
             tool_node("search", "web_search"),
         ]);
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty(), "{gated:?}");
         assert!(gate_ids(&g).is_empty());
@@ -773,14 +876,53 @@ description = "Runs Acme."
         }
     }
 
+    /// The three newest additions to `NodeKind` (tinyflows 0.8.x), classified
+    /// directly against `call_of` rather than only through `apply_policy_gates`
+    /// — a regression lock on the two new match arms added alongside
+    /// `Capabilities.approvals`.
+    ///
+    /// `Approval` and `Void` join `tinyflows_parallel_control_nodes_do_not_describe_outward_calls`
+    /// in reaching nothing on this path (`Approval`'s own doc comment on the
+    /// match arm says why: it is a stub, like `Code`/`Memory`/`Shell`, not a
+    /// classified capability call); `Trigger` was already exhaustive-matched to
+    /// `None` and gets the same direct check for symmetry.
+    #[test]
+    fn the_newest_node_kinds_reach_nothing_on_this_path() {
+        for kind in [NodeKind::Approval, NodeKind::Trigger, NodeKind::Void] {
+            let node = kind_node("n", kind.clone());
+            assert_eq!(call_of(&node), None, "{kind:?}");
+        }
+    }
+
+    /// The two node kinds `call_of` *does* classify, checked directly rather
+    /// than only through the higher-level `apply_policy_gates` tests above —
+    /// so a future new `None` arm accidentally shadowing one of these two would
+    /// fail here even if a specific gating test happened not to exercise it.
+    #[test]
+    fn tool_call_and_http_request_are_the_two_classified_kinds() {
+        let tool = tool_node("run-it", "shell");
+        assert!(call_of(&tool).is_some(), "{tool:?}");
+
+        let mut http = tool_node("fetch", "unused");
+        http.kind = NodeKind::HttpRequest;
+        http.config = json!({ "method": "GET", "url": "https://example.com" });
+        assert!(call_of(&http).is_some(), "{http:?}");
+    }
+
     /// `always_approve` outranks the tier, exactly as it does on the agent
     /// path — so a company can gate a metered read it wants to be asked about
     /// even though `supervised` alone would let it through.
     #[tokio::test]
     async fn always_approve_gates_a_call_the_tier_would_allow() {
         let mut g = graph(vec![tool_node("search", "web_search")]);
-        let gated =
-            apply_policy_gates(&mut g, &company("full", &["web_search"]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("full", &["web_search"]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), ["search"]);
         assert!(gated[0].reason.contains("always-approve"), "{gated:?}");
@@ -794,7 +936,14 @@ description = "Runs Acme."
         node.config = json!({ "slug": "shell", "requires_approval": false });
         let mut g = graph(vec![node]);
 
-        apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(g.nodes[0].config["requires_approval"], json!(true));
     }
@@ -814,7 +963,14 @@ description = "Runs Acme."
         transform.kind = NodeKind::Transform;
         let mut g = graph(vec![agent, transform]);
 
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty(), "{gated:?}");
         assert!(gate_ids(&g).is_empty());
@@ -832,7 +988,14 @@ description = "Runs Acme."
             json!({ "method": "post", "url": "https://api.example.com/v1/pay?token=s3cret" });
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), ["fetch"]);
         assert_eq!(gated[0].slug, "http_request");
@@ -855,7 +1018,14 @@ description = "Runs Acme."
         let before = node.config.clone();
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("full", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty(), "{gated:?}");
         assert_eq!(g.nodes[0].config, before);
@@ -874,7 +1044,14 @@ description = "Runs Acme."
         node.config = json!({ "method": "GET", "url": "=item.endpoint" });
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert_eq!(gate_ids(&g), ["fetch"]);
         let target = gated[0].target.as_deref().expect("the absence is stated");
@@ -951,7 +1128,14 @@ description = "Runs Acme."
         node.config = json!({});
         let mut g = graph(vec![node]);
 
-        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(
+            &mut g,
+            &company("supervised", &[]),
+            "wf",
+            "run-1",
+            &GrantSet::default(),
+        )
+        .await;
 
         assert!(gated.is_empty());
         assert!(gate_ids(&g).is_empty());

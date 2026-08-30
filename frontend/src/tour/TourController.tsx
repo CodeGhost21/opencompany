@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import type { Step, TourData } from "react-joyride";
+import type { EventData, Step, TourData } from "react-joyride";
 
 import type { View } from "@/components/app-shell";
+import { terminalOutcome } from "./events";
 import { TOUR, waitForTarget } from "./steps";
 import { TourTooltip } from "./TourTooltip";
 import { WelcomeDialog } from "./WelcomeDialog";
@@ -47,11 +48,6 @@ export function preloadTour(): void {
   void importJoyride().catch(() => {});
 }
 
-// react-joyride status values as string literals, so we don't statically import
-// the runtime `STATUS` enum (which would defeat the lazy load).
-const STATUS_FINISHED = "finished";
-const STATUS_SKIPPED = "skipped";
-
 const STEPS: Step[] = TOUR.map((s) => ({
   target: s.target,
   title: s.title,
@@ -81,10 +77,33 @@ const STEPS: Step[] = TOUR.map((s) => ({
 export function TourController({
   company,
   setView,
+  hold,
+  suppressWelcome,
 }: {
   company: string | null;
-  /** `sub` names a section's sub-page, e.g. `#/settings/connections`. */
+  /** `sub` names a section's sub-page, e.g. `#/settings/oauth`. */
   setView: (view: View, sub?: string) => void;
+  /**
+   * Hold the tour back while first-run setup is on screen
+   * (`docs/spec/runtime/company-setup.md`).
+   *
+   * The two are sequenced, not independent: a tour of an unstaffed company walks
+   * an operator through empty pages, which is the first impression setup exists
+   * to fix. So setup runs first and this suppresses the welcome until it closes,
+   * at which point the tour has a real roster, real desks and real workflows to
+   * point at.
+   *
+   * Only the *welcome* is held. A tour already running is left alone — setup
+   * cannot open over one, because setup only opens on an empty roster and the
+   * tour's own stops are what would have been empty.
+   */
+  hold?: boolean;
+  /**
+   * Setup has just finished and navigated to the new roster. Its build-out
+   * already introduced the product, so leave that arrival unobscured for this
+   * console mount rather than opening a second welcome dialog over it.
+   */
+  suppressWelcome?: boolean;
 }) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -133,6 +152,10 @@ export function TourController({
     setStartIndex(0);
     if (tourForced() || !tourSeen(scope)) setWelcomeOpen(true);
     else setWelcomeOpen(false);
+    // `hold` is deliberately NOT a dependency. This effect consumes the one-shot
+    // resume marker, so re-running it eats a resume that had already been
+    // honoured — which is exactly what happened when the hold was wired here.
+    // The hold suppresses the *rendered* welcome instead; see below.
   }, [company, scope]);
 
   const start = useCallback(() => {
@@ -187,12 +210,14 @@ export function TourController({
     [setView],
   );
 
-  // End the tour (recording completed vs skipped) when joyride reports it done.
-  const after = useCallback(
-    (data: TourData) => {
-      if (data.status === STATUS_FINISHED || data.status === STATUS_SKIPPED) {
-        finish(data.status === STATUS_SKIPPED);
-      }
+  // End the tour (recording completed vs skipped) when joyride reports the RUN
+  // over — `onEvent` + `EVENTS.TOUR_END`, not the per-step `options.after` hook
+  // this used to be registered as. See `./events` for why that distinction is
+  // issue #1408 and why v3 has no `callback` prop to move it to.
+  const onEvent = useCallback(
+    (data: EventData) => {
+      const outcome = terminalOutcome(data);
+      if (outcome) finish(outcome === "skipped");
     },
     [finish],
   );
@@ -200,7 +225,11 @@ export function TourController({
   return (
     <>
       <WelcomeDialog
-        open={welcomeOpen}
+        // Held while first-run setup owns the screen, or while the company has
+        // nobody on it (`docs/spec/runtime/company-setup.md`). A render-time gate
+        // rather than a state one: the effect above has side effects that must
+        // fire exactly once, and this only decides what is on screen.
+        open={welcomeOpen && !hold && !suppressWelcome}
         onOpenChange={setWelcomeOpen}
         onStart={start}
         onSkip={handleSkip}
@@ -217,13 +246,36 @@ export function TourController({
             initialStepIndex={startIndex}
             continuous
             tooltipComponent={TourTooltip}
+            // Clamp the card into the viewport on BOTH axes (issue #583).
+            //
+            // joyride positions with floating-ui, and neither of its two
+            // defaults can save a stop anchored to a full-viewport element —
+            // which the Overview graph is (`h-svh`, top edge at y=0). Asking
+            // for `placement: "top"` there resolves to `0 - height - offset`,
+            // measured at y=-238: rendered, visible, mounted, and entirely
+            // above the fold. Which is what gets reported as "the tour is
+            // stuck on step 2".
+            //
+            // `flip` cannot fix it: against a full-height anchor the *bottom*
+            // side overflows by exactly as much as the top, so floating-ui's
+            // best-fit tie-break keeps the side it started on. And `shift`
+            // clamps only its main axis, which for a top/bottom placement is
+            // the horizontal one — the broken axis is the one left alone.
+            //
+            // Turning on `crossAxis` is the missing half: the card slides back
+            // inside on the axis the placement runs along. It may then overlap
+            // the element it points at, which for a full-bleed anchor is
+            // unavoidable and strictly better than being unreachable.
+            floatingOptions={{ shiftOptions: { crossAxis: true } }}
+            // Run-level. `options.before` below is per-step and stays there;
+            // the terminal handler must not, which is the whole of #1408.
+            onEvent={onEvent}
             options={{
               zIndex: 1200,
               overlayColor: "rgba(0,0,0,0.45)",
               spotlightPadding: 6,
               arrowSize: 0,
               before,
-              after,
             }}
           />
         </Suspense>

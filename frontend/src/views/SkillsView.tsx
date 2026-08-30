@@ -13,6 +13,7 @@ import {
   type Skill,
 } from "@/api/skills";
 import type { OpenCompanyClient } from "@/api/client";
+import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   CATEGORY_STYLES,
+  registryEmptyLabel,
   SKILLS_READ_ONLY_NOTE,
   type SkillCategory,
   skillReachLabel,
@@ -175,20 +177,24 @@ export function SkillsView({ client, company }: Props) {
   }, [query, registry]);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl space-y-5 px-4 py-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">Skills</h2>
-            <p className="text-sm text-muted-foreground">
-              Playbooks your teammates read. Enable, install from the registry, or add your own.
-            </p>
-          </div>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader
+        title="Skills"
+        width="5xl"
+        description={
+          <>
+            Playbooks your teammates read. Enable, install from the registry, or add your own.
+          </>
+        }
+        actions={
+          <>
           <Button onClick={() => setAddOpen(true)}>
             <Plus className="size-4" /> Add skill
           </Button>
-        </div>
-
+          </>
+        }
+      />
+      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-5 overflow-y-auto px-4 py-6">
         {/* Issue #569: what install / enable actually buy. A desk agent can list,
             describe and read a skill and can never run one — deliberate, and
             pinned by `dispatched_belt_excludes_every_deferred_family` — but this
@@ -253,13 +259,11 @@ export function SkillsView({ client, company }: Props) {
                 <Skeleton className="h-32 rounded-xl" />
               </div>
             ) : visibleRegistry.length === 0 ? (
-              <Empty
-                label={
-                  registry.length === 0
-                    ? "This host serves no shared skill registry."
-                    : "No skills match that search."
-                }
-              />
+              // A failed read leaves `registry` empty too, so the label must not
+              // derive "serves no registry" from the same failure the alert above
+              // already reports (issue #1467). The decider keeps the three cases
+              // apart.
+              <Empty label={registryEmptyLabel(registryError !== null, registry.length === 0)} />
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
                 {visibleRegistry.map((s) => (
@@ -305,7 +309,7 @@ function InstalledCard({
 }) {
   return (
     <Card data-testid="installed-card" className={cn(!skill.enabled && "opacity-70")}>
-      <CardContent className="space-y-2 py-4">
+      <CardContent className="space-y-2">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">
             <Sparkles className="size-4 text-muted-foreground" />
@@ -354,7 +358,7 @@ function RegistryCard({
 }) {
   return (
     <Card data-testid="registry-card">
-      <CardContent className="space-y-2 py-4">
+      <CardContent className="space-y-2">
         <div className="flex items-center gap-2">
           <Sparkles className="size-4 text-muted-foreground" />
           <p className="font-medium">{skill.name}</p>

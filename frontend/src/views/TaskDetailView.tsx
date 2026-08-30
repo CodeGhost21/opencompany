@@ -1,7 +1,7 @@
 // The Task Detail screen (v1, #184): the epic's capstone read surface. One
 // `GET …/tasks/{id}` (#185/#190) drives a header, the lineage rail, the event
 // timeline, and a controls bar; a 4s visibility-gated poll keeps it live while
-// the card is open. Cost/₹ is intentionally absent everywhere. The Artifacts tab is
+// the card is open. The Artifacts tab is
 // its own self-fetching surface (#306, over #187's routes); Discussion stays an
 // honest stub pending its own backend. Export (#352) is a host-rendered
 // document the controls bar downloads — the console lays out none of it.
@@ -13,16 +13,13 @@ import {
   useRef,
   useState,
   type ReactElement,
-  type ReactNode,
 } from "react";
 import {
   AlertCircle,
   ArrowLeft,
   Ban,
-  Brain,
-  CheckCircle2,
-  ChevronDown,
   ChevronRight,
+  ClipboardList,
   Clock,
   CornerDownRight,
   CornerUpLeft,
@@ -31,18 +28,14 @@ import {
   Hourglass,
   Layers,
   Loader2,
-  MessageSquare,
   MessagesSquare,
   Pencil,
   Play,
   Send,
-  ShieldCheck,
   Square,
-  StickyNote,
   Trash2,
   UserCog,
   Workflow,
-  Wrench,
 } from "lucide-react";
 
 import {
@@ -56,14 +49,11 @@ import {
   type DiscussionMessage,
   type InflightRun,
   type IrreversibleEffect,
-  type StepStatus,
   type SteerAction,
   type Task,
   type TaskApproval,
   type TaskDetail,
   type TaskPlan,
-  type TimelineEntry,
-  type TimelineKind,
 } from "@/api/tasks";
 import {
   getRun,
@@ -71,17 +61,32 @@ import {
   runElapsedMillis,
   RUN_STATUS_LABEL,
   type RunDetail,
-  type RunStatus,
   type RunSummary,
 } from "@/api/runs";
 import {
-  AWAITING_APPROVAL_LABEL,
   ApiError,
-  STEP_FAILURE_LABEL,
+  type ApprovalSummary,
+  type GrantScope,
+  type Verdict,
 } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
-import { hasFocus, type TaskFocus } from "@/lib/task-output";
-import { pendingApprovalWait } from "@/lib/task-approvals";
+import {
+  isTaskTab,
+  tabForFocus,
+  type TaskFocus,
+  type TaskTab,
+} from "@/lib/task-output";
+import { useAskerNames } from "@/components/approval-card";
+import { ApprovalRow } from "@/views/chat/ApprovalRow";
+import type { DecidedApproval } from "@/views/chat/model";
+import {
+  blockingTaskApprovals,
+  decidingForTask,
+  pendingApprovalWait,
+  taskApprovalRows,
+} from "@/lib/task-approvals";
+import { formatDuration, timeOf } from "@/lib/timeline-format";
+import { TimelineList, runStatusTone } from "@/views/runs/RunTimeline";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import {
   AlertDialog,
@@ -96,6 +101,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -110,8 +116,11 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { formatUsdCost } from "@/lib/cost";
 import { effectDone } from "@/lib/language";
-import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
+
+import { labelFor, PRIORITY_STYLES, type TaskColumn } from "@/lib/board-columns";
+import { useBoardColumns } from "@/hooks/use-board-columns";
 import { toast } from "sonner";
 import { ArtifactsTab } from "./ArtifactsTab";
 import { TaskPlanBrief, tallyPrerequisites } from "./TaskPlanBrief";
@@ -129,9 +138,17 @@ function priorityStyle(priority: string): string {
   );
 }
 
-/** The column id → human label ("in_progress" → "In progress"), tolerating unknowns. */
-function columnLabel(column: string): string {
-  return TASK_COLUMNS.find((c) => c.id === column)?.label ?? column;
+/**
+ * The column id → human label ("working" → "Working").
+ *
+ * Takes the columns because they come from the `tasks` ledger now rather than
+ * from a list this module could read at import time. `labelFor` humanises an
+ * id the host has not named — which since issue #1512 includes every *stage*
+ * word, since the ledger declares only the three phases — so a card's stage
+ * still reads as words when it is passed through here.
+ */
+function columnLabel(columns: TaskColumn[], column: string): string {
+  return labelFor(columns, column);
 }
 
 /**
@@ -156,14 +173,26 @@ function columnLabel(column: string): string {
 const UNSTARTED_COLUMNS = new Set(["todo", "planning"]);
 
 /**
+ * Whether a card has not been dispatched yet, on the stage vocabulary.
+ *
+ * Reads {@link Task.stage} and falls back to the phase, because since issue
+ * #1512 `column` is `pending`/`working`/`done`: `pending` is unstarted, a
+ * working card is unstarted only while it is `planning`, and matching on the
+ * phase alone would call every in-flight card never-dispatched.
+ */
+function neverDispatched(task: Task): boolean {
+  const stage = task.stage ?? task.column;
+  return stage === "pending" || UNSTARTED_COLUMNS.has(stage);
+}
+
+/**
  * Extends a host-computed duration to `now` while its span is still open.
  *
- * The worked/waiting arithmetic — the dispatch-window pairing and the approval
- * interval merge — used to live here *and* in the exporter
+ * The worked/waiting arithmetic used to live here *and* in the exporter
  * (`src/server/ops/task_export.rs`), so the screen and the exported record of
- * the same task could disagree about how long a person was waited on with
- * nothing failing. The host now computes both totals once in `TaskDurations`
- * and hands them to whoever reads the task; this is all that is left client-side.
+ * the same task could disagree with nothing failing. The host now computes the
+ * totals once in `TaskDurations` and hands them to whoever reads the task; this
+ * is all that is left client-side.
  *
  * The extension is exact rather than an approximation, which is why the merge
  * does not have to be repeated here: every closed span ends in the past, so past
@@ -179,54 +208,23 @@ function extend(
   return { millis: live ? total + Math.max(0, now - asOf) : total, live };
 }
 
-/**
- * The pixel height of a waiting band for a span of `millis` (#305).
- *
- * Sub-linear on purpose. The point of the band is that a four-hour wait and a
- * four-second wait must not look alike, but a linear scale makes the short one
- * invisible and the long one taller than the screen. A log curve with a floor
- * and a cap keeps both on the page: ~14px at four seconds, ~112px at four
- * hours. Past the cap the printed duration inside the band carries the
- * precision the height no longer can.
- */
-export function waitingBandHeight(millis: number): number {
-  const minutes = Math.max(0, millis) / 60_000;
-  const raw = 12 + 26 * Math.log2(1 + minutes);
-  return Math.round(Math.min(112, Math.max(12, raw)));
-}
-
-/** `1h 04m 09s` / `4m 09s` / `9s`. */
-function formatDuration(millis: number): string {
-  const s = Math.floor(millis / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0)
-    return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
-  if (m > 0) return `${m}m ${String(sec).padStart(2, "0")}s`;
-  return `${sec}s`;
-}
-
-function timeOf(at: number): string {
-  return new Date(at).toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
+// `waitingBandHeight` moved to `@/lib/timeline-format` with the timeline it
+// sizes (issue #1573), and is re-exported here so its existing importers — the
+// unit tests that pin the curve — keep their path.
+export { waitingBandHeight } from "@/lib/timeline-format";
 
 /**
- * Which tab a card's output link asks for (issue #339).
- *
- * `timeline` for everything else — including a focus that names nothing, which
- * is every navigation that existed before this — so the screen's default is
- * untouched by the feature.
+ * A stable empty default for the `parked` prop (issue #883). A `[]` literal in
+ * the parameter list is a new array every render, which would re-run the memo
+ * that reads it on a screen with a 1s clock.
  */
-function tabForFocus(focus?: TaskFocus): string {
-  if (focus?.artifactId) return "artifacts";
-  if (focus?.runId) return "attempts";
-  return "timeline";
-}
+const EMPTY_PARKED: readonly ApprovalSummary[] = [];
+/** Stable defaults, so a screen rendered without the decide bundle does not
+ *  churn the row's props on every poll (#1891). */
+const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+const EMPTY_VERDICTS: Record<string, Verdict> = {};
+const EMPTY_DECIDED: Readonly<Record<string, DecidedApproval>> = {};
+const EMPTY_FAILED: Record<string, string> = {};
 
 /**
  * The count that rides the Plan tab's trigger, and the colour it wears (#337).
@@ -255,7 +253,14 @@ export function TaskDetailView({
   client,
   company,
   taskId,
+  attemptEventTick,
   focus,
+  onTabChange,
+  parked = EMPTY_PARKED,
+  deciding = EMPTY_DECIDING,
+  decided = EMPTY_DECIDED,
+  failed = EMPTY_FAILED,
+  onDecide,
   onBack,
   onNavigate,
   onOpenThread,
@@ -266,11 +271,36 @@ export function TaskDetailView({
   company: string | null;
   taskId: string;
   /**
+   * Bumped on every `run_status_changed` (issue #1015) — the push half of this
+   * screen's liveness, beside the poll below rather than instead of it.
+   */
+  attemptEventTick?: number;
+  /**
+   * The company's parked approvals, for naming what this card is waiting on
+   * (issue #883). Optional and defaulting to empty, which renders the pre-#883
+   * row — this screen's own read is what decides *whether* it is waiting.
+   */
+  parked?: readonly ApprovalSummary[];
+  /**
+   * The console-wide decision state this screen decides through (#1891).
+   *
+   * The same bundle the board and the run drawer receive, so a verdict given on
+   * any of them settles on the others without a reload. `onDecide` absent means
+   * a read-only screen: it renders what the card is waiting on and no controls,
+   * on `RunResultPanel`'s precedent.
+   */
+  deciding?: ReadonlyMap<string, Verdict>;
+  decided?: Readonly<Record<string, DecidedApproval>>;
+  failed?: Record<string, string>;
+  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  /**
    * What the address asked this screen to open (issue #339): a pinned artifact
    * or an attempt's trace. Empty — the ordinary "open the card" navigation —
    * lands on the default tab, exactly as before.
    */
   focus?: TaskFocus;
+  /** Writes an always-visible tab into the task detail's address. */
+  onTabChange?: (tab: TaskTab) => void;
   /** Return to the board. */
   onBack: () => void;
   /** Navigate the detail to a neighbouring (lineage) task. */
@@ -282,6 +312,15 @@ export function TaskDetailView({
   /** Tell the board a card was deleted. */
   onDeleted: (id: string) => void;
 }) {
+  // The board's columns, so this screen and the board label a status the same
+  // way without either keeping a list. See `lib/board-columns`.
+  const columns = useBoardColumns(client, company);
+  /**
+   * Who asked for each parked approval (#1891). Over the whole company queue,
+   * not this card's slice: `useAskerNames` keys on the set of asker ids, so the
+   * roster read is shared with every other surface asking the same question.
+   */
+  const askerNames = useAskerNames(client, company, [...parked]);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [inflight, setInflight] = useState<InflightRun | null>(null);
   const [loading, setLoading] = useState(true);
@@ -294,18 +333,24 @@ export function TaskDetailView({
   // whenever the address asked for nothing.
   const [tab, setTab] = useState<string>(() => tabForFocus(focus));
 
-  // Follow a focus that arrives (or changes) after mount: a card link clicked
-  // while this screen is already open, or a back/forward between two links on
-  // the same card. Keyed on the focus's own identity rather than the object,
-  // because the parent rebuilds it on every hash event and an object dependency
-  // would yank the operator back to the linked tab on every re-render.
-  const focusKey = `${focus?.artifactId ?? ""}|${focus?.version ?? ""}|${focus?.runId ?? ""}`;
+  // Follow the address after mount: a card link clicked while this screen is
+  // already open, a back/forward between two links on the same card, or a
+  // lineage hop to a neighbouring card. Keyed on the focus's own identity
+  // rather than the object, because the parent rebuilds it on every hash event
+  // and an object dependency would yank the operator back to the linked tab on
+  // every re-render.
+  //
+  // `taskId` is a dependency because a lineage hop writes a plain
+  // `#/tasks/<id>` — no tab addressed — while this component instance survives.
+  // Without the reset the screen would keep showing the previous card's tab
+  // while its address claimed the default, so copying or reloading that URL
+  // opened a different view than the one on screen.
+  const focusKey = `${focus?.tab ?? ""}|${focus?.artifactId ?? ""}|${focus?.version ?? ""}|${focus?.runId ?? ""}`;
   useEffect(() => {
-    if (!hasFocus(focus ?? {})) return;
     setTab(tabForFocus(focus));
     // `focus` is read through `focusKey`, which is what actually changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusKey]);
+  }, [focusKey, taskId]);
 
   // `isActive` is a per-effect-run token, not a shared ref: a superseded run
   // (e.g. taskId A→B) flips its own token to false so an in-flight `load()` from
@@ -353,6 +398,36 @@ export function TaskDetailView({
     };
   }, [load]);
 
+  // Issue #1015: the push half. Re-read the detail the moment the host says an
+  // attempt moved, rather than up to `POLL_MS` later — and at all, which the
+  // poll above deliberately does not do while the tab is hidden.
+  //
+  // Its own effect rather than a dependency of the one above, for the reason the
+  // board screen gave for the same split (issue #464): folding the tick in there
+  // would tear down and restart the fallback timer on every frame, so a busy
+  // company would keep resetting the interval and the fallback would effectively
+  // stop existing on exactly the companies that need it most.
+  //
+  // The poll STAYS. A frame can be missed — the stream can drop, and the store
+  // swallows an append that fails rather than failing the transition it
+  // describes (`runtime::run_events`) — so the timer is the floor under a
+  // liveness this does not otherwise guarantee.
+  const seenAttemptTick = useRef(attemptEventTick);
+  useEffect(() => {
+    if (attemptEventTick === undefined || attemptEventTick === seenAttemptTick.current) return;
+    // Gated like the poll it complements (issue #581), or the visibility gate
+    // buys nothing on a busy company. Deliberately NOT consumed on the way out:
+    // marking it seen here would drop it, since this effect does not re-run on a
+    // visibility change.
+    if (document.visibilityState === "hidden") return;
+    seenAttemptTick.current = attemptEventTick;
+    let cancelled = false;
+    void load(() => !cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [attemptEventTick, load]);
+
   const worked = useMemo(
     () =>
       detail
@@ -365,6 +440,8 @@ export function TaskDetailView({
         : null,
     [detail, now],
   );
+  // This remains an input to the worked-time calculation below, but is not a
+  // second current-wait presentation. Pending approvals own that display.
   const waiting = useMemo(
     () =>
       detail
@@ -377,21 +454,13 @@ export function TaskDetailView({
         : null,
     [detail, now],
   );
-
   // Only tick the 1s clock while something is actually running: a dispatch
-  // window is open, the task is parked on an operator right now, an attempt has
-  // not settled, or this task still owns a pending approval.
-  //
-  // The pending-approval term is not redundant with `waiting?.live`. That one
-  // derives from `waitingSince`, which the server gates on an *open run
-  // window* (#305) — so a finished card that still has a sign-off outstanding
-  // reports no `waitingSince` at all, and the Approvals tab's "waiting Xs"
-  // froze at whatever it read on mount. Since #333 the backend deliberately
-  // returns that row, so the clock has to keep up with it.
+  // window is open, an attempt has not settled, or this task still owns a
+  // pending approval. Pending approvals are the one source for the current
+  // wait clock, including after the run that created one has settled.
   const awaitingApproval = Boolean(detail?.approvals.some((a) => a.status === "pending"));
   const ticking =
     Boolean(worked?.live) ||
-    Boolean(waiting?.live) ||
     Boolean(detail?.runs.some(isRunOpen)) ||
     awaitingApproval;
   useEffect(() => {
@@ -405,6 +474,12 @@ export function TaskDetailView({
   if (notFound) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+        {/*
+          `#/tasks/<deleted-id>` had no `h1` at all (codex review, #1785): this
+          pane's only heading is the card's own title, and a deleted card has
+          none. `hidden`, because the recovery message *is* the pane.
+        */}
+        <PageHeader title="Task not found" hidden />
         <p className="text-sm font-medium">This task no longer exists.</p>
         <p className="max-w-sm text-xs text-muted-foreground">
           It may have been deleted. Head back to the board to pick another card.
@@ -419,6 +494,19 @@ export function TaskDetailView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/*
+        This pane's heading is the card's own title, inside `DetailHeader`,
+        which needs a loaded `detail`. So a cold `#/tasks/<id>` was unnamed
+        while the read was in flight, and stayed unnamed if it failed with
+        anything other than a 404 — `detail` is left null and nothing retries
+        (codex review, #1785).
+
+        "Task", not the id: an id is a string the operator did not choose and
+        cannot read out, and announcing one would be worse than announcing the
+        kind of page. It disappears the moment the real title exists, so the
+        two are never both on screen.
+      */}
+      {!detail && <PageHeader title="Task" hidden />}
       <div className="flex items-center gap-2 border-b px-4 py-3">
         <Button
           variant="ghost"
@@ -448,39 +536,56 @@ export function TaskDetailView({
         </div>
       ) : detail ? (
         <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto w-full max-w-3xl space-y-5 p-4">
-            <DetailHeader
-              task={detail.task}
-              worked={worked}
-              waiting={waiting}
-            />
+          <div className="w-full space-y-4 p-4">
+            <section className="overflow-hidden rounded-xl border bg-card">
+              <DetailHeader
+                task={detail.task}
+                worked={worked}
+                waiting={waiting}
+                columns={columns}
+              />
 
-            <ControlBar
-              task={detail.task}
-              inflight={inflight}
-              irreversible={detail.irreversibleEffects}
-              historyIncomplete={detail.historyIncomplete}
-              client={client}
-              company={company}
-              onChanged={load}
-              onSaved={onSaved}
-              onEdit={() => setEditing(true)}
-            />
+              <ControlBar
+                task={detail.task}
+                inflight={inflight}
+                irreversible={detail.irreversibleEffects}
+                historyIncomplete={detail.historyIncomplete}
+                client={client}
+                company={company}
+                onChanged={load}
+                onSaved={onSaved}
+                onEdit={() => setEditing(true)}
+              />
+
+              <AwaitingApprovalRow
+                approvals={detail.approvals}
+                parked={parked}
+                taskId={detail.task.id}
+                now={now}
+                askerNames={askerNames}
+                deciding={deciding}
+                decided={decided}
+                failed={failed}
+                onDecide={onDecide}
+              />
+            </section>
 
             <OriginThreadRow
               originChatId={detail.task.originChatId}
               onOpenThread={onOpenThread}
             />
 
-            <LineageRail lineage={detail.lineage} onNavigate={onNavigate} />
-
-            <AwaitingApprovalRow approvals={detail.approvals} now={now} />
+            <LineageRail
+              lineage={detail.lineage}
+              onNavigate={onNavigate}
+              columns={columns}
+            />
 
             {/* Issue #580: the built workflow awaiting approval, shown only while
                 the card sits In Review with a proposal. Apply creates the
                 workflow and moves the card to Done (#339 link); reject returns
-                it to To-do. */}
-            {detail.task.column === "in_review" && detail.task.workflowProposal && (
+                it to Pending. */}
+            {detail.task.stage === "in_review" && detail.task.workflowProposal && (
               <TaskWorkflowProposalPanel
                 client={client}
                 company={company}
@@ -490,7 +595,14 @@ export function TaskDetailView({
               />
             )}
 
-            <Tabs value={tab} onValueChange={(next) => setTab(String(next))}>
+            <Tabs
+              value={tab}
+              onValueChange={(next) => {
+                const selected = String(next);
+                setTab(selected);
+                if (isTaskTab(selected)) onTabChange?.(selected);
+              }}
+            >
               <TabsList>
                 <TabsTrigger value="timeline">Timeline</TabsTrigger>
                 <TabsTrigger value="attempts">
@@ -530,9 +642,13 @@ export function TaskDetailView({
 
               <TabsContent value="timeline" className="mt-4">
                 <TimelineList
+                  empty={
+                    <EmptyState
+                      title="Nothing has happened yet"
+                      body="Dispatch this task from the board to start its timeline."
+                    />
+                  }
                   entries={detail.timeline}
-                  waitingSince={detail.waitingSince}
-                  now={now}
                 />
               </TabsContent>
 
@@ -548,7 +664,28 @@ export function TaskDetailView({
 
               {detail.task.plan && (
                 <TabsContent value="plan" className="mt-4">
-                  <TaskPlanBrief plan={detail.task.plan} />
+                  <TaskPlanBrief
+                    plan={detail.task.plan}
+                    // Issue #1106: answering the brief's ownership question is
+                    // the same write the reassign row makes, through the same
+                    // route — so the host validates the pick against the roster
+                    // once, for both, and a candidate the planner named cannot
+                    // reach the card by a path that skips that check.
+                    onPick={async (id) => {
+                      try {
+                        const saved = await patchTask(client, company, detail.task.id, {
+                          assignee: id,
+                        });
+                        onSaved(saved);
+                        await load();
+                        toast.success(`Assigned to ${id}.`);
+                      } catch (e) {
+                        toast.error(
+                          e instanceof Error ? e.message : "could not assign the task",
+                        );
+                      }
+                    }}
+                  />
                 </TabsContent>
               )}
 
@@ -603,17 +740,22 @@ function DetailHeader({
   task,
   worked,
   waiting,
+  columns,
 }: {
   task: Task;
   worked: { millis: number; live: boolean } | null;
   waiting: { millis: number; live: boolean } | null;
+  /** The board's columns, for the status badge's label. Passed rather than
+      read here: they come from the `tasks` ledger, so the one component that
+      can fetch them is the one that already holds the client. */
+  columns: TaskColumn[];
 }) {
   const hasDispatch = worked !== null && (worked.millis > 0 || worked.live);
   // Issue #465: "Not yet dispatched" is only sayable where it can still be true.
   // A card past To-do/Planning has been worked whether or not a dispatch window
   // was journaled for it, so claiming otherwise beside a settled status is the
   // self-contradiction the report caught.
-  const neverStarted = !hasDispatch && UNSTARTED_COLUMNS.has(task.column);
+  const neverStarted = !hasDispatch && neverDispatched(task);
   // `worked` is the whole elapsed run window; waiting sits *inside* it, so
   // working time is the remainder. Clamped at zero because the two figures come
   // from different sources (event log vs journal join) and a clock skew between
@@ -624,9 +766,9 @@ function DetailHeader({
   // all, not a "Waiting 0s".
   const showWaiting = waitedMs > 0 || Boolean(waiting?.live);
   return (
-    <div className="rounded-xl border bg-card p-4">
+    <div className="p-4">
       <div className="flex items-start justify-between gap-3">
-        <h2 className="text-lg font-semibold leading-snug">{task.title}</h2>
+        <h1 className="text-lg font-semibold leading-snug">{task.title}</h1>
         <Badge
           variant="outline"
           className={cn("shrink-0 capitalize", priorityStyle(task.priority))}
@@ -636,11 +778,25 @@ function DetailHeader({
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
+        {formatUsdCost(task.cost, "total") && (
+          <span className="font-medium tabular-nums text-foreground">
+            {formatUsdCost(task.cost, "total")}
+            {task.cost?.amountUsd !== undefined && " total"}
+          </span>
+        )}
         <span className="inline-flex items-center gap-1.5">
           <span className="font-medium text-foreground">Status</span>
           <Badge variant="secondary" className="font-normal">
-            {columnLabel(task.column)}
+            {columnLabel(columns, task.column)}
           </Badge>
+          {/* The stage beside the phase, never instead of it (issue #1512).
+              The board has three columns; what a working card is *waiting on*
+              is a property of the card, and this is where it is read. */}
+          {task.stage && (
+            <Badge variant="outline" className="font-normal">
+              {columnLabel(columns, task.stage)}
+            </Badge>
+          )}
         </span>
         {/* Issue #580: this card builds a reusable workflow rather than doing
             the work once. Stated on the detail header the same as the board
@@ -687,23 +843,6 @@ function DetailHeader({
             )}
           </span>
         )}
-        {showWaiting && (
-          <span className="inline-flex items-center gap-1.5">
-            <Hourglass className="size-3.5 text-status-blocked-text" />
-            <span className="font-medium text-status-blocked-text">
-              Waiting {formatDuration(waitedMs)}
-            </span>
-            {waiting!.live && (
-              <span className="inline-flex items-center gap-1 text-status-blocked-text">
-                <span
-                  className="size-1.5 animate-pulse rounded-full bg-current"
-                  aria-hidden
-                />
-                on you
-              </span>
-            )}
-          </span>
-        )}
       </div>
 
       {task.note && (
@@ -718,7 +857,7 @@ function DetailHeader({
           host older than #333 has no link and still falls back to the run
           window. Said plainly rather than left for a reader to discover. */}
       {showWaiting && (
-        <p className="mt-2 text-2xs text-muted-foreground/70">
+        <p className="mt-2 text-2xs text-muted-foreground">
           Waiting counts this task&rsquo;s own approvals; sign-offs parked before they carried a
           task id fall back to its run window.
         </p>
@@ -784,7 +923,9 @@ function ControlBar({
     setBusy(true);
     try {
       const saved = await patchTask(client, company, task.id, {
-        column: "in_progress",
+        // The phase word, not the stage: the host resolves `working` to
+        // `in_progress`, which is what dispatches (issue #1512).
+        column: "working",
       });
       onSaved(saved);
       await onChanged();
@@ -793,6 +934,38 @@ function ControlBar({
       toast.error(
         e instanceof Error ? e.message : "could not dispatch the task",
       );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Buy one planning pass before any work is dispatched (issue #1512).
+   *
+   * The gesture the Planning **column** used to be. Collapsing the board to
+   * three columns took the drop target away, and the pass is not something to
+   * lose with it: it is the one way to have a card turned into a brief — and to
+   * have its hard prerequisites checked — before an agent turn is paid for.
+   *
+   * So it becomes a control on the card, which is where it belonged anyway. A
+   * column is a *state*, and "plan this first" is an act. It writes the
+   * `planning` stage directly, because there is no phase word that means it:
+   * dropping into Working means dispatch, and always has.
+   *
+   * It spends money, exactly as the drag into Planning did, which is why it is
+   * a deliberate second button rather than something folded into Dispatch.
+   */
+  async function planFirst() {
+    setBusy(true);
+    try {
+      const saved = await patchTask(client, company, task.id, {
+        column: "planning",
+      });
+      onSaved(saved);
+      await onChanged();
+      toast.success("Planning — a brief is being written for this card.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "could not plan the task");
     } finally {
       setBusy(false);
     }
@@ -826,10 +999,10 @@ function ControlBar({
     }
   }
 
-  const resumeLabel = task.column === "paused" ? "Resume" : "Retry";
+  const resumeLabel = task.stage === "paused" ? "Resume" : "Retry";
 
   return (
-    <div className="rounded-xl border bg-card/40 p-3">
+    <div className="border-t bg-card/40 p-3">
       <div className="flex flex-wrap items-center gap-2">
         {inflight ? (
           <>
@@ -889,14 +1062,32 @@ function ControlBar({
             )}
           </>
         ) : (
-          <RetryButton
-            label={resumeLabel}
-            title={task.title}
-            irreversible={irreversible}
-            historyIncomplete={historyIncomplete}
-            disabled={busy}
-            onConfirm={() => void patchColumn()}
-          />
+          <>
+            <RetryButton
+              label={resumeLabel}
+              title={task.title}
+              irreversible={irreversible}
+              historyIncomplete={historyIncomplete}
+              disabled={busy}
+              onConfirm={() => void patchColumn()}
+            />
+            {/* Only before anything has started: planning a card that has
+                already been worked would write a brief for work that exists,
+                which is the one shape the pass has nothing useful to say
+                about (issue #1512). */}
+            {task.column === "pending" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8"
+                disabled={busy}
+                onClick={() => void planFirst()}
+              >
+                <ClipboardList className="mr-1.5 size-3.5" />
+                Plan first
+              </Button>
+            )}
+          </>
         )}
 
         <div className="ml-auto flex items-center gap-2">
@@ -961,12 +1152,14 @@ function ControlBar({
 
       {reassigning && (
         <div className="mt-2 flex items-center gap-2">
-          {/* Issue #263: the same roster picker the edit dialog uses. Since
-              #301 this is the *only* place a card gets an assignee — the create
-              box asks for a prompt and nothing else, so the host's default
-              (unassigned → orchestrator) stands until somebody picks here.
-              Unassigned is a row here rather than an empty field, so handing the
-              card back to the orchestrator is something you can see and choose. */}
+          {/* Issue #263: the same roster picker the edit dialog uses, and since
+              #1106 the same one the create dialog offers up front. This is the
+              row that can reach the *whole* roster after the fact — the create
+              dialog pre-empts, and the plan brief's candidate list narrows to
+              what the planner named, so a card that needs anyone else is
+              reassigned here. Unassigned is a row rather than an empty field, so
+              handing the card back to the orchestrator is something you can see
+              and choose. */}
           <AssigneeSelect
             client={client}
             company={company}
@@ -1035,9 +1228,11 @@ function OriginThreadRow({
 function LineageRail({
   lineage,
   onNavigate,
+  columns,
 }: {
   lineage: TaskDetail["lineage"];
   onNavigate: (id: string) => void;
+  columns: TaskColumn[];
 }) {
   if (!lineage.parent && lineage.children.length === 0) return null;
   return (
@@ -1055,8 +1250,13 @@ function LineageRail({
             <span className="min-w-0 flex-1 truncate">
               {lineage.parent.title}
             </span>
+            {formatUsdCost(lineage.parent.cost, "total") && (
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatUsdCost(lineage.parent.cost, "total")}
+              </span>
+            )}
             <Badge variant="secondary" className="shrink-0 font-normal">
-              {columnLabel(lineage.parent.column)}
+              {columnLabel(columns, lineage.parent.column)}
             </Badge>
           </button>
         )}
@@ -1071,8 +1271,13 @@ function LineageRail({
           >
             <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate">{child.title}</span>
+            {formatUsdCost(child.cost, "total") && (
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatUsdCost(child.cost, "total")}
+              </span>
+            )}
             <Badge variant="secondary" className="shrink-0 font-normal">
-              {columnLabel(child.column)}
+              {columnLabel(columns, child.column)}
             </Badge>
           </button>
         ))}
@@ -1081,398 +1286,14 @@ function LineageRail({
   );
 }
 
-/** One rendered timeline row — a single entry, or a run of grouped failures. */
-interface TimelineGroup {
-  key: string;
-  kind: TimelineKind;
-  /** A run step's outcome (#242); absent for journal-derived entries. */
-  status?: StepStatus;
-  label: string;
-  count: number;
-  entries: TimelineEntry[];
-}
+export { groupTimeline } from "@/views/runs/RunTimeline";
 
-/**
- * One item in the rendered timeline: an event row, or a waiting band (#305).
- *
- * The band is not an event — nothing is journaled while the company waits — so
- * it cannot be a `TimelineGroup`. Making the list a union keeps the band's
- * variable height out of the row renderer entirely.
- */
-type TimelineItem =
-  | { row: "group"; key: string; group: TimelineGroup }
-  | { row: "wait"; key: string; millis: number; live: boolean };
-
-/**
- * Folds a timeline into rows, coalescing consecutive same-label `tool_failed`
- * entries into one `×N` row. Every other kind is its own row.
- *
- * Waiting bands (#305) are spliced in *before* the approval row that ended the
- * wait — the band is the pause that led to the decision, so it reads in that
- * order — and a live band is appended at the foot when the task is parked on an
- * operator right now. Approvals are never coalesced, so no band can land inside
- * a `×N` group.
- */
-function groupTimeline(
-  entries: TimelineEntry[],
-  waitingSince?: number,
-  now: number = Date.now(),
-): TimelineItem[] {
-  const groups: TimelineGroup[] = [];
-  for (const e of entries) {
-    const last = groups[groups.length - 1];
-    if (
-      isFailureRow(e) &&
-      last &&
-      last.kind === e.kind &&
-      last.label === e.label &&
-      isFailureRow(last.entries[last.entries.length - 1])
-    ) {
-      last.count += 1;
-      last.entries.push(e);
-    } else {
-      groups.push({
-        key: String(e.seq),
-        kind: e.kind,
-        status: e.status,
-        label: e.label,
-        count: 1,
-        entries: [e],
-      });
-    }
-  }
-
-  const items: TimelineItem[] = [];
-  for (const g of groups) {
-    const waited =
-      g.kind === "approval" ? g.entries[0].waitedMillis : undefined;
-    if (waited !== undefined && waited > 0) {
-      // `wait-` prefixed so a band can never collide with a row key, which is
-      // the bare sequence number.
-      items.push({
-        row: "wait",
-        key: `wait-${g.entries[0].seq}`,
-        millis: waited,
-        live: false,
-      });
-    }
-    items.push({ row: "group", key: g.key, group: g });
-  }
-  if (waitingSince !== undefined) {
-    items.push({
-      row: "wait",
-      key: "wait-live",
-      millis: Math.max(0, now - waitingSince),
-      live: true,
-    });
-  }
-  return items;
-}
-
-const KIND_ICON: Record<TimelineKind, ReactElement> = {
-  dispatched: <Play className="size-3.5" />,
-  reply: <MessageSquare className="size-3.5" />,
-  tool_failed: <AlertCircle className="size-3.5" />,
-  approval: <ShieldCheck className="size-3.5" />,
-  completed: <CheckCircle2 className="size-3.5" />,
-  // The run-trace kinds (#242). Same renderer, three more icon rows.
-  tool_call: <Wrench className="size-3.5" />,
-  thinking: <Brain className="size-3.5" />,
-  note: <StickyNote className="size-3.5" />,
-};
-
-/**
- * The icon for a row. A run step's **outcome** outranks its kind (#242): a
- * failed tool call reads as a failure, and one still in flight reads as a
- * spinner — which is the honest render of a step the trace recorded as
- * `running` because the host died mid-call, not an error.
- *
- * Task-timeline entries carry no `status`, so they fall through to the kind
- * icon exactly as before.
- */
-function rowIcon(kind: TimelineKind, status?: StepStatus): ReactElement {
-  if (status === "running")
-    return <Loader2 className="size-3.5 animate-spin" />;
-  // A parked step is waiting on a person, not broken — it takes the hourglass
-  // the waiting band already uses, never the failure icon (#411).
-  if (status === "awaiting_approval")
-    return <Hourglass className="size-3.5" />;
-  if (status === "error") return <AlertCircle className="size-3.5" />;
-  return KIND_ICON[kind];
-}
-
-function kindTone(kind: TimelineKind, status?: StepStatus): string {
-  // Outcome first, for the same reason `rowIcon` reads it first.
-  if (status === "running") return "text-status-running-text";
-  if (status === "awaiting_approval")
-    return "text-status-blocked-text";
-  if (status === "error") return "text-status-failed-text";
-  switch (kind) {
-    case "completed":
-      return "text-status-done-text";
-    case "tool_failed":
-      return "text-status-failed-text";
-    case "approval":
-      return "text-status-blocked-text";
-    default:
-      return "text-muted-foreground";
-  }
-}
-
-/**
- * Whether a row is a failure, from either surface: the journal's `tool_failed`
- * kind, or a run step whose recorded outcome was an error (#242). This is what
- * the `×N` coalescing keys on, so a tool that failed six times in a row reads
- * the same in a run's trace as it does on the task timeline.
- */
-function isFailureRow(entry: TimelineEntry): boolean {
-  return entry.kind === "tool_failed" || entry.status === "error";
-}
-
-function TimelineList({
-  entries,
-  waitingSince,
-  now,
-}: {
-  entries: TimelineEntry[];
-  waitingSince?: number;
-  now: number;
-}) {
-  const items = useMemo(
-    () => groupTimeline(entries, waitingSince, now),
-    [entries, waitingSince, now],
-  );
-  if (items.length === 0) {
-    return (
-      <EmptyState
-        title="Nothing has happened yet"
-        body="Dispatch this task from the board to start its timeline."
-      />
-    );
-  }
-  return (
-    <ol className="space-y-1.5">
-      {items.map((item) =>
-        item.row === "wait" ? (
-          <WaitingBand key={item.key} millis={item.millis} live={item.live} />
-        ) : (
-          <TimelineRow key={item.key} group={item.group} />
-        ),
-      )}
-    </ol>
-  );
-}
-
-/**
- * A waiting period, rendered as space rather than as another uniform row (#305).
- *
- * This is the acceptance criterion the timeline exists for: a four-hour wait and
- * a four-second wait must not look alike. The height carries the comparison at a
- * glance; the printed duration carries the exact figure, including past the
- * point the height saturates.
- */
-function WaitingBand({ millis, live }: { millis: number; live: boolean }) {
-  // Height is quantised to the 4s poll while the band is live, so a 1s text tick
-  // does not relayout the list underneath the reader's cursor every second.
-  const height = waitingBandHeight(
-    live ? Math.round(millis / 4000) * 4000 : millis,
-  );
-  return (
-    <li
-      className={cn(
-        "flex items-center justify-center gap-1.5 rounded-lg border border-dashed",
-        "border-status-blocked/40 bg-status-blocked-soft text-2xs text-status-blocked-text",
-        live && "animate-pulse",
-      )}
-      style={{ minHeight: height }}
-      aria-label={`Waiting on a human for ${formatDuration(millis)}`}
-    >
-      <Hourglass className="size-3.5 shrink-0" aria-hidden />
-      <span className="font-medium tabular-nums">
-        {live
-          ? `Waiting on you · ${formatDuration(millis)}`
-          : `Waited ${formatDuration(millis)}`}
-      </span>
-    </li>
-  );
-}
-
-/**
- * A step's expanded body: **what it was doing** above **what came back** (#411).
- *
- * Labelled, because the two used to be one anonymous string and an operator had
- * no way to tell an argument from an answer. `detail` on a journal entry has no
- * second half, so it renders alone exactly as it did before.
- */
-function StepBody({ entry }: { entry: TimelineEntry }) {
-  return (
-    <div className="space-y-1">
-      {entry.detail && (
-        <div>
-          {entry.result && (
-            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
-              Called with
-            </div>
-          )}
-          <pre className="whitespace-pre-wrap break-words font-mono text-2xs text-muted-foreground">
-            {entry.detail}
-          </pre>
-        </div>
-      )}
-      {entry.result && (
-        <div>
-          {entry.detail && (
-            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
-              Result
-            </div>
-          )}
-          <pre className="whitespace-pre-wrap break-words font-mono text-2xs text-muted-foreground">
-            {entry.result}
-            {entry.truncated && " (cut short)"}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** A small state chip on a timeline row. Mirrors the chat timeline's. */
-function StepStateChip({
-  tone,
-  children,
-}: {
-  tone: "amber" | "rose";
-  children: ReactNode;
-}) {
-  return (
-    <span
-      className={cn(
-        "shrink-0 rounded px-1 py-px text-3xs font-medium",
-        tone === "amber"
-          ? "bg-status-blocked-soft text-status-blocked-text"
-          : "bg-status-failed-soft text-status-failed-text",
-      )}
-    >
-      {children}
-    </span>
-  );
-}
-
-function TimelineRow({ group }: { group: TimelineGroup }) {
-  const [open, setOpen] = useState(false);
-  // A step that only reports what came back is still worth expanding — "how far
-  // did it get" lives in `result`, not just in `detail` (#411).
-  const details = group.entries.filter((e) => e.detail || e.result);
-  const expandable = details.length > 0 || group.count > 1;
-  const first = group.entries[0];
-
-  return (
-    <li className="rounded-lg border bg-card">
-      <button
-        className={cn(
-          "flex w-full flex-wrap items-center gap-2 px-3 py-2 text-left text-xs",
-          expandable ? "cursor-pointer" : "cursor-default",
-        )}
-        disabled={!expandable}
-        onClick={() => expandable && setOpen((o) => !o)}
-      >
-        <span className={cn("shrink-0", kindTone(group.kind, group.status))}>
-          {rowIcon(group.kind, group.status)}
-        </span>
-        {/* A floor, not just `min-w-0`: a row carrying a state chip AND a
-            duration would otherwise squeeze the label to "Workspa…", hiding
-            the one thing that says which step this is. */}
-        <span className="min-w-[7rem] flex-1 truncate font-medium">
-          {group.label}
-        </span>
-        {/* The typed state a step reached, by lookup rather than by reading its
-            prose (#411). Only on a single row — a ×N group's entries can differ
-            and one chip would have to speak for all of them. */}
-        {group.count === 1 && first.status === "awaiting_approval" && (
-          <StepStateChip tone="amber">{AWAITING_APPROVAL_LABEL}</StepStateChip>
-        )}
-        {group.count === 1 && first.failure && (
-          <StepStateChip tone="rose">
-            {STEP_FAILURE_LABEL[first.failure]}
-          </StepStateChip>
-        )}
-        {group.count === 1 && first.truncated && (
-          <StepStateChip tone="amber">Result cut</StepStateChip>
-        )}
-        {group.count > 1 && (
-          <Badge variant="outline" className="shrink-0 font-normal">
-            ×{group.count}
-          </Badge>
-        )}
-        {/* A run step's own duration (#242); journal entries carry none. A
-            gated call never ran, so its 0ms is the absence of a measurement
-            rather than a fast one (#411). */}
-        {group.count === 1 && first.status === "awaiting_approval" ? (
-          <span className="shrink-0 text-2xs text-muted-foreground">
-            didn't run
-          </span>
-        ) : (
-          group.count === 1 &&
-          first.elapsedMs !== undefined && (
-            <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
-              {first.elapsedMs < 1000
-                ? `${first.elapsedMs}ms`
-                : formatDuration(first.elapsedMs)}
-            </span>
-          )
-        )}
-        <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
-          {timeOf(first.atMillis)}
-        </span>
-        {expandable &&
-          (open ? (
-            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-          ))}
-      </button>
-      {open && expandable && (
-        <div className="space-y-2 border-t px-3 py-2">
-          {group.count > 1
-            ? group.entries.map((e) => (
-                <div key={e.seq} className="text-2xs">
-                  <div className="mb-0.5 text-muted-foreground">
-                    {timeOf(e.atMillis)}
-                  </div>
-                  <StepBody entry={e} />
-                </div>
-              ))
-            : details.map((e) => <StepBody key={e.seq} entry={e} />)}
-        </div>
-      )}
-    </li>
-  );
-}
+// Timeline rendering lives in `@/views/runs/RunTimeline`; the task and attempt
+// surfaces share the same grouping, waiting bands, and step-state treatment.
 
 // ---------------------------------------------------------------------------
 // Attempts (#242)
 // ---------------------------------------------------------------------------
-
-/**
- * The tone of a run's status chip. `waiting_approval` and `paused` share the
- * amber "parked" tone the waiting band already uses — they differ in *who*
- * unblocks them, not in whether the company is stuck.
- */
-function runStatusTone(status: RunStatus): string {
-  switch (status) {
-    case "succeeded":
-      return "border-status-done/40 text-status-done-text";
-    case "failed":
-      return "border-status-failed/40 text-status-failed-text";
-    case "cancelled":
-      return "border-muted-foreground/30 text-muted-foreground";
-    case "waiting_approval":
-    case "paused":
-      return "border-status-blocked/40 text-status-blocked-text";
-    default:
-      return "border-status-running/40 text-status-running-text";
-  }
-}
 
 /**
  * The card's recorded attempts (#242) — the thing that makes a task which
@@ -1778,8 +1599,11 @@ function RunDrawer({
                   />
                 ) : detail ? (
                   /* The same grouped-timeline renderer the task timeline uses —
-                     `kind` simply widens to the three step words. */
-                  <TimelineList entries={detail.steps} now={now} />
+                     `kind` simply widens to the three step words. The zero-step
+                     case is handled by the guard above, so no `empty` copy is
+                     needed here — the task-card dispatch sentence would be
+                     wrong for a run's trace anyway. */
+                  <TimelineList entries={detail.steps} />
                 ) : null}
               </div>
             </ScrollArea>
@@ -1791,52 +1615,185 @@ function RunDrawer({
 }
 
 /**
- * The card's one line about approvals (#468).
+ * What this card is waiting on, decided here (#468, #1891).
  *
- * This replaces an Approvals tab that listed every sign-off this task ever
+ * This replaced an Approvals tab that listed every sign-off this task ever
  * asked for. The tab was removed because it could not do the one thing an
- * operator wanted from it — decide. Approvals are resolved in exactly one
- * place, and a second surface beside that one was a maintenance cost that only
- * ever ended in a link.
+ * operator wanted from it — decide — and a second surface beside the real one
+ * was a maintenance cost that only ever ended in a link. The row that took its
+ * place kept the *signal*: a card stalled behind a sign-off has to say so, or
+ * the screen that exists to answer "why is this stuck" silently stops
+ * answering it.
  *
- * What could not be removed with it is the *signal*. A card stalled behind a
- * sign-off has to say so, or the screen that exists to answer "why is this
- * stuck" silently stops answering it — trading a bad surface for a worse
- * silence. So: one row, only when something is actually pending, saying what is
- * being waited on and for how long, and linking to where it gets decided.
+ * #1891 closes the loop the tab could not: the sign-off is decided **here**,
+ * through the same `ApprovalRow` the Approvals page, the chat transcript and
+ * the workflow run drawer resolve with. That is not the tab coming back. The
+ * tab was a *list of history* that ended in a link; this is the live queue for
+ * one card, and it disappears the moment nothing is pending.
  *
- * Deliberately says nothing about *decided* approvals. Those are resolutions,
- * they are already on the timeline as `approval` entries with their own waited
- * span, and repeating them here would rebuild the tab one row at a time.
+ * Still says nothing about *decided* approvals. Those are resolutions, already
+ * on the timeline as `approval` entries with their own waited span, and
+ * repeating them here would rebuild the tab one row at a time.
  *
- * Renders nothing when nothing is pending — an always-present "no approvals"
- * line is the clutter the tab was removed for.
+ * ## Two sources, and only one of them is the truth about waiting
+ *
+ * `approvals` is this screen's own read, and it decides **whether** the card is
+ * waiting — the host computed it with an ownership rule (`approval_owner`)
+ * carrying an attempt-level key this side cannot see. `parked` is the company
+ * queue, and it is what makes a pending approval *decidable*: it is where the
+ * payload, the deadline and the id live.
+ *
+ * They can disagree for a poll, and the honest rendering of that is the point.
+ * An approval the host counts and the feed has not delivered yet is still
+ * counted — it is named in the residual line rather than dropped, because a
+ * decide surface that quietly showed three of four rows would tell an operator
+ * they had cleared a card that is still stopped.
+ *
+ * Exported for `test/unit/task-detail-approvals.test.ts` (#1891), on the same
+ * grounds `TaskItem` and the chat card are: the claims that matter here — that
+ * a decidable row appears, that deciding one does not freeze its siblings, and
+ * above all that an undelivered approval is *said* rather than swallowed — only
+ * exist at the rendered row.
  */
-function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; now: number }) {
+export function AwaitingApprovalRow({
+  approvals,
+  parked,
+  taskId,
+  now,
+  askerNames,
+  deciding,
+  decided,
+  failed,
+  onDecide,
+}: {
+  approvals: TaskApproval[];
+  /**
+   * The company's parked queue (issue #883). Deliberately **not** the source of
+   * truth for whether the card is waiting: `approvals` is, because the host
+   * computed it with an ownership rule (`approval_owner`) that has an
+   * attempt-level key this side cannot see. Rows are matched into it by id, so
+   * an approval the host counts and the feed has not caught up on is still
+   * counted — it goes undecidable for one poll rather than disappearing.
+   */
+  parked: readonly ApprovalSummary[];
+  taskId: string;
+  now: number;
+  askerNames: Map<string, string>;
+  deciding: ReadonlyMap<string, Verdict>;
+  decided: Readonly<Record<string, DecidedApproval>>;
+  failed: Record<string, string>;
+  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+}) {
   const pending = pendingApprovalWait(approvals, now);
+  /**
+   * This card's rows, as the queue has them.
+   *
+   * One row per approval, unlike the board card's single consolidated batch,
+   * and for the same reason the Approvals page itemises: this screen is where
+   * an operator studies a request. There is room for each payload and each
+   * grant-scope choice, and a card whose turn parked a fetch *and* a payment
+   * should be able to take the first and refuse the second here.
+   */
+  const rows = useMemo(() => {
+    // Intersected with the host's own answer, never taken from the queue alone
+    // (#1895 review). `approvalsForTask` can only match on the park's task
+    // link, while `approval_owner` decides ownership with an attempt-level
+    // `run_id` this side cannot see — so an approval linked to this card but
+    // belonging to another attempt is excluded from `approvals` by the host and
+    // would still have been pulled in here, giving this screen a row to resolve
+    // that the host does not consider part of this card. The header already
+    // says `approvals` is the authority on what this card is waiting on; this
+    // is that rule applied to the rows and not only to the count.
+    const owned = new Set(
+      approvals.filter((a) => a.status === "pending").map((a) => a.id),
+    );
+    return taskApprovalRows(parked, decided, taskId).filter((r) =>
+      owned.has(r.approval.id),
+    );
+  }, [approvals, parked, decided, taskId]);
+  const blocking = useMemo(() => blockingTaskApprovals(rows), [rows]);
+  /**
+   * Pending approvals the host counts that this screen can neither show nor
+   * account for.
+   *
+   * The honest residual, and the reason it is stated rather than swallowed: the
+   * two reads land separately, so for a poll this screen can hold four pending
+   * approvals and three decidable rows. Deciding those three would leave the
+   * card stopped, and a surface that said nothing would have just told the
+   * operator they were finished.
+   *
+   * **A set difference, not a subtraction** (#1895 review). Counting
+   * `pending.count - blocking.length` mixes two clocks: `pending` refreshes on
+   * this screen's own 4s poll while `blocking` drops a row the instant a
+   * verdict is witnessed, so for up to a poll after the operator decides the
+   * last approval the arithmetic said one was undelivered and the screen
+   * announced "still loading it" about a request that had just been settled by
+   * the person reading it. Naming the ids instead cannot drift: an approval is
+   * unaccounted for only if the host still calls it pending, this screen has no
+   * row for it, **and** this console has not decided it.
+   */
+  const undelivered = useMemo(() => {
+    const shown = new Set(rows.map((r) => r.approval.id));
+    return approvals.filter(
+      (a) => a.status === "pending" && !shown.has(a.id) && !decided[a.id],
+    ).length;
+  }, [approvals, rows, decided]);
   if (!pending) return null;
   const { waited } = pending;
+  const href = `#/approvals/${encodeURIComponent(taskId)}`;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2 text-xs">
-      <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
-      <span className="min-w-0 flex-1 text-status-blocked-text">
-        {pending.count === 1
-          ? "Waiting on an approval"
-          : `Waiting on ${pending.count} approvals`}{" "}
-        <span className="tabular-nums">for {formatDuration(waited)}</span>
-      </span>
-      <a
-        href="#/approvals"
-        className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
-        aria-label={
-          pending.count === 1
-            ? "Review this task's pending approval on the Approvals page"
-            : `Review this task's ${pending.count} pending approvals on the Approvals page`
-        }
-      >
-        Review
-      </a>
+    <div className="border-t border-status-blocked/30 bg-status-blocked-soft px-4 py-3">
+      <div className="flex items-center gap-2 text-xs">
+        <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
+        <span className="min-w-0 flex-1 text-status-blocked-text">
+          {pending.count === 1
+            ? "Waiting on your approval"
+            : `Waiting on ${pending.count} approvals`}{" "}
+          <span className="tabular-nums">for {formatDuration(waited)}</span>
+        </span>
+        {/* Kept even now that the rows are decidable here. The page is where an
+            operator cleans up across cards, and it is also the whole answer when
+            the feed has delivered none of this card's rows yet. */}
+        <a
+          href={href}
+          className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
+          aria-label={
+            pending.count === 1
+              ? "Review this task's pending approval on the Approvals page"
+              : `Review this task's ${pending.count} pending approvals on the Approvals page`
+          }
+        >
+          Review
+        </a>
+      </div>
+      {onDecide && blocking.length > 0 && (
+        <div className="-mx-4 mt-1" data-testid="task-approvals">
+          {blocking.map((row) => (
+            <ApprovalRow
+              key={row.approval.id}
+              approvals={[row.approval]}
+              now={now}
+              askerNames={askerNames}
+              // Narrowed to this row: a decision in flight on a sibling
+              // approval of the same card is not this row's business, and
+              // `ApprovalRow` reads a non-empty map as "I am busy" (#373).
+              deciding={decidingForTask([row], deciding)}
+              decided={EMPTY_VERDICTS}
+              failed={failed}
+              onDecide={onDecide}
+            />
+          ))}
+        </div>
+      )}
+      {undelivered > 0 && (
+        <p className="mt-1 text-2xs text-muted-foreground">
+          {/* Never "and that is all of them". See `undelivered` above. */}
+          {blocking.length === 0
+            ? `Still loading ${undelivered === 1 ? "it" : "them"} — decide on the Approvals page in the meantime.`
+            : `${undelivered} more not loaded yet — this card stays stopped until ${undelivered === 1 ? "it is" : "they are"} decided too.`}
+        </p>
+      )}
     </div>
   );
 }

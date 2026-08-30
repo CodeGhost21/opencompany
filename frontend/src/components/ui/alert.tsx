@@ -24,10 +24,21 @@ function Alert({
   variant,
   ...props
 }: React.ComponentProps<"div"> & VariantProps<typeof alertVariants>) {
+  // `role="alert"` is an assertive live region, so hard-coding it on every Alert
+  // made a standing informational notice — one present on mount, like the
+  // "Saved to this browser as a draft" note on Settings — interrupt a screen
+  // reader on page load even though nothing had changed (issue #1392).
+  //
+  // The default is `role="status"`, not no role at all: a polite live region is
+  // silent for a notice that is already there when the page renders, but still
+  // announces one mounted in response to something the operator did — the
+  // feedback form's success alert after Send, or the warning that appears when
+  // the last teammate is removed in the setup wizard. Dropping the role
+  // outright would have made those silent.
   return (
     <div
       data-slot="alert"
-      role="alert"
+      role={variant === "destructive" ? "alert" : "status"}
       className={cn(alertVariants({ variant }), className)}
       {...props}
     />

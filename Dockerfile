@@ -5,6 +5,18 @@
 # features (e.g. "medulla tinyplace sqlite"); empty = the small default build.
 FROM rust:1-slim-bookworm AS builder
 ARG FEATURES=""
+# The revision this image is built from, read by `build.rs` (see
+# `src/build_stamp.rs`). It has to be passed in here: `.dockerignore` excludes
+# `.git`, so the build script has no repository to ask, and `GITHUB_SHA` does
+# not cross into a build context either. Left unset, the binary stamps the
+# honest string `unknown` — which is what a hosted tenant would otherwise
+# report forever, since `version` has read 0.1.0 for thousands of commits.
+#
+#   docker build --build-arg OPENCOMPANY_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)" .
+#
+# A changing value invalidates the layer below, but not the compile: the cargo
+# `target` cache mount survives it, so only the final crate is rebuilt.
+ARG OPENCOMPANY_BUILD_COMMIT=""
 WORKDIR /build
 
 # `--features openhuman` transitively needs system libraries at build time that
@@ -22,10 +34,20 @@ RUN apt-get update \
        libx11-dev libxi-dev libxtst-dev libxrandr-dev libxcb1-dev libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# The whole workspace is copied (examples/*/Cargo.toml load the workspace;
-# vendor/tinyagents backs the [patch.crates-io] entry). vendor/openhuman,
-# target/, and node_modules are trimmed via .dockerignore.
-COPY . .
+# Copy only inputs read by the Rust build, rather than the whole checkout.
+# Keeping frontend, docs, scripts, and deployment files out of this layer lets
+# their changes reuse the compiled Cargo cache.
+#
+# `build.rs` embeds the shipped company agents and `src/desktop.rs` embeds each
+# preset manifest, so the complete companies tree remains a real build input.
+# `vendor/` backs the path dependencies and Cargo patch table.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
+COPY src ./src
+COPY benches ./benches
+COPY tests ./tests
+COPY examples ./examples
+COPY vendor ./vendor
+COPY companies ./companies
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
@@ -41,12 +63,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Builds the Vite/React operator console (frontend/) into a static bundle that
 # the runtime image serves at `/` (same-origin, no separate nginx container).
 # Matches the node version frontend/Dockerfile pins.
+#
+# `build:pages-sdk` builds `@opencompany/site` — the component subset +
+# postMessage client agent-authored dashboard pages import — into
+# `dist/pages-sdk/`, nested inside the same `dist/` the console itself builds
+# to, so the single `COPY --from=console /console/dist /app/console` below
+# already carries it into the runtime image with no second COPY needed.
 FROM node:22-slim AS console
 WORKDIR /console
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-RUN npm run build
+RUN npm run build && npm run build:pages-sdk
 
 # ── local development ─────────────────────────────────────────────────────
 # Used by docker-compose.dev.yml. The repository is bind-mounted over

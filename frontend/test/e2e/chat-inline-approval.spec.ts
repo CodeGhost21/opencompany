@@ -96,9 +96,17 @@ test("a request raised in a channel appears in that channel, and only there", as
 
   await openChannel(page, ENGINEERING.id);
   await expect(card(page, IN_ENGINEERING.id)).toBeVisible({ timeout: 30_000 });
-  // Told in full, the same as on the page — the payload is the thing being
-  // consented to, so a card without it asks for a blind signature.
+  // The chat row names the decision distinctly without repeating the full
+  // approval form; the detailed card remains on the Approvals page. A monetary
+  // approval also shows its amount — an operator approves the payment, not the
+  // address the payload happens to lead with.
   await expect(card(page, IN_ENGINEERING.id)).toContainText("vendor@example.test");
+  await expect(card(page, IN_ENGINEERING.id)).toContainText("$42.50");
+  await expect(card(page, IN_ENGINEERING.id)).toHaveAttribute("data-approval-inline", "compact");
+  await expect(card(page, IN_ENGINEERING.id).getByRole("link", { name: "View details" })).toHaveAttribute(
+    "href",
+    "#/approvals",
+  );
 
   // The trap, in both directions. A card belongs to the conversation that
   // raised it; a desk channel and a DM to its lead resolve to the same agent,
@@ -194,7 +202,7 @@ test("declining inline says so in the thread rather than leaving it stalled", as
   // as a stall. The line is addressed to this channel, not to "wherever the
   // operator last looked".
   await expect(
-    page.getByText(/Declined — the agent will not take that action/),
+    page.getByText(/Declined — the teammate will not take that action/),
   ).toBeVisible({ timeout: 30_000 });
 });
 

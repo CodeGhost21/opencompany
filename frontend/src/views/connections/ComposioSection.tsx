@@ -5,6 +5,10 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import { getComposioStatus, setComposioToken, type ComposioStatus } from "@/api/composio";
 import { ApiError } from "@/api/types";
+import { grantStanding } from "@/lib/provider-grid";
+import { classifyLoadFailure } from "@/lib/section-load";
+import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
+import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -64,7 +68,7 @@ interface Props {
  * feature is not in the build.
  */
 export function ComposioSection({ client, company, canManage, onChanged }: Props) {
-  const [load, setLoad] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [load, setLoad] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
   const [status, setStatus] = useState<ComposioStatus | null>(null);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<"save" | "clear" | null>(null);
@@ -82,9 +86,12 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       setStatus(s);
       // Hide the whole section when the feature is not compiled into this build.
       setLoad(s.inBuild ? "ready" : "unavailable");
-    } catch {
+    } catch (err) {
       if (generation !== requestGeneration.current) return;
-      setLoad("unavailable");
+      // A 404 is a host with no Composio surface — hide it. Anything else is a
+      // host that could not answer; keep the section rather than vanishing
+      // (issue #1470).
+      setLoad(classifyLoadFailure(err));
     }
   }, [client, company]);
 
@@ -119,7 +126,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       setToken("");
       // Clearing an override falls back to whatever tier remains — the status
       // the host just returned says which, and the grid re-probes for itself.
-      toast.success("Composio token cleared.");
+      toast.success(res.note);
       onChanged();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not clear the token.");
@@ -146,33 +153,44 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
   // attested one: the paste card is a deliberate override, not the way in.
   const credentialed = attested || companyKey;
   const showTokenCard = canManage && (!credentialed || showOverride || byoToken);
+  // The composio-grant tri-state, narrowed the same way `ProvidersSection` does
+  // (issue #1478): `undefined` reads as "unknown", never as "not granted", so
+  // this badge and the grid a few inches below it cannot disagree on the same
+  // field. `status` is non-null wherever this is read below.
+  const grant = grantStanding(status?.granted);
 
   return (
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <Plug className="size-4 text-muted-foreground" />
-        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Composio credential
-        </h3>
+        </h2>
       </div>
       <p className="text-sm text-muted-foreground">
         {!canManage
-          ? "Your agents reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
+          ? "Your teammates reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
           : attested
-            ? "Your agents reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
+            ? "Your teammates reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
             : companyKey
-              ? "Your agents reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every agent in the company can then use what you connect."
-              : "Your agents reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
+              ? "Your teammates reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every teammate in the company can then use what you connect."
+              : "Your teammates reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
       </p>
 
       {load === "loading" ? (
         <Skeleton className="h-32 rounded-xl" />
+      ) : load === "error" ? (
+        <SectionUnreachable label="Couldn't read this company's Composio credential" />
       ) : (
         <>
           {status && (
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={status.granted ? "secondary" : "outline"}>
-                {status.granted ? "granted" : "not granted"}
+              <Badge variant={grant === "granted" ? "secondary" : "outline"}>
+                {grant === "granted"
+                  ? "granted"
+                  : grant === "not-granted"
+                    ? "not granted"
+                    : "grant unknown"}
               </Badge>
               {attested ? (
                 <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
@@ -192,12 +210,23 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
             </div>
           )}
 
-          {status && !status.granted && (
-            <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-              This company does not grant the <span className="font-mono">composio</span> tool
-              namespace, so agents will not receive Composio tools even once connected. Add
-              <span className="font-mono"> composio</span> to the company&apos;s tool grants first.
-            </p>
+          {/* Fires only on an explicit not-granted, never on an unchecked grant
+              (issue #1478): telling an operator to widen a grant that may
+              already be set, off a field that was never read, is the same false
+              confidence the badge above used to show. */}
+          {grant === "not-granted" && (
+            <GrantNamespace
+              client={client}
+              company={company}
+              namespace="composio"
+              explanation="Teammates will not receive Composio tools even once connected."
+              canManage={canManage}
+              onGranted={async () => {
+                await refresh();
+                onChanged();
+              }}
+              testId="composio-not-granted"
+            />
           )}
 
           {/* Gated on `credentialed`, not `attested`: a company brokered through
@@ -214,7 +243,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
 
           {showTokenCard && (
             <Card>
-              <CardContent className="space-y-4 py-4">
+              <CardContent className="space-y-4">
                 {/* The explainer has to name what the token would displace,
                     and that differs by tier: an attested company falls back to
                     the pod's cluster identity, a company-key one falls back to

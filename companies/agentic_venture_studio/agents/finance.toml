@@ -1,2 +1,52 @@
 role = "Finance"
 description = "Financial modeling, runway, and reporting."
+
+# Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
+# manages its own work on the board and sees, but does not redefine, company
+# direction. The orchestrator keeps unrestricted access.
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+    # The global baseline (`globals/ledgers/`). Every teammate may raise a risk
+    # and record what it learned — both are worthless if only the orchestrator
+    # can write them, because the teammate that hit the thing is the one that
+    # knows. `commitments` stays read-only: promising something outward is not a
+    # specialist's call to make alone.
+    { name = "risks", access = "record" },
+    { name = "commitments", access = "read" },
+    { name = "learnings", access = "record" },
+    # This studio's own axes (`ledgers/`).
+    { name = "ventures", access = "record" },
+    { name = "shared-assets", access = "read" },
+]
+
+# Write scope (docs/spec/runtime/agents.md): confined to this company's
+# shared active-work document, plus the always-writable agents/<id> home.
+# The bare entries below preserve this agent's existing (reasoning-tier)
+# routed context — only the last entry changes behavior, by adding a write
+# grant. standards/ and playbooks/ stay out: governance documents, left to
+# the operator and the unconfined orchestrator.
+context = [
+    "brief.md", "claims.md",
+    { path = "ventures/local-services-marketplace.md", access = "write" },
+]
+
+# The role's working rules, checked in beside this file and read at manifest
+# load. The `.toml` carries the wiring; `prompts/` carries how the role works.
+# A missing path here is a manifest error rather than a skipped entry — a role
+# whose prompt was written around a briefing it never received fails silently.
+prompt_files = ["prompts/finance.md"]
+
+# Billing (#788). The one teammate in this company that holds `chargebee`.
+# Recording transactions and reconciling accounts is the job invoicing belongs
+# to, so the grant sits here rather than on the company at large.
+#
+# The company belt restated verbatim, then extended — the same rule
+# `[tools].allow` follows, and for the same reason: a short list here REPLACES
+# the belt rather than adding to it.
+#
+# `chargebee_send_invoice` and `chargebee_create_customer` are declared
+# `Reach::Consequence`, so they still park for approval under this company's
+# `auto` policy. Holding the tools is not the same as invoicing unattended.
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*", "chargebee"]

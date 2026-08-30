@@ -1,0 +1,100 @@
+# What this firm's analysis is resting on that it has not verified.
+#
+# Every model has these and most decks hide them in a footnote. A strategy built
+# on an unverified growth rate is not wrong — it is conditional, and the client
+# is entitled to know on what. This ledger exists so the conditions are
+# enumerable rather than buried, and so that when one turns out to be false, the
+# firm can find every recommendation that depended on it.
+
+title = "Assumptions"
+purpose = """
+What this firm's analysis rests on that has not been verified: the input, where \
+it came from, how sensitive the conclusion is to it, and what would confirm it. \
+Read it before relying on any model — an assumption nobody enumerated is one \
+nobody checked.\
+"""
+written_by = "`record_entry` to record or revise an assumption, `close_entry` when it is confirmed or falsified"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "assumption"
+role = "title"
+required = true
+description = "What is being taken as true, with the number if there is one."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "source"
+role = "prose"
+required = true
+description = "Where it came from — a client figure, an industry benchmark, an estimate. `estimate` is honest."
+
+[[field]]
+name = "sensitivity"
+role = "prose"
+description = "How much the conclusion moves if this is wrong. The field that decides whether it matters."
+
+[[field]]
+name = "would_confirm_it"
+role = "prose"
+description = "What would settle it, and what that would cost."
+
+[[field]]
+name = "used_in"
+role = "refs"
+description = "The models and recommendations that depend on it — so a falsified assumption can be traced."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — confirmed, falsified, or no longer load-bearing. Required when it closes."
+
+[[status]]
+name = "unverified"
+
+[[status]]
+name = "checking"
+
+[[status]]
+name = "confirmed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "falsified"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "moot"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Load-bearing and unverified"
+blurb = "Taken as true, not checked, and the conclusion moves if they are wrong. Read this before presenting anything."
+statuses = ["unverified", "checking"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+blurb = """
+Confirmed, falsified, or no longer load-bearing. A falsified assumption names \
+every recommendation that depended on it in `used_in` — which is the entire \
+reason the field exists.\
+"""
+statuses = ["confirmed", "falsified", "moot"]
+cap = 20

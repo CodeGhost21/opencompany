@@ -1,0 +1,123 @@
+# Campaigns. An agency's unit of work, and one the board cannot hold: a campaign
+# runs for weeks across five channels, spends real money continuously, and is
+# judged on a number nobody knows until after it ends. Fifty cards describe the
+# work; none of them answers "is this campaign working".
+
+title = "Campaigns"
+purpose = """
+Every campaign this agency is running or has run: what it is for, what it is \
+spending, how it is measured, and what it actually returned. Read it before \
+proposing anything — half of what gets proposed here has been run before, and \
+the closed rows say how it went.\
+"""
+written_by = "`record_entry` to launch or update a campaign, `close_entry` when it ends"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "campaign"
+role = "title"
+required = true
+description = "What it is, in the words the client would use."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "objective"
+role = "prose"
+required = true
+description = "The one thing this campaign is for. A campaign with three objectives has none."
+
+[[field]]
+name = "measure"
+role = "prose"
+required = true
+description = "The number that says whether it worked, and what counts as working. Decided before launch, never after."
+
+[[field]]
+name = "channels"
+role = "prose"
+description = "Where it runs — paid, email, organic, page."
+
+[[field]]
+name = "budget"
+role = "number"
+description = "What it is authorised to spend, in the account's currency."
+
+[[field]]
+name = "spent"
+role = "number"
+description = "What it has spent so far. Updated by whoever is running the channel, not at the end."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "result"
+role = "prose"
+description = "What actually happened against the measure. Honest numbers, including the bad ones."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it ended — ran its course, killed early, or replaced. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "proposed"
+
+[[status]]
+name = "approved"
+
+[[status]]
+name = "live"
+aliases = ["paused"]
+
+[[status]]
+name = "ended"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "killed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Live"
+blurb = "Running and spending now. Check `spent` against `budget` before proposing anything new."
+statuses = ["live"]
+order = "recent"
+
+[[section]]
+heading = "Approved and paused"
+blurb = "Cleared to run, or stopped mid-flight. A paused row should say what would restart it."
+statuses = ["approved", "live"]
+order = "recent"
+
+[[section]]
+heading = "Proposed"
+blurb = "Put forward, not approved. Spending starts at approval, not here."
+statuses = ["proposed"]
+order = "recent"
+
+[[section]]
+heading = "Finished"
+blurb = """
+Ended or killed, each with its result against the measure it set beforehand. \
+This section is the agency's actual expertise: an idea that reads well and \
+failed twice is in here, and nowhere else.\
+"""
+statuses = ["ended", "killed"]
+cap = 20

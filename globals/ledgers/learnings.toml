@@ -1,0 +1,108 @@
+# The global baseline's learning register: what this company found out that
+# should change how it works.
+#
+# Deliberately not `decisions`. A decision is a call the company made and is
+# bound by; a learning is evidence it acquired, which may not have changed
+# anything yet. Collapsing the two loses both halves — evidence recorded as a
+# decision reads as binding when nobody agreed to it, and a decision recorded as
+# a learning is one nobody is held to. A learning's whole value is being read by
+# whoever is about to do the thing again.
+
+title = "Learnings"
+purpose = """
+What this company has found out — from a run, a launch, a client, a failure — \
+and what it should change. Read it before repeating something the company has \
+already tried; record one whenever a result surprised you, including when it \
+went well.\
+"""
+written_by = "`record_entry` to add or revise a learning, `close_entry` when it is folded into practice or superseded"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "learning"
+role = "title"
+required = true
+description = "What is now known, stated so somebody could act on it without reading the rest."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "evidence"
+role = "prose"
+required = true
+description = "What actually happened, concretely. A learning with no evidence is an opinion with a row of its own."
+
+[[field]]
+name = "so_what"
+role = "prose"
+description = "What should be done differently next time. The half that makes this worth writing."
+
+[[field]]
+name = "owner"
+role = "owner"
+description = "The teammate or desk that found it, and can be asked about it."
+
+[[field]]
+name = "found_on"
+role = "date"
+
+[[field]]
+name = "confidence"
+role = "prose"
+description = "How sure — one run, a pattern across many, or a client saying it outright."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — adopted into a standard, or shown wrong. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+description = "The run, task, decision or document it came out of."
+
+[[status]]
+name = "noted"
+
+[[status]]
+name = "confirmed"
+
+[[status]]
+name = "adopted"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "disproved"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Confirmed"
+blurb = "Seen more than once, or stated plainly by someone outside. Treat these as true until something says otherwise."
+statuses = ["confirmed"]
+order = "recent"
+
+[[section]]
+heading = "Noted"
+blurb = "Seen once. Worth knowing, not yet worth building on."
+statuses = ["noted"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Adopted into how the company works, or disproved — each with the reason. A \
+disproved learning is kept precisely because it is the one somebody would \
+otherwise re-derive from the same single run.\
+"""
+statuses = ["adopted", "disproved"]
+cap = 20

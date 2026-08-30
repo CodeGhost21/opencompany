@@ -13,21 +13,22 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::response::Response;
-use axum::routing::{post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::AppState;
 use crate::company::dns::{self, DomainStatus};
 use crate::company::runtime::CompanyRuntime;
+use crate::error::OpenCompanyError;
 use crate::ports::types::SecretValue;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, DOMAIN_KEY, ScopedCompany, scoped};
 
 /// Builds the domain route fragment.
 pub fn router() -> Router<AppState> {
-    scoped("/domain", put(put_domain)).merge(scoped("/domain/verify", post(verify_domain)))
+    scoped("/domain", get(get_domain).put(put_domain))
+        .merge(scoped("/domain/verify", post(verify_domain)))
 }
 
 /// The set-domain request body.
@@ -58,11 +59,41 @@ async fn persist(runtime: &CompanyRuntime, status: &DomainStatus) -> Result<(), 
 }
 
 /// Loads the stored domain config, if any.
-async fn load_domain(runtime: &CompanyRuntime) -> Result<Option<DomainStatus>, ApiError> {
+///
+/// `pub(crate)` and carrying the crate error rather than [`ApiError`] so the
+/// GraphQL resolver for `Company.domain` can serve the same read instead of
+/// keeping a second copy of it (issue #316) — an `ApiError` is an HTTP
+/// response, and a resolver has nowhere to put one.
+pub(crate) async fn load_domain(
+    runtime: &CompanyRuntime,
+) -> Result<Option<DomainStatus>, OpenCompanyError> {
     let Some(value) = runtime.secrets().get(runtime.id(), DOMAIN_KEY).await? else {
         return Ok(None);
     };
     Ok(Some(serde_json::from_str(value.expose())?))
+}
+
+/// `GET …/domain` (both scope forms) — the stored domain status, or `null`.
+///
+/// `ScopedCompany`, not `AdminScopedCompany`, and deliberately: the admin line
+/// on this plane is the company's outward *identity*, which is the write. The
+/// read carries no credential — a domain, its published DNS records, and
+/// whether they resolved — so it stays open to any member, exactly as
+/// `POST …/domain/verify` and `GET …/hosting` already are
+/// (`docs/modules/server/authority.md`). Making it admin-only would `403` a
+/// member on the Settings screen while the same domain, its records and its
+/// verified flag stayed readable to them over GraphQL as `Company.domain`.
+///
+/// "The same", not "identical". Both surfaces read through [`load_domain`], so
+/// neither can be staler than the other, but they do not answer the same
+/// detail: this route returns the whole [`DomainStatus`], and `DomainStatusGql`
+/// projects only `domain`, `verified` and `records`. The per-record `checks`
+/// from the last verify pass are REST-only.
+///
+/// `null` rather than a synthesized empty status, matching the nullability
+/// `Company.domain` already reports.
+async fn get_domain(company: ScopedCompany) -> Result<Json<Option<DomainStatus>>, ApiError> {
+    Ok(Json(load_domain(&company.runtime).await?))
 }
 
 /// `PUT …/domain` (both scope forms).
@@ -81,26 +112,21 @@ async fn put_domain(
 async fn run_verify(
     state: &AppState,
     runtime: Arc<CompanyRuntime>,
-) -> Result<Json<DomainStatus>, Response> {
+) -> Result<Json<DomainStatus>, crate::server::Rejection> {
     use axum::response::IntoResponse;
     let Some(resolver) = state.connections().dns.clone() else {
-        return Err(super::not_wired("domain verification"));
+        return Err(super::not_wired("domain verification").into());
     };
-    let stored = load_domain(&runtime)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    let stored = load_domain(&runtime).await?;
     let Some(stored) = stored else {
         return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
             "no domain configured".to_string(),
         ))
-        .into_response());
+        .into_response()
+        .into());
     };
-    let status = dns::verify(&stored.domain, resolver.as_ref())
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
-    persist(&runtime, &status)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    let status = dns::verify(&stored.domain, resolver.as_ref()).await?;
+    persist(&runtime, &status).await?;
     Ok(Json(status))
 }
 
@@ -108,6 +134,6 @@ async fn run_verify(
 async fn verify_domain(
     company: ScopedCompany,
     State(state): State<AppState>,
-) -> Result<Json<DomainStatus>, Response> {
+) -> Result<Json<DomainStatus>, crate::server::Rejection> {
     run_verify(&state, company.runtime).await
 }

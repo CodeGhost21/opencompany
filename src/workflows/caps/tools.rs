@@ -19,13 +19,13 @@
 //! gracefully when no managed credential is configured (fail-closed).
 //!
 //! Every invocation is **fail-closed**: the slug's grant namespace (via
-//! [`toolbelt::namespace_of`]) must be covered by the company's `[tools].allow`
-//! globs — reusing the exact grant-intersection rule an agent's exec tools use
-//! ([`crate::harness::build::grants_cover`]) — before the tool is even looked
-//! up. The one exception is the priced `search` namespace, which requires an
-//! **explicit** `search` grant (`grants_search_explicit`) rather than glob
-//! coverage, so `*` never buys a managed search call and the invoke-time gate
-//! matches construction.
+//! [`toolbelt::namespace_of`]) must be granted by the company's `[tools].allow`
+//! before the tool is even looked up. Construction above and refusal below both
+//! ask [`grants_workflow_namespace`] — the grant-intersection rule an agent's
+//! exec tools use, except for the priced `search` namespace, which requires an
+//! **explicit** `search` grant rather than glob coverage. So `*` never buys a
+//! managed search call, and the invoke-time gate matches construction because
+//! neither can answer the question differently.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -41,6 +41,7 @@ use oh::tools::{Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
 use crate::harness::search::{SearchBackend, SearchMetering};
+use crate::harness::search_byo::TenantSearch;
 use crate::harness::toolbelt::{self, CapabilityFilter};
 
 /// The grant namespaces a workflow `tool_call` can actually reach — the exec
@@ -77,16 +78,46 @@ fn capability_filtered(filter: &CapabilityFilter, namespace: &'static str) -> bo
     }
 }
 
+/// Whether `[tools].allow` grants a **workflow-tool namespace** (issue #874).
+///
+/// The one grant rule every workflow-tool decision keys off: the priced `search`
+/// family needs an EXPLICIT `search` grant — a `*` wildcard never confers it,
+/// because each call is a priced managed request — while every other namespace
+/// uses the ordinary grant-glob intersection.
+///
+/// Three places used to spell this split out by hand, and they must agree or the
+/// system contradicts itself: author-time validation
+/// (`company::validate_tool_call_node`), the grounding lists
+/// (`workflow_effective_tool_slugs` / `workflow_granted_but_unwired_tool_slugs`,
+/// via `grants_workflow_tool`), and [`refusal_for`] below. A slug offered for
+/// grounding that validation would reject, or accepted at save and refused at
+/// run for a *grant* reason, is a bug in the seam rather than in any one of
+/// them — so the split lives here once, beside the wiring rule it pairs with.
+///
+/// It cannot live with its siblings in the always-compiled `company::types`:
+/// `grants_cover` is behind the `openhuman` feature, as is every caller.
+pub(crate) fn grants_workflow_namespace(grants: &[String], namespace: &str) -> bool {
+    if namespace == "search" {
+        crate::company::grants_search_explicit(grants)
+    } else {
+        crate::harness::build::grants_cover(grants, namespace)
+    }
+}
+
 pub(crate) fn workflow_tool_wiring(deps: &crate::harness::HarnessDeps) -> WorkflowToolWiring {
     let mut wiring = WorkflowToolWiring::default();
     for namespace in WORKFLOW_TOOL_NAMESPACES {
-        let missing = if namespace == "search" && deps.search.is_none() {
-            Some(MissingReason::SearchBackendNotConfigured)
-        } else if capability_filtered(&deps.capabilities, namespace) {
-            Some(MissingReason::CapabilityTierFiltered)
-        } else {
-            None
-        };
+        // A company that configured its OWN provider is credentialed for search
+        // even on a deployment with no managed backend at all — the calls go to
+        // its account, not the platform's. Only "neither" is unconfigured.
+        let missing =
+            if namespace == "search" && deps.search.is_none() && deps.tenant_search.is_none() {
+                Some(MissingReason::SearchBackendNotConfigured)
+            } else if capability_filtered(&deps.capabilities, namespace) {
+                Some(MissingReason::CapabilityTierFiltered)
+            } else {
+                None
+            };
         if let Some(reason) = missing {
             wiring.missing.insert(namespace, reason);
         } else {
@@ -94,12 +125,6 @@ pub(crate) fn workflow_tool_wiring(deps: &crate::harness::HarnessDeps) -> Workfl
         }
     }
     wiring
-}
-
-pub(crate) fn wired_workflow_namespaces(
-    deps: &crate::harness::HarnessDeps,
-) -> BTreeSet<&'static str> {
-    workflow_tool_wiring(deps).wired_namespaces
 }
 
 pub(crate) fn refusal_for(
@@ -110,19 +135,14 @@ pub(crate) fn refusal_for(
     let Some(namespace) = toolbelt::namespace_of(slug) else {
         return Some(format!("tool_call '{slug}' is not a wired workflow tool"));
     };
-    let granted = if namespace == "search" {
-        crate::company::grants_search_explicit(grants)
-    } else {
-        crate::harness::build::grants_cover(grants, namespace)
-    };
-    if !granted {
+    if !grants_workflow_namespace(grants, namespace) {
         return Some(format!(
             "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's [tools].allow"
         ));
     }
     match wiring.missing.get(namespace) {
         Some(MissingReason::SearchBackendNotConfigured) => Some(format!(
-            "tool_call '{slug}' is granted, but no managed search backend is configured on this deployment; ask the platform operator to configure search or remove the node"
+            "tool_call '{slug}' is granted, but no search provider is configured: this deployment has no managed search backend and this company has set none of its own; set one in Settings → Search, ask the platform operator to configure managed search, or remove the node"
         )),
         Some(MissingReason::CapabilityTierFiltered) => Some(format!(
             "tool_call '{slug}' is granted, but the deployment's capability tier filtered it; ask the platform operator to raise the capability tier or remove the node"
@@ -314,14 +334,20 @@ impl WorkflowToolInvoker {
         grants: Vec<String>,
         filter: &CapabilityFilter,
         search: Option<&SearchBackend>,
+        tenant_search: Option<&TenantSearch>,
         search_metering: SearchMetering,
         wiring: WorkflowToolWiring,
     ) -> Self {
         // Mirror `build_agent`: do not initialize a tool family (or its audit
         // state) unless the company's grants can invoke that namespace.
+        //
+        // Every arm reads `grants_workflow_namespace`, the same rule
+        // `refusal_for` applies below. Construction and refusal disagreeing is
+        // the one failure this file cannot afford: a family wired here but
+        // refused there is a tool that exists and always errors, and the reverse
+        // is a refusal for a tool that is sitting right there.
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-        if crate::harness::build::grants_cover(&grants, "shell")
-            && wiring.wired_namespaces.contains("shell")
+        if grants_workflow_namespace(&grants, "shell") && wiring.wired_namespaces.contains("shell")
         {
             tools.extend(toolbelt::shell_tools(
                 security.clone(),
@@ -330,14 +356,10 @@ impl WorkflowToolInvoker {
                 workspace,
             ));
         }
-        if crate::harness::build::grants_cover(&grants, "code")
-            && wiring.wired_namespaces.contains("code")
-        {
+        if grants_workflow_namespace(&grants, "code") && wiring.wired_namespaces.contains("code") {
             tools.extend(toolbelt::code_tools(security.clone(), workspace));
         }
-        if crate::harness::build::grants_cover(&grants, "web")
-            && wiring.wired_namespaces.contains("web")
-        {
+        if grants_workflow_namespace(&grants, "web") && wiring.wired_namespaces.contains("web") {
             tools.extend(toolbelt::web_tools(
                 security,
                 web_allowed_domains,
@@ -345,24 +367,33 @@ impl WorkflowToolInvoker {
             ));
         }
         // Metered web search (issue #238) — mirror `build_agent`'s two-gate
-        // wiring exactly: an EXPLICIT `search` grant (`grants_search_explicit`;
-        // the catch-all `*` never confers it, because each call is a priced
-        // managed request) AND a managed search backend on the deps. Granted-but-
+        // wiring exactly: an EXPLICIT `search` grant (which is what
+        // `grants_workflow_namespace` resolves to for this namespace; the
+        // catch-all `*` never confers it, because each call is a priced managed
+        // request) AND a managed search backend on the deps. Granted-but-
         // uncredentialed wires nothing and warns, so `web_search` degrades
         // gracefully when no managed credential is configured (fail-closed).
-        if crate::company::grants_search_explicit(&grants)
+        if grants_workflow_namespace(&grants, "search")
             && wiring.wired_namespaces.contains("search")
         {
-            match search {
-                Some(backend) => {
+            // The company's own provider REPLACES the managed surface here for
+            // the same reason it does on an agent belt: two tools under one
+            // slug is a node that spends the platform's metered budget for a
+            // company that pasted its own key.
+            match (tenant_search, search) {
+                (Some(tenant), _) => {
+                    tools.extend(crate::harness::search_byo::byo_search_tools(tenant));
+                }
+                (None, Some(backend)) => {
                     tools.extend(crate::harness::search::search_tools(
                         backend,
                         search_metering,
                     ));
                 }
-                None => tracing::warn!(
-                    "[workflow] company explicitly grants `search` but no managed search backend \
-                     is configured; web_search NOT wired (fail-closed)"
+                (None, None) => tracing::warn!(
+                    "[workflow] company explicitly grants `search` but neither a company search \
+                     provider nor a managed backend is configured; web_search NOT wired \
+                     (fail-closed)"
                 ),
             }
         }
@@ -622,6 +653,7 @@ mod tests {
             Vec::new(),
             &CapabilityFilter::AllowAll,
             None,
+            None,
             test_metering(),
             WorkflowToolWiring::default(),
         );
@@ -659,6 +691,9 @@ mod tests {
         let provider_message = refusal_for("web_search", &["search".to_string()], &provider)
             .expect("missing provider refuses");
         assert!(provider_message.contains("no managed search backend"));
+        // Both remedies, because either one fixes it: the company can set its
+        // own provider without waiting on the platform.
+        assert!(provider_message.contains("Settings → Search"));
         assert!(provider_message.contains("ask the platform operator"));
 
         let tier = WorkflowToolWiring {
@@ -693,6 +728,7 @@ mod tests {
             Vec::new(),
             &CapabilityFilter::AllowAll,
             None,
+            None,
             test_metering(),
             WorkflowToolWiring::default(),
         );
@@ -705,6 +741,7 @@ mod tests {
             Vec::new(),
             vec!["code.*".to_string()],
             &CapabilityFilter::AllowAll,
+            None,
             None,
             test_metering(),
             WorkflowToolWiring {
@@ -741,6 +778,7 @@ mod tests {
             vec!["search".to_string()],
             &CapabilityFilter::AllowAll,
             Some(&backend),
+            None,
             test_metering(),
             WorkflowToolWiring {
                 wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
@@ -758,6 +796,7 @@ mod tests {
             vec!["*".to_string()],
             &CapabilityFilter::AllowAll,
             Some(&backend),
+            None,
             test_metering(),
             WorkflowToolWiring {
                 wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
@@ -775,6 +814,7 @@ mod tests {
             vec!["search".to_string()],
             &CapabilityFilter::AllowAll,
             None,
+            None,
             test_metering(),
             WorkflowToolWiring {
                 wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
@@ -782,6 +822,63 @@ mod tests {
             },
         );
         assert!(!uncredentialed.tools.contains_key("web_search"));
+    }
+
+    /// A workflow node searches through the company's own provider when it has
+    /// one — and reaches it on a deployment with no managed backend at all,
+    /// which is exactly the self-hosted case the BYO surface exists for.
+    #[test]
+    fn a_company_provider_serves_workflow_search_and_replaces_the_managed_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let security = Arc::new(toolbelt::exec_security(
+            dir.path(),
+            crate::harness::policy::PolicyMode::Supervised,
+        ));
+        let tenant = TenantSearch::for_test("exa", Some("tenant-key"), None);
+        let backend = SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed"),
+            5,
+        );
+
+        // No managed backend, a company provider → search still works.
+        let byo_only = WorkflowToolInvoker::new(
+            security.clone(),
+            dir.path(),
+            audit.path(),
+            Vec::new(),
+            vec!["search".to_string()],
+            &CapabilityFilter::AllowAll,
+            None,
+            Some(&tenant),
+            test_metering(),
+            WorkflowToolWiring {
+                wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
+                missing: BTreeMap::new(),
+            },
+        );
+        assert!(byo_only.tools.contains_key("web_search"));
+        assert!(byo_only.tools.contains_key("exa_get_contents"));
+
+        // Both configured → the company's own provider wins, and the node can
+        // no longer reach the platform's metered surface at all.
+        let both = WorkflowToolInvoker::new(
+            security,
+            dir.path(),
+            audit.path(),
+            Vec::new(),
+            vec!["search".to_string()],
+            &CapabilityFilter::AllowAll,
+            Some(&backend),
+            Some(&tenant),
+            test_metering(),
+            WorkflowToolWiring {
+                wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
+                missing: BTreeMap::new(),
+            },
+        );
+        assert!(both.tools.contains_key("exa_find_similar"));
     }
 
     #[test]
@@ -808,6 +905,7 @@ mod tests {
                 crate::company::credentials::Credential::from_value("managed"),
                 5,
             )),
+            None,
             test_metering(),
             wiring.clone(),
         );

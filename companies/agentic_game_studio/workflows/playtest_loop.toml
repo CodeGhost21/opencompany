@@ -1,0 +1,91 @@
+# Workflow graph: playtest_loop
+#
+# Referenced by `[workflows].enabled` in ../company.toml. A build is played, what
+# happened is recorded as behaviour rather than as opinion, and the blocking
+# observations are fixed before anything new is started — which is the rule
+# studios break first and pay for last.
+
+id = "playtest_loop"
+name = "Playtest loop"
+description = "A build is played, observations are recorded as behaviour, and blockers are fixed before new work starts."
+
+[[node]]
+id = "build"
+kind = "trigger"
+name = "Build ready to play"
+summary = "A build exists that somebody outside the team could play."
+
+[[node]]
+id = "session"
+kind = "agent"
+name = "Run the session"
+summary = "Say nothing while they play. Every prompt destroys the observation it was about to produce."
+agent = "qa_tester"
+
+[[node]]
+id = "record"
+kind = "agent"
+name = "Record what happened"
+summary = "Behaviour, the build, and how many players hit it — never \"the tutorial is confusing\"."
+agent = "qa_tester"
+
+[[node]]
+id = "blocking"
+kind = "condition"
+name = "Anything blocking?"
+summary = "Branch on whether a player could not continue."
+[node.config]
+field = "=item.has_blocker"
+
+[[node]]
+id = "fix"
+kind = "agent"
+name = "Fix the blockers"
+summary = "Blocking observations outrank everything on the schedule."
+agent = "gameplay_engineer"
+
+[[node]]
+id = "tune"
+kind = "agent"
+name = "Tune what needs tuning"
+summary = "One change per system, recorded with old and new values."
+agent = "balance_designer"
+
+[[node]]
+id = "report"
+kind = "output"
+name = "Report the state of the build"
+summary = "What is actually playable, honestly, so the schedule rests on something real."
+[node.destination]
+kind = "channel"
+target = "release"
+
+[[edge]]
+from = "build"
+to = "session"
+
+[[edge]]
+from = "session"
+to = "record"
+
+[[edge]]
+from = "record"
+to = "blocking"
+
+[[edge]]
+from = "blocking"
+to = "fix"
+label = "yes"
+
+[[edge]]
+from = "blocking"
+to = "tune"
+label = "no"
+
+[[edge]]
+from = "fix"
+to = "tune"
+
+[[edge]]
+from = "tune"
+to = "report"

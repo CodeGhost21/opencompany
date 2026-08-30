@@ -61,7 +61,9 @@ async function dismissOnboarding(page: Page) {
 }
 
 async function goToTeam(page: Page) {
-  await page.goto("/#/team");
+  // The Company page, whose Cards half is the roster (issue #1141). Bare
+  // `#/team` redirects here; this asks for the address that exists.
+  await page.goto("/#/company");
   await dismissOnboarding(page);
   await expect(page.getByTestId("team-card").first()).toBeVisible({ timeout: 30_000 });
 }
@@ -88,7 +90,6 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   await expect(page).toHaveURL(/#\/team\/ceo$/);
 
   await expect(page.getByTestId("agent-name")).toHaveText("Chief Executive");
-  await expect(page.getByTestId("agent-id")).toHaveText("ceo");
 
   // The tier, resolved by the host rather than read off the manifest string.
   await expect(page.getByTestId("agent-tier")).toContainText("Orchestrator");
@@ -107,16 +108,36 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   await expect(tools).toContainText("composio");
   await expect(tools).toContainText("mcp:*");
 
-  // This agent sits on no desk, and says so rather than rendering nothing.
-  await expect(page.getByTestId("agent-desks-empty")).toBeVisible();
+  // This agent sits on no desk, so the identity row carries no desk chip.
+  await expect(page.locator('[data-testid^="agent-desk-"]')).toHaveCount(0);
 
-  // A blueprint teammate is read-only here, and the screen says why instead of
-  // offering an edit that would 409.
-  await expect(page.getByTestId("agent-edit")).toHaveCount(0);
-  await expect(page.getByTestId("agent-readonly-note")).toContainText("company.toml");
+  // `ceo` is a blueprint teammate, and this is the assertion that used to pin
+  // the opposite. The Edit affordance was *present and disabled* (#1141) with a
+  // note saying the edit belonged in `company.toml` — which is advice with no
+  // action behind it for a hosted tenant that has no checkout to edit and no
+  // redeploy to make. A manifest teammate is editable now, through an overlay
+  // layered on the record rather than a rewrite of the blueprint, so the button
+  // is live and the read-only note is gone.
+  await expect(page.getByTestId("agent-edit")).toBeEnabled();
+  await expect(page.getByTestId("agent-readonly-note")).toHaveCount(0);
 
-  // Back returns to the roster.
-  await page.getByRole("button", { name: "Back to team" }).click();
+  // And it is a real editor rather than a live-looking button: clicking opens
+  // the same fields a console-created teammate is edited through, so a manifest
+  // teammate follows one flow and not a second, weaker one. Persona instructions
+  // remain a distinct field layered on top of main's description editor.
+  await page.getByTestId("agent-edit").click();
+  await expect(page.getByTestId("agent-field-description")).toBeVisible();
+  await expect(page.getByTestId("agent-field-instructions")).toBeVisible();
+
+  // What does *not* change: the source still names the blueprint. Editing does
+  // not launder a manifest teammate into an overlay one — the operator can
+  // still see where this teammate came from.
+  await expect(page.getByTestId("agent-source")).toHaveText("Company blueprint");
+
+  // The breadcrumb returns to the Company page (issue #1141, replacing "Back to
+  // team" — this page is linked into from the org chart and the chat pane, and
+  // Back named a page half its arrivals had never seen).
+  await page.getByTestId("agent-breadcrumb-company").click();
   await expect(page.getByTestId("team-card").first()).toBeVisible();
 });
 
@@ -128,7 +149,9 @@ test("desk membership is on the agent, and an agent is reachable by link", async
 
   await expect(page.getByTestId("agent-name")).toHaveText("Engineer", { timeout: 30_000 });
   await expect(page.getByTestId("agent-tier")).toContainText("Worker");
-  await expect(page.getByTestId("agent-desks")).toContainText("Engineering desk");
+  const desk = page.getByTestId("agent-desk-engineering");
+  await expect(desk).toContainText("Engineering desk");
+  await expect(desk).toHaveAttribute("href", "#/company/engineering");
 });
 
 test("an agent defined in the console can be read back and edited", async ({ page }) => {
@@ -141,12 +164,12 @@ test("an agent defined in the console can be read back and edited", async ({ pag
   // and leaves a second card for `card(page, role)` to match.
   try {
     // Define one through the dialog the issue calls create-only.
-    await page.getByRole("button", { name: "Add member" }).first().click();
+    await page.getByRole("button", { name: "Add teammate" }).first().click();
     const dialog = page.getByRole("dialog");
     await dialog.getByTestId("agent-field-name").fill("Detail Spec");
     await dialog.getByTestId("agent-field-role").fill(role);
     await dialog.getByTestId("agent-field-description").fill("Original instructions.");
-    await dialog.getByRole("button", { name: "Add member" }).click();
+    await dialog.getByRole("button", { name: "Add teammate" }).click();
     await expect(card(page, role)).toBeVisible({ timeout: 30_000 });
 
     // Open it. This is the half that was impossible: the roster was write-once
@@ -191,14 +214,14 @@ test("an agent defined in the console can be read back and edited", async ({ pag
 
     // …and the roster the operator came from agrees, rather than only the panel
     // they edited in.
-    await page.getByRole("button", { name: "Back to team" }).click();
+    await page.getByTestId("agent-breadcrumb-company").click();
     await expect(card(page, "Spec Runner II")).toBeVisible({ timeout: 30_000 });
   } finally {
     // Leave the company as we found it, whatever happened above.
     await goToTeam(page);
     const leftover = page.getByTestId("team-card").filter({ hasText: "Detail Spec" }).first();
     if (await leftover.count()) {
-      await leftover.getByLabel("Member actions").click();
+      await leftover.getByLabel("Teammate actions").click();
       await page.getByRole("menuitem", { name: "Remove" }).click();
       await expect(leftover).toHaveCount(0, { timeout: 30_000 });
     }

@@ -2,10 +2,11 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 import {
-  ArrowLeft, ChevronRight, ClipboardList, FileText, ListChecks, Server, User, UserCog, Wrench, X, type LucideIcon,
+  ArrowLeft, ArrowUpRight, ChevronRight, ClipboardList, FileText, ListChecks, Server, User, UserCog, Wrench, X, type LucideIcon,
 } from 'lucide-react';
 import type { ToolWiki } from './agent-wiki';
 import type { MemoryNode } from './memory-core';
+import type { ConsoleDestination } from './open-in-console';
 import type { Person, SopTask } from './schemas';
 
 export type AgentLite = { id: string; name: string; role: string; model: string };
@@ -28,6 +29,36 @@ export function WikiLink({ label, mcp, onClick }: { label: string; mcp?: boolean
     </button>
   ) : (
     <span className="inline-flex items-center gap-1 font-mono text-2xs text-os-accent">{inner}</span>
+  );
+}
+
+/**
+ * The way out of the graph (issue #1308).
+ *
+ * Every card here used to be a dead end: the landing page could tell an
+ * operator that a teammate had never run, and then made them leave through the
+ * sidebar and find that teammate again by hand. This is the one control that
+ * ends the card, in the same place on every card, and it goes to the page that
+ * already names the same record.
+ *
+ * A real `<a href>` rather than a click handler, deliberately: it is a link, so
+ * cmd-click, middle-click and copy-link all have to work, and the console's
+ * hash router picks the address up from `hashchange` exactly as it does for
+ * every other link in the app.
+ *
+ * It mirrors `PanelHeader`'s Back row — same mono caption size, same tracking,
+ * same resting colour — so the card reads as a thing with a top and a bottom
+ * rather than a panel that has grown a button.
+ */
+export function OpenInConsole({ to }: { to: ConsoleDestination }) {
+  return (
+    <a
+      href={to.hash}
+      className="flex shrink-0 items-center justify-between gap-2 border-t border-os-border px-3 py-2 font-mono text-3xs uppercase tracking-[0.14em] text-os-dim transition-colors hover:bg-os-surface hover:text-os-text"
+    >
+      <span className="truncate">{to.label}</span>
+      <ArrowUpRight className="h-3 w-3 shrink-0" aria-hidden />
+    </a>
   );
 }
 
@@ -110,12 +141,12 @@ export function DeptOverviewCard({
           <Row color={dept.color} title={head.name} sub={head.role} badge="lead" onClick={() => onPerson(dept.deptId)} />
         ) : (
           <p className="rounded-md-t border border-dashed border-os-border px-3 py-2 font-mono text-2xs text-os-dim">
-            No human lead yet — this team runs on agents.
+            No human lead yet — this team runs on teammates.
           </p>
         )}
 
         <div className="mt-4">
-          <SectionLabel icon={User}>Agents ({agents.length})</SectionLabel>
+          <SectionLabel icon={User}>Teammates ({agents.length})</SectionLabel>
           <div className="flex flex-col gap-1.5">
             {agents.map((a) => (
               <Row key={a.id} color="var(--accent)" title={a.name} sub={`${a.role} · ${a.model}`} onClick={() => onAgent(a.id)} />
@@ -144,7 +175,7 @@ export function DeptOverviewCard({
  */
 export function AgentHarnessCard({
   agent, task, parentName, parentAgentId, subAgents, lastRun, runLabel, tools,
-  onBack, onClose, onTool, onAgent, onTask,
+  onBack, onClose, onTool, onAgent, onTask, openIn,
 }: {
   /**
    * `tier` is the company's declaration verbatim, `null` when it declared none;
@@ -174,10 +205,12 @@ export function AgentHarnessCard({
   onTool?: (slug: string) => void;
   onAgent?: (agentId: string) => void;
   onTask?: () => void;
+  /** The teammate's own page in the console (issue #1308). */
+  openIn?: ConsoleDestination | null;
 }) {
   return (
     <div className="flex h-full flex-col">
-      <PanelHeader title={agent.name} sub={`${agent.role} · AI agent`} onBack={onBack} onClose={onClose} />
+      <PanelHeader title={agent.name} sub={`${agent.role} · AI teammate`} onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
         <p className="mb-3 text-2xs leading-relaxed text-os-muted">{agent.description}</p>
 
@@ -258,9 +291,15 @@ export function AgentHarnessCard({
             </p>
           </div>
         ) : (
-          <p className="font-mono text-2xs text-os-dim">never run — trigger it from /agents</p>
+          // It used to say "trigger it from /agents" — a route that has never
+          // existed in `VIEWS`, so following the one instruction the card gave
+          // landed the operator back on this same page (issue #1315). The
+          // teammate's real page is one row below now, so this states the fact
+          // and lets the footer carry the way there.
+          <p className="font-mono text-2xs text-os-dim">never run</p>
         )}
       </div>
+      {openIn && <OpenInConsole to={openIn} />}
     </div>
   );
 }
@@ -284,7 +323,7 @@ export function ToolDetailCard({
         </div>
         <SectionLabel icon={User}>used by ({wiki.usedBy.length})</SectionLabel>
         {wiki.usedBy.length === 0 ? (
-          <p className="font-mono text-2xs text-os-dim">no agents in view</p>
+          <p className="font-mono text-2xs text-os-dim">no teammates in view</p>
         ) : (
           <div className="flex flex-col gap-1">
             {wiki.usedBy.map((n) => (
@@ -300,12 +339,14 @@ export function ToolDetailCard({
 
 /** Memory note detail: one note from the company's memory constellation. */
 export function MemoryNoteCard({
-  note, color, onBack, onClose,
+  note, color, onBack, onClose, openIn,
 }: {
   note: MemoryNode;
   color: string;
   onBack?: () => void;
   onClose?: () => void;
+  /** The Brain, which is the surface a note lives on (issue #1308). */
+  openIn?: ConsoleDestination | null;
 }) {
   return (
     <div className="flex h-full flex-col">
@@ -330,17 +371,18 @@ export function MemoryNoteCard({
         <SectionLabel icon={FileText}>source</SectionLabel>
         <WikiLink label={`${note.id}.md`} />
       </div>
+      {openIn && <OpenInConsole to={openIn} />}
     </div>
   );
 }
 
 /** SOP detail: one written-out job — its steps, its single owner, its tools. */
 export function SopTaskDetailCard({
-  task, assigneeName, assigneeKindLabel, assigneeColor, runtime, tools, onBack, onClose, onAssignee, onTool,
+  task, assigneeName, assigneeKindLabel, assigneeColor, runtime, tools, onBack, onClose, onAssignee, onTool, openIn,
 }: {
   task: SopTask;
   assigneeName: string;
-  assigneeKindLabel: string; // 'human' | 'AI agent'
+  assigneeKindLabel: string; // 'human' | 'AI teammate'
   assigneeColor: string;
   /** what executes this SOP, e.g. 'builtin · imapflow' or 'human · judgment call' */
   runtime?: string | null;
@@ -349,6 +391,8 @@ export function SopTaskDetailCard({
   onClose?: () => void;
   onAssignee?: () => void;
   onTool?: (slug: string) => void;
+  /** The board card this SOP is (issue #1308). */
+  openIn?: ConsoleDestination | null;
 }) {
   return (
     <div className="flex h-full flex-col">
@@ -384,13 +428,14 @@ export function SopTaskDetailCard({
           {tools.length === 0 && <span className="font-mono text-2xs text-os-dim">no tools wired</span>}
         </div>
       </div>
+      {openIn && <OpenInConsole to={openIn} />}
     </div>
   );
 }
 
 /** Graph human detail: a person in the process — their one job and tools. */
 export function GraphHumanDetailCard({
-  person, deptName, color, task, tools, onBack, onClose, onTask, onTool,
+  person, deptName, color, task, tools, onBack, onClose, onTask, onTool, openIn,
 }: {
   person: Person;
   deptName: string;
@@ -401,6 +446,8 @@ export function GraphHumanDetailCard({
   onClose?: () => void;
   onTask?: () => void;
   onTool?: (slug: string) => void;
+  /** The console's people list — there is no per-person page (issue #1308). */
+  openIn?: ConsoleDestination | null;
 }) {
   return (
     <div className="flex h-full flex-col">
@@ -424,6 +471,7 @@ export function GraphHumanDetailCard({
           ))}
         </div>
       </div>
+      {openIn && <OpenInConsole to={openIn} />}
     </div>
   );
 }
@@ -444,7 +492,7 @@ export function PersonDetailCard({
       <PanelHeader title={person.name} sub={person.role} color={color} onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
         <p className="mb-3 text-2xs leading-relaxed text-os-muted">
-          Leads <span className="font-semibold" style={{ color }}>{deptName}</span> — manages {agents.length} agent{agents.length === 1 ? '' : 's'}.
+          Leads <span className="font-semibold" style={{ color }}>{deptName}</span> — manages {agents.length} teammate{agents.length === 1 ? '' : 's'}.
         </p>
         <SectionLabel icon={FileText}>context</SectionLabel>
         <div className="mb-4"><WikiLink label={`${person.name.toLowerCase()}.md`} /></div>

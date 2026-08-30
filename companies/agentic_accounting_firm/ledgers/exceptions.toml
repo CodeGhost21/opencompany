@@ -1,0 +1,103 @@
+# Discrepancies found in the books, and what was done about each.
+#
+# The thing a bookkeeping firm is actually paid for. An unreconciled item filed
+# as a task disappears into a board and is closed by whoever gets there first;
+# an exception has to carry what was found, what it was traced to, and how it
+# was resolved — because the next auditor will ask, and "it was fixed" is not an
+# answer.
+
+title = "Exceptions"
+purpose = """
+Every discrepancy found in the books: what did not tie out, what it was traced \
+to, and how it was resolved. Read it before explaining any figure that looks \
+wrong — most of them have been looked at already.\
+"""
+written_by = "`record_entry` to raise or update an exception, `close_entry` when it is resolved or written off"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "exception"
+role = "title"
+required = true
+description = "What did not tie out, with the account and the amount."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "amount"
+role = "number"
+description = "The size of the discrepancy, in the entity's currency."
+
+[[field]]
+name = "period"
+role = "refs"
+description = "The close period it belongs to."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "traced_to"
+role = "prose"
+description = "What actually caused it. `unknown` is honest; a plausible cause written as fact is not."
+
+[[field]]
+name = "resolution"
+role = "prose"
+description = "The correcting entry, the write-off, or the acceptance — with its authority."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "open"
+
+[[status]]
+name = "investigating"
+
+[[status]]
+name = "corrected"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "written_off"
+label = "Written off"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "accepted"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Open"
+blurb = "Found and unresolved. A period does not close over one of these without somebody saying so."
+statuses = ["open", "investigating"]
+order = "recent"
+
+[[section]]
+heading = "Resolved"
+blurb = """
+Corrected, written off, or accepted — each with what it was traced to and the \
+authority for the treatment. This section is what an auditor reads, and "it was \
+fixed" is not an entry.\
+"""
+statuses = ["corrected", "written_off", "accepted"]
+cap = 20

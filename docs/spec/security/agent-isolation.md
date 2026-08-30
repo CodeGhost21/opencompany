@@ -1,8 +1,8 @@
 # Agent isolation: what confines an agent, and what does not
 
-**Status: current, and deliberately uncomfortable.** This is the threat model
-[repos.md](../runtime/repos.md) deferred when the bound-repository read tier
-shipped (issue #245), filed as issue #752 C0. It exists to be read *before*
+**Status: current, and deliberately uncomfortable.** The threat model filed as
+issue #752 C0, kept after the bound-repository tier it was first written for was
+removed: nothing in it depended on repositories. It exists to be read *before*
 someone concludes from a closed child issue that the agent shell is contained.
 It is not.
 
@@ -27,7 +27,7 @@ agent that has been prompt-injected is not a cooperative component.
 
 The attacker does not have an account. They write text that an agent reads:
 an issue body, a pull-request description, a web page fetched by `web_fetch`,
-a file in a repository the company bound, an inbound email, a Telegram message,
+an inbound email, a page an agent fetched,
 a Composio trigger payload. Any of those can carry instructions, and the agent
 that reads them is the one holding the grants.
 
@@ -46,13 +46,10 @@ Each of these is real. None of them is a sandbox.
 | Database per tenant | `OPENCOMPANY_MONGODB_URI` is scoped to that tenant's database | [storage.md](../runtime/storage.md) |
 | Tool grants are per agent, and `repo` needs naming | `grants_repo_explicit` — the catch-all `*` does **not** confer `repo`, `media`, `composio` or `search` | `src/company/types.rs` |
 | Repo tools need a grant, a wired manager **and** a binding | Three of the four gates in `build_agent`, each fail-closed with a warning (the fourth is the row below) | `src/harness/build.rs` |
-| Repo credentials refused on a plaintext secret backend | Issue #752 C3 — bind, company boot and agent build all refuse unless `OPENCOMPANY_STORAGE=mongodb` | `src/store/select.rs`, `src/runtime/repo_manager.rs`, `src/runtime/builder.rs`, `src/harness/build.rs` |
 | Classic PATs refused at intake | `ghp_…` reads every repository the account can reach; the route refuses it and says how to make a fine-grained one | `src/server/ops/repos.rs` |
-| The credential never reaches argv, the environment or a file | A git credential helper on stdin, with an emptied environment | [repos.md](../runtime/repos.md) |
 | A checkout cannot reach the mirror it came from | Full object copy over `file://`, no hardlinks, no `alternates`, every back-reference severed | `src/harness/repo.rs` |
 | A push at a mirror is refused by the mirror | A `pre-receive` hook installed in every mirror | `install_push_refusal` |
 | Checkouts do not survive a turn | Orphaned checkouts swept at boot, tenant-scoped | `sweep_orphaned_checkouts` |
-| Repository configuration cannot make git run programs | `core.hooksPath=/dev/null`, no system/global config, scratch `$HOME`, deadline on every invocation | [repos.md](../runtime/repos.md) |
 | Shell without an audit logger is no shell | `shell_audit` returns `None` → the whole `shell` namespace is withheld | `src/harness/toolbelt.rs` |
 | The audit sink is not in the agent's sandbox | Issue #752 C6 — the sink is the host-owned `companies/<slug>/audit/<agent>/`, so the file tools' `workspace_only` policy **refuses** it instead of permitting it | `src/store/layout.rs`, `src/harness/toolbelt.rs` |
 | A command that could not be recorded does not run | `AuditedShellTool` appends the intent line and fsyncs it **before** delegating; an append failure refuses the call | `src/harness/audit.rs` |
@@ -292,8 +289,6 @@ this one — but see the precondition above.
 
 ## Related
 
-- [repos.md](../runtime/repos.md) — "The honest limit", which this document is
-  the deferred follow-up to.
 - [storage.md](../runtime/storage.md) — backend selection, and the repository
   credential requirement C3 added.
 - [ports-state.md](../runtime/ports-state.md) — the `SecretStore` contract.

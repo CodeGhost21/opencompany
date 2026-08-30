@@ -1,0 +1,111 @@
+# The portfolio of things this studio is building, and what state each is in.
+#
+# A studio's whole discipline is killing ventures on time. Every venture feels
+# alive from the inside — there is always one more experiment — and without an
+# explicit state and an agreed kill criterion, a studio ends up with six
+# half-built products and no capital. The board cannot express "this is still
+# alive because nobody has said otherwise", and that is the state most ventures
+# are actually in.
+
+title = "Ventures"
+purpose = """
+Every venture this studio is building: the thesis, the stage, what it would take \
+to kill it, and how the dead ones died. Read it before proposing a new venture — \
+studio capacity, not ideas, is the binding constraint.\
+"""
+written_by = "`record_entry` to launch or advance a venture, `close_entry` when it spins out or is killed"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "venture"
+role = "title"
+required = true
+description = "What it is, in a sentence a customer would recognise."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "thesis"
+role = "prose"
+required = true
+description = "Who has this problem, and why now. \"Now\" is the half most theses skip."
+
+[[field]]
+name = "riskiest_assumption"
+role = "prose"
+required = true
+description = "The thing that, if false, ends this. It should be what the next experiment tests."
+
+[[field]]
+name = "kill_criteria"
+role = "prose"
+description = "What would stop this, agreed before it is needed. Written afterwards, they are never met."
+
+[[field]]
+name = "capacity"
+role = "prose"
+description = "What of the studio it is consuming. The real constraint, and the reason a sixth venture is a decision about the other five."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it ended — spun out, sold, or killed and on what. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "validating"
+aliases = ["thesis"]
+
+[[status]]
+name = "building"
+
+[[status]]
+name = "launched"
+
+[[status]]
+name = "spun_out"
+label = "Spun out"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "killed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Building and launched"
+blurb = "Consuming studio capacity now. Check `capacity` before proposing anything new."
+statuses = ["building", "launched"]
+order = "recent"
+
+[[section]]
+heading = "Early"
+blurb = "Thesis or validating. Each should name the riskiest assumption and what would kill it."
+statuses = ["validating"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Spun out or killed, each with the reason. The kills are the studio's actual \
+method: a venture killed on a stated criterion is a working studio, and one \
+that faded out is capital nobody can account for.\
+"""
+statuses = ["spun_out", "killed"]
+cap = 20

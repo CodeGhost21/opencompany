@@ -43,6 +43,20 @@ impl StubToolProvider {
 /// `filesystem_wipe`.
 const TOOL_NAME_SEPARATORS: &[char] = &['.', '_', ':'];
 
+/// The characters that end a namespace segment in a `[tools].allow` **grant**:
+/// only `.`, because a namespace grant is written dotted (`docs.read`).
+///
+/// Deliberately narrower than [`TOOL_NAME_SEPARATORS`] — `files_scratch` is not
+/// a grant under the `files` namespace, and never was.
+///
+/// Lives here, beside [`extends_on_boundary`], rather than in
+/// [`harness::build`](crate::harness::build) where it started: the namespace
+/// rule now has two always-compiled callers as well as the feature-gated one
+/// ([`grants_files_or_docs`](crate::company::grants_files_or_docs) is read by
+/// the console route, which ships without `openhuman`), and a second
+/// transcription of the separator set is precisely the fork issue #461 removed.
+pub(crate) const NAMESPACE_SEPARATORS: &[char] = &['.'];
+
 /// Whether `name` *is* `prefix`, or extends it and stops on a namespace
 /// boundary drawn from `separators`.
 ///
@@ -99,7 +113,13 @@ pub(crate) fn grant_matches(grant: &str, tool: &str) -> bool {
 /// first, never the raw per-agent `tools`.
 pub(crate) fn grants_cover_server(grants: &[String], name: &str) -> bool {
     let want = format!("mcp:{name}");
-    grants.iter().any(|grant| grant_matches(grant, &want))
+    // MCP is an explicit company opt-in. The generic matcher deliberately
+    // treats `*` as universal, but carrying that rule into this namespace would
+    // make a wildcard-only company reach every installed server.
+    grants
+        .iter()
+        .filter(|grant| grant.as_str() != "*")
+        .any(|grant| grant_matches(grant, &want))
 }
 
 #[async_trait]
@@ -200,6 +220,14 @@ mod test {
         assert!(grant_matches("composio_list*", "composio_list_toolkits"));
         assert!(!grant_matches("composio_list*", "composio_listen"));
         assert!(!grant_matches("composio_list*", "composio_execute"));
+    }
+
+    #[test]
+    fn wildcard_does_not_cover_mcp_servers() {
+        assert!(!grants_cover_server(&["*".into()], "notion"));
+        assert!(grants_cover_server(&["mcp:*".into()], "notion"));
+        assert!(grants_cover_server(&["mcp:notion".into()], "notion"));
+        assert!(!grants_cover_server(&["mcp:notion".into()], "linear"));
     }
 
     /// Every grant shape the shipped `companies/*/company.toml` manifests use

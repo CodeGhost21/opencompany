@@ -1,0 +1,107 @@
+# Companies seen, and what was decided about each.
+#
+# A venture firm's actual asset. The firm sees hundreds of companies and invests
+# in a handful, and everything it learns about the ones it passes on is thrown
+# away unless it is recorded — including the passes that turn out to be wrong,
+# which are the only way a firm learns anything about its own judgement.
+
+title = "Pipeline"
+purpose = """
+Every company this firm has seen: what they do, where the conversation got to, \
+and why the passes were passes. Read it before taking a meeting — the firm has \
+often seen this company, or one exactly like it, and what it concluded is the \
+cheapest preparation available.\
+"""
+written_by = "`record_entry` to add or advance a company, `close_entry` when the firm invests or passes"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "company"
+role = "title"
+required = true
+description = "The company and what it does, in one line somebody outside the sector would follow."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "thesis_fit"
+role = "prose"
+description = "Which part of the firm's thesis this is, or why it is an exception worth making."
+
+[[field]]
+name = "team"
+role = "prose"
+description = "Who the founders are and what makes them the ones to do this."
+
+[[field]]
+name = "the_question"
+role = "prose"
+description = "The single thing this investment turns on. Every deal has one and diligence that does not name it wanders."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = """
+Why it closed — invested, passed and on what specifically, or lost the \
+allocation. \"Not for us\" is not a reason. Required when it closes.\
+"""
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "seen"
+
+[[status]]
+name = "diligence"
+aliases = ["committee"]
+
+[[status]]
+name = "invested"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "passed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "lost"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Live"
+blurb = "In diligence or at committee. Each should name the single question the investment turns on."
+statuses = ["diligence"]
+order = "recent"
+
+[[section]]
+heading = "Seen"
+blurb = "Met, not yet worked. Cheap to hold; cheap to pass on with a reason."
+statuses = ["seen"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Invested, passed, or lost the allocation — each with a specific reason. The \
+passes are the record of the firm's own judgement, and a firm that cannot \
+review its passes cannot improve.\
+"""
+statuses = ["invested", "passed", "lost"]
+cap = 20

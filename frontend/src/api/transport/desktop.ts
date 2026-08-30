@@ -23,6 +23,8 @@
 // from holding more than one host, and a convenience default here would
 // reintroduce it above the seam instead of below it.
 
+import type { SshTarget } from "@/connections/types";
+
 import { tauriCore } from "./bridge";
 
 /** What `oc_embedded` answers with. Mirrors `EmbeddedInfo` in Rust. */
@@ -39,34 +41,18 @@ export interface EmbeddedInfo {
    * behaviour rather than to a connection keyed on `undefined`.
    */
   instanceId?: string;
-  /**
-   * The address this host will sign a person in as (#632).
-   *
-   * A desktop install has one standing admin and no mail transport, so nobody
-   * could guess what to type and every other address gets the same silent
-   * acknowledgement. Optional for the same reason as `instanceId`: an older
-   * shell does not send it, and a blank sign-in form is the honest degrade.
-   */
-  operatorEmail?: string;
 }
 
 /**
  * How a connection authenticates, in the shape `oc_connect` takes.
  *
- * Note what is absent: any device token. The core resolves a paired device's
- * session from the keychain by connection id, so the console has nothing to
- * pass and — more to the point — nothing to leak. Only the platform bearer
- * travels, because that one genuinely arrives in the URL.
+ * Only the platform bearer travels, because that one genuinely arrives in the
+ * URL. A session the desktop holds is the client's own business — it lives in
+ * the OS keychain and the console never sees it, which is also why there is no
+ * device token here to leak.
  */
 export interface DesktopCredential {
   platformToken?: string;
-}
-
-/** What pairing tells the console. Carries no secret. */
-export interface PairedDevice {
-  company: string;
-  deviceId: string;
-  expiresAtMillis: number;
 }
 
 /** Connections the core has been told about, by id. */
@@ -113,6 +99,44 @@ export function registerConnection(
     );
   registrations.set(id, pending);
   return pending;
+}
+
+/**
+ * Hands a sign-in's session to the core, as `id`'s credential (issue #1855).
+ *
+ * The desktop cannot hold a session the way a hub console does: the proxy
+ * strips a webview-supplied `x-opencompany-session` (`RESERVED_HEADERS`) and
+ * the event stream never takes caller headers at all — both on purpose, so the
+ * page never decides what a request authenticates as. The one place a sign-in's
+ * token can live and work is the core, which is where pairing always kept it.
+ *
+ * Sequenced behind whatever is parked under this id, like `forgetConnection`:
+ * an adoption racing an in-flight `oc_connect` would otherwise be overwritten
+ * by a registration that read the keychain before the session was in it.
+ *
+ * The returned promise REJECTS on failure, unlike `registerConnection`'s
+ * swallowed one, because this caller is a sign-in with a person behind it — a
+ * session that could not be stored must surface where they can retry, not as a
+ * mysterious 401 three requests later. The map entry parks the settled-either-
+ * way promise so later calls still sequence and nothing resurfaces.
+ */
+export function adoptSessionIntoCore(id: string, session: string): Promise<void> {
+  const desktop = tauriCore();
+  if (!desktop) return Promise.resolve();
+  const previous = registrations.get(id) ?? Promise.resolve();
+  const adopted = previous.then(() =>
+    desktop.invoke<void>("oc_adopt_session", { connectionId: id, session }),
+  );
+  registrations.set(
+    id,
+    adopted.then(
+      () => undefined,
+      (error: unknown) => {
+        console.error(`[desktop] could not adopt the session for ${id}`, error);
+      },
+    ),
+  );
+  return adopted;
 }
 
 /**
@@ -184,43 +208,366 @@ export async function embeddedHost(): Promise<EmbeddedInfo | null> {
   }
 }
 
-/**
- * Redeems a pairing code for this machine.
- *
- * The token never comes back. It exists for one HTTP response, and the core
- * keeps that response to itself: it writes the session to the OS keychain and
- * answers with only what a person needs to see. A console that received the
- * token — even to hand it straight back — would be a console an injected script
- * could read it from.
- */
-export async function pairDevice(
-  id: string,
-  baseUrl: string,
-  code: string,
-  label?: string,
-): Promise<PairedDevice> {
-  const desktop = tauriCore();
-  if (!desktop) throw new Error("pairing a device needs the desktop application");
-  return desktop.invoke<PairedDevice>("oc_pair_device", {
-    connectionId: id,
-    baseUrl,
-    code,
-    label: label ?? null,
-  });
+/** One host this machine runs. Mirrors `LocalInstanceInfo` in Rust. */
+export interface LocalInstance {
+  /** Stable within this machine, and the name of its data directory. */
+  id: string;
+  /** What the operator called it. Free text, and renameable. */
+  label: string;
+  dataDir: string;
+  running: boolean;
+  /** Present exactly when `running` — a stopped instance has no port. */
+  baseUrl?: string;
+  /**
+   * The host's own durable identity, which is what a connection row is keyed
+   * on. The address is not: it is a fresh ephemeral port every launch.
+   */
+  instanceId?: string;
+  companies?: string[];
+  /** Why it is not running. Usually another process holding its data root. */
+  error?: string;
 }
 
 /**
- * Forgets this machine's stored session for a connection.
+ * Every host this machine runs, listening or not.
  *
- * Local only: the session still exists on the host until someone revokes it
- * from the devices list there. Conflating the two would mean unpairing one
- * laptop cut off another.
+ * `[]` in a browser, which runs none. Also `[]` on a shell built before the
+ * roster existed: the command is simply absent there, and `App` falls back to
+ * {@link embeddedHost} — one instance is what that shell has anyway, so the
+ * degrade is exact rather than approximate.
  */
-export async function forgetDevice(id: string): Promise<void> {
-  await tauriCore()?.invoke("oc_forget_device", { connectionId: id });
+export async function localInstances(): Promise<LocalInstance[] | null> {
+  const desktop = tauriCore();
+  if (!desktop) return [];
+  try {
+    const answer = await desktop.invoke<LocalInstance[]>("oc_local_instances");
+    // Anything that is not an array is a shell that does not implement this.
+    // Checked rather than defaulted to `[]`: an unknown command answers
+    // `undefined` on some bridges and rejects on others, and both mean the same
+    // thing — ask `oc_embedded` instead.
+    return Array.isArray(answer) ? answer : null;
+  } catch (error) {
+    // `null`, not `[]`: "this shell has no roster command" and "this machine
+    // runs nothing" are different answers, and only the first has a fallback.
+    console.warn("[desktop] this shell has no instance roster", error);
+    return null;
+  }
+}
+
+/**
+ * Adds a host on this machine over a data root of its own, and starts it.
+ *
+ * A root of its own is the whole mechanism: two hosts over one root overwrite
+ * each other's companies, which is why the core locks it. So a second local
+ * company is a second root, not a second process.
+ */
+export async function createLocalInstance(label: string): Promise<LocalInstance> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  return desktop.invoke<LocalInstance>("oc_create_local_instance", { label });
+}
+
+export async function startLocalInstance(id: string): Promise<LocalInstance> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  return desktop.invoke<LocalInstance>("oc_start_local_instance", { id });
+}
+
+/**
+ * Stops a host, freeing its port and its data root.
+ *
+ * Freeing the root is the part worth wanting: it is what lets an
+ * `opencompany serve` in a terminal take over the same company.
+ */
+export async function stopLocalInstance(id: string): Promise<LocalInstance> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  return desktop.invoke<LocalInstance>("oc_stop_local_instance", { id });
+}
+
+export async function renameLocalInstance(id: string, label: string): Promise<LocalInstance> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  return desktop.invoke<LocalInstance>("oc_rename_local_instance", { id, label });
+}
+
+/**
+ * Drops a host from the roster. **The data stays on disk** — the core does the
+ * reversible half only, because the other half is someone's company.
+ */
+export async function forgetLocalInstance(id: string): Promise<void> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("running a host locally needs the desktop application");
+  await desktop.invoke<void>("oc_forget_local_instance", { id });
+}
+
+/** Permanently deletes a desktop-created host and everything in its data root. */
+export async function deleteLocalInstance(id: string): Promise<void> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("deleting a local company needs the desktop application");
+  await desktop.invoke<void>("oc_delete_local_instance", { id });
+}
+
+/**
+ * One tunnel this application is holding open. Mirrors `SshTunnelInfo` in Rust.
+ */
+export interface SshTunnel {
+  /** Stable for a target across launches, and what closing one names. */
+  id: string;
+  destination: string;
+  remotePort: number;
+  /** The loopback address to address this host at, this launch. */
+  baseUrl: string;
+  /** Why it stopped forwarding, in `ssh`'s own words. */
+  error?: string;
+}
+
+/**
+ * Opens a tunnel to a host on another machine, and answers with the address to
+ * use for it.
+ *
+ * Idempotent per target: a host already tunnelled answers with the tunnel that
+ * is up. That is what lets the probe call this unconditionally rather than the
+ * console keeping its own idea of which tunnels exist.
+ *
+ * Rejects with what `ssh` printed — "Host key verification failed" and
+ * "Permission denied (publickey)" being the two likely ones, both of which the
+ * operator has to go and fix in a specific way that only `ssh` knows.
+ */
+export async function openSshTunnel(target: SshTarget): Promise<SshTunnel> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("reaching a host over ssh needs the desktop application");
+  return desktop.invoke<SshTunnel>("oc_open_ssh_tunnel", { target });
+}
+
+/**
+ * Closes the tunnel to a target.
+ *
+ * Named by the target rather than by the id {@link SshTunnel} carries, so the
+ * roster key stays derived on the core's side alone. A connection restored
+ * from `localStorage` has the target and has never seen the id, and a second
+ * copy of that derivation here would be a rule two languages have to keep in
+ * step.
+ *
+ * Not an error when there is no such tunnel — removal can arrive twice.
+ */
+export async function closeSshTunnel(target: SshTarget): Promise<void> {
+  await tauriCore()?.invoke<void>("oc_close_ssh_tunnel", { target });
+}
+
+/**
+ * Every tunnel, and which of them stopped forwarding.
+ *
+ * `[]` in a browser, which holds none. `null` on a shell built before tunnels
+ * existed — the same distinction {@link localInstances} draws, and for the same
+ * reason: "this shell cannot do it" and "there are none" have different
+ * answers.
+ */
+export async function sshTunnels(): Promise<SshTunnel[] | null> {
+  const desktop = tauriCore();
+  if (!desktop) return [];
+  try {
+    const answer = await desktop.invoke<SshTunnel[]>("oc_ssh_tunnels");
+    return Array.isArray(answer) ? answer : null;
+  } catch (error) {
+    console.warn("[desktop] this shell has no ssh tunnels", error);
+    return null;
+  }
+}
+
+/**
+ * Whether a coding harness can be used right now, and if not, what to do
+ * about it. Mirrors `Readiness` in Rust (`acp::discovery`) — a tagged union
+ * over `state`, exactly as `serde`'s `tag = "state"` emits it.
+ */
+export type AcpReadiness =
+  | { state: "notInstalled" }
+  /**
+   * The CLI is installed here; the ACP adapter that fronts it is not.
+   *
+   * Distinct from `notInstalled` because the fix is different and the wrong
+   * one is actively misleading: this operator has Claude Code, uses it, and
+   * needs one npm package — not a reinstall of software they already run.
+   */
+  | { state: "adapterMissing"; cli: string; package: string }
+  /**
+   * No `node` on the shell PATH.
+   *
+   * Distinct from every other failure because installing an adapter would not
+   * help: both adapters are `#!/usr/bin/env node` scripts, so a missing runtime
+   * defeats a perfectly good install. Rendering an Install button here offers
+   * an action that cannot work.
+   */
+  | { state: "nodeMissing" }
+  /** This app's own adapter is behind the version this build pins. */
+  | { state: "adapterOutdated"; found: string; want: string }
+  | { state: "notSignedIn" }
+  /**
+   * Installed and signed in as far as the filesystem can tell, but not yet
+   * confirmed to start. A *pending* answer, not a verdict — resolve it with
+   * {@link confirmAcpHarness}. Never render this as usable.
+   */
+  | { state: "checking" }
+  | { state: "ready" }
+  | { state: "spawnFailed"; reason: string };
+
+/** One coding harness this shell can drive over ACP. Mirrors `HarnessStatus`. */
+export interface AcpHarnessStatus {
+  id: string;
+  label: string;
+  readiness: AcpReadiness;
+}
+
+/**
+ * Every coding harness this shell knows how to drive over ACP, and whether
+ * each is ready.
+ *
+ * `[]` in a browser, which has no local harnesses to speak of. `null` on a
+ * shell built before this command existed — same distinction
+ * {@link localInstances} draws, and for the same reason: "no command" and "no
+ * harnesses installed" are different answers, and only the settings panel
+ * that reads this needs to tell them apart.
+ */
+export async function acpHarnesses(): Promise<AcpHarnessStatus[] | null> {
+  const desktop = tauriCore();
+  if (!desktop) return [];
+  try {
+    const answer = await desktop.invoke<AcpHarnessStatus[]>("oc_acp_harnesses");
+    return Array.isArray(answer) ? answer : null;
+  } catch (error) {
+    console.warn("[desktop] this shell has no ACP harness catalogue", error);
+    return null;
+  }
+}
+
+/** One model a harness advertises. Mirrors `HarnessModel`. */
+export interface AcpHarnessModel {
+  /** The id to send back when pinning a teammate. Must round-trip exactly. */
+  value: string;
+  /** A human label when the adapter gives one, else render `value`. */
+  name?: string;
+  description?: string;
+  /** Whether the adapter reports this as what it would use right now. */
+  current: boolean;
+}
+
+/** What a confirmation found: whether it runs, and what it can run. */
+export interface AcpConfirmation {
+  readiness: AcpReadiness;
+  /** Empty when the adapter advertises no choosable model. */
+  models: AcpHarnessModel[];
+  /**
+   * Where the adapter turned out to be — present only on the states that quote
+   * it, and resolved after the verdict rather than before it.
+   *
+   * The survey no longer carries a path, because it no longer looks: nothing
+   * is known about a harness until it has been started.
+   */
+  path?: string;
+}
+
+/**
+ * Every harness confirmed this session, keyed by id.
+ *
+ * Deliberately module-level rather than component state: Settings probes on
+ * open and the agent detail page needs the same answer, and without a shared
+ * cache each would spawn the CLI again for a list that cannot have changed in
+ * between.
+ *
+ * Never persisted. The list is a fact about the installed CLI at this moment —
+ * `codex-acp` gained three models between one capture and the next — so a
+ * stored copy would go quietly stale and offer models the harness no longer
+ * has.
+ */
+const confirmations = new Map<string, AcpConfirmation>();
+
+/**
+ * Starts one harness, resolving its `checking` state to `ready` or
+ * `spawnFailed`, and reporting the models it advertises.
+ *
+ * Separate call from {@link acpHarnesses} on purpose: the list paints from the
+ * cheap filesystem probe straight away and each row settles on its own, so one
+ * slow CLI cannot hold up the rest of the pane.
+ *
+ * `null` when nothing can answer — a browser, or a shell predating the
+ * command. Callers should leave the row on `checking` in that case rather than
+ * inventing a verdict.
+ */
+export async function confirmAcpHarness(id: string): Promise<AcpConfirmation | null> {
+  const desktop = tauriCore();
+  if (!desktop) return null;
+  try {
+    const answer = await desktop.invoke<AcpConfirmation>("oc_acp_confirm_harness", { id });
+    if (!answer || typeof answer.readiness?.state !== "string") return null;
+    const confirmation: AcpConfirmation = {
+      readiness: answer.readiness,
+      models: Array.isArray(answer.models) ? answer.models : [],
+      path: answer.path,
+    };
+    confirmations.set(id, confirmation);
+    return confirmation;
+  } catch (error) {
+    console.warn(`[desktop] could not confirm the \`${id}\` harness`, error);
+    return null;
+  }
+}
+
+/**
+ * The models `id` advertised when it was last confirmed, or `[]` if it has not
+ * been — which is not the same as "it has none", so a caller rendering a
+ * picker should treat empty as "nothing to offer yet" and fall back to free
+ * text rather than to an empty dropdown.
+ */
+export function cachedAcpModels(id: string): AcpHarnessModel[] {
+  return confirmations.get(id)?.models ?? [];
+}
+
+/**
+ * Confirms `id` unless it already has been this session.
+ *
+ * What a surface calls when it wants the model list but does not care about
+ * readiness — the agent detail page, which is reached without ever opening
+ * Settings.
+ */
+export async function ensureAcpModels(id: string): Promise<AcpHarnessModel[]> {
+  const known = confirmations.get(id);
+  if (known) return known.models;
+  return (await confirmAcpHarness(id))?.models ?? [];
+}
+
+/**
+ * Installs (or updates) the ACP adapter this app owns for `id`.
+ *
+ * Resolves to `null` on success, or the reason it failed — npm's own words
+ * where there are any, because a message this layer invented would be a guess
+ * about a failure it did not diagnose (a yanked version, a proxy, a read-only
+ * home all fail differently and are fixed differently).
+ *
+ * Evicts the cached confirmation for `id` before returning. That cache exists
+ * so the agent model picker does not re-spawn a CLI for a list that cannot
+ * have changed — but an install is precisely the event that changes it, and a
+ * stale entry would keep serving the pre-install answer for the rest of the
+ * session, including the `adapterMissing` that prompted the install.
+ */
+export async function installAcpHarness(id: string): Promise<string | null> {
+  const desktop = tauriCore();
+  if (!desktop) return "Installing a coding harness needs the desktop app.";
+  try {
+    await desktop.invoke<void>("oc_acp_install_harness", { id });
+    confirmations.delete(id);
+    return null;
+  } catch (error) {
+    // Cleared on failure too: a partial install leaves the previous answer
+    // no more trustworthy than a successful one would.
+    confirmations.delete(id);
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 /** Test seam: forget every registration. */
 export function resetDesktopRegistrations(): void {
   registrations.clear();
+  // The confirmation cache is module-level, so a test that left one behind
+  // would leak a harness's model list into the next test's expectations.
+  confirmations.clear();
 }

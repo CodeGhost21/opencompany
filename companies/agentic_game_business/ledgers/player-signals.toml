@@ -1,0 +1,98 @@
+# What the community is actually saying, distinguished from what is loudest.
+#
+# Community sentiment reaches a live-game team as a stream of individually
+# unrepresentative complaints, and the team's real problem is telling a
+# widespread quiet problem from a small loud one. A ledger row with a count and
+# a source does that; a channel full of messages does not.
+
+title = "Player signals"
+purpose = """
+What players are saying, where, how many, and whether it is borne out by the \
+data. Read it before responding to any community flare-up, and before assuming \
+the loudest complaint is the common one.\
+"""
+written_by = "`record_entry` to raise or update a signal, `close_entry` when it is addressed or found unrepresentative"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "signal"
+role = "title"
+required = true
+description = "What players are saying, in their words."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "where"
+role = "prose"
+required = true
+description = "Which channel — store reviews, Discord, support tickets. Each has a different bias and they disagree."
+
+[[field]]
+name = "scale"
+role = "prose"
+description = "How many, out of what. The field that separates a widespread quiet problem from a small loud one."
+
+[[field]]
+name = "data_says"
+role = "prose"
+description = "Whether telemetry bears it out. Sometimes it does not, and that is itself the finding."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — addressed, or not borne out. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "emerging"
+
+[[status]]
+name = "confirmed"
+
+[[status]]
+name = "addressed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "unrepresentative"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Confirmed"
+blurb = "Borne out by scale, data, or both. These are real regardless of how quiet they are."
+statuses = ["confirmed"]
+order = "recent"
+
+[[section]]
+heading = "Emerging"
+blurb = "Being said, not yet checked. Loud is not the same as common."
+statuses = ["emerging"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Addressed, or found unrepresentative — each with the reason. Kept because the \
+same complaint returns every few months, and knowing it was checked last time \
+is what stops it being re-litigated from scratch.\
+"""
+statuses = ["addressed", "unrepresentative"]
+cap = 20

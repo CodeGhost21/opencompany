@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Issue #300 — an OAuth connection started from inside the onboarding tour.
+ * Issue #300 — a legacy OAuth connection query from inside the onboarding tour.
  *
  * The redirect back from the provider is a **full-page navigation**, so neither
  * half of this can be proven by a unit test: the tour's step state lives in
  * react-joyride's memory and dies with the document, and the failure arms of the
- * host callback used to render a JSON body *as the page*.
+ * host callback used to render a JSON body *as the page*. #838's callback now
+ * has a terminal explanatory page; these cover the console's compatibility
+ * handling for an older callback URL.
  *
  * These specs drive a running host (see `playwright.config.ts` — the harness
  * brings it up, there is no `webServer`). CI does not run Playwright.
@@ -23,7 +25,15 @@ type Page = import("@playwright/test").Page;
  */
 async function dismissWelcome(page: Page): Promise<void> {
   const skip = page.getByRole("button", { name: "Skip for now" });
+  // Waits rather than sampling. The welcome is held until first-run setup has
+  // read the roster and decided it has nothing to do
+  // (`docs/spec/runtime/company-setup.md`), so it now appears one request later
+  // than it used to — an instantaneous `isVisible()` loses that race and leaves
+  // the dialog blocking every role-based assertion below. Absence is still
+  // tolerated: a company that has already seen the tour never offers it.
+  await skip.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined);
   if (await skip.isVisible().catch(() => false)) await skip.click();
+  await expect(skip).toBeHidden();
 }
 
 /** The tour's per-company localStorage key, discovered from the running app. */
@@ -35,11 +45,11 @@ async function tourKey(page: Page): Promise<string> {
   return key!;
 }
 
-test("a cancelled handshake lands back in the console, not on a dead page", async ({ page }) => {
-  // Exactly what the host now redirects to when the operator cancels at the
-  // provider's consent screen. Before the fix this route answered with
+test("a legacy hash callback lands on the OAuth page with its cancellation message", async ({ page }) => {
+  // This is the query the former callback used after an operator cancelled at
+  // the provider consent screen. Before the original fix it answered with
   // `{"error":"provider returned: access_denied"}` as the document body.
-  await page.goto("/connections?connect_error=denied&provider=slack");
+  await page.goto("/#/connections?connect_error=denied&provider=slack");
 
   // Assert the message first — the toast auto-dismisses, so anything that
   // blocks for a timeout before this would race it away.
@@ -47,12 +57,12 @@ test("a cancelled handshake lands back in the console, not on a dead page", asyn
 
   // The console renders — the operator is not stranded on raw JSON.
   await dismissWelcome(page);
-  await expect(page.getByRole("heading", { name: "Connections", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "OAuth", level: 1 })).toBeVisible();
 
-  // The param is stripped, so a refresh doesn't re-fire the toast.
+  // The fragment query is stripped, so a refresh doesn't re-fire the toast.
   await expect
-    .poll(() => new URL(page.url()).searchParams.get("connect_error"))
-    .toBeNull();
+    .poll(() => new URL(page.url()).hash.includes("connect_error"))
+    .toBe(false);
 
   // The grid is rendered and usable — the failure was a bounce-back, not a
   // terminal state.
@@ -78,10 +88,10 @@ test("an unknown failure code still produces a usable message", async ({ page })
   await page.goto("/connections?connect_error=something_new_2099");
   await expect(page.getByText(/couldn't connect/i)).toBeVisible();
   await dismissWelcome(page);
-  await expect(page.getByRole("heading", { name: "Connections", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "OAuth", level: 1 })).toBeVisible();
 });
 
-test("the tour resumes on the Connections stop after a redirect", async ({ page }) => {
+test("the tour resumes on the accounts stop after a redirect", async ({ page }) => {
   await page.goto("/#/overview");
 
   // First run offers the tour. Skipping writes the per-company key, which is
@@ -91,14 +101,14 @@ test("the tour resumes on the Connections stop after a redirect", async ({ page 
   await skip.click();
   const key = await tourKey(page);
 
-  // Seed exactly what `armTourResume` writes just before ConnectionsView hands
-  // the browser to the provider: mid-tour, on the Connections stop, no
+  // Seed exactly what `armTourResume` writes just before the OAuth page hands
+  // the browser to the provider: mid-tour, on the accounts stop, no
   // completed/skipped flag (the tour never finished).
   //
   // `"settings"`, NOT `"connections"`. The marker stores the stop's `view`
   // (`TourController`'s `before` hook publishes `stop.view` through
-  // `setActiveTourStop`), and Connections became a *page of the Settings
-  // section* — the stop is `{ view: "settings", sub: "connections" }`. This
+  // `setActiveTourStop`), and the accounts page is a *page of the Settings
+  // section* — the stop is `{ view: "settings", sub: "oauth" }`. This
   // spec seeded the pre-move value, which no `TOUR` stop matches, so the
   // controller's `findIndex` returned -1 and the resume was correctly skipped.
   // The spec had gone stale against a deliberate product change; it was not

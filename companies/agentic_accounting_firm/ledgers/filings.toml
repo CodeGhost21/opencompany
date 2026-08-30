@@ -1,0 +1,122 @@
+# Statutory filings: returns, remittances and reports with dates imposed from
+# outside.
+#
+# A board cannot hold these. A card can be re-planned; a VAT return cannot, and
+# the penalty for missing one is charged whether or not anybody had a card open.
+# The question this ledger answers — what is due, when, and has anyone signed it
+# — is asked at the start of every day and cannot be assembled from a task list.
+
+title = "Filings"
+purpose = """
+Every statutory filing and remittance this firm is responsible for: what is \
+due, when, what it covers, and who signed it. Read it at the start of every \
+working session; a date here outranks anything discretionary.\
+"""
+written_by = "`record_entry` to add or update a filing, `close_entry` when it is filed, extended or superseded"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "filing"
+role = "title"
+required = true
+description = "What it is and for whom — the return, the entity, the period."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "due"
+role = "date"
+required = true
+description = "The statutory date. Not the internal target."
+
+[[field]]
+name = "authority"
+role = "prose"
+required = true
+description = "Who imposes it, and under what. A filing with no named authority is a habit."
+
+[[field]]
+name = "period"
+role = "prose"
+description = "What it covers — the month, quarter or year."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "penalty"
+role = "prose"
+description = "What missing it costs. This is what decides whether it outranks everything else today."
+
+[[field]]
+name = "signed_by"
+role = "prose"
+description = "The person who signed. This roster prepares filings; it does not sign them."
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it resolved — filed, extended, or no longer required. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "upcoming"
+
+[[status]]
+name = "preparing"
+
+[[status]]
+name = "awaiting_signature"
+label = "Awaiting signature"
+
+[[status]]
+name = "filed"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "not_filed"
+label = "Not filed"
+closed = true
+needs_reason = true
+aliases = ["extended", "not_required"]
+
+[[section]]
+heading = "Awaiting a signature"
+blurb = "Prepared and parked on a person. Chase these; nothing here moves on its own."
+statuses = ["awaiting_signature"]
+order = "recent"
+
+[[section]]
+heading = "In preparation"
+blurb = "Being worked now."
+statuses = ["preparing"]
+order = "recent"
+
+[[section]]
+heading = "Upcoming"
+blurb = "Ahead, with the penalty for missing each one."
+statuses = ["upcoming"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+blurb = """
+Filed, or not — each with the reason (extended, or found not to be required) and \
+who signed. This is the firm's own audit trail, and it is read far more often than \
+it is written.\
+"""
+statuses = ["filed", "not_filed"]
+cap = 20

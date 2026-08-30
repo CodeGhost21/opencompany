@@ -26,11 +26,12 @@ no roster beyond its single implicit local owner.
 | Bootstrap | The manifest's `[users] admins` list |
 | Mode | `[users] mode` — `email` (default), `wallet`, or `none`. See [Sign-in modes](auth-modes.md) |
 | Roles | `admin` (may invite and administer) / `member` |
+| Profile | Name and icon, self-served through `PATCH …/auth/me` — see [avatars.md](avatars.md) |
 
 An `admin` is also what the write plane means by authority over the company: the
 routes that decide what the company reaches the world as — its Composio and
 provider connections, its inference provider and key, its mail identity, its
-Telegram bot, its MCP servers — require one. See
+its MCP servers — require one. See
 [the write plane](../../modules/server/authority.md)
 for the table and the reasoning. A `member` reads those surfaces but does not
 change them.
@@ -153,6 +154,32 @@ variable on the instance and restart it. The workload reads it at boot, and
 eligibility is evaluated per login rather than cached, so the next link request
 from that address succeeds.
 
+### Recovery without a mailbox
+
+Every path above needs a magic link to arrive — and a hosted tenant may have
+**no mail transport at all**, or one that is failing. With no admin yet, no one
+can set a password from the console, so the address stays unreachable
+(issue #1718). For that case the host issues the first password directly:
+
+```sh
+opencompany issue-password --company <id> --email ada@example.com
+```
+
+It reads storage directly, so its authority is possession of the host and its
+data — which an operator has and an HTTP caller never does. It admits exactly
+the standing grants above — a manifest `[users].admins` entry or
+`OPENCOMPANY_ADMIN_EMAIL` — and makes one usable without mail; it does **not**
+create one. Committing revokes the user's existing sessions and pending login
+codes first, and by default flags the password for replacement, matching the
+admin temporary-password route ([Passwords](#passwords)). It requires the
+effective email auth mode, takes a company id in the bare or namespaced
+`<tenant>--<id>` form in shared-database mode — a bare id is namespaced to the
+current `OPENCOMPANY_TENANT_ID`, and one carrying a different tenant's prefix is
+refused — reads the password from stdin to
+keep it out of argv, and on the filesystem store holds the same data-root lock
+as `serve`, so it fails cleanly if a server is running on that root. See the
+[CLI reference](../../../gitbooks/developers/cli.md) for the full semantics.
+
 ## Routes
 
 Login routes are **unauthenticated by construction** (`PublicCompany`), because
@@ -161,7 +188,7 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 
 | Route | Purpose |
 |---|---|
-| `GET …/auth/config` | The sign-in mode this company uses, so the console knows which screen to draw |
+| `GET …/auth/config` | The sign-in mode this company uses and the name it goes by, so the console knows which screen to draw and what to call it |
 | `POST …/auth/request` | Mail a magic link. Always `{"sent": true}` |
 | `POST …/auth/verify` | Redeem a link → session cookie |
 | `POST …/auth/login` | Email + password → session cookie |
@@ -171,6 +198,7 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 | `POST …/auth/wallet/challenge` | Mint a nonce for a wallet to sign (`wallet` mode) |
 | `POST …/auth/wallet/verify` | Answer a challenge → session cookie (`wallet` mode) |
 | `GET …/auth/me` | Who this session belongs to |
+| `PATCH …/auth/me` | Your own name and icon — see [avatars.md](avatars.md). No user id in the path, so it can only ever be you |
 | `POST …/auth/logout` | Revoke this session |
 | `GET …/users` | The roster (admin) |
 | `GET …/users/invites` | List outstanding invites (admin) |
@@ -246,7 +274,10 @@ login followed by setting a new one — reusing a path that already exists rathe
 than adding a second emailed secret to get wrong.
 
 An admin may instead set a **temporary password**, which revokes the user's
-sessions and pending codes and sets `mustChangePassword`. Note two things:
+sessions and pending codes and sets `mustChangePassword`. A host with no
+browser session to do this through uses `issue-password`, which commits the
+same semantics from the command line — see
+[Recovery without a mailbox](#recovery-without-a-mailbox). Note two things:
 
 - The admin knows that password and must convey it out-of-band. That is
   inherent to the option, not a defect.
@@ -284,8 +315,7 @@ is never attached ambiently the way a cookie is.
 **A browser gets the cookie unless it asks otherwise, and it only asks when the
 cookie cannot work.** The default is unchanged and is what every same-origin
 console still gets: the token reaches the browser only as `Set-Cookie`, where
-`HttpOnly` keeps it away from JavaScript. Device pairing remains the issuer for
-native clients.
+`HttpOnly` keeps it away from JavaScript.
 
 The exception is the [hub console](hub-console.md), which is cross-origin with
 every host it operates and therefore receives no cookie at all.
@@ -318,44 +348,18 @@ hostile page therefore cannot make someone's browser request the readable
 carrier on its behalf. Anything other than `header` — absent, empty, or a value
 nobody defined — degrades to the cookie rather than to no session.
 
-## Device pairing
+## Device pairing was removed
 
-A **device** is not a second credential system: it is a `SessionRecord` with
-`SessionKind::Device`, a label, and a year-long TTL. That is deliberate over a
-separate storage port — `delete_for_user` is what suspension and admin reset
-call, and a separate device table would be a second thing every one of those
-paths must remember to clear. The failure mode of forgetting is a suspended user
-whose desktop keeps working.
+A desktop client used to enrol itself by redeeming a pairing code an
+already-signed-in human minted (`POST …/devices`, `…/devices/claim`), receiving
+a long-lived `SessionKind::Device` session. Those routes and the **Settings →
+Devices** page are gone: the frontend client holds its own session, so the host
+no longer runs a second enrolment protocol, a second code keyspace and a second
+revocation list beside the one sign-in it already has.
 
-The flow runs the opposite way to OAuth's device flow, which removes a problem
-rather than solving it:
-
-1. A **signed-in** human asks for a pairing code (`POST …/devices`).
-   Authentication has already happened; nothing is pending approval.
-2. They paste it into the desktop client.
-3. The client redeems it (`POST …/devices/claim`) and receives a session token
-   exactly once.
-
-One secret instead of two, no polling, and the code is only ever shown to
-someone already authenticated — where the device-flow variant shows it to an
-anonymous starter.
-
-Pairing codes and login codes share `LoginCodeStore` and are kept apart by
-hashing under a domain prefix rather than by a flag: they are different
-keyspaces, not one keyspace with a check someone could forget.
-
-A paired device **cannot mint a pairing code**. Otherwise one compromised
-desktop could quietly enrol further machines that survive revoking it, and
-revocation would stop being a lever.
-
-Routes: `GET/POST …/devices`, `POST …/devices/claim`, `DELETE …/devices/{id}`.
-Listing and revocation are scoped to the caller's own devices by querying
-`list_for_user`, so another user's id is simply not found.
-
-Every claim failure — unknown, expired, already redeemed, suspended user,
-removed user — returns one indistinguishable response. The route is reachable
-without any credential, and separating them would tell an anonymous caller which
-codes once existed and which accounts are live.
+What is unchanged is the carrier: a client that cannot receive a cookie asks for
+the header carrier (above), and that is still how a non-browser client presents
+a session.
 
 ## Revocation
 
@@ -439,6 +443,15 @@ admin's request open.
   mailbox to spare there, only the plaintext's hash is stored (so a throttled
   answer cannot re-echo the live code), and throttling would lock the sole local
   sign-in path for a minute after every use.
+
+  The silence has a cost the console has to absorb: nothing in the response
+  distinguishes a mailed link from a swallowed one, so the "check your email"
+  card cannot ask whether a resend would land. It therefore keeps its own copy
+  of the window — it stamps the moment each `202` arrives and disables its
+  "Resend link" button, with the remaining seconds in the label, until a minute
+  has passed (`frontend/src/views/login/resend.ts`, issue #1333). The constant
+  there must track `RESEND_INTERVAL_MILLIS`: too short and the button fires
+  into the throttle and reports a send that never happened.
 - **Login codes are never echoed** from a host that is reachable from anywhere
   else. `dev_code` appears only on a loopback-only bind with no mail
   transport. A routable host with broken mail lets nobody in rather than

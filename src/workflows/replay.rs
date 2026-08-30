@@ -131,9 +131,14 @@
 use serde_json::{Value, json};
 use tinyflows::model::{NodeKind, WorkflowGraph};
 
+use crate::company::{WorkflowFile, WorkflowNodeKind};
 use crate::ports::bound_node_output;
 
 use crate::runtime::workflow_resume::{PerformedCall, performed_in_input};
+
+use crate::workflows::caps::resolver::{
+    ChildGateRecord, ChildGateRegistry, GATE_NAMESPACE, child_id_of,
+};
 
 /// The host-private slug a replayed node invokes instead of its real tool.
 ///
@@ -227,13 +232,40 @@ impl UnreplayableCall {
 pub(crate) fn outward_calls_performed(
     graph: &WorkflowGraph,
     output: &Value,
+    authored: &WorkflowFile,
 ) -> (Vec<PerformedCall>, Vec<UnreplayableCall>) {
     let nodes = output.get("nodes");
     let mut performed = Vec::new();
     let mut unreplayable = Vec::new();
+    let declared = declared_unrepeatable(authored);
+    let declared_names = declared_call_names(authored);
 
     for node in &graph.nodes {
-        let Some(slug) = outward_call_of(node) else {
+        let is_declared = declared.contains(node.id.as_str());
+        // `replay_performed` overwrites a replayed node's own config with the
+        // `REPLAY_SLUG` sentinel *before* this run's engine ever sees it, so by
+        // the time the settled output reaches here the node's own `slug` no
+        // longer names the call it made — it names the sentinel (issue #850 +
+        // #846 interaction). Recording that sentinel verbatim would put
+        // `__opencompany.already_performed` on the operator's approval card in
+        // place of the real tool name. A declared node has to keep tracking
+        // under its own name instead — dropping it (the naive fix) would stop
+        // guarding it after this hop, so a third run downstream of a second
+        // gate would find an empty ledger entry and call it for real, which is
+        // exactly what the declaration exists to prevent. An undeclared node's
+        // replay is dropped here exactly as it already, if accidentally, was:
+        // it falls to `outward_call_of`'s classifier below, which cannot
+        // classify the sentinel either — this just makes that explicit instead
+        // of leaning on the policy table never having an opinion about it.
+        let is_replay_sentinel = matches!(node.kind, NodeKind::ToolCall)
+            && node.config.get("slug").and_then(Value::as_str) == Some(REPLAY_SLUG);
+        let Some(slug) = (if is_replay_sentinel {
+            is_declared
+                .then(|| declared_names.get(node.id.as_str()).cloned())
+                .flatten()
+        } else {
+            outward_call_of(node, is_declared)
+        }) else {
             continue;
         };
         // Not reached, or reached and produced nothing: there is nothing to
@@ -288,6 +320,171 @@ pub(crate) fn outward_calls_performed(
     }
 
     (performed, unreplayable)
+}
+
+/// The ungated outward calls a paused child will repeat when its gate is
+/// approved (issue #617).
+///
+/// A `sub_workflow` child that stops at an approval gate pauses the *parent*:
+/// tinyflows reports the child's gates namespaced (`<node>::<gate>`, nested
+/// one level per child — `sub::nested::work` for a gate two levels down), and
+/// the continuation re-runs the parent, which re-runs every child from the
+/// top. Any outward call the child made before the gate therefore fires again —
+/// but unlike a top-level call, its result does not travel up when the child
+/// pauses (tinyflows drops the child's partial output on
+/// `ChildOutcome::Paused`), so there is nothing to replay. Report it the same
+/// way [`outward_calls_performed`] reports a top-level call it cannot replay,
+/// so the operator is warned that approving restarts the child from the top.
+///
+/// Each namespaced pending id is resolved through `registry` to the child graph
+/// the resolver actually gated — descending through nested namespaces, and
+/// resolving an expression-bound `workflow_id` against `trigger_input` where
+/// the engine's `once` scope allows — then every call **upstream-reachable**
+/// from the paused gate is examined. "Upstream-reachable" is read off the
+/// child's edges by walking backward from the gate; a call on an un-taken
+/// branch of a fan-out is over-reported, the same conservative direction the
+/// top-level [`outward_calls_performed`] takes when it reads "completed" from
+/// the run state rather than per-branch.
+///
+/// A `requires_approval` node this run's list has already approved is *not*
+/// treated as still-blocked: the engine executes an approved gate (it skips the
+/// interrupt only when the id is listed), so the call fires on this
+/// continuation and will fire again on the next — exactly what the operator
+/// must be warned about.
+pub(crate) fn child_calls_to_repeat(
+    parent: &WorkflowGraph,
+    pending: &[String],
+    registry: &ChildGateRegistry,
+    trigger_input: &Value,
+) -> Vec<UnreplayableCall> {
+    let approved = approved_ids(trigger_input);
+    let mut out = Vec::new();
+    for node_id in pending {
+        let mut segments: Vec<&str> = node_id.split(GATE_NAMESPACE).collect();
+        let Some(gate) = segments.pop() else {
+            continue;
+        };
+        let mut graph = parent.clone();
+        let mut record: Option<ChildGateRecord> = None;
+        let mut prefix = String::new();
+
+        // A nested child is restarted from its own root, so calls in every
+        // ancestor child before the next `sub_workflow` node are repeated too.
+        // Walk each intermediate graph before descending to the record below it.
+        for segment in segments {
+            let Some(child_id) = child_id_of(&graph, segment, Some(trigger_input)) else {
+                record = None;
+                break;
+            };
+            if let Some(ancestor) = record.as_ref() {
+                for call in
+                    child_calls_preceding(&ancestor.graph, segment, &approved, &prefix, &prefix)
+                {
+                    if !out.contains(&call) {
+                        out.push(call);
+                    }
+                }
+            }
+            let Some(next) = registry.get(&child_id) else {
+                record = None;
+                break;
+            };
+            prefix.push_str(segment);
+            prefix.push_str(GATE_NAMESPACE);
+            graph = next.graph.clone();
+            record = Some(next);
+        }
+
+        let Some(record) = record else {
+            continue;
+        };
+        // Keep the deepest-child node ids in their established local form;
+        // ancestor calls carry the namespace so equal local ids remain distinct.
+        for call in child_calls_preceding(&record.graph, gate, &approved, &prefix, "") {
+            if !out.contains(&call) {
+                out.push(call);
+            }
+        }
+    }
+    out
+}
+
+/// The ids this lineage has already approved, read off the continuation input
+/// the same way the engine's `approvals_for_child` reads them
+/// (`run.trigger.approvals`).
+fn approved_ids(trigger_input: &Value) -> std::collections::HashSet<String> {
+    trigger_input
+        .get("approvals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The outward calls in `child` that run before `gate` and are not themselves
+/// gated.
+///
+/// Every node from which `gate` is reachable by walking `edges` backward must
+/// have run (or be on the branch that ran) before the pause; everything past
+/// the gate is unreachable and excluded. A `requires_approval` node the gate
+/// pass marked is excluded too — the child restarts and *pauses at it again*
+/// rather than executing it — **unless its namespaced id (`namespace_prefix` +
+/// the node's own id) is already in `approved`**: an approved gate does
+/// execute, on this continuation, and will execute again on the next, so it is
+/// exactly the call the operator must be warned about (issue #617).
+///
+/// Classified with the same [`outward_call_of`] the top-level guard uses, so
+/// the two reports agree about what an "outward call" is. The child's authored
+/// `repeatable` declarations are not consulted (the resolver keeps the
+/// translated graph, not the authored file); an undeclared classification is
+/// the conservative direction for a warning.
+fn child_calls_preceding(
+    child: &WorkflowGraph,
+    gate: &str,
+    approved: &std::collections::HashSet<String>,
+    namespace_prefix: &str,
+    output_prefix: &str,
+) -> Vec<UnreplayableCall> {
+    let mut reached = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::from([gate.to_string()]);
+    while let Some(id) = queue.pop_front() {
+        if !reached.insert(id.clone()) {
+            continue;
+        }
+        for edge in &child.edges {
+            if edge.to_node == id {
+                queue.push_back(edge.from_node.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for node in &child.nodes {
+        if !reached.contains(&node.id) {
+            continue;
+        }
+        let is_gate = node
+            .config
+            .get("requires_approval")
+            .and_then(Value::as_bool)
+            == Some(true);
+        if is_gate && !approved.contains(&format!("{namespace_prefix}{}", node.id)) {
+            // The child restarts and pauses at this node again; it does not
+            // execute it.
+            continue;
+        }
+        let Some(slug) = outward_call_of(node, false) else {
+            continue;
+        };
+        out.push(UnreplayableCall {
+            node_id: format!("{output_prefix}{}", node.id),
+            slug,
+            why: "it runs inside a child workflow whose ungated calls are not carried up when \
+                  the child pauses, so approving restarts the child and calls it again",
+        });
+    }
+    out
 }
 
 /// Rewrites every node this lineage has already called so the continuation
@@ -363,6 +560,70 @@ pub(crate) fn replay_performed(graph: &mut WorkflowGraph, trigger_input: &Value)
     replayed
 }
 
+/// The node ids whose author declared `repeatable = false` (issue #850).
+///
+/// Read off the **authored** file rather than the compiled graph, the same way
+/// [`deliver_outputs`](super::delivery::deliver_outputs) reads `destination`:
+/// this is host-side policy the engine never sees, so putting it in engine
+/// config would be an inert key riding into the graph.
+///
+/// Restricted to the two kinds that make a call, mirroring the validation that
+/// rejects the field anywhere else — so a graph loaded from an older or looser
+/// source cannot widen the guarded set through a kind the rewrite would not
+/// touch anyway.
+fn declared_unrepeatable(authored: &WorkflowFile) -> std::collections::HashSet<&str> {
+    authored
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.repeatable == Some(false)
+                && matches!(
+                    node.kind,
+                    WorkflowNodeKind::ToolCall | WorkflowNodeKind::HttpRequest
+                )
+        })
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
+/// The outward-call identity a declared-unrepeatable node's own authored
+/// config names, keyed by node id.
+///
+/// Consulted only when [`outward_calls_performed`] finds a node whose compiled
+/// config has already been overwritten by [`replay_performed`] with the
+/// [`REPLAY_SLUG`] sentinel: at that point the graph itself has nothing left
+/// to classify, so the name has to be read back off `authored` — the same
+/// source [`declared_unrepeatable`] reads, for the same reason.
+fn declared_call_names(authored: &WorkflowFile) -> std::collections::HashMap<&str, String> {
+    authored
+        .nodes
+        .iter()
+        .filter(|node| node.repeatable == Some(false))
+        .filter_map(|node| {
+            let name = match node.kind {
+                WorkflowNodeKind::ToolCall => node
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.get("slug"))
+                    .and_then(Value::as_str)?
+                    .to_string(),
+                WorkflowNodeKind::HttpRequest => {
+                    let method = node
+                        .config
+                        .as_ref()
+                        .and_then(|c| c.get("method"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("GET")
+                        .to_uppercase();
+                    format!("http_request {method}")
+                }
+                _ => return None,
+            };
+            Some((node.id.as_str(), name))
+        })
+        .collect()
+}
+
 /// The name of the outward call a node makes — or `None` when the node makes no
 /// call, or makes one that reaches nobody outside the company.
 ///
@@ -373,7 +634,7 @@ pub(crate) fn replay_performed(graph: &mut WorkflowGraph, trigger_input: &Value)
 /// than an oversight: its own tool calls park through #395's drain and are
 /// decided one at a time, and its re-execution is the token cost #438 already
 /// priced and declined to fix here.
-fn outward_call_of(node: &tinyflows::model::Node) -> Option<String> {
+fn outward_call_of(node: &tinyflows::model::Node, declared_unrepeatable: bool) -> Option<String> {
     match node.kind {
         NodeKind::ToolCall => {
             let slug = node.config.get("slug").and_then(Value::as_str)?;
@@ -382,6 +643,17 @@ fn outward_call_of(node: &tinyflows::model::Node) -> Option<String> {
                 .get("args")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            // The author said this call must not be made twice (issue #850).
+            // Read BEFORE the classifier, because the whole point is the calls
+            // the classifier cannot see: `shell` runs an arbitrary command and
+            // the host does not parse it, so no amount of inspection here will
+            // ever reach the right answer. Only the guarding direction is taken
+            // from the author — `repeatable = true` falls through to the
+            // classifier below rather than overriding it, so a declaration can
+            // never switch off a guard #846 already applies.
+            if declared_unrepeatable {
+                return Some(slug.to_string());
+            }
             let consequence = crate::policy::consequence_of(slug, &args);
             // The residual bucket — "no particular consequence to name on the
             // card" — is everything that stays inside the company plus the three
@@ -407,7 +679,12 @@ fn outward_call_of(node: &tinyflows::model::Node) -> Option<String> {
                 .and_then(Value::as_str)
                 .unwrap_or("GET")
                 .to_uppercase();
-            if SAFE_METHODS.contains(&method.as_str()) {
+            // A `GET` the author knows has a side effect — the method promises
+            // to have done nothing, and an endpoint is free to break that
+            // promise. Same one-way rule as the `tool_call` arm: the
+            // declaration adds this node to the guarded set and can never take
+            // a non-safe method out of it.
+            if SAFE_METHODS.contains(&method.as_str()) && !declared_unrepeatable {
                 return None;
             }
             Some(format!("http_request {method}"))
@@ -432,7 +709,49 @@ mod tests {
     use super::*;
     use crate::ports::run_output::RUN_OUTPUT_MAX_BYTES;
     use crate::runtime::workflow_resume::CONTINUATION_PERFORMED_KEY;
+    use crate::workflows::caps::resolver::ChildGateRecord;
     use tinyflows::model::Node;
+
+    use crate::company::{WorkflowEdgeDef, WorkflowNodeDef};
+
+    /// The authored file behind a test graph: one `WorkflowNodeDef` per
+    /// `(id, kind, repeatable)`, and nothing else set.
+    ///
+    /// Declared kinds matter — [`declared_unrepeatable`] filters on them, so a
+    /// test that passed the wrong kind would assert nothing.
+    fn authored(nodes: &[(&str, WorkflowNodeKind, Option<bool>)]) -> WorkflowFile {
+        WorkflowFile {
+            id: "wf".into(),
+            name: "wf".into(),
+            description: None,
+            owner_desk: None,
+            nodes: nodes
+                .iter()
+                .map(|(id, kind, repeatable)| WorkflowNodeDef {
+                    id: (*id).to_string(),
+                    kind: *kind,
+                    name: String::new(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: *repeatable,
+                    destination: None,
+                })
+                .collect(),
+            edges: Vec::<WorkflowEdgeDef>::new(),
+            global: false,
+        }
+    }
+
+    /// An authored file that declares nothing — the pre-#850 world, and the
+    /// shape every test written before this issue implicitly assumed.
+    fn undeclared() -> WorkflowFile {
+        authored(&[])
+    }
 
     fn node(id: &str, kind: NodeKind, config: Value) -> Node {
         Node {
@@ -472,8 +791,11 @@ mod tests {
             NodeKind::HttpRequest,
             json!({ "method": "POST", "url": "https://api.test/hooks" }),
         )]);
-        let (performed, unreplayable) =
-            outward_calls_performed(&g, &settled("notify", json!({ "status": 201 })));
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("notify", json!({ "status": 201 })),
+            &undeclared(),
+        );
 
         assert_eq!(performed.len(), 1, "{performed:?}");
         assert_eq!(performed[0].node, "notify");
@@ -518,9 +840,247 @@ mod tests {
             output["nodes"][id] = settled(id, json!({ "ok": true }))["nodes"][id].clone();
         }
 
-        let (performed, unreplayable) = outward_calls_performed(&g, &output);
+        let (performed, unreplayable) = outward_calls_performed(&g, &output, &undeclared());
         assert!(performed.is_empty(), "{performed:?}");
         assert!(unreplayable.is_empty(), "{unreplayable:?}");
+    }
+
+    /// `shell` is NOT recorded on its own (issue #850).
+    ///
+    /// The load-bearing negative. `shell` runs an arbitrary command the host
+    /// does not parse, so it is `EffectGroup::Other` and falls in the residual
+    /// bucket — and it must stay there. Replaying it by default would stop
+    /// every `shell` node that builds, lints or reads from re-running, to guard
+    /// the rare one that reached a counterparty. #846 declined that trade on
+    /// purpose; this test is what stops a later change making it silently.
+    #[test]
+    fn shell_is_not_recorded_without_a_declaration() {
+        let g = graph(vec![node(
+            "build",
+            NodeKind::ToolCall,
+            json!({ "slug": "shell", "args": { "command": "curl -X POST https://api.test/x" } }),
+        )]);
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("build", json!({ "stdout": "" })),
+            &undeclared(),
+        );
+        assert!(performed.is_empty(), "{performed:?}");
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+    }
+
+    /// `repeatable = false` puts a `shell` node in the guarded set (issue #850).
+    ///
+    /// The whole feature: the author states what the host cannot infer, and the
+    /// same recording path every classified call already travels picks it up.
+    #[test]
+    fn a_declared_shell_node_is_recorded() {
+        let g = graph(vec![node(
+            "publish",
+            NodeKind::ToolCall,
+            json!({ "slug": "shell", "args": { "command": "./bin/announce" } }),
+        )]);
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("publish", json!({ "stdout": "sent" })),
+            &authored(&[("publish", WorkflowNodeKind::ToolCall, Some(false))]),
+        );
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+        assert_eq!(performed.len(), 1, "{performed:?}");
+        assert_eq!(performed[0].node, "publish");
+        assert_eq!(performed[0].tool, "shell");
+    }
+
+    /// A replayed declared node still records its own tool name, not the
+    /// replay sentinel (issue #850 + #846 interaction).
+    ///
+    /// `replay_performed` overwrites a declared node's own config with the
+    /// `REPLAY_SLUG` sentinel before this run's engine ever executes it, so by
+    /// the time `outward_calls_performed` looks at the graph, the node's
+    /// `slug` reads `__opencompany.already_performed`, not `shell`. Recording
+    /// that sentinel verbatim would put it on the operator's approval card in
+    /// place of the tool name — and dropping the node instead (the naive fix)
+    /// would stop tracking it after this hop: a third run downstream of a
+    /// second gate would find an empty ledger entry for it and call `shell`
+    /// for real, which is exactly the violation issue #850 exists to prevent.
+    /// This pins both: the name stays correct, and the node stays guarded.
+    #[test]
+    fn a_replayed_declared_node_keeps_its_own_name() {
+        let authored = {
+            let mut file = authored(&[("publish", WorkflowNodeKind::ToolCall, Some(false))]);
+            file.nodes[0].config = Some(json!({
+                "slug": "shell",
+                "args": { "command": "./bin/announce" }
+            }));
+            file
+        };
+        // What `replay_performed` leaves behind on the second hop: the node's
+        // own config is gone, replaced by the sentinel.
+        let g = graph(vec![node(
+            "publish",
+            NodeKind::ToolCall,
+            json!({ "slug": REPLAY_SLUG, "args": { "__replayed_result": "\"sent\"" } }),
+        )]);
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("publish", json!({ "stdout": "sent" })),
+            &authored,
+        );
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+        assert_eq!(performed.len(), 1, "{performed:?}");
+        assert_eq!(performed[0].node, "publish");
+        assert_eq!(
+            performed[0].tool, "shell",
+            "must record the authored tool name, not the replay sentinel — recording the \
+             sentinel is a display bug on the operator's card, and dropping the node instead \
+             would silently let it run for real on the hop after next"
+        );
+    }
+
+    /// The same recovery, for an `http_request` node (issue #850 + #846
+    /// interaction).
+    ///
+    /// `declared_call_names` has a separate branch for `HttpRequest` that
+    /// builds the name from the authored method rather than a `slug` — this
+    /// pins that it is actually reached through the sentinel-recovery path,
+    /// not just present in the source. `replay_performed` converts a replayed
+    /// `HttpRequest` node into `NodeKind::ToolCall` with `REPLAY_SLUG` — the
+    /// same shape a replayed `ToolCall` node ends up in — so this is the
+    /// fixture that exercises the `HttpRequest` arm of `declared_call_names`
+    /// rather than its `ToolCall` arm.
+    #[test]
+    fn a_replayed_declared_http_node_keeps_its_own_name() {
+        let authored = {
+            let mut file = authored(&[("notify", WorkflowNodeKind::HttpRequest, Some(false))]);
+            file.nodes[0].config = Some(json!({
+                "method": "POST",
+                "url": "https://api.test/hooks"
+            }));
+            file
+        };
+        // What `replay_performed` leaves behind on the second hop: kind
+        // rewritten to `ToolCall`, config replaced by the sentinel — an
+        // `HttpRequest` node is indistinguishable in shape from a replayed
+        // `ToolCall` node by the time this function sees it.
+        let g = graph(vec![node(
+            "notify",
+            NodeKind::ToolCall,
+            json!({ "slug": REPLAY_SLUG, "args": { "__replayed_result": "{\"status\":201}" } }),
+        )]);
+        let (performed, unreplayable) =
+            outward_calls_performed(&g, &settled("notify", json!({ "status": 201 })), &authored);
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+        assert_eq!(performed.len(), 1, "{performed:?}");
+        assert_eq!(performed[0].node, "notify");
+        assert_eq!(
+            performed[0].tool, "http_request POST",
+            "must recover the authored method-based name through the HttpRequest arm of \
+             declared_call_names, not the replay sentinel"
+        );
+    }
+
+    /// A declaration only ever ADDS a guard.
+    ///
+    /// `repeatable = true` on a node the host already classifies as outward is
+    /// not a way to switch #846 off. The author is not more authoritative than
+    /// the consequence table about a call the table can see; the field exists
+    /// for the calls it cannot.
+    #[test]
+    fn repeatable_true_cannot_remove_a_guard() {
+        let g = graph(vec![node(
+            "notify",
+            NodeKind::HttpRequest,
+            json!({ "method": "POST", "url": "https://api.test/hooks" }),
+        )]);
+        let (performed, _) = outward_calls_performed(
+            &g,
+            &settled("notify", json!({ "status": 201 })),
+            &authored(&[("notify", WorkflowNodeKind::HttpRequest, Some(true))]),
+        );
+        assert_eq!(
+            performed.len(),
+            1,
+            "a declared-repeatable POST is still guarded"
+        );
+    }
+
+    /// A declaration on a `GET` guards it, because an endpoint is free to break
+    /// the promise the method makes.
+    #[test]
+    fn a_declared_get_is_recorded() {
+        let g = graph(vec![node(
+            "trip",
+            NodeKind::HttpRequest,
+            json!({ "method": "GET", "url": "https://api.test/fire" }),
+        )]);
+        let (performed, _) = outward_calls_performed(
+            &g,
+            &settled("trip", json!({ "status": 200 })),
+            &authored(&[("trip", WorkflowNodeKind::HttpRequest, Some(false))]),
+        );
+        assert_eq!(performed.len(), 1, "{performed:?}");
+    }
+
+    /// A declaration names a node id, and a stale one guards nothing.
+    ///
+    /// A graph edited between the pause and the approval can leave a
+    /// declaration naming a node that is gone. Silently guarding the wrong node
+    /// would be worse than guarding none, so the lookup is by id and misses.
+    #[test]
+    fn a_declaration_for_a_node_not_in_the_graph_guards_nothing() {
+        let g = graph(vec![node(
+            "build",
+            NodeKind::ToolCall,
+            json!({ "slug": "shell", "args": { "command": "make" } }),
+        )]);
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("build", json!({ "stdout": "" })),
+            &authored(&[("gone", WorkflowNodeKind::ToolCall, Some(false))]),
+        );
+        assert!(performed.is_empty(), "{performed:?}");
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+    }
+
+    /// A declared node still obeys every limit `outward_calls_performed`
+    /// already enforces — here, the fan-out refusal.
+    ///
+    /// The declaration decides *whether the node is guarded*, never *how*. A
+    /// declared fan-out is still refused and surfaced, because one recorded
+    /// result cannot answer N invocations whoever asked for the guard.
+    #[test]
+    fn a_declared_fan_out_is_still_refused() {
+        let g = graph(vec![node(
+            "notify_each",
+            NodeKind::ToolCall,
+            json!({ "slug": "shell", "args": { "command": "./bin/announce" } }),
+        )]);
+        let output = json!({
+            "nodes": { "notify_each": { "items": [
+                { "raw": { "status": 201 } },
+                { "raw": { "status": 201 } }
+            ] } }
+        });
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &output,
+            &authored(&[("notify_each", WorkflowNodeKind::ToolCall, Some(false))]),
+        );
+        assert!(performed.is_empty(), "{performed:?}");
+        assert_eq!(unreplayable.len(), 1, "{unreplayable:?}");
+        assert_eq!(unreplayable[0].node_id, "notify_each");
+    }
+
+    /// A declaration on a kind that makes no call is ignored here as well as
+    /// rejected at validation.
+    ///
+    /// Validation is the place an author hears about it; this is the belt to
+    /// that braces, so a graph loaded from an older or looser source cannot
+    /// widen the guarded set through a kind the rewrite would not touch.
+    #[test]
+    fn a_declaration_on_a_non_calling_kind_is_ignored() {
+        let file = authored(&[("report", WorkflowNodeKind::Output, Some(false))]);
+        assert!(declared_unrepeatable(&file).is_empty());
     }
 
     /// A node the run never reached is not recorded — which is what makes
@@ -532,8 +1092,11 @@ mod tests {
             NodeKind::HttpRequest,
             json!({ "method": "POST", "url": "https://api.test/hooks" }),
         )]);
-        let (performed, unreplayable) =
-            outward_calls_performed(&g, &json!({ "nodes": { "notify": { "items": [] } } }));
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &json!({ "nodes": { "notify": { "items": [] } } }),
+            &undeclared(),
+        );
         assert!(performed.is_empty(), "{performed:?}");
         assert!(unreplayable.is_empty(), "{unreplayable:?}");
     }
@@ -558,7 +1121,7 @@ mod tests {
             ] } }
         });
 
-        let (performed, unreplayable) = outward_calls_performed(&g, &output);
+        let (performed, unreplayable) = outward_calls_performed(&g, &output, &undeclared());
         assert!(performed.is_empty(), "{performed:?}");
         assert_eq!(unreplayable.len(), 1, "{unreplayable:?}");
         assert_eq!(unreplayable[0].node_id, "notify_each");
@@ -582,7 +1145,8 @@ mod tests {
             json!({ "method": "POST", "url": "https://api.test/hooks" }),
         )]);
         let huge = json!({ "body": "x".repeat(RUN_OUTPUT_MAX_BYTES + 1) });
-        let (performed, unreplayable) = outward_calls_performed(&g, &settled("notify", huge));
+        let (performed, unreplayable) =
+            outward_calls_performed(&g, &settled("notify", huge), &undeclared());
 
         assert!(performed.is_empty(), "{performed:?}");
         assert_eq!(unreplayable.len(), 1, "{unreplayable:?}");
@@ -684,7 +1248,8 @@ mod tests {
             NodeKind::HttpRequest,
             json!({ "method": "POST", "url": "https://api.test/hooks" }),
         )]);
-        let (performed, _) = outward_calls_performed(&g, &settled("notify", hostile.clone()));
+        let (performed, _) =
+            outward_calls_performed(&g, &settled("notify", hostile.clone()), &undeclared());
         let input = json!({ CONTINUATION_PERFORMED_KEY: performed });
 
         replay_performed(&mut g, &input);
@@ -697,5 +1262,272 @@ mod tests {
             .expect("encoded as a string");
         assert!(!encoded.starts_with('='), "{encoded}");
         assert_eq!(replayed_result(REPLAY_SLUG, args), Some(hostile));
+    }
+
+    // ---- Issue #617: child-gate repeat warnings ---------------------------
+
+    /// A parent graph running one child from a node named `sub`.
+    fn child_parent_graph(child_id: &str) -> WorkflowGraph {
+        graph(vec![node(
+            "sub",
+            NodeKind::SubWorkflow,
+            json!({ "workflow_id": child_id }),
+        )])
+    }
+
+    /// A child graph with an ungated POST then two sequential gated POSTs —
+    /// the shape the repeat warning exists for.
+    fn two_gate_child_graph() -> WorkflowGraph {
+        let mut g = graph(vec![
+            node(
+                "notify",
+                NodeKind::HttpRequest,
+                json!({ "method": "POST", "url": "https://api.test/notify" }),
+            ),
+            node(
+                "work",
+                NodeKind::HttpRequest,
+                json!({
+                    "method": "POST",
+                    "url": "https://api.test/work",
+                    "requires_approval": true,
+                }),
+            ),
+            node(
+                "work2",
+                NodeKind::HttpRequest,
+                json!({
+                    "method": "POST",
+                    "url": "https://api.test/work2",
+                    "requires_approval": true,
+                }),
+            ),
+            node("done", NodeKind::Transform, json!({})),
+        ]);
+        g.edges = vec![
+            tinyflows::model::Edge {
+                from_node: "notify".into(),
+                from_port: "main".into(),
+                to_node: "work".into(),
+                to_port: "main".into(),
+            },
+            tinyflows::model::Edge {
+                from_node: "work".into(),
+                from_port: "main".into(),
+                to_node: "work2".into(),
+                to_port: "main".into(),
+            },
+            tinyflows::model::Edge {
+                from_node: "work2".into(),
+                from_port: "main".into(),
+                to_node: "done".into(),
+                to_port: "main".into(),
+            },
+        ];
+        g
+    }
+
+    /// A registry holding `child`'s gated record.
+    fn child_registry(graph: WorkflowGraph) -> ChildGateRegistry {
+        let registry = ChildGateRegistry::default();
+        registry.record(
+            "child",
+            ChildGateRecord {
+                graph,
+                gated: Vec::new(),
+            },
+        );
+        registry
+    }
+
+    /// Issue #617. Two sequential gated nodes in one child: approving the first
+    /// makes it execute on the continuation (the engine skips the interrupt
+    /// only when the id is listed), the child then pauses at the second, and
+    /// approving that re-runs the child with BOTH approvals — so the first
+    /// gate's call fires on every hop. A `requires_approval` exclusion that
+    /// treats every such node as still-blocked would omit exactly the call the
+    /// operator must be warned about.
+    #[test]
+    fn an_approved_child_gate_that_will_fire_again_is_reported() {
+        let parent = child_parent_graph("child");
+        let pending = vec!["sub::work2".to_string()];
+        let input = json!({ "approvals": ["sub::work"] });
+
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &input,
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["notify", "work"], "{warned:?}");
+        assert!(
+            !warned.iter().any(|w| w.node_id == "work2"),
+            "the gate this run paused on is not yet approved, so it is excluded: {warned:?}"
+        );
+    }
+
+    /// The negative control: a not-yet-approved gate stays excluded. On the run
+    /// that parks it the child restarts and pauses at it again — it does not
+    /// execute — so reporting it would be a warning for a call that will not
+    /// happen.
+    #[test]
+    fn a_gate_this_run_has_not_cleared_stays_excluded() {
+        let parent = child_parent_graph("child");
+        let pending = vec!["sub::work".to_string()];
+
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &json!({}),
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["notify"], "{warned:?}");
+    }
+
+    /// Issue #617, nested ancestor calls are included too. A call in the
+    /// intermediate child has already happened before that child enters its
+    /// nested workflow, so approving the grandchild gate restarts and repeats
+    /// the intermediate call as well.
+    #[test]
+    fn a_nested_gate_warns_for_calls_in_ancestor_children() {
+        let mut ancestor = graph(vec![
+            node(
+                "notify_parent_child",
+                NodeKind::HttpRequest,
+                json!({ "method": "POST", "url": "https://api.test/ancestor" }),
+            ),
+            node(
+                "nested",
+                NodeKind::SubWorkflow,
+                json!({ "workflow_id": "b" }),
+            ),
+        ]);
+        ancestor.edges = vec![tinyflows::model::Edge {
+            from_node: "notify_parent_child".into(),
+            from_port: "main".into(),
+            to_node: "nested".into(),
+            to_port: "main".into(),
+        }];
+
+        let registry = ChildGateRegistry::default();
+        registry.record(
+            "a",
+            ChildGateRecord {
+                graph: ancestor,
+                gated: Vec::new(),
+            },
+        );
+        registry.record(
+            "b",
+            ChildGateRecord {
+                graph: two_gate_child_graph(),
+                gated: Vec::new(),
+            },
+        );
+
+        let warned = child_calls_to_repeat(
+            &child_parent_graph("a"),
+            &["sub::nested::work2".to_string()],
+            &registry,
+            &json!({ "approvals": ["sub::nested::work"] }),
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sub::notify_parent_child", "notify", "work"],
+            "{warned:?}"
+        );
+    }
+
+    /// `sub::nested::work`; the child whose graph holds `work` is the
+    /// grandchild, reachable only by descending the registry through the
+    /// intermediate `sub_workflow` node's `workflow_id`. The approved first
+    /// gate then reads `sub::nested::work` off the same namespace.
+    #[test]
+    fn a_two_level_child_namespace_warns_for_the_grandchilds_upstream() {
+        let registry = ChildGateRegistry::default();
+        registry.record(
+            "a",
+            ChildGateRecord {
+                graph: graph(vec![node(
+                    "nested",
+                    NodeKind::SubWorkflow,
+                    json!({ "workflow_id": "b" }),
+                )]),
+                gated: Vec::new(),
+            },
+        );
+        registry.record(
+            "b",
+            ChildGateRecord {
+                graph: two_gate_child_graph(),
+                gated: Vec::new(),
+            },
+        );
+        let parent = child_parent_graph("a");
+        let pending = vec!["sub::nested::work2".to_string()];
+        let input = json!({ "approvals": ["sub::nested::work"] });
+
+        let warned = child_calls_to_repeat(&parent, &pending, &registry, &input);
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["notify", "work"], "{warned:?}");
+    }
+
+    /// Issue #617, the dynamic half. A `workflow_id = "=item.target"` child is
+    /// keyed in the registry by the RESOLVED id, so the repeat walk must
+    /// resolve the same expression against the trigger input — the same way
+    /// [`child_gate_call`](crate::workflows::caps::resolver::child_gate_call)
+    /// does for the card — or the warning is silently dropped for a dynamic
+    /// child.
+    #[test]
+    fn an_expr_bound_child_gate_warns_for_the_resolved_children_calls() {
+        let parent = graph(vec![node(
+            "sub",
+            NodeKind::SubWorkflow,
+            json!({ "workflow_id": "=item.target" }),
+        )]);
+        let pending = vec!["sub::work".to_string()];
+        let input = json!({ "target": "child" });
+
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &input,
+        );
+
+        let ids: Vec<&str> = warned.iter().map(|w| w.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["notify"], "{warned:?}");
+    }
+
+    /// A per-item expression-bound child cannot be reconstructed — the paused
+    /// id carries no item index to say which element's scope resolved the id —
+    /// so the walk falls back rather than describing the wrong child.
+    #[test]
+    fn a_per_item_expr_bound_child_id_falls_back_to_nothing() {
+        let parent = graph(vec![node(
+            "sub",
+            NodeKind::SubWorkflow,
+            json!({ "workflow_id": "=item.target", "execution": "per_item" }),
+        )]);
+        let pending = vec!["sub::work".to_string()];
+
+        let warned = child_calls_to_repeat(
+            &parent,
+            &pending,
+            &child_registry(two_gate_child_graph()),
+            &json!({ "target": "child" }),
+        );
+
+        assert!(
+            warned.is_empty(),
+            "falls back rather than guessing: {warned:?}"
+        );
     }
 }

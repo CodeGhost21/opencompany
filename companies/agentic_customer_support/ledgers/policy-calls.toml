@@ -1,0 +1,101 @@
+# Judgement calls made at the edge of policy, so the next one matches.
+#
+# Refunds outside the window, goodwill credits, exceptions for a customer having
+# a bad month. Each is defensible alone; together, made from memory by different
+# agents, they are a policy nobody wrote and cannot enforce — and the customer
+# who is refused what their neighbour was granted is the one who tells everyone.
+
+title = "Policy calls"
+purpose = """
+Every decision made at the edge of policy: what was asked, what was granted or \
+refused, and on what reasoning. Read it before making an exception — this is \
+how the tenth exception matches the first, and how a pattern of exceptions gets \
+noticed and turned into policy.\
+"""
+written_by = "`record_entry` to record a call, `close_entry` when it is superseded by written policy"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "call"
+role = "title"
+required = true
+description = "What was asked for and what was decided, in one line."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "situation"
+role = "prose"
+required = true
+description = "The circumstances. Enough that somebody could tell whether the next case is the same one."
+
+[[field]]
+name = "reasoning"
+role = "prose"
+required = true
+description = "Why this and not the default. A call with no reasoning cannot be matched or overturned."
+
+[[field]]
+name = "value"
+role = "number"
+description = "What it cost, where it cost something."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — written into policy, or reversed. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "standing"
+
+[[status]]
+name = "disputed"
+
+[[status]]
+name = "in_policy"
+label = "Written into policy"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "reversed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Standing"
+blurb = "How this company handles these cases now. Match these rather than deciding afresh."
+statuses = ["standing"]
+order = "recent"
+
+[[section]]
+heading = "Disputed"
+blurb = "Called one way and questioned. The operator settles these."
+statuses = ["disputed"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Written into policy, or reversed. A run of similar calls here is the signal that \
+something should stop being a judgement call — which is the whole point of \
+recording them.\
+"""
+statuses = ["in_policy", "reversed"]
+cap = 20

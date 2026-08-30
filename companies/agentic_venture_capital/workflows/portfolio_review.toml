@@ -1,0 +1,91 @@
+# Workflow graph: portfolio_review
+#
+# Referenced by `[workflows].enabled` in ../company.toml. Every position is
+# checked for contact staleness, runway and unanswered asks. Sorting by
+# `last_contact` rather than by status is the whole point: the companies a firm
+# knows least about are the ones whose rows still say "healthy".
+
+id = "portfolio_review"
+name = "Portfolio review"
+description = "Positions are checked for stale contact, runway and unanswered asks, and the ones needing attention are surfaced."
+
+[[node]]
+id = "due"
+kind = "trigger"
+name = "Review due"
+summary = "A quarter turns, or a company has gone quiet."
+
+[[node]]
+id = "stale"
+kind = "agent"
+name = "Sort by last contact"
+summary = "A healthy row nobody has spoken to in five months is an unknown row, not a healthy one."
+agent = "portfolio_support"
+
+[[node]]
+id = "runway"
+kind = "agent"
+name = "Check runway"
+summary = "Months, and what the number depends on. If runway is short, nothing else matters this quarter."
+agent = "market_sizer"
+
+[[node]]
+id = "attention"
+kind = "condition"
+name = "Needs attention?"
+summary = "Branch on whether anything here requires the firm to act."
+[node.config]
+field = "=item.needs_attention"
+
+[[node]]
+id = "reach_out"
+kind = "agent"
+name = "Make contact"
+summary = "Answer the outstanding asks. An unanswered ask is how a firm gets excluded from the next round's information."
+agent = "portfolio_support"
+
+[[node]]
+id = "record"
+kind = "agent"
+name = "Update the positions"
+summary = "Honestly, including where the firm does not know."
+agent = "portfolio_support"
+
+[[node]]
+id = "report"
+kind = "output"
+name = "Surface what needs the operator"
+summary = "A bridge, an introduction, a hard conversation — decisions rather than tasks."
+[node.destination]
+kind = "channel"
+target = "investment_committee"
+
+[[edge]]
+from = "due"
+to = "stale"
+
+[[edge]]
+from = "stale"
+to = "runway"
+
+[[edge]]
+from = "runway"
+to = "attention"
+
+[[edge]]
+from = "attention"
+to = "reach_out"
+label = "yes"
+
+[[edge]]
+from = "attention"
+to = "record"
+label = "no"
+
+[[edge]]
+from = "reach_out"
+to = "record"
+
+[[edge]]
+from = "record"
+to = "report"

@@ -120,9 +120,9 @@ export function setActiveTourStop(view: string | null): void {
  * `ConnectionsView`'s native connect, which set `window.location.href` to the
  * host's authorize URL; that offer is gone, and the Composio sign-in it left
  * behind opens a tab rather than handing the document away. The read half stays
- * wired — `TourController` still honours a marker on mount, and the host still
- * redirects an in-flight handshake back to `/connections?connected=…`, so a
- * marker written by an older bundle is still consumed. Kept, rather than deleted
+ * wired — `TourController` still honours a marker on mount, so a marker written
+ * by an older bundle is consumed when its user returns to the console. Kept,
+ * rather than deleted
  * with its caller, because the next surface that navigates the document away
  * mid-tour needs exactly this and reconstructing it is the harder half.
  */

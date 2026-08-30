@@ -10,6 +10,8 @@
 // here is readable by an agent on its next turn. Every node carries who created
 // it and who last wrote it (issue #326) so the two are told apart on sight.
 
+import { rosterDisplayName, type RosterNames } from "@/lib/roster-names";
+
 import type { OpenCompanyClient } from "./client";
 
 /** Whether a node is a folder or a file. */
@@ -22,12 +24,18 @@ export type NodeKind = "folder" | "file";
  * nobody. `agentId` is present exactly when `kind` is `"agent"`.
  */
 export type WorkspaceOrigin =
-  | { kind: "seed" }
-  | { kind: "operator" }
-  | { kind: "agent"; id: string };
+  { kind: "seed" } | { kind: "operator" } | { kind: "agent"; id: string };
 
 /** The origin every node falls back to — what the host defaults a legacy node to. */
 export const OPERATOR_ORIGIN: WorkspaceOrigin = { kind: "operator" };
+
+/**
+ * The lookup an `originLabel` caller passes when it has no roster to hand.
+ *
+ * A shared empty map rather than a fresh one per call: `rosterDisplayName`
+ * only reads it, and this function is called once per rendered row.
+ */
+const NO_ROSTER_NAMES: RosterNames = new Map();
 
 /**
  * A short human label for an origin, or `null` for a plain operator note.
@@ -36,11 +44,21 @@ export const OPERATOR_ORIGIN: WorkspaceOrigin = { kind: "operator" };
  * "Operator" for the operator case: in the Brain every row has an interesting
  * origin, whereas here the operator is the unremarkable default and badging it
  * would put a chip on nearly every note while saying nothing.
+ *
+ * `names` resolves the agent case through the one shared
+ * {@link rosterDisplayName} (issue #1723): the raw roster handle is engine
+ * plumbing — `seo_specialist` where the operator knows "SEO Specialist" — and
+ * this label sits beside names that are already resolved. Optional, and the
+ * resolver falls back to the id, so a caller that has no roster read to hand
+ * gets exactly the previous string rather than a blank badge.
  */
-export function originLabel(origin: WorkspaceOrigin | undefined): string | null {
+export function originLabel(
+  origin: WorkspaceOrigin | undefined,
+  names: RosterNames = NO_ROSTER_NAMES,
+): string | null {
   switch (origin?.kind) {
     case "agent":
-      return `Agent · ${origin.id}`;
+      return `Teammate · ${rosterDisplayName(origin.id, names)}`;
     case "seed":
       return "Seeded";
     default:
@@ -106,7 +124,10 @@ export interface WorkspaceFile {
  * by a host that predates issue #326 gets neither field, and defaulting is
  * cheaper than a blank badge.
  */
-interface FsNodeWire extends Omit<FsNode, "parentId" | "createdBy" | "updatedBy"> {
+interface FsNodeWire extends Omit<
+  FsNode,
+  "parentId" | "createdBy" | "updatedBy"
+> {
   parentId?: string | null;
   createdBy?: WorkspaceOrigin;
   updatedBy?: WorkspaceOrigin;
@@ -135,7 +156,9 @@ export async function fetchTree(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<FsNode[]> {
-  const nodes = await client.get<FsNodeWire[]>(`${client.scopeFor(company)}/workspace`);
+  const nodes = await client.get<FsNodeWire[]>(
+    `${client.scopeFor(company)}/workspace`,
+  );
   return nodes.map(normalize);
 }
 
@@ -168,7 +191,7 @@ export async function fetchFile(
  * `parentId` by walking the tree, and a flat hit list has no tree to walk.
  */
 export interface SearchHit extends FsNode {
-  /** The node's logical path, e.g. `Standards/Engineering.md`. */
+  /** The node's logical path, e.g. `standards/Engineering.md`. */
   path: string;
   /** Whether the query matched the node's name or its body. */
   matched: "name" | "content";
@@ -208,7 +231,11 @@ export async function searchWorkspace(
   if (options?.prefix) params.set("prefix", options.prefix);
   if (options?.limit !== undefined) params.set("limit", String(options.limit));
   const results = await client.get<{
-    hits: (FsNodeWire & { path: string; matched: "name" | "content"; excerpt?: string })[];
+    hits: (FsNodeWire & {
+      path: string;
+      matched: "name" | "content";
+      excerpt?: string;
+    })[];
     total: number;
   }>(`${client.scopeFor(company)}/workspace/search?${params.toString()}`);
   return {
@@ -236,7 +263,10 @@ export async function searchWorkspace(
  * An empty query yields one unmatched run, which is what keeps a cleared box
  * from marking every character.
  */
-export function highlightRuns(text: string, query: string): { text: string; hit: boolean }[] {
+export function highlightRuns(
+  text: string,
+  query: string,
+): { text: string; hit: boolean }[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return [{ text, hit: false }];
   const haystack = text.toLowerCase();
@@ -246,7 +276,11 @@ export function highlightRuns(text: string, query: string): { text: string; hit:
   // Rust: JavaScript indexes strings by UTF-16 code unit and `toLowerCase` is
   // length-preserving for every character the browser will render in a note
   // title, so the two strings stay aligned.
-  for (let found = haystack.indexOf(needle); found !== -1; found = haystack.indexOf(needle, at)) {
+  for (
+    let found = haystack.indexOf(needle);
+    found !== -1;
+    found = haystack.indexOf(needle, at)
+  ) {
     if (found > at) runs.push({ text: text.slice(at, found), hit: false });
     runs.push({ text: text.slice(found, found + needle.length), hit: true });
     at = found + needle.length;
@@ -255,13 +289,65 @@ export function highlightRuns(text: string, query: string): { text: string; hit:
   return runs;
 }
 
+/**
+ * The most matches one search can return (issue #1457).
+ *
+ * Mirrors the host's `MAX_SEARCH_RESULTS` (`src/company/workspace_search.rs`).
+ * The host's *default* is 20 and its ceiling is 50, and `clamp_limit` clamps
+ * rather than refusing — so the console naming no limit at all was what capped
+ * every search at 20 while the header truthfully reported "20 of 50 matches"
+ * and offered no way to reach the other 30. There is no offset on the route, so
+ * 50 is a genuine hard ceiling; past it the honest remedy is a narrower query,
+ * which is what the foot of the list now says.
+ */
+export const SEARCH_LIMIT = 50;
+
+/**
+ * Slide an excerpt so its first match is near the front (issue #1375).
+ *
+ * The host returns a window of context around the match, and the console
+ * renders it into a `line-clamp-2` paragraph about 250px wide. When the match
+ * sits past the first dozen or so words the browser clamps *before* reaching
+ * it, so the operator gets two lines of arbitrary mid-file prose and no visible
+ * highlight — the one thing the excerpt exists to show.
+ *
+ * Pure and conservative: an early match is returned untouched (no leading `…`
+ * on text that was already fine), and a query that does not appear at all is
+ * left exactly as the host sent it. Cutting is done at a word boundary where
+ * one is near, so the result does not open mid-word.
+ */
+export function centerExcerpt(
+  excerpt: string,
+  query: string,
+  budget = 24,
+): string {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return excerpt;
+  const at = excerpt.toLowerCase().indexOf(needle);
+  if (at === -1 || at <= budget) return excerpt;
+  let cut = at - budget;
+  // Prefer the next space, so the excerpt starts on a whole word — but only if
+  // one is close, or a line with no spaces would be shifted arbitrarily far.
+  const space = excerpt.indexOf(" ", cut);
+  if (space !== -1 && space < at && space - cut < budget) cut = space + 1;
+  return `…${excerpt.slice(cut)}`;
+}
+
 /** Create a folder or file. The host mints the id and the timestamp. */
 export async function createNode(
   client: OpenCompanyClient,
   company: string | null,
-  input: { name: string; kind: NodeKind; parentId?: string | null; content?: string },
+  input: {
+    name: string;
+    kind: NodeKind;
+    parentId?: string | null;
+    content?: string;
+  },
 ): Promise<FsNode> {
-  const node = await client.post<FsNodeWire>(`${client.scopeFor(company)}/workspace`, input);
+  const node = await client.post<FsNodeWire>(
+    `${client.scopeFor(company)}/workspace`,
+    input,
+  );
   return normalize(node);
 }
 
@@ -314,7 +400,9 @@ export function deleteNode(
   company: string | null,
   id: string,
 ): Promise<void> {
-  return client.del<void>(`${client.scopeFor(company)}/workspace/${encodeURIComponent(id)}`);
+  return client.del<void>(
+    `${client.scopeFor(company)}/workspace/${encodeURIComponent(id)}`,
+  );
 }
 
 /** One folder the sweep removed, or would remove (issue #700). */
@@ -334,7 +422,7 @@ interface SweepResult {
 }
 
 /**
- * Remove the empty `Agents/<id>/` folders a pre-#570 company still carries
+ * Remove the empty `agents/<id>/` folders a pre-#570 company still carries
  * (issue #700), or — with `dryRun` — find out which ones those are without
  * touching anything.
  *
@@ -378,7 +466,8 @@ export interface MergedFolder {
 }
 
 /** Why the repair left a node exactly where it found it. */
-export type ResidualCause = "fileSharesTheName" | "fileInTheWay" | "treeMovedOn";
+export type ResidualCause =
+  "fileSharesTheName" | "fileInTheWay" | "treeMovedOn" | "danglingParent";
 
 /** One node the repair deliberately did not touch (issue #759). */
 export interface Residual {
@@ -419,6 +508,8 @@ export function residualReason(cause: ResidualCause): string {
       return "Both copies hold a note with this name. Merging them would discard one, so both were kept — open them and keep what you want.";
     case "treeMovedOn":
       return "Something changed while the repair ran, so this was left alone. Run it again.";
+    case "danglingParent":
+      return "The folder this was filed under no longer exists, so it has no reachable path. Move it somewhere that does, or delete it if you don't need it.";
   }
 }
 
@@ -492,14 +583,20 @@ export async function uploadFile(
  * **The caller must revoke the returned URL** when it is done with it —
  * `URL.revokeObjectURL` — or the blob stays resident for the life of the
  * document.
+ *
+ * An optional `signal` cancels the transfer: a preview that scrolls out of
+ * view aborts its fetch instead of downloading the whole payload only to
+ * discard it (codex review finding).
  */
 export async function fetchBlobUrl(
   client: OpenCompanyClient,
   company: string | null,
   id: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const blob = await client.getBlob(
     `${client.scopeFor(company)}/workspace/blob/${encodeURIComponent(id)}`,
+    signal,
   );
   return URL.createObjectURL(blob);
 }
@@ -536,6 +633,7 @@ export function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined) return "unknown size";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }

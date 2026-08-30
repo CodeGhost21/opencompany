@@ -1,6 +1,6 @@
 // The live task-board API: the console's Kanban reads and writes real cards
 // through the host's `…/tasks` routes (REST, camelCase over the wire). Replaces
-// the client-side `tasks-sample` illustrative data.
+// the client-side illustrative data the console shipped before it had one.
 
 import type { OpenCompanyClient } from "./client";
 import type { ArtifactKind } from "./artifacts";
@@ -48,29 +48,54 @@ export interface TaskOutputWorkflow {
 }
 
 /**
+ * What produced a {@link TaskOutput} — and what its link of last resort points
+ * at (issue #806).
+ *
+ * A run is *an* addressable producer, not the only one. An operator chat turn
+ * produces things too, and run records stay reserved for actual work attempts,
+ * so such a turn has no run to name. This is a union rather than an optional
+ * `runId` so the console can label what is at the other end instead of calling
+ * a conversation an attempt.
+ *
+ * Discriminate with `"runId" in source` — the host flattens these keys onto the
+ * output, so a run-sourced record is byte-identical to what this type carried
+ * before the union existed.
+ */
+export type TaskOutputSource =
+  | {
+      /** The attempt that produced it. */
+      runId: string;
+      /** Its 1-based ordinal, for the label. Absent if unreadable. */
+      attempt?: number;
+    }
+  | {
+      /** The conversation whose turn produced it. */
+      chatId: string;
+    };
+
+/**
  * What a card's latest **successful** attempt produced (issue #339, epic #183
  * §6) — the link that turns a finished card into something you can open.
  *
- * `runId` is unconditional, and that is the whole design: an output with no
- * artifacts and no workflows is not an absence, it is the *trace case*. Plenty
- * of tasks produce no file — a message sent, a record updated, a question
- * answered — and for those the attempt's trace **is** the deliverable. It is
- * also the fallback when an artifact is later deleted.
+ * **A last-resort link is unconditional, and that is the whole design**: an
+ * output with no artifacts and no workflows is not an absence, it is the *trace
+ * case*. Plenty of tasks produce no file — a message sent, a record updated, a
+ * question answered — and for those the producer's own record **is** the
+ * deliverable. It is also the fallback when an artifact is later deleted.
+ *
+ * The guarantee is "there is always something to open", not "there is always a
+ * `runId`" (issue #806) — see {@link TaskOutputSource}.
  *
  * Absent entirely on a card that has never succeeded, one moved to Done by
  * hand, and every card settled before this shipped. Those link to the card
  * itself rather than to a synthesized output.
  */
-export interface TaskOutput {
-  /** The attempt that produced it — always present. */
-  runId: string;
-  /** That attempt's 1-based ordinal, for the label. Absent if unreadable. */
-  attempt?: number;
+export type TaskOutput = TaskOutputSource & {
   /** Epoch-millis the stamp was written. */
   atMillis: number;
   artifacts?: TaskOutputArtifact[];
   workflows?: TaskOutputWorkflow[];
-}
+};
 
 /**
  * What surface a plan's prerequisite is checked against (issue #337).
@@ -143,7 +168,30 @@ export interface TaskPlan {
    * had no assignee — a plan never reassigns work a person routed.
    */
   proposedAssignee?: string;
+  /**
+   * The teammates that plausibly fit, when more than one did (issue #1106).
+   *
+   * Non-empty means the pass **declined to choose** and the card is waiting on
+   * a person — it is never populated alongside `proposedAssignee`, which is set
+   * only when exactly one candidate resolved. Absent on every plan written
+   * before #1106, and on every unambiguous plan written since.
+   */
+  assigneeCandidates?: AssigneeCandidate[];
   plannedAtMillis: number;
+}
+
+/**
+ * One teammate the planner thinks could take a card, and why (issue #1106).
+ *
+ * `id` is canonical — the host resolves it against the roster before storing
+ * it, and drops anything the roster does not carry, so every candidate rendered
+ * is one the assignee write boundary will accept.
+ */
+export interface AssigneeCandidate {
+  /** A teammate id, or a desk id. Submitted verbatim, never resolved here. */
+  id: string;
+  /** One line on why this one fits. Model prose, shown to a person deciding. */
+  reason: string;
 }
 
 /** A board card as the host returns it. */
@@ -154,6 +202,30 @@ export interface TaskPlan {
  * treat an absent value as `"once"`.
  */
 export type TaskDeliverable = "once" | "workflow";
+
+/**
+ * What the operator says one chat **message** is for (issue #1152).
+ *
+ * The two work words mean exactly what they mean on a card. `"chat"` is the
+ * operator saying this message is not a request for work at all — the composer's
+ * "Just chatting" — so no deterministic path opens a card for it.
+ *
+ * Deliberately **not** a widening of `TaskDeliverable`. That type is the card
+ * field, shared by `CreateTask`, `TaskPatch` and `TaskDto`, and a card can never
+ * *be* "not work": widening it would make `"chat"` assignable in every one of
+ * those positions and put the compiler on the wrong side of the invariant. This
+ * is message-scoped, and the host draws the same line (`MessageIntent` beside
+ * `TaskDeliverable` in `src/ports/types.rs`).
+ *
+ * Sent only when it is not the default — see `OpenCompanyClient.chat`.
+ */
+export type MessageIntent = "chat" | TaskDeliverable;
+
+/** A positive source-currency USD amount or an explicit role-redacted state. */
+export interface TaskCost {
+  amountUsd?: number;
+  hidden?: boolean;
+}
 
 /**
  * A workflow the builder pass proposed for a `workflow`-deliverable card,
@@ -179,11 +251,30 @@ export interface Task {
   id: string;
   title: string;
   note?: string;
+  /**
+   * The board's column: `pending`, `working` or `done` (issue #1512).
+   *
+   * Three, not six. The four states that used to sit between To-do and Done —
+   * `planning`, `in_progress`, `paused`, `in_review` — all say the same thing
+   * to a reader of a board, so they are one column now and {@link Task.stage}
+   * carries which of them it actually is.
+   */
   column: string;
+  /**
+   * Which kind of working, on a working card: `planning`, `in_progress`,
+   * `paused` or `in_review`. Absent on a pending or done card.
+   *
+   * Read this — never `column` — for anything genuinely stage-specific: the
+   * Resume button on a paused card, the review link on one waiting for a
+   * verdict. Those reads are what used to force `column` to stay six-valued.
+   */
+  stage?: string;
   priority: string;
   /** The desk/teammate label that owns it (a roster agent id routes a turn). */
   assignee: string;
   updatedAt: number;
+  /** Lifetime total, including descendants. Absent for a true zero. */
+  cost?: TaskCost;
   /**
    * The card this one was spawned from (#185), when it has a parent. Omitted on
    * a lineage root — every card the board creates today — so the board's wire
@@ -196,6 +287,22 @@ export interface Task {
    * is every card created before this shipped.
    */
   originChatId?: string;
+  /**
+   * The workflow run whose agent node opened this card (issue #661), and the
+   * graph it is a run of.
+   *
+   * Carried on the **board** read, not just task detail, because a card with no
+   * parent and no origin chat is otherwise unexplained: with these two an
+   * operator finding a card nobody opened can see the schedule that did. They
+   * are stamped together by one call site on the host, so either both are
+   * present or neither is — but they are typed independently, because a host
+   * predating them sends neither and the console must make no claim then.
+   *
+   * `originRunId` is what deep-links the workflow canvas to *the run that
+   * opened this card* rather than to the graph's current shape.
+   */
+  originRunId?: string;
+  originWorkflowId?: string;
   /**
    * What this card's latest successful attempt produced (issue #339).
    *
@@ -224,7 +331,7 @@ export interface Task {
   workflowProposal?: TaskWorkflowProposal;
 }
 
-/** The create body; the host defaults column→`todo`, priority→`medium`. */
+/** The create body; the host defaults column→`pending`, priority→`medium`. */
 export interface CreateTask {
   title: string;
   note?: string;
@@ -235,27 +342,28 @@ export interface CreateTask {
    * The chat thread this card is being opened from (issue #246). Set by the
    * transcript's "Add to board" action; the board's `+` button omits it.
    *
-   * Note what is deliberately NOT sent alongside it: `column`. Entering a
-   * column is what spends money, so the server's intake default decides where a
-   * chat-created card lands and a **human drag** stays the only way to start
+   * Note what is deliberately NOT sent alongside it: `column`. Entering
+   * Working is what spends money, so the server's intake default decides where
+   * a chat-created card lands and a **human drag** stays the only way to start
    * spending on it.
-   *
-   * Since issue #337 there are two such columns, not one. `in_progress`
-   * dispatches an agent turn; `planning` buys one planning pass, which on
-   * success hands the card straight on to `in_progress` without asking again.
-   * So a drag into Planning is informed consent to both, and neither can be
-   * reached from this body.
    */
   originChatId?: string;
   /**
    * The operator's explicit once-vs-workflow choice (issue #580, decision D2a).
-   * Omitting it means `"once"`. A `"workflow"` card lands in To-do like any
-   * other; the builder pass fires only when it is dragged into In Progress.
+   * Omitting it means `"once"`. A `"workflow"` card lands in Pending like any
+   * other; the builder pass fires only when it is dragged into Working.
    */
   deliverable?: TaskDeliverable;
 }
 
-/** A partial update; any omitted field is left as-is. A drag sends `{column}`. */
+/**
+ * A partial update; any omitted field is left as-is.
+ *
+ * A drag sends `{column}` — one of the three phase words. The host resolves it
+ * to the stage a drop actually means, so `working` becomes `in_progress` and
+ * dispatches. There is no way to write a stage from here, and there should not
+ * be: the three states are the vocabulary (issue #1512).
+ */
 export interface PatchTask {
   title?: string;
   note?: string;
@@ -264,8 +372,8 @@ export interface PatchTask {
   assignee?: string;
   /**
    * Flip the once-vs-workflow choice (issue #580). Omitting it leaves the choice
-   * untouched — so an operator can flip a To-do card to `"workflow"` before
-   * dragging it into In Progress.
+   * untouched — so an operator can flip a Pending card to `"workflow"` before
+   * dragging it into Working.
    */
   deliverable?: TaskDeliverable;
 }
@@ -340,6 +448,10 @@ export interface TimelineEntry {
    * host-side and bounded (#411).
    */
   detail?: string;
+  /** Stable key for a durable cost row that is not a journal event. */
+  costKey?: string;
+  /** Cost incurred by this line. Absent for a true zero. */
+  cost?: TaskCost;
   /**
    * On a run step: **what came back** — a shape summary, an intrinsic tool's
    * own message, or a failure's plain-language cause (#411). Absent on
@@ -372,7 +484,16 @@ export interface TimelineEntry {
   waitedMillis?: number;
 }
 
-/** What became of an approval (#333). `pending` is still waiting on a human. */
+/**
+ * What became of an approval (#333). `pending` is still waiting on a human.
+ *
+ * `expired` was declared here from the start and was **unreachable** until
+ * #971: nothing swept approvals for a company without a manifest schedule, so
+ * no approval ever aged out and no surface ever needed to render this. It is
+ * reachable now. Render it through `approvalStatusLabel` in `lib/language` —
+ * an operator must be able to tell the no they made from the one the deadline
+ * made, and neither should ever appear as a raw identifier.
+ */
 export type TaskApprovalStatus = "pending" | "approved" | "denied" | "expired";
 
 /**
@@ -472,6 +593,8 @@ export interface LineageRef {
   id: string;
   title: string;
   column: string;
+  /** This child's lifetime total, including its descendants. */
+  cost?: TaskCost;
 }
 
 /** The parent/children view of a task (#185). */
@@ -754,7 +877,41 @@ export interface InflightRun {
   pendingAction: string | null;
 }
 
-/** The steer body. `redirect` requires `instruction`; `cancel` requires `confirm`. */
+/**
+ * The live board state Chat needs for a card-linked background turn (#1758).
+ *
+ * `column` is the task's stage when the current three-column API provides one,
+ * otherwise its column. `startedAt` is present only while the task appears in
+ * the in-flight read, so it supplies the elapsed clock and wins a brief race
+ * where the board has already moved but the run has not disappeared yet.
+ */
+export interface TaskStatus {
+  column: string;
+  startedAt?: number;
+}
+
+/** Task id -> status, merged from the board and in-flight reads (#1758). */
+export function taskStatusesById(
+  tasks: readonly Task[],
+  inflight: readonly InflightRun[],
+): Record<string, TaskStatus> {
+  const statuses: Record<string, TaskStatus> = {};
+
+  for (const task of tasks) {
+    statuses[task.id] = { column: task.stage ?? task.column };
+  }
+
+  for (const run of inflight) {
+    if (!run.taskId) continue;
+    statuses[run.taskId] = {
+      column: statuses[run.taskId]?.column ?? "in_progress",
+      startedAt: run.startedAt,
+    };
+  }
+
+  return statuses;
+}
+
 export interface SteerInput {
   action: SteerAction;
   instruction?: string;

@@ -1,0 +1,110 @@
+# The global baseline's setup board. Every company starts with these cards in
+# To-do, whichever vertical it started from.
+#
+# Not a tutorial and not a checklist of things the runtime could do itself.
+# Each card is real setup work that only this company's people and agents can
+# do, because it depends on facts nobody but them has: what this company sells,
+# who it answers to, what it has already decided. A company that boots with an
+# empty board has agents with nothing to pick up and an operator with no idea
+# where to start, and the first thing anyone does is invent this list badly.
+#
+# Rules for adding one here rather than to a vertical's own `tasks.toml`:
+#
+#   * It must make sense for a law firm, a game studio and a research lab
+#     alike. Anything that names a vertical's own artifact belongs beside that
+#     vertical.
+#   * It must name what it produces — a ledger row, a workspace document — so
+#     an agent picking it up knows what "done" looks like and does not hand
+#     back an essay.
+#   * It must not name an owner. This file ships to every company and cannot
+#     know any of their rosters, so every card here is unassigned and routes to
+#     whoever orchestrates.
+#
+# A company that does not want one of these drops it by id:
+# `[globals] disable = ["task:write-the-company-brief"]`.
+
+[[task]]
+id = "write-the-company-brief"
+title = "Write the company brief"
+priority = "high"
+note = """
+What this company does, who it does it for, and what it is trying to be true \
+a year from now — in the workspace, at `brief.md`, in prose a new teammate \
+could read once and then act on.
+
+Everything else on this board assumes this exists. Goals that do not ladder up \
+to a brief are a list of preferences, and an agent asked to decide anything \
+without one will substitute its own guess about what the company wants.
+
+Done when `brief.md` exists and says what we sell, who buys it, and what would \
+count as a good year.\
+"""
+
+[[task]]
+id = "set-the-first-goals"
+title = "Set the first goals"
+priority = "high"
+note = """
+Open three rows on the `goals` ledger — no more. Each names an outcome with a \
+date on it, not an activity: "sign the first ten paying customers by March" \
+rather than "do sales".
+
+Three, because a company with ten goals has none: every card on this board is \
+prioritised against them, and a priority order that points ten ways points \
+nowhere. Read `brief.md` first; a goal that does not serve it is either the \
+wrong goal or a sign the brief is wrong.
+
+Done when `goals` has three rows, each with an owner and a date.\
+"""
+
+[[task]]
+id = "record-the-decisions-already-made"
+title = "Record the decisions already made"
+priority = "medium"
+note = """
+Before this company existed, somebody already decided things — what it will \
+not do, which market it is aimed at, what it refuses to compromise on. Put \
+each on the `decisions` ledger with the reasoning that produced it.
+
+Undocumented decisions get silently re-litigated. An agent that cannot see \
+that a question was already settled will answer it again, differently, and \
+neither answer will know about the other.
+
+Done when every standing decision an operator can think of has a row saying \
+what was decided and why.\
+"""
+
+[[task]]
+id = "name-the-top-risks"
+title = "Name the top risks"
+priority = "medium"
+note = """
+Open a row on the `risks` ledger for each of the three things most likely to \
+stop this company doing what `brief.md` says it will. Each needs an owner \
+watching it, an observable trigger that says it is happening now, and what \
+would actually be done about it.
+
+A risk is watched, not worked — most rows here should have no card on the \
+board until the trigger fires. A risk with no trigger is a worry, and a risk \
+with no response is a note.
+
+Done when `risks` has three owned rows, each with a trigger and a response.\
+"""
+
+[[task]]
+id = "wire-the-connections-this-company-needs"
+title = "Wire the connections this company needs"
+priority = "medium"
+note = """
+Go through Settings → Connections and turn on the tool servers and providers \
+this company's work actually depends on. The bundle ships the ones its vertical \
+obviously needs already declared; anything holding a credential ships disabled, \
+waiting for a token to be written from the console.
+
+Worth doing early and deliberately: an agent that reaches for a tool it has \
+not been given does not fail loudly, it works around the gap and hands back a \
+worse answer without mentioning why.
+
+Done when every declared server is either enabled and answering, or turned off \
+on purpose.\
+"""

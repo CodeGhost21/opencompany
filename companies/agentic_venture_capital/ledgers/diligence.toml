@@ -1,0 +1,98 @@
+# What was checked, what was found, and what was never verified.
+#
+# The last field is the point. Diligence produces a memo full of confident
+# statements, and the difference between the ones somebody verified and the ones
+# taken from the founders' deck is invisible in the memo and decisive in the
+# outcome. Recording each finding with how it was established makes it visible.
+
+title = "Diligence"
+purpose = """
+Every diligence item: what was checked, how, what it showed, and what could not \
+be verified. Read the open items before any investment committee — an unverified \
+claim that nobody flagged is how a firm invests in something it did not check.\
+"""
+written_by = "`record_entry` to open or update a diligence item, `close_entry` when it is verified or abandoned"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "item"
+role = "title"
+required = true
+description = "The claim being checked, in the form the founders stated it."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "company"
+role = "refs"
+required = true
+
+[[field]]
+name = "method"
+role = "prose"
+required = true
+description = "How it was checked — customer calls, code review, data room, references. \"The founders said so\" is a method and must be recorded as one."
+
+[[field]]
+name = "finding"
+role = "prose"
+description = "What it actually showed, including when it showed less than claimed."
+
+[[field]]
+name = "materiality"
+role = "prose"
+description = "Whether this changes the decision. Most findings do not, and saying so keeps the memo readable."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "How it closed — verified, contradicted, or could not be verified. Required when it closes."
+
+[[status]]
+name = "open"
+
+[[status]]
+name = "checking"
+
+[[status]]
+name = "verified"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "contradicted"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "unverifiable"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Outstanding"
+blurb = "Not yet checked. Nothing goes to committee with a material item open and unflagged."
+statuses = ["open", "checking"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Verified, contradicted, or could not be verified — each with the method. \
+`unverifiable` is the most important status here: it is the honest label for \
+everything the memo would otherwise state as fact on the founders' authority.\
+"""
+statuses = ["verified", "contradicted", "unverifiable"]
+cap = 20

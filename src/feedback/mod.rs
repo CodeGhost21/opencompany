@@ -6,12 +6,15 @@
 //! privacy [`scrub`]ber and a scrub-then-preview gate before a mockable
 //! [`github`] client files (or degrades to a manual link). [`service`] wires the
 //! whole flow; [`tool`] exposes a built-in `feedback` tool the brain can invoke;
-//! [`labels`] maps categories to the triage taxonomy.
+//! [`labels`] maps categories to the triage taxonomy. [`board`] is the other
+//! half of the loop: the shared, cross-product feedback board the hub hosts,
+//! proxied for the console so a browser never holds the instance credential.
 //!
 //! The trait + mock transport and the scrubber/store compile in the default
 //! build so the loop is exercised entirely offline; only the real HTTP filer is
 //! gated behind the `github` feature.
 
+pub mod board;
 pub mod github;
 pub mod labels;
 pub mod scrub;
@@ -22,6 +25,10 @@ pub mod tool;
 pub mod triage;
 pub mod types;
 
+pub use board::{
+    BoardComment, BoardDetail, BoardItem, BoardKind, BoardPage, BoardQuery, BoardSort, BoardStatus,
+    VoteValue,
+};
 pub use github::{
     ExistingIssue, FilingOutcome, GitHubClient, IssueDraft, MockGitHubClient, RateLimiter,
     file_feedback, manual_issue_url, sign_body,

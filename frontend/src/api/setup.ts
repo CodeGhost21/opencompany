@@ -91,6 +91,112 @@ export interface SetupStatus {
   build: SetupBuild;
   /** Companies already registered. Non-empty means the seed step is skipped. */
   companies: string[];
+  /** What this host can already reach without the operator supplying anything. */
+  inference: InferenceReady;
+  /** What this host can do with a mailbox. */
+  mail: MailReady;
+}
+
+/**
+ * What this host can do with a mailbox.
+ *
+ * Separate from `auth_modes`, which says which modes are *legal*: `email` stays
+ * on that list whatever mail the host has, because hub OAuth and passwords sign
+ * people in without a transport. This says which sign-in can honestly be
+ * offered today.
+ *
+ * Required rather than optional, deliberately. An optional field would let a
+ * host too old to report it fall through to whatever the UI treats `undefined`
+ * as and render confident copy about a mailbox nobody checked; required makes
+ * the compiler name every place that has to decide.
+ */
+export interface MailReady {
+  /** A transport and credentials are wired — a link is genuinely sent. */
+  wired: boolean;
+  /**
+   * A minted code comes back in the response instead of going to a mailbox:
+   * loopback bind, no public URL, no transport. The laptop case, where the
+   * honest hand-off is a link rather than an inbox.
+   */
+  echoes_code: boolean;
+}
+
+/**
+ * The credential the host already holds.
+ *
+ * A hosted tenant has one injected by the control plane, and its operator has no
+ * key of their own and no way to get one. This is what lets the first step
+ * arrive already answered rather than demanding something unobtainable.
+ */
+export interface InferenceReady {
+  /** A credential is already resolvable — the design pass would run regardless. */
+  ready: boolean;
+  /** The provider behind it, for the picker's initial value. */
+  provider: string | null;
+  /** The endpoint it resolves to. Shown so a green tick is checkable. */
+  base_url: string | null;
+}
+
+/** The providers this host can talk to (`INFERENCE_PROVIDERS`). */
+export const INFERENCE_PROVIDERS = [
+  {
+    id: "managed",
+    label: "TinyHumans",
+    hint: "The managed endpoint. What a hosted company runs on.",
+    needsUrl: false,
+    needsKey: true,
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    hint: "One key, many models. Billed by OpenRouter.",
+    needsUrl: false,
+    needsKey: true,
+  },
+  {
+    id: "openai_compatible",
+    label: "Other endpoint",
+    hint: "Anything speaking the OpenAI chat API — a proxy, vLLM, a gateway.",
+    needsUrl: true,
+    needsKey: true,
+  },
+  {
+    id: "ollama",
+    label: "Ollama",
+    hint: "A model running on this machine. No key needed.",
+    needsUrl: true,
+    needsKey: false,
+  },
+] as const;
+
+export type InferenceProviderId = (typeof INFERENCE_PROVIDERS)[number]["id"];
+
+/** What the connection test answers. */
+export interface InferenceTestResult {
+  ok: boolean;
+  /** The endpoint actually reached — a tick from the wrong URL is not a pass. */
+  baseUrl: string;
+  /** Concrete model discovered from the endpoint's OpenAI-compatible catalog. */
+  model?: string | null;
+  /** Present only on failure, already summarised into one actionable line. */
+  error?: string;
+}
+
+/**
+ * Probe a credential before anything is written.
+ *
+ * The design pass is deliberately silent about credentials — it falls back to a
+ * curated team on any failure — so without this an operator who mistypes a key
+ * gets a plausible company and finds out five screens later, if at all.
+ *
+ * The key is used and discarded by the host. Testing a credential and committing
+ * to it are separate acts.
+ */
+export function testInference(
+  client: OpenCompanyClient,
+  body: { provider: string; key?: string | null; baseUrl?: string | null },
+): Promise<InferenceTestResult> {
+  return client.post<InferenceTestResult>("/api/v1/setup/inference/test", body);
 }
 
 /**
@@ -104,6 +210,175 @@ export interface SetupInput {
   fields: Record<string, string | null>;
   /** Ignored by the host when a company already exists. */
   template?: string | null;
+  /**
+   * A company the wizard designed, from the answers and the reviewed roster.
+   *
+   * Wins over {@link SetupInput.template} when both are present: someone who
+   * answered three questions and edited a roster has expressed a preference a
+   * preset cannot override.
+   */
+  company?: DesignedCompany | null;
+  /**
+   * What to call the company, as the review step asks for it.
+   *
+   * Applies to either path above. Omitted or blank means "derive it", which is
+   * what every company built here used to get: the host takes the first clause
+   * of {@link DesignedCompany.industry}, so the answer to "what kind of company
+   * are you setting up?" silently became the company's name — and its id, which
+   * is then permanent.
+   */
+  name?: string | null;
+  /**
+   * The address that will be able to sign in, for the template path.
+   *
+   * {@link DesignedCompany.adminEmail} carries the same thing for a designed
+   * company. This one exists because a seeded template has no designed company
+   * to carry it in, and no shipped template names an admin — so a template plus
+   * a sign-in mode would otherwise finish setup into a company nobody can
+   * administer.
+   *
+   * Snake case, unlike the camelCase inside {@link DesignedCompany}: the top
+   * level of this request is read field-for-field by the host.
+   */
+  admin_email?: string | null;
+}
+
+/** The company the wizard designed, as the review step hands it over. */
+export interface DesignedCompany {
+  industry: string;
+  teamHint: string;
+  automate: string;
+  /**
+   * The roster **as reviewed** — renamed, removed and reordered by the operator.
+   * Sent back rather than regenerated, so what they approved is exactly what
+   * gets built; a second pass could return a different team.
+   */
+  agents: DesignedAgent[];
+  /**
+   * The address that will be able to sign in, written into `[users].admins`.
+   *
+   * Not optional in spirit: no shipped template invites anybody, so without it
+   * an operator who chose email sign-in finishes setup and can then sign in as
+   * nobody. Omitted only on a host that needs no sign-in at all.
+   */
+  adminEmail?: string | null;
+  /** The tested provider to persist onto the new company. */
+  inference?: SetupInferenceInput | null;
+}
+
+export interface SetupInferenceInput {
+  provider: string;
+  baseUrl?: string | null;
+  model?: string | null;
+  /** Write-only; stored in the company's secret store. */
+  key?: string | null;
+}
+
+export interface DesignedAgent {  name: string;
+  role: string;
+  description: string;
+  /**
+   * The job shape the design pass assigned, carried back untouched.
+   *
+   * This is what narrows the teammate's tool belt on the host. Dropping it here
+   * would silently hand every designed agent the company-wide belt — which is
+   * `["*", "media", "composio"]` by default, i.e. real-money media and
+   * per-tenant credentials — so the round trip is load-bearing, not incidental.
+   */
+  focus?: string | null;
+}
+
+/** One agent the host proposes for a company that does not exist yet. */
+export interface SetupRosterAgent {
+  name: string;
+  role: string;
+  description: string;
+  /**
+   * The job shape that decides this teammate's tool belt on the host
+   * (`AgentFocus` in `src/company/setup.rs`).
+   *
+   * Carried, never shown and never edited. The console has no business picking
+   * a permission boundary; round-tripping it untouched is what makes the belt
+   * an operator approves on the review screen the belt they actually get.
+   */
+  focus?: string | null;
+}
+
+/** What `POST /api/v1/setup/roster` answers. */
+export interface SetupRoster {
+  agents: SetupRosterAgent[];
+  /** Which curated roster framed the proposal, e.g. `ecommerce`. */
+  template: string;
+  /**
+   * `model` — designed from the answers. `fallback` — the curated team matched
+   * from them. `preset` — the roster of the template the operator *picked*,
+   * shipped whole.
+   *
+   * The last one is the only source the console may send back as a
+   * {@link SetupInput.template} rather than as a designed company: it is the
+   * one case where the host can seed the real thing — that template's belt and
+   * prompts as well as its roster — instead of rebuilding it from this screen.
+   */
+  source: "model" | "fallback" | "preset";
+  /**
+   * The jobs the operator named, as the **host** split them.
+   *
+   * Echoed on the review screen so the list the roster was judged against is the
+   * list they can see — a bad split is visible to the person who typed it rather
+   * than silently shaping a prompt.
+   */
+  jobs?: string[];
+  /**
+   * The jobs no teammate on this roster owns.
+   *
+   * Non-empty only when `source` is `"model"`: coverage is a claim the design
+   * pass makes and the host checks against its own list, by set maths. A curated
+   * team was chosen by keyword and never read the list, so it claims nothing
+   * about it.
+   */
+  uncovered?: string[];
+  /**
+   * Why this is the curated team, when it is. Absent on the `model` path.
+   *
+   * `"no_model"` — no credential was reachable, so no design pass ran.
+   * `"model_unreachable"` — a credential is wired, but its provider did not
+   * answer in time.
+   * `"not_designable"` — a model answered and the answer was unusable: too thin,
+   * unreadable, or the reference team handed back unchanged. In practice, the
+   * answers were too sparse to design from.
+   *
+   * The review screen needs the distinction because the **action differs**. It
+   * used to say "we couldn't reach a model" for every fallback, which is a plain
+   * falsehood in the second case — and it pointed the operator at adding a key
+   * when what they actually needed was to say more about their business.
+   */
+  reason?: "no_model" | "model_unreachable" | "not_designable";
+}
+
+/**
+ * Ask the host to design a starting team, before any company exists.
+ *
+ * The company-scoped twin (`api/company-setup.ts`) cannot serve the wizard: it
+ * resolves a company, and during first-run setup there is none.
+ *
+ * `inferenceKey` is the credential the operator has just typed into this wizard,
+ * passed so the design can run on it before anything is written. The host uses
+ * it and discards it — the apply that persists it is still a single atomic step.
+ */
+export function proposeSetupRoster(
+  client: OpenCompanyClient,
+  body: {
+    industry: string;
+    teamHint: string;
+    automate: string;
+    template?: string | null;
+    inferenceKey?: string | null;
+    inferenceProvider?: string | null;
+    inferenceBaseUrl?: string | null;
+    inferenceModel?: string | null;
+  },
+): Promise<SetupRoster> {
+  return client.post<SetupRoster>("/api/v1/setup/roster", body);
 }
 
 /** What an apply reports back. */

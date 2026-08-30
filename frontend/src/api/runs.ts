@@ -25,6 +25,11 @@ import type { TimelineEntry } from "./tasks";
  * `paused` is currently unreachable from a delegation, so nothing in the UI may
  * *depend* on seeing it — but it is handled everywhere a status is, because a
  * status the console cannot render is worse than one it never meets.
+ *
+ * `declined` is terminal and means the workflow compiler declined *by design* to
+ * automate the work ("better done once than built into a workflow", issue
+ * #1809) — neither an error nor an ordinary success, so it must never render in
+ * a failure tone.
  */
 export type RunStatus =
   | "pending"
@@ -33,7 +38,8 @@ export type RunStatus =
   | "paused"
   | "succeeded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "declined";
 
 /**
  * The coarse phase of a {@link RunStatus}, projected by the host.
@@ -62,8 +68,22 @@ export interface RunUsage {
 export interface RunSummary {
   /** Stable id for the attempt within the company. */
   id: string;
-  /** The card this is an attempt at. */
-  taskId: string;
+  /**
+   * The card this is an attempt at.
+   *
+   * **Absent, never null**, when the attempt is at no card — an operator chat
+   * turn (issue #983), which the run store now records so a turn in flight is
+   * queryable. Test for it by presence.
+   */
+  taskId?: string;
+  /**
+   * The conversation this attempt belongs to, when one raised it (issue #983).
+   * Absent for a card dispatch, which is reachable through its card instead.
+   *
+   * This is what lets a reloading console match an open turn back to the thread
+   * whose working indicator it should re-arm.
+   */
+  chatId?: string;
   /** The desk/teammate it was dispatched to. */
   agentId: string;
   /** Which attempt at the card this is — **1-based**; the first run is `1`. */
@@ -133,6 +153,20 @@ export interface RunDetail {
 export interface RunQuery {
   /** Only attempts at this card. */
   task?: string;
+  /**
+   * Only attempts dispatched to this desk/teammate (issue #1573).
+   *
+   * Sent to the host rather than applied to the answer. Filtering a fetched
+   * page here would make {@link limit} mean "the newest N attempts in the
+   * *company*, of which some happen to be this desk's" — so a teammate who has
+   * been quiet while the rest of the company was busy would render as one who
+   * has never run at all.
+   *
+   * A host predating the selector ignores it and answers with the whole
+   * company's attempts. That is why the caller must still not assume every row
+   * it gets back is this desk's; see `AgentRuns`.
+   */
+  agent?: string;
   /** Only these statuses. An unknown word is refused with a 400, not silently dropped. */
   status?: RunStatus[];
   /** Cap the page; the host clamps it. */
@@ -142,6 +176,7 @@ export interface RunQuery {
 function queryString(query: RunQuery): string {
   const params = new URLSearchParams();
   if (query.task) params.set("task", query.task);
+  if (query.agent) params.set("agent", query.agent);
   if (query.status?.length) params.set("status", query.status.join(","));
   if (query.limit !== undefined) params.set("limit", String(query.limit));
   const encoded = params.toString();
@@ -190,6 +225,7 @@ export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
   succeeded: "Succeeded",
   failed: "Failed",
   cancelled: "Cancelled",
+  declined: "Declined",
 };
 
 /**

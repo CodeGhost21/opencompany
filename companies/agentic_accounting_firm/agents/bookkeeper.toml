@@ -6,3 +6,22 @@ description = "Record transactions and reconcile accounts."
 # teammate came first. Stating the tier keeps the same agent orchestrating
 # instead of handing the job to whoever sorts first alphabetically.
 tier = "orchestrator"
+
+# The role's working rules, checked in beside this file and read at manifest
+# load. The `.toml` carries the wiring; `prompts/` carries how the role works.
+# A missing path here is a manifest error rather than a skipped entry — a role
+# whose prompt was written around a briefing it never received fails silently.
+prompt_files = ["prompts/bookkeeper.md"]
+
+# Billing (#788). The one teammate in this company that holds `chargebee`.
+# Recording transactions and reconciling accounts is the job invoicing belongs
+# to, so the grant sits here rather than on the company at large.
+#
+# The company belt restated verbatim, then extended — the same rule
+# `[tools].allow` follows, and for the same reason: a short list here REPLACES
+# the belt rather than adding to it.
+#
+# `chargebee_send_invoice` and `chargebee_create_customer` are declared
+# `Reach::Consequence`, so they still park for approval under this company's
+# `auto` policy. Holding the tools is not the same as invoicing unattended.
+tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*", "chargebee"]

@@ -13,8 +13,8 @@ here.
 ## The situation
 
 OpenCompany independently built a thin version of the seam `tinymemory` exists
-to provide. [`src/store/tinycortex.rs`](../../../../src/store/tinycortex.rs)
-defines a bespoke `CortexClient` trait with `CortexMemoryStore: MemoryStore` and
+to provide. `src/store/tinycortex.rs` (removed in #1568) defined a bespoke
+`CortexClient` trait with `CortexMemoryStore: MemoryStore` and
 `CortexContextStore: ContextStore` over it, alongside an in-process engine
 implementation.
 
@@ -88,10 +88,21 @@ The decorator additionally owns:
   to deletion.
 - **Taint.** Every inbound-channel write MUST be stamped external-trust. None of
   the three ports model provenance today, and a company that reads the web needs
-  it. Note the contract's own warning: the taint-aware store method has a
-  default implementation that **drops** the taint, so any driver we wrap MUST
-  override it — laundering external content into internal-trust content is the
-  failure it exists to prevent.
+  it. Laundering external content into internal-trust content is the failure
+  this exists to prevent.
+
+  One correction to an earlier reading of the contract, since it changes what
+  the rule actually is. The taint-dropping default is `Memory::store_with_taint`
+  on the **engine-side storage trait** (`api/src/traits.rs`), not on the
+  provider contract. `MemoryCore::store` on `MemoryProvider` takes `MemoryTaint`
+  as a mandatory parameter with no default at all, and the contract says why:
+  "a driver that could default it would be able to launder externally-sourced
+  content into internal-trust content."
+
+  So the duty is not "override a taint-dropping default" — there is nothing to
+  override. It is **never wrap a bare `Memory`; always wrap a
+  `MemoryProvider`**. Reaching for the storage trait is the mistake to guard
+  against, because that is where the silent default lives.
 - **Operator rights.** Inspect, delete, redact and export from
   [company-brain/memory.md](../../company-brain/memory.md) are decorator
   responsibilities. Export is already mandatory in the contract, which helps: a
@@ -106,6 +117,34 @@ which is the copy OpenHuman itself pins. A standalone checkout may be on an
 older contract major, and compatibility is rejected across that gap — binding
 the wrong copy yields two incompatible versions of the same trait in one
 process.
+
+**`tinymemory` and `tinycortex` are not two names for one thing.** This was
+resolved while landing the phase, and the distinction is load-bearing:
+
+| Path | Crate | `CONTRACT_VERSION` | Role |
+|---|---|---|---|
+| `vendor/openhuman/vendor/tinymemory/api` | `tinymemory-api` | `(2, 0)` | The contract. **Bind this.** |
+| `vendor/openhuman/vendor/tinycortex/api` | `tinycortex-api` | `(1, 0)` | Deprecated re-export of the above |
+| `vendor/openhuman/vendor/tinycortex` | `tinycortex` | — | The engine OpenHuman pins (removed as an OpenCompany memory backend in #1568) |
+
+`is_compatible` is major-equality only, so the two contract crates are declared
+incompatible — and since they are separate crates, their `MemoryProvider` traits
+are distinct types regardless of the version numbers. OpenHuman has additionally
+inlined the v2 contract into its own tree at
+`vendor/openhuman/src/openhuman/memory/api/`, and that inlined copy is what its
+live binding uses; its module docs call `tinycortex-api` "now a deprecated
+re-export of this one" and treat the string `tinycortex` as a legacy driver-id
+alias.
+
+So the engine keeps its name and stays pinned by path for OpenHuman's own
+build; only the *contract* moved. `Cargo.toml` path-deps `tinymemory-api` at
+the same directory `vendor/openhuman/Cargo.toml` names, because Cargo unifies
+two path deps only when they resolve to the same directory.
+
+The registry, the HTTP adapters for hosted engines, and the vendor adapter all
+already exist in `vendor/openhuman/vendor/tinymemory` — they were never in
+`tinycortex`, whose contract crate excludes `Driver`, `DriverClass`,
+`SubsystemRegistry` and the policy `Guard` on purpose.
 
 Engine adapters name their engines by version requirement rather than by path,
 specifically so a host that already pins its own engine checkout unifies onto

@@ -1,0 +1,90 @@
+# Every tuning change, and what it did.
+#
+# Balance is the one part of a game where the same change is made, reverted and
+# made again over a project, because each individual change is small enough that
+# nobody writes it down. The result is a build whose numbers nobody can explain
+# and a designer who cannot say whether the last pass helped.
+
+title = "Balance changes"
+purpose = """
+Every tuning change: what was changed, from what to what, why, and what happened \
+afterwards. Read it before tuning anything — this number has probably been moved \
+before, possibly in the direction you are about to move it back from.\
+"""
+written_by = "`record_entry` to record or revise a change, `close_entry` when it is kept or reverted"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "change"
+role = "title"
+required = true
+description = "What was changed, with the old and new value. \"Nerfed the bow\" is not a record."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "why"
+role = "prose"
+required = true
+description = "The problem it was meant to fix, stated as a player experience."
+
+[[field]]
+name = "build"
+role = "prose"
+description = "The build it went into."
+
+[[field]]
+name = "effect"
+role = "prose"
+description = "What actually happened — from playtests or telemetry. Frequently not what was intended."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why it closed — kept, or reverted and why. Required when it closes."
+
+[[field]]
+name = "refs"
+role = "refs"
+
+[[status]]
+name = "trialling"
+label = "Trialling"
+
+[[status]]
+name = "kept"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "reverted"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Being trialled"
+blurb = "In the build and not yet judged. Do not stack another change on the same system while one of these is open."
+statuses = ["trialling"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+blurb = """
+Kept or reverted, each with what it actually did. This section is what stops the \
+same number being moved back and forth for a whole project by people who each \
+remember only their own pass.\
+"""
+statuses = ["kept", "reverted"]
+cap = 20

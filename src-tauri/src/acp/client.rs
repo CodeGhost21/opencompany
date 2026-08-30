@@ -43,6 +43,16 @@ pub const PROTOCOL_VERSION: i64 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcpError {
+    /// The executable is not on `PATH` — the OS refused to start anything.
+    ///
+    /// Split from [`Self::Spawn`] because it is the *only* spawn error that
+    /// means "not installed", and the caller's response is completely
+    /// different: install something, versus read a reason. Classifying it
+    /// here, off `io::ErrorKind`, keeps that decision away from substring
+    /// matching on `"os error 2"` — which is locale- and platform-dependent
+    /// and silently stops matching when either changes.
+    #[error("`{0}` is not on PATH")]
+    NotOnPath(String),
     #[error("could not start the harness: {0}")]
     Spawn(String),
     #[error("the harness went away")]
@@ -135,6 +145,58 @@ impl ClientHandler for ConfinedFiles {
     }
 }
 
+/// Wraps another handler's file logic but answers every permission request
+/// itself, picking by option `kind` rather than a caller-configured id.
+///
+/// Ported from how `buzz-agent` handles the same protocol gap
+/// (`crates/buzz-acp/src/acp.rs::handle_permission_request`): finds the
+/// option whose `kind` is `allow_once`, falling back to `reject_once` /
+/// `reject_always` if the agent offered no allow option at all. Never a
+/// hardcoded `optionId` — adapters name their ids however they like, and only
+/// `kind` is part of the ACP spec's stable vocabulary.
+///
+/// This is `LocalAcpAgent`'s production handler: an ACP agent's own
+/// permission-mode config option (the same `session/set_config_option` lever
+/// already used for model steering) is meant to keep it from asking at all,
+/// and this is the fallback for whatever still does — never a hang, never a
+/// silent refusal that reads as the harness doing nothing.
+pub struct AutoApprovingFiles<H> {
+    inner: H,
+}
+
+impl<H: ClientHandler> AutoApprovingFiles<H> {
+    pub fn new(inner: H) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: ClientHandler> ClientHandler for AutoApprovingFiles<H> {
+    async fn read_text_file(&self, path: &Path) -> Result<String, String> {
+        self.inner.read_text_file(path).await
+    }
+
+    async fn write_text_file(&self, path: &Path, content: &str) -> Result<(), String> {
+        self.inner.write_text_file(path, content).await
+    }
+
+    async fn request_permission(&self, _tool_call: &Value, options: &Value) -> String {
+        let by_kind = |kind: &str| {
+            options.as_array().and_then(|list| {
+                list.iter()
+                    .find(|o| o["kind"].as_str() == Some(kind))
+                    .and_then(|o| o["optionId"].as_str())
+            })
+        };
+        by_kind("allow_once")
+            .or_else(|| by_kind("reject_once"))
+            .or_else(|| by_kind("reject_always"))
+            .map(str::to_string)
+            // Nothing offered at all: say so rather than inventing an id.
+            .unwrap_or_else(|| "reject".to_string())
+    }
+}
+
 type Pending = Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, String>>>>>;
 
 /// One spawned harness.
@@ -160,15 +222,36 @@ pub type UpdateSink = Arc<dyn Fn(Value) + Send + Sync>;
 
 impl AcpClient {
     /// Spawns `command` and starts reading it.
+    ///
+    /// `env` is added on top of this process's own inherited environment —
+    /// not a replacement for it — so a harness that also needs `PATH`, `HOME`,
+    /// etc. keeps them. Callers that need no extra vars (every one before
+    /// issue #1245) pass `&[]`.
     pub async fn spawn(
         command: &str,
         args: &[&str],
         cwd: &Path,
+        env: &[(&str, &str)],
         handler: Arc<dyn ClientHandler>,
         updates: UpdateSink,
     ) -> Result<Self, AcpError> {
         let mut child = Command::new(command)
             .args(args)
+            // Set before `envs` so an explicit caller override still wins.
+            //
+            // The same shell `PATH` the probe located the harness with, for
+            // the same reason — and here it matters twice over: these adapters
+            // are `#!/usr/bin/env node` scripts, so spawning one resolves
+            // `node` afresh. Finding `claude-agent-acp` under `launchd`'s
+            // `PATH` and then failing to find `node` is a spawn failure whose
+            // message names neither.
+            .envs(
+                crate::acp::shell_env::effective_path()
+                    .map(|path| ("PATH".into(), path))
+                    .into_iter()
+                    .collect::<Vec<(std::ffi::OsString, std::ffi::OsString)>>(),
+            )
+            .envs(env.iter().copied())
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -178,7 +261,10 @@ impl AcpClient {
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|error| AcpError::Spawn(error.to_string()))?;
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => AcpError::NotOnPath(command.to_string()),
+                _ => AcpError::Spawn(error.to_string()),
+            })?;
 
         let stdout = child.stdout.take().ok_or(AcpError::Gone)?;
         let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or(AcpError::Gone)?));
@@ -391,5 +477,41 @@ async fn serve(method: &str, params: &Value, handler: &dyn ClientHandler) -> Res
         // that returns `{}` to `terminal/create` has told the agent it holds a
         // terminal it can then write to.
         other => Err(format!("unsupported client method: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::acp::confine::Confinement;
+
+    fn auto_approving(root: &std::path::Path) -> AutoApprovingFiles<ConfinedFiles> {
+        AutoApprovingFiles::new(ConfinedFiles::new(Confinement::new(root).unwrap(), None))
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_reject_once_when_the_agent_offers_no_allow_option() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = auto_approving(dir.path());
+        let options = json!([
+            { "optionId": "n1", "name": "Reject", "kind": "reject_once" },
+            { "optionId": "n2", "name": "Reject always", "kind": "reject_always" },
+        ]);
+
+        assert_eq!(
+            handler.request_permission(&Value::Null, &options).await,
+            "n1"
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_the_literal_reject_when_the_agent_offers_nothing_to_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = auto_approving(dir.path());
+
+        assert_eq!(
+            handler.request_permission(&Value::Null, &json!([])).await,
+            "reject"
+        );
     }
 }

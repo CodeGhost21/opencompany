@@ -1,0 +1,54 @@
+# The setup work this company starts with, on the board in To-do at first
+# boot.
+#
+# Vertical-specific: the baseline in `globals/tasks.toml` already covers the
+# brief, the first goals, the standing decisions, the top risks and the
+# connections. What is here is the setup an accounting firm is defined by —
+# the flow it runs on, and the ledgers it keeps.
+#
+# Each card names what it produces, so an agent picking it up hands back the
+# thing rather than an essay about the thing.
+
+[[task]]
+id = "set-up-the-book-flow"
+title = "Set up the book flow"
+priority = "high"
+note = """
+Decide how a period closes: what is reconciled, in what order, who signs \
+it off, and what opens a `closes` row. Put the sequence in the workspace \
+as the close checklist.
+
+This is the flow the whole firm runs on. Left implicit, every close is \
+done slightly differently and the differences are only found in an audit.
+
+Done when the checklist exists and the next period has a `closes` row \
+against it.\
+"""
+
+[[task]]
+id = "set-up-the-exception-rule"
+title = "Set up the exception rule"
+priority = "high"
+note = """
+State what makes something an `exceptions` row rather than a note: a \
+threshold, a category, a missing document. Record the rule on `decisions`.
+
+An exception log everyone fills in differently is a log nobody can read \
+for patterns, which is the only reason to keep one.
+
+Done when the rule is recorded and open exceptions have rows.\
+"""
+
+[[task]]
+id = "set-up-the-filing-calendar"
+title = "Set up the filing calendar"
+priority = "high"
+note = """
+Open a `filings` row for every statutory deadline this firm's clients face \
+in the next two quarters, each with its owner and its date.
+
+A missed filing is not a late deliverable, it is a penalty. A date living \
+in someone's memory is a date that gets missed.
+
+Done when the next two quarters are on `filings` with owners.\
+"""

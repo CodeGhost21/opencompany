@@ -1,0 +1,103 @@
+# Who told this newsroom what, on what terms, and how reliable they turned out
+# to be.
+#
+# The most sensitive record a media company keeps, and the one that most often
+# lives in an individual reporter's head. That is a problem in both directions: a
+# source's terms must be honoured by everybody who touches the story, and a
+# source who has been wrong before must be known to be, by somebody other than
+# the person they charmed.
+
+title = "Sources"
+purpose = """
+Every source: what they provided, on what terms, and how they have held up. \
+Read it before quoting anyone and before agreeing to terms — the terms bind the \
+whole newsroom, not the reporter who agreed them.\
+"""
+written_by = "`record_entry` to log or reassess a source, `close_entry` when they are no longer used"
+writers = ["story_scout", "source_verifier", "writer"]
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+description = "A reference, not a name, where the source is protected."
+
+[[field]]
+name = "source"
+role = "title"
+required = true
+description = "Who they are, or what they are — an official, an internal document, a dataset."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "terms"
+role = "prose"
+required = true
+description = "On the record, on background, off the record — agreed when, with whom. Binding on everyone, not the reporter alone."
+
+[[field]]
+name = "provided"
+role = "prose"
+description = "What they gave, and to which stories."
+
+[[field]]
+name = "reliability"
+role = "prose"
+description = "How they have held up. A source who was wrong once must be known to be, by more than the person they charmed."
+
+[[field]]
+name = "interest"
+role = "prose"
+description = "What they gain from the story running. Everybody has one; not naming it does not remove it."
+
+[[field]]
+name = "owner"
+role = "owner"
+
+[[field]]
+name = "reason"
+role = "prose"
+description = "Why they closed — unreachable, discredited, or no longer relevant. Required when it closes."
+
+[[status]]
+name = "active"
+
+[[status]]
+name = "cautious"
+label = "Use with caution"
+
+[[status]]
+name = "discredited"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "retired"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Active"
+blurb = "In use, with their terms. The terms bind everyone who touches the story."
+statuses = ["active"]
+order = "recent"
+
+[[section]]
+heading = "Use with caution"
+blurb = "Usable, with a stated reason for care. Read it before relying on them alone."
+statuses = ["cautious"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+blurb = """
+Discredited or retired, with the reason. A discredited source is kept precisely \
+so a new reporter does not rediscover them as a promising contact.\
+"""
+statuses = ["discredited", "retired"]
+cap = 20

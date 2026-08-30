@@ -24,6 +24,21 @@ kind or route involved, and error codes.
 
 - The operator MUST be shown the **exact final issue body** — post-scrub,
   byte-for-byte what will be posted.
+- The previewed body is frozen on the local Feedback Item, and a later
+  **confirm** (Send after Preview) posts exactly those bytes — never a
+  re-derivation under a possibly-changed secret store or manifest. The frozen
+  body is still re-scrubbed as a verification, so a value that became a secret
+  since the preview still aborts (fail closed), and a config change that would
+  alter the approved body asks for a fresh preview instead of silently posting
+  different bytes.
+- A **confirm-by-id is refused unless that item has a frozen preview**. Items
+  captured by the built-in `feedback` tool or the operator-chat intent were
+  never previewed and their words are hidden from the reports list, so
+  confirming one by id would send a body nobody inspected; the operator must
+  preview it first.
+- A **confirm is idempotent**: confirming an item that already left the machine
+  returns the recorded result (the filed issue URL or the hub forwarding)
+  instead of filing or forwarding a second time.
 - Nothing is transmitted without explicit confirmation or a standing
   per-category auto-consent ([README.md](README.md)); auto-consent filings
   are journaled and the operator can review every filed body after the fact.

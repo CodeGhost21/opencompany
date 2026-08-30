@@ -15,7 +15,9 @@ use super::connections::{ConnectionStateGql, DomainStatusGql, SmtpStatusGql};
 use super::finances::FinancesGql;
 use super::inbox::InboxGql;
 use super::memory_facts::{MemoryFactGql, MemoryKindGql};
+use super::observability;
 use super::pagination::Page;
+use super::policy;
 use super::skills::SkillGql;
 use super::tasks::TaskGql;
 use super::usage::{UsageGql, UsageRangeGql};
@@ -25,9 +27,10 @@ use super::{
     connections, finances, inbox, memory_facts, skills, tasks, usage, workflows, workspace,
 };
 use crate::company::runtime::CompanyRuntime;
+use crate::ports::types::Attachment;
 use crate::ports::types::CompanyId;
 use crate::ports::types::TurnStep;
-use crate::server::chat_history::{self, MessageView, ReactionView, Viewer};
+use crate::server::chat_history::{self, MentionView, MessageView, ReactionView, Viewer};
 
 /// The aggregation-root handle over one company. See the module docs.
 pub struct CompanyGql {
@@ -66,15 +69,18 @@ impl CompanyGql {
 
     /// The approvals currently awaiting the operator for this company.
     ///
-    /// Contents are role-gated exactly as on the REST list (issue #618). This
-    /// is the surface that made the question worth asking: it maps the same
-    /// projection, so a redaction applied only to the REST handlers would leave
-    /// the whole boundary reachable through one GraphQL field.
+    /// Contents are role-gated exactly as on the REST list (issue #618), and
+    /// ownership is resolved exactly as there (#1891). This is the surface that
+    /// made the question worth asking: it maps the same projection, so either
+    /// applied only to the REST handlers would leave the whole boundary
+    /// reachable through one GraphQL field — the redaction as a contents hole,
+    /// and the raw park stamp as a client putting an approval on a card the
+    /// host does not consider its owner.
     async fn approvals(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<ApprovalGql>> {
         let auth = ctx.data::<GqlAuth>()?;
         Ok(crate::server::approval_visibility::for_principal(
             auth,
-            self.runtime.pending_approvals(),
+            self.runtime.pending_approvals_resolved().await,
         )
         .into_iter()
         .map(ApprovalGql::from)
@@ -119,6 +125,44 @@ impl CompanyGql {
         #[graphql(default = 0)] offset: i32,
     ) -> async_graphql::Result<Page<TaskGql>> {
         tasks::resolve(&self.runtime, column, first, offset).await
+    }
+
+    /// Attempts at work — a card dispatch, a chat turn, or a workflow node —
+    /// newest first, each with its step trace.
+    ///
+    /// `workflowRunId` is the join that had no answer before agent nodes minted
+    /// rows: a node's turn has neither a card nor a conversation, so nothing
+    /// could ask what a workflow run's agents did.
+    ///
+    /// The unredacted half of each step is **role-gated**: a member sees the
+    /// scrubbed trace, and only a principal who may read sensitive contents sees
+    /// the raw reasoning, arguments and output (`approval_visibility`).
+    async fn agent_runs(
+        &self,
+        ctx: &Context<'_>,
+        task_id: Option<ID>,
+        workflow_run_id: Option<ID>,
+        #[graphql(default = 50)] limit: i32,
+    ) -> async_graphql::Result<Vec<observability::AgentRunGql>> {
+        observability::resolve_runs(
+            ctx,
+            &self.runtime,
+            task_id.map(|id| id.0),
+            workflow_run_id.map(|id| id.0),
+            limit,
+        )
+        .await
+    }
+
+    /// One attempt by id, with its step trace; null when absent.
+    ///
+    /// The unredacted half is role-gated exactly as on [`agent_runs`](Self::agent_runs).
+    async fn agent_run(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+    ) -> async_graphql::Result<Option<observability::AgentRunGql>> {
+        observability::resolve_run(ctx, &self.runtime, id.0).await
     }
 
     /// The company's installed skills.
@@ -201,6 +245,19 @@ impl CompanyGql {
     /// SMTP status — host/port/username only, never the password.
     async fn smtp(&self) -> async_graphql::Result<SmtpStatusGql> {
         connections::resolve_smtp(&self.runtime).await
+    }
+
+    /// The approval policy in force (issue #1070).
+    ///
+    /// Answers from the same derivation `GET {scope}/policy` uses, so the two
+    /// read surfaces cannot report different tiers for one company. Read-only:
+    /// the write plane stays REST-and-admin-only (issue #562).
+    ///
+    /// This sits beside [`Self::approvals`] on purpose. That field says what is
+    /// parked; this one says whether anything ever parks, and an empty queue
+    /// means opposite things under `supervised` and `full`.
+    async fn policy(&self) -> async_graphql::Result<policy::PolicyGql> {
+        policy::resolve_policy(&self.runtime).await
     }
 
     /// The source-template provenance recorded at launch: the stable template
@@ -290,16 +347,23 @@ impl CompanyGql {
                 spent_today_usd: cap.and_then(|_| spent(id)),
                 budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
                 budget_set_at_millis: attribution.map(|entry| entry.at_millis as f64),
+                // Resolved through the record, like the caps: one override row
+                // answers for a manifest teammate and an overlay one alike, so
+                // both arms of the roster get the chosen face with no second
+                // lookup to keep in step (mirrored from the REST `list_team`).
+                avatar: record.effective_avatar(id),
             }
         };
-        let mut out: Vec<TeamMemberGql> = record
-            .manifest
-            .agents
+        // Resolved through the record for the same reason the caps are: a
+        // manifest teammate an operator edited from the console reads back as
+        // what it now is, here and in the REST `list_team`, identically.
+        let effective = record.effective_agents();
+        let mut out: Vec<TeamMemberGql> = effective
             .iter()
             .map(|agent| {
                 row(
                     &agent.id,
-                    None,
+                    agent.name.clone(),
                     agent.role.clone(),
                     agent.description.clone(),
                 )
@@ -349,6 +413,14 @@ pub struct ApprovalGql {
     /// Epoch-millis the effect was parked. `Float` round-trips the full u64
     /// range that would overflow GraphQL's `Int`.
     pub at_millis: f64,
+    /// Epoch-millis this approval default-denies if nobody decides it
+    /// (issue #971). `Float` for the same reason as `atMillis`.
+    ///
+    /// Carried here rather than left to the REST summary alone so the two
+    /// projections of one approval cannot drift into disagreeing about when it
+    /// dies — which is the sort of divergence a reader discovers by acting on
+    /// the wrong one. Null against a host that does not report a deadline.
+    pub expires_at_millis: Option<f64>,
     /// Whether `amountUsd` was withheld from this reader by their role (#618).
     ///
     /// Carried for the same reason it is on the REST summary: a `null` amount
@@ -362,6 +434,14 @@ pub struct ApprovalGql {
     /// every park with no workflow behind it (a chat turn, a scheduler tick, a
     /// board task's attempt), which is the majority.
     pub workflow_run_id: Option<String>,
+    /// Which workflow a parked `workflow.approve` gate is asking about
+    /// (issue #1418), when the effect is one.
+    ///
+    /// Carried for the same reason it is on the REST summary: it is the second
+    /// half of the run address, and it must survive role redaction or a Member
+    /// holding up a stalled workflow would see `workflow_run_id` and still have
+    /// nowhere to click.
+    pub workflow_id: Option<String>,
 }
 
 impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
@@ -371,8 +451,10 @@ impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
             kind: summary.kind,
             amount_usd: summary.amount_usd,
             at_millis: summary.at_millis as f64,
+            expires_at_millis: summary.expires_at_millis.map(|ms| ms as f64),
             contents_hidden: summary.contents_hidden,
             workflow_run_id: summary.workflow_run_id,
+            workflow_id: summary.workflow_id,
         }
     }
 }
@@ -409,6 +491,12 @@ pub struct TeamMemberGql {
     /// When that cap was set (epoch millis). `Float` round-trips the full u64
     /// range that would overflow GraphQL's `Int`, matching `Approval.atMillis`.
     pub budget_set_at_millis: Option<f64>,
+    /// The face this teammate wears, when somebody has chosen one — a
+    /// `tiny:<flavour>` mascot or a `blob:<nodeId>` upload
+    /// (`docs/spec/runtime/avatars.md`). Absent means **nobody has chosen**, and
+    /// the console draws the mascot it hashes from the id. Mirrors the REST
+    /// team DTO's `avatar`; both arms of the roster read answer the same way.
+    pub avatar: Option<String>,
 }
 
 /// Internal desk projection shared between `chats` and `chat`.
@@ -531,6 +619,88 @@ pub struct MessageGql {
     /// Who reacted to this message with what (issue #364), one row per person
     /// per emoji. Empty when nobody has.
     pub reactions: Vec<MessageReactionGql>,
+    /// Who this message names, in reading order. Empty when it names nobody.
+    /// Same [`MessageView`] field the REST route reads, so the two surfaces
+    /// cannot disagree about who was mentioned.
+    pub mentions: Vec<MessageMentionGql>,
+    /// Files attached to this message (issue #1682), each a reference into the
+    /// company workspace with the store-computed name / mime / size. Empty on a
+    /// reply, a system pill, and every operator message journaled before the
+    /// field existed. Same [`MessageView`] field the REST route reads, so the
+    /// two surfaces carry the same rows (issue #65).
+    pub attachments: Vec<MessageAttachmentGql>,
+}
+
+/// One mention on a history message. GraphQL mirror of the REST `mentions`
+/// array, so the two surfaces carry the same rows.
+#[derive(SimpleObject)]
+#[graphql(name = "MessageMention")]
+pub struct MessageMentionGql {
+    /// The literal span the author typed.
+    pub text: String,
+    /// Byte offset of `text` in the message body.
+    pub offset: u32,
+    /// Who was named, as a display label — never a raw user id.
+    pub label: String,
+    /// Whether the reading viewer is the one named (or was named by
+    /// `@everyone`).
+    pub mine: bool,
+    /// Whether this mention renders but pings nobody.
+    pub quiet: bool,
+}
+
+/// One file attached to a history message (issue #1682). GraphQL mirror of the
+/// REST `attachments` array, so the two surfaces carry the same rows. Every
+/// field is store-authored metadata; the bytes are fetched separately through
+/// the hardened `GET …/workspace/blob/{nodeId}` route.
+#[derive(SimpleObject)]
+#[graphql(name = "MessageAttachment")]
+pub struct MessageAttachmentGql {
+    /// The workspace node id the payload is stored under.
+    pub node_id: ID,
+    /// The stored file's display name.
+    pub name: String,
+    /// The stored payload's media type.
+    pub mime: String,
+    /// The stored payload's exact length in bytes.
+    pub size: f64,
+}
+
+impl From<Attachment> for MessageAttachmentGql {
+    fn from(attachment: Attachment) -> Self {
+        MessageAttachmentGql {
+            node_id: ID(attachment.node_id),
+            name: attachment.name,
+            mime: attachment.mime,
+            // GraphQL has no 64-bit integer; `Float` carries a byte count
+            // exactly up to 2^53, far past any file this route will store.
+            size: attachment.size as f64,
+        }
+    }
+}
+
+impl From<MentionView> for MessageMentionGql {
+    fn from(view: MentionView) -> Self {
+        MessageMentionGql {
+            text: view.text,
+            // Saturating rather than `as`: GraphQL has no 64-bit integer, and a
+            // silent wrap would put a chip at the wrong place in the text. An
+            // offset this large cannot occur in a chat message, so the clamp is
+            // unreachable — it is here so that if it ever is reached, the chip
+            // lands at the end rather than at a wrapped-around position.
+            //
+            // `i32::MAX`, not `u32::MAX`: the GraphQL spec defines `Int` as a
+            // signed 32-bit integer, so a `u32` value above `i32::MAX` is
+            // already out of range for the scalar this field is declared as
+            // and can fail serialization on the way out — the clamp exists
+            // for exactly this unreachable-in-practice case, so it needs to
+            // clamp to a value the wire type can actually carry.
+            offset: i32::try_from(view.offset).unwrap_or(i32::MAX) as u32,
+            label: view.label,
+            mine: view.mine,
+            quiet: view.quiet,
+        }
+    }
 }
 
 /// One person's reaction on a history message (issue #364). GraphQL mirror of
@@ -606,6 +776,16 @@ impl From<MessageView> for MessageGql {
                 .reactions
                 .into_iter()
                 .map(MessageReactionGql::from)
+                .collect(),
+            mentions: view
+                .mentions
+                .into_iter()
+                .map(MessageMentionGql::from)
+                .collect(),
+            attachments: view
+                .attachments
+                .into_iter()
+                .map(MessageAttachmentGql::from)
                 .collect(),
         }
     }

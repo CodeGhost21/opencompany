@@ -57,6 +57,7 @@ use std::num::NonZeroUsize;
 
 use crate::Result;
 use crate::company::workspace_paths::{render_path, split_logical_path};
+use crate::company::workspace_scaffold::is_agent_hidden_path;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
@@ -113,7 +114,7 @@ pub struct SearchHit {
     /// The matching node, carrying its id, kind, both origins and — for a binary
     /// node — its `mime` / `size` / `sha256`.
     pub node: WorkspaceNode,
-    /// The node's rendered logical path, e.g. `Standards/Engineering.md`.
+    /// The node's rendered logical path, e.g. `standards/Engineering.md`.
     pub path: String,
     /// Whether the name or the body matched.
     pub matched: MatchKind,
@@ -163,7 +164,7 @@ pub fn clamp_limit(limit: NonZeroUsize) -> usize {
 /// Search one company's workspace.
 ///
 /// `prefix` scopes the search to a subtree by logical path (`Standards`,
-/// `Product/Specs`); `None` searches the whole tree. It is validated with the
+/// `product/Specs`); `None` searches the whole tree. It is validated with the
 /// same [`split_logical_path`] the agent tools use, so a traversal-shaped scope
 /// is refused rather than normalised.
 ///
@@ -178,6 +179,36 @@ pub async fn search_workspace(
     query: &str,
     prefix: Option<&str>,
     limit: NonZeroUsize,
+) -> Result<SearchOutcome> {
+    search_workspace_with_visibility(store, company, query, prefix, limit, |_| true).await
+}
+
+/// Search the workspace subset exposed to agents.
+///
+/// Operator REST and GraphQL search use [`search_workspace`] and retain the
+/// complete tree. Agent tools use this function so the operator-only
+/// `secrets/` subtree is discarded before either names or note bodies are
+/// considered.
+pub async fn search_workspace_for_agent(
+    store: &dyn WorkspaceStore,
+    company: &CompanyId,
+    query: &str,
+    prefix: Option<&str>,
+    limit: NonZeroUsize,
+) -> Result<SearchOutcome> {
+    search_workspace_with_visibility(store, company, query, prefix, limit, |path| {
+        !is_agent_hidden_path(path)
+    })
+    .await
+}
+
+async fn search_workspace_with_visibility(
+    store: &dyn WorkspaceStore,
+    company: &CompanyId,
+    query: &str,
+    prefix: Option<&str>,
+    limit: NonZeroUsize,
+    visible: impl Fn(&str) -> bool,
 ) -> Result<SearchOutcome> {
     let needle = query.trim();
     if needle.is_empty() {
@@ -214,6 +245,9 @@ pub async fn search_workspace(
         let Some(path) = render_path(node, &by_id) else {
             continue;
         };
+        if !visible(&path) {
+            continue;
+        }
         if let Some(scope) = &scope
             && !(path == *scope || path.starts_with(&format!("{scope}/")))
         {

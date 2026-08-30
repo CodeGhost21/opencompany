@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { mcpAddedMessage, mcpBridgeState } from "@/lib/mcp-bridge";
-import type { CapabilityStatusDto } from "@/api/types";
+import { mcpAddedMessage, mcpBridgeState, mcpHealthBadge } from "@/lib/mcp-bridge";
+import type { CapabilityStatusDto, McpHealth } from "@/api/types";
 
 /**
  * The MCP tab's build-state signal (issue #567).
@@ -48,7 +48,7 @@ describe("mcpBridgeState", () => {
 
 /**
  * The add-success message, which is where the screen's other claim used to
- * live: "Agents pick it up on the next rebuild" — fired at the moment the
+ * live: "Teammates pick it up on the next rebuild" — fired at the moment the
  * operator acts, and false twice over on a build with no bridge (nothing picks
  * it up, and since #566 a rebuild is not how pickup happens either).
  */
@@ -59,7 +59,7 @@ describe("mcpAddedMessage", () => {
     // Still a success: the server IS stored, and survives the rebuild that adds
     // the feature. Saying otherwise would report a working add as a failure.
     expect(message).toMatch(/stored/i);
-    expect(message).not.toMatch(/agents pick it up/i);
+    expect(message).not.toMatch(/teammates pick it up/i);
   });
 
   it("promises next-turn pickup when the bridge is present", () => {
@@ -74,5 +74,63 @@ describe("mcpAddedMessage", () => {
     // Unknown is not absence: claiming no agent can use the server, on a host
     // that never said so, is the same class of lie in the other direction.
     expect(mcpAddedMessage("notion", "unknown")).toBe(mcpAddedMessage("notion", "present"));
+  });
+});
+
+/**
+ * The per-row health badge's register (issue #1405).
+ *
+ * The bug this pins: a reachable server read a green `ok · N tools` even under
+ * the banner saying no teammate can call one — reachability rendered as
+ * delivery. Folding the bridge state in demotes every affirmative reading to the
+ * neutral register when — and only when — the bridge is explicitly absent.
+ */
+function health(over: Partial<McpHealth> = {}): McpHealth {
+  return { status: "ok", message: "", toolCount: 3, checkedAtMillis: 1, ...over };
+}
+
+describe("mcpHealthBadge", () => {
+  it("reads a healthy server as delivering when the bridge is present", () => {
+    const badge = mcpHealthBadge(health({ toolCount: 12 }), true, "present");
+    expect(badge).toEqual({ tone: "delivering", label: "ok · 12 tools" });
+  });
+
+  it("drops a healthy server out of the success colour when the bridge is absent", () => {
+    // The exact #1405 contradiction: green `ok` under the "no teammate receives
+    // their tools" banner. Reachable, but not delivering.
+    const badge = mcpHealthBadge(health({ toolCount: 12 }), true, "absent");
+    expect(badge?.tone).toBe("configured");
+    expect(badge?.tone).not.toBe("delivering");
+    expect(badge?.label).toMatch(/not delivered/);
+    expect(badge?.label).toContain("12 tools");
+  });
+
+  it("keeps the success colour on an unknown host — non-delivery must not be invented", () => {
+    // Symmetry with the banner: `unknown` has not said the bridge is missing, so
+    // demoting the badge there would be the #567 lie in the other direction.
+    expect(mcpHealthBadge(health(), true, "unknown")?.tone).toBe("delivering");
+  });
+
+  it("singularises a one-tool count in both registers", () => {
+    expect(mcpHealthBadge(health({ toolCount: 1 }), true, "present")?.label).toBe("ok · 1 tool");
+    expect(mcpHealthBadge(health({ toolCount: 1 }), true, "absent")?.label).toMatch(/1 tool,/);
+  });
+
+  it("shows the auth hint when never probed, and demotes it under an absent bridge", () => {
+    expect(mcpHealthBadge(undefined, true, "present")).toEqual({
+      tone: "delivering",
+      label: "auth set",
+    });
+    expect(mcpHealthBadge(undefined, true, "absent")?.tone).toBe("configured");
+    // Nothing at all when there is neither a probe nor a stored credential.
+    expect(mcpHealthBadge(undefined, false, "present")).toBeNull();
+  });
+
+  it("leaves genuine probe problems in their own register, bridge or no bridge", () => {
+    // A missing credential or an unreachable endpoint is a real problem the
+    // bridge state does not change — these keep amber / red.
+    expect(mcpHealthBadge(health({ status: "needs_config" }), true, "present")?.tone).toBe("warn");
+    expect(mcpHealthBadge(health({ status: "needs_config" }), true, "absent")?.tone).toBe("warn");
+    expect(mcpHealthBadge(health({ status: "error" }), true, "absent")?.tone).toBe("error");
   });
 });

@@ -63,8 +63,6 @@ pub const PRESETS: &[DesktopPreset] = &[
 
 /// The preset a first-run desktop install uses.
 pub const DEFAULT_PRESET_ID: &str = "agentic_marketing_agency";
-/// The local standing invite used only to bootstrap the desktop webview session.
-pub const DESKTOP_OPERATOR_EMAIL: &str = "operator@opencompany.local";
 /// The origin used by Tauri v2's desktop webview.
 pub const TAURI_WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
 
@@ -98,12 +96,16 @@ pub fn preset(id: &str) -> Option<&'static DesktopPreset> {
     PRESETS.iter().find(|preset| preset.id == id)
 }
 
-/// Information the webview needs to authenticate to its embedded runtime.
+/// Where the webview should point itself at its embedded runtime.
+///
+/// No credential of any kind, and that is the whole shape of the desktop now:
+/// the host runs `none` mode, so the address and the company are all a caller
+/// needs. It carried an operator mailbox until the shell stopped signing
+/// anybody in.
 #[derive(Clone, Debug, Serialize)]
 pub struct DesktopConfig {
     pub api_url: String,
     pub company: String,
-    pub operator_email: &'static str,
 }
 
 /// A running local OpenCompany API. Dropping it aborts the loopback server.
@@ -124,18 +126,25 @@ impl Drop for DesktopRuntime {
     }
 }
 
-/// The manifest a first-run install starts from: a bundled preset, with the
-/// local operator added as a standing admin.
+/// The manifest a first-run install starts from: a bundled preset, unchanged.
 ///
-/// The admin entry is what makes the company signable-into. `eligibility` in
-/// `src/server/users/routes.rs` admits an address only if it is already a user,
-/// is named as a bootstrap admin, or holds a redeemable invite — and a manifest
-/// that names nobody satisfies none of the three, so a company created without
-/// this is a company nobody on this machine can enter (issue #632).
+/// It used to carry one edit — a synthetic `operator@opencompany.local` pushed
+/// into `[users].admins`, because `eligibility` admits an address only if it is
+/// already a user, is named as a bootstrap admin, or holds a redeemable invite,
+/// and a manifest naming nobody satisfies none of the three (issue #632).
 ///
-/// The address is local-only by construction: a desktop install has no mail
-/// transport, so it exists purely for the loopback magic link the shell
-/// redeems. It never leaves the device and grants a network caller nothing.
+/// The desktop no longer asks that question. It runs
+/// [`AuthMode::None`](crate::app::config::AuthMode::None) host-wide, where
+/// `eligibility` consults **no** bootstrap list at all and the single local
+/// owner is materialized from the request rather than admitted from a roster.
+/// An entry here would therefore grant nothing to nobody — and worse, it would
+/// be an entry `validate_users` flags the moment anything writes
+/// `[users].mode = "none"` beside it.
+///
+/// That is also why the mode is set as a *host-wide override* on the desktop's
+/// `AppConfig` rather than written into these manifests: the override leaves
+/// `manifest.users.mode` at its serde default, so nothing is flagged, while
+/// `RuntimeBuilder::with_auth_mode_override` still outranks it at build.
 fn first_run_manifest(preset_id: &str) -> Result<CompanyManifest> {
     let preset = preset(preset_id).ok_or_else(|| {
         crate::OpenCompanyError::Config(format!("unknown desktop preset `{preset_id}`"))
@@ -150,17 +159,6 @@ fn first_run_manifest(preset_id: &str) -> Result<CompanyManifest> {
     let roster = embedded_roster(preset_id)?;
     if !roster.is_empty() {
         manifest.agents = roster;
-    }
-    if !manifest
-        .users
-        .admins
-        .iter()
-        .any(|email| email == DESKTOP_OPERATOR_EMAIL)
-    {
-        manifest
-            .users
-            .admins
-            .push(DESKTOP_OPERATOR_EMAIL.to_string());
     }
     Ok(manifest)
 }
@@ -241,6 +239,17 @@ mod generated {
 /// An `archived` company is skipped. Archiving removes a company from the
 /// registry on purpose (`src/server/provision.rs`), and re-registering it at
 /// the next launch would undo that quietly.
+///
+/// ## What the desktop does now
+///
+/// Not this. The application starts every host through `adopt_companies`
+/// alone and lets an empty registry open the first-run wizard, because seeding
+/// answered the wizard's questions silently and then hid it for good — the
+/// reasoning is on `crate::desktop`'s caller side, in the tauri crate's
+/// `local::start_at`. The seed half stayed reachable, since the wizard itself
+/// ends by calling `seed_company` with the template the operator picked, and
+/// this function stayed whole because the two halves belong together for any
+/// caller that does want a company without a wizard.
 pub async fn bootstrap_companies(
     state: &AppState,
     preset_id: &str,
@@ -328,7 +337,62 @@ pub async fn seed_company(
     state: &AppState,
     preset_id: &str,
 ) -> Result<crate::ports::types::CompanyId> {
-    let manifest = first_run_manifest(preset_id)?;
+    seed_company_with(state, preset_id, SeedOverrides::default()).await
+}
+
+/// What the operator decides about a company seeded from a template.
+///
+/// Everything else is the template's. These two are not, and both are fixed at
+/// seed time rather than editable afterwards — the id is minted from the name
+/// here, and a company with no admin cannot be signed into at all.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SeedOverrides<'a> {
+    /// What to call the company. `None` keeps the template's own
+    /// `[company].name`, which is what every seed before the first-run wizard
+    /// asked used, and what [`bootstrap_companies`] still passes.
+    pub name: Option<&'a str>,
+    /// The address that may sign in, written into `[users].admins`.
+    ///
+    /// No shipped product template names an admin, so on a host that asks
+    /// people to sign in, a seed without this produces a company nobody can
+    /// administer — setup completes, email sign-in is on, and the address the
+    /// operator just typed is ineligible. The designed path has always written
+    /// it (`manifest_from_setup`); the template path reached the console only
+    /// once a picked template began being seeded as itself, which is what makes
+    /// this reachable now.
+    ///
+    /// Ignored under `[users].mode = "none"`, where `validate_users` flags an
+    /// admin list as granting nothing and both seeding paths treat a flagged
+    /// manifest as a hard error.
+    pub admin_email: Option<&'a str>,
+}
+
+/// [`seed_company`], with the decisions the operator made about it.
+///
+/// Split from `seed_company` rather than folded into it so the no-decision
+/// callers — first-run bootstrap, tests — keep an entry point that says they
+/// made none.
+pub async fn seed_company_with(
+    state: &AppState,
+    preset_id: &str,
+    overrides: SeedOverrides<'_>,
+) -> Result<crate::ports::types::CompanyId> {
+    let mut manifest = first_run_manifest(preset_id)?;
+    if let Some(name) = overrides
+        .name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        manifest.company.name = name.to_string();
+    }
+    if let Some(email) = overrides
+        .admin_email
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        && manifest.users.mode != "none"
+    {
+        manifest.users.admins = vec![email.to_string()];
+    }
     let id = company_id_from_name(&manifest.company.name);
     // Issue #85: record which template this install started from. Only the
     // slug, never a host path — there is no source directory on a packaged
@@ -343,30 +407,151 @@ pub async fn seed_company(
     Ok(id)
 }
 
+/// Registers a company the first-run wizard **designed**, rather than one copied
+/// from a preset.
+///
+/// The sibling of [`seed_company`], and deliberately a separate entry point: a
+/// generated company carries no [`TemplateProvenance`], because it did not come
+/// from a template. Stamping the reference roster's slug there would claim a
+/// lineage the company does not have, and provenance is exposed verbatim on the
+/// API surfaces — an operator reading `ecommerce` would reasonably conclude
+/// their company *is* that template and could be re-seeded from it.
+///
+/// The manifest is expected to have come from
+/// [`manifest_from_setup`](crate::company::setup::manifest_from_setup), which is
+/// what guarantees it validates.
+pub async fn seed_generated_company(
+    state: &AppState,
+    manifest: CompanyManifest,
+    answers: Option<crate::company::setup::SetupAnswers>,
+) -> Result<crate::ports::types::CompanyId> {
+    let problems = manifest.validate();
+    if !problems.is_empty() {
+        // Refused rather than registered: a company that fails validation would
+        // boot into a state the operator cannot fix from the console, and they
+        // typed nothing wrong to get here.
+        return Err(crate::OpenCompanyError::Config(format!(
+            "the company this setup designed is not valid: {}",
+            problems.join("; ")
+        )));
+    }
+    let id = company_id_from_name(&manifest.company.name);
+    register(state, id.clone(), manifest, None).await?;
+
+    // Record what the operator told us, on the company it produced.
+    //
+    // Phase 2 builds this company's workflows from these answers, and the whole
+    // point of storing them is that it never has to ask again. The company-scoped
+    // route already does this; without it here, a company created through the
+    // wizard — the *default* path — would be the one that arrives without them.
+    //
+    // Logged and swallowed: the company is registered and usable, and losing the
+    // answers costs a re-ask later rather than the company itself.
+    if let Some(answers) = answers
+        && let Some(runtime) = state.registry().get(&id)
+    {
+        let store = runtime.store();
+        match store.load(&id).await {
+            Ok(Some(mut record)) => {
+                record.setup = Some(answers);
+                if let Err(error) = store.save(&record).await {
+                    tracing::warn!(company = %id, %error, "could not store the setup answers");
+                }
+            }
+            Ok(None) => tracing::warn!(company = %id, "no record to store the setup answers on"),
+            Err(error) => tracing::warn!(company = %id, %error, "could not read the record back"),
+        }
+    }
+
+    tracing::info!(company = %id, "seeded a company designed by first-run setup");
+    Ok(id)
+}
+
 /// Builds one company over the instance home and puts it in the registry.
+/// The builder assembly every desktop company is built with.
+///
+/// Shared by [`register`] and [`DesktopRebuilder`] so a rebuilt company cannot
+/// be wired differently from the one it replaces — the same reason the binary's
+/// `BootRebuilder` reuses `company_builder`. A rebuild that quietly dropped the
+/// ACP factory would take every local harness down with it, and the symptom
+/// (turns falling back to the echo brain) points nowhere near the cause.
+fn desktop_builder(
+    state: &AppState,
+    id: crate::ports::types::CompanyId,
+    manifest: CompanyManifest,
+) -> RuntimeBuilder {
+    let mut builder =
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
+            .with_id(id)
+            // The host-wide sign-in mode, which outranks the manifest's own.
+            .with_auth_mode_override(state.auth_mode_override());
+    if let Some(stores) = state.stores() {
+        builder = builder.with_stores(stores);
+    }
+    // Issue #1245: `with_acp_agents` only exists under `acp` — an
+    // `openhuman`-only build (or one with no `AcpAgentFactory` wired on
+    // `state`, e.g. every non-desktop embedder) leaves the builder's default
+    // `None`, so a `local` acp harness resolves `unavailable` exactly as it
+    // already does.
+    #[cfg(feature = "acp")]
+    if let Some(factory) = state.acp_agents() {
+        builder = builder.with_acp_agents(factory);
+    }
+    builder
+}
+
+/// Rebuilds a desktop company in place, with the wiring it booted with.
+///
+/// The desktop needs this more than `serve` does, not less: it is the only host
+/// that runs local ACP harnesses, so it is the only host where changing a
+/// teammate's harness or model has to take effect without a restart. Wiring it
+/// nowhere meant `rebuild_company` failed on exactly that host — the handler
+/// logged and returned 200, so the console reported success while turns kept
+/// using the old lane until the app was restarted.
+pub struct DesktopRebuilder;
+
+#[async_trait::async_trait]
+impl crate::runtime::RuntimeRebuilder for DesktopRebuilder {
+    async fn rebuild(
+        &self,
+        state: &AppState,
+        request: crate::runtime::RebuildRequest,
+    ) -> Result<crate::CompanyRuntime> {
+        desktop_builder(state, request.id.clone(), request.manifest)
+            // The successor adopts the live journal, approval gate, stores and
+            // harness pool rather than constructing a second copy of any of
+            // them. Not attaching this is a correctness bug, not a missed
+            // optimisation — see `RuntimeHandover`.
+            .with_handover(request.handover)
+            .build()
+            .await
+    }
+}
+
 async fn register(
     state: &AppState,
     id: crate::ports::types::CompanyId,
     manifest: CompanyManifest,
     provenance: Option<crate::ports::types::TemplateProvenance>,
 ) -> Result<()> {
-    let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
-        .with_id(id.clone())
-        // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
-        // `auth_mode`), which outranks this manifest's own `[users].mode`.
-        //
-        // `serve`'s `--company` path has always applied it; this one did not,
-        // so a company registered here silently kept its manifest's mode. That
-        // was invisible while only the desktop app reached this code, and stops
-        // being invisible the moment anything else does: the first-run setup
-        // flow writes `auth_mode` and tells the operator to restart, and
-        // without this the restart adopts the company and quietly ignores the
-        // setting they were just told would take effect. `None` — the normal
-        // case — leaves each manifest to name its own mode, as before.
-        .with_auth_mode_override(state.auth_mode_override());
-    if let Some(stores) = state.stores() {
-        builder = builder.with_stores(stores);
-    }
+    // The embedded agent harness, on the same terms `serve` attaches it: the
+    // pool unconditionally, plus whichever managed backends the environment
+    // supplies. Without this a desktop company had no harness even in a build
+    // that compiled one in, so every turn fell back to the echo brain and the
+    // console reported that this build cannot reach a model.
+    let mut builder = desktop_builder(state, id.clone(), manifest)
+            // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
+            // `auth_mode`), which outranks this manifest's own `[users].mode`.
+            //
+            // `serve`'s `--company` path has always applied it; this one did not,
+            // so a company registered here silently kept its manifest's mode. That
+            // was invisible while only the desktop app reached this code, and stops
+            // being invisible the moment anything else does: the first-run setup
+            // flow writes `auth_mode` and tells the operator to restart, and
+            // without this the restart adopts the company and quietly ignores the
+            // setting they were just told would take effect. `None` — the normal
+            // case — leaves each manifest to name its own mode, as before.
+        ;
     if let Some(provenance) = provenance {
         builder = builder.with_template_provenance(provenance);
     }
@@ -390,6 +575,14 @@ async fn register(
 }
 
 /// Starts an offline, loopback-only runtime from a bundled preset.
+///
+/// `none` host-wide, like the packaged shell (`src-tauri/src/embedded.rs`),
+/// and set the same way — as an override on the host's own config rather than
+/// as `[users].mode` in the preset manifests, which would not survive
+/// `validate_users`. The two entry points must agree about the mode: this one
+/// is not what ships, but it is the one whose name reads like it is, and a
+/// company enterable here but not there (or the reverse) is a difference
+/// nothing would report.
 pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<DesktopRuntime> {
     let manifest = first_run_manifest(preset_id)?;
 
@@ -398,32 +591,34 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
     let company_id = company_id_from_name(&manifest.company.name);
     let state = AppState::new(AppConfig {
         bind: address.to_string(),
+        auth_mode_override: Some(crate::app::config::AuthMode::None),
         ..AppConfig::default()
     })
     .with_home(home.into())
     .with_cors(CorsConfig {
         allowed_origins: vec![TAURI_WEBVIEW_ORIGIN.to_string()],
     });
-    let runtime = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
-        .with_id(company_id.clone())
-        .build()
-        .await?;
+    let runtime =
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
+            .with_id(company_id.clone())
+            .with_auth_mode_override(state.auth_mode_override())
+            .build()
+            .await?;
     state
         .registry()
         .insert(company_id.clone(), std::sync::Arc::new(runtime));
 
     // Through the one production serving path, not a bare `axum::serve` — this
     // is where the `none`-mode local-owner peer and proxy-header gates are
-    // wired (see `serve_on`'s doc comment). Harmless today since this always
-    // binds loopback and nothing here sets `[users].mode = "none"`, but this
-    // function's name is the one someone will copy from, so it should not be
-    // the one place those guarantees are missing.
+    // wired (see `serve_on`'s doc comment). No longer merely defensive: this
+    // host *is* `none`-mode, so those two per-request gates are the ones
+    // standing between its owner's company and anything that reached this
+    // socket from somewhere else.
     let server = tokio::spawn(crate::server::serve_on(listener, state));
     Ok(DesktopRuntime {
         config: DesktopConfig {
             api_url: format!("http://{address}"),
             company: company_id.as_ref().to_string(),
-            operator_email: DESKTOP_OPERATOR_EMAIL,
         },
         server,
     })
@@ -592,7 +787,38 @@ mod tests {
             .await
             .unwrap();
         assert!(runtime.config().api_url.starts_with("http://127.0.0.1:"));
-        assert_eq!(runtime.config().operator_email, DESKTOP_OPERATOR_EMAIL);
+        assert_eq!(runtime.config().company, "agentic-marketing-agency");
+    }
+
+    /// A desktop company must come up with an agent harness attached.
+    ///
+    /// The gap this pins was two-part and each half was silent on its own. The
+    /// desktop shell shipped without the `openhuman` feature, so `src/harness/`
+    /// was not compiled at all and the console's inference test answered "This
+    /// build cannot reach a model — the agent harness is not compiled in"; and
+    /// `register` — the only path a desktop company is built through — never
+    /// called `with_harness`, so even a build that *did* compile one in would
+    /// have handed every company the echo brain instead.
+    ///
+    /// Gated on the feature because there is nothing to attach without it, and
+    /// asserted here rather than on `attach` itself because the seam that broke
+    /// is this registration path, not the helper.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_seeded_company_has_a_harness() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state_over(directory.path());
+
+        bootstrap_companies(&state, DEFAULT_PRESET_ID)
+            .await
+            .expect("a fresh root bootstraps");
+
+        let runtime = state.registry().sole().expect("the company is registered");
+        assert!(
+            runtime.harness().is_some(),
+            "a desktop company was built without a harness pool, so every turn \
+             falls back to the echo brain",
+        );
     }
 
     /// A state over `home`, as an embedded host builds one.
@@ -604,15 +830,39 @@ mod tests {
         crate::store::FsCompanyStore::new(home.to_path_buf())
     }
 
-    /// Issue #632: a fresh install must end up somewhere a person can sign in.
+    /// A state shaped like the packaged desktop: loopback, and `none` host-wide.
     ///
-    /// Both halves matter. A company nobody is eligible for is the same dead end
-    /// as no company at all — the login form renders, the 202 comes back, and no
-    /// code is ever minted.
+    /// The override is what the shipped shell sets (`src-tauri/src/embedded.rs`),
+    /// and it is set *there* rather than in the preset manifests deliberately —
+    /// `[users].mode = "none"` beside a `[users].admins` entry is a manifest
+    /// `validate_users` flags, and both seeding paths treat a flagged manifest as
+    /// a hard error. The override never rewrites the manifest, so nothing is
+    /// flagged.
+    fn desktop_state_over(home: &std::path::Path) -> AppState {
+        AppState::new(AppConfig {
+            auth_mode_override: Some(crate::app::config::AuthMode::None),
+            ..AppConfig::default()
+        })
+        .with_home(home.to_path_buf())
+    }
+
+    /// Issue #632: a fresh install must end up somewhere its owner can work.
+    ///
+    /// The answer changed shape rather than going away. The seeded company used
+    /// to name a synthetic mailbox in `[users].admins`, because `eligibility`
+    /// admits nobody a manifest has not named and a company nobody is eligible
+    /// for is the same dead end as no company at all. The desktop now runs
+    /// [`AuthMode::None`](crate::app::config::AuthMode::None), where there is no
+    /// eligibility question to answer: the person at the machine *is* the
+    /// principal. A bootstrap roster would grant nothing to nobody.
+    ///
+    /// So the assertion moved rather than relaxed — an empty `[users].admins` is
+    /// now the correct state, and the thing that must hold is the mode the
+    /// company is actually built in.
     #[tokio::test]
-    async fn a_first_run_seeds_a_company_the_local_operator_can_enter() {
+    async fn a_first_run_seeds_a_company_its_owner_needs_no_account_for() {
         let directory = tempfile::tempdir().unwrap();
-        let state = state_over(directory.path());
+        let state = desktop_state_over(directory.path());
 
         let ids = bootstrap_companies(&state, DEFAULT_PRESET_ID)
             .await
@@ -623,6 +873,11 @@ mod tests {
             .registry()
             .sole()
             .expect("the seeded company is registered, not merely written");
+        assert_eq!(
+            runtime.auth_mode(),
+            crate::app::config::AuthMode::None,
+            "the host-wide mode is what a desktop company is built in"
+        );
         let record = runtime
             .store()
             .load(runtime.id())
@@ -630,13 +885,10 @@ mod tests {
             .unwrap()
             .expect("the seeded company persists");
         assert!(
-            record
-                .manifest
-                .users
-                .admins
-                .iter()
-                .any(|email| email == DESKTOP_OPERATOR_EMAIL),
-            "the seeded company must name somebody eligible: {:?}",
+            record.manifest.users.admins.is_empty(),
+            "a `none`-mode company has no bootstrap roster to name, and naming \
+             one here would put `[users].admins` under a mode that grants it \
+             nothing: {:?}",
             record.manifest.users.admins
         );
         assert_eq!(

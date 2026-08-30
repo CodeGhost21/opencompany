@@ -5,6 +5,11 @@ approves it: single-use and standing grants, the `auto` tier they define, the
 tier a new company is given, what an `always_approve` entry names, and the order
 the gate decides in. This doc is normative.
 
+Policy-generated HITL is currently disabled. The machinery below remains for
+approvals already in flight, specialized tools that explicitly stage an
+approval, and a future opt-in policy mode. New general approvals come from
+`request_approval`; `supervised`, `auto`, and `full` do not create cards.
+
 Split out of [`approvals.md`](approvals.md), which was over the repository's
 500-line limit. That page holds the trust model around this one — the checkpoint
 taxonomy, the [approval lifecycle](approvals.md#approval-lifecycle) the "as
@@ -66,6 +71,27 @@ epoch-millis deadline, capped at 7 days server-side — a request past the cap i
 a **400, never a silent clamp**, because quietly shortening a duration would
 leave the operator believing a permission is live when it lapsed days earlier.
 
+The same standing-policy record also carries a **verdict**. Approving a card
+with a standing scope creates a standing approval; declining it with that scope
+creates a standing **denial**. A denial is an agent-only refusal for the same
+`(subject, tool, scope)` the card showed: matching calls are rejected until the
+policy expires or is revoked, rather than being parked again. Workflow gate
+cards cannot mint standing denials, because the workflow path does not enforce
+that verdict; the resolve route rejects that combination with a 400 and leaves
+the card parked for a one-time denial instead.
+
+Standing approvals and denials are mutually exclusive for a scope. When a new
+standing policy is minted, any live opposite-polarity policy whose subject and
+tool match and whose recorded scope overlaps the new scope is journaled as
+revoked before it is removed from the live set. Thus the newest operator
+decision wins, while policies for different hosts or other non-overlapping
+scopes coexist. Overlap is symmetric: a wildcard policy (scope `None`) shadows
+every policy for the same tool in either direction. A wildcard legacy policy
+is superseded by any newer scoped decision, and a wildcard **new** policy
+supersedes every older scoped one — the newest decision is the whole standing
+contract for that tool, rather than leaving the older scoped policy
+listed-but-inert until the wildcard expires and resurrects it.
+
 Expiry is enforced at **redemption**, under the same lock as the match, and also
 swept on the scheduler's maintenance tick. The sweep is housekeeping and an
 operator notice; it is never the enforcement, or "for one hour" would mean
@@ -108,10 +134,14 @@ writes confined to the agent's own sandboxed workspace (`file_write`, `edit`,
 
 ### The `auto` tier
 
-This is the historical tier boundary retained for compatibility and for a
-future policy-HITL mode. Policy HITL is currently disabled, so `supervised`,
-`auto`, and `full` do not create cards; agents ask explicitly with
-`request_approval`. `readonly` remains a hard denial.
+That low-consequence middle is the base of the `auto` tier (issue #560), with
+one company-context exception: a shared-workspace mutation confined to a node
+the calling agent created and last wrote runs unattended too (issue #877). An
+operator had two settings and needed a third: `supervised` parks every write
+including the agent's own scratch files, so companies drown in cards; `full`
+parks nothing but the always-ask list, so it stops asking before a shell
+command or a git push too. Companies ran one and suffered, or ran the other and
+lost the gate that mattered.
 
 `auto`'s contract, in the operator's words: **the agent works without
 interrupting me, and stops before anything that leaves the building or spends
@@ -127,6 +157,25 @@ deadline" to "this runs unattended for everyone while the company sits in
 rather than by what it is called, and because the widening is exactly what the
 operator chooses when they select the tier. It is written down so that a later
 edit loosening `Grantable` knows it is loosening two things.
+
+The workspace exception is graded at the policy seam rather than in the
+declaration table, because it is not a property of the tool: `workspace_create`,
+`workspace_write`, `workspace_delete` and `workspace_rename` all stay
+`PerCall` in the table, and the harness policy asks the live company tree
+whether the resolved node was both created and last written by the calling
+agent. Only then does it lift that one call to `Grantable`, so the agent's own
+notes run unattended under `auto` while an operator- or teammate-authored node
+still parks. The lift never reaches the standing-grant mint path, which keeps
+reading the table — so the shared note tree stays non-grantable (above) however
+`auto` treats a call on it. Two extra bounds follow from what the tools
+themselves allow: `workspace_delete` is refused at execution time when a
+folder still holds anything (the policy allows an owned target, so no approval
+card is parked), and `workspace_rename` of a folder parks unless every node
+inside it is the agent's own, because the rename re-renders all of their paths. A `workspace_rename` that *moves* a node is
+bound by the same landing-zone rule `workspace_create` applies to a nested
+parent: the destination folder must also be the agent's own (the home root
+excepted), so an operator-authored folder inside the home cannot become an
+unreviewed collection point.
 
 Three tools answer the reach question from their **arguments** rather than from
 their name, because the name is too coarse to be the answer. `composio_execute`
@@ -165,6 +214,35 @@ The tier composes with the Composio read/send reclassification rather than
 depending on it: a Composio read is `Grantable` today while still carrying
 `Reach::Consequence`, and reclassifying its *reach* leaves its standing alone,
 so it runs unattended under `auto` either way.
+
+#### And on the effect gate (issue #1454)
+
+Everything above is the **tool** gate. The **effect** gate —
+`ManifestApprovalGate`, which decides the native effects the runtime performs
+itself — is a second dispatch on the same `[policy].mode` word, and #560 gave it
+no `auto` arm. `auto` fell into its fail-safe catch-all, so the tier every
+provisioned company boots on parked *every* native effect, behaving exactly like
+`readonly` and strictly stricter than the `supervised` tier below it on the
+ladder. Nothing caught it because a tier with no arm and a tier that decided to
+park return the same decision, and every gate test named a single mode.
+
+It has a named arm now, and that arm applies the
+[supervised checkpoint taxonomy](approvals.md#checkpoint-taxonomy) unchanged.
+That is not a placeholder. The split `auto` needs on the tool path is
+`Standing::Grantable` — the sandbox writes that stay inside the company — and
+the effect taxonomy has no equivalent: every group it parks leaves the company
+or spends money, which is the line `auto` advertises stopping at, and its one
+inside-the-company group (**Other**) is already allowed under `supervised`. So
+there is nothing left for `auto` to loosen there.
+
+The stricter reading — park `Spend`/`Send`/`Hire` unconditionally, withholding
+`supervised`'s cap relief and established-thread relief — was considered and
+rejected: it inverts the ladder a second time, parking a $1 spend and a reply on
+a running thread that the tier *below* waves through.
+
+Two properties are pinned by tests rather than by this prose: every word in
+`POLICY_MODES` reaches a named arm, and permissiveness is monotonic up the
+ladder for every branch of the taxonomy.
 
 `auto` is **not** the default. Issue #560 argues it should become one, but
 `default_policy_mode()` returning it would change behaviour for every existing
@@ -282,13 +360,15 @@ standard than open operator input. The old default was `payment.send` /
 the harness path believed payments and publishing were gated and none were. Two
 of the three name capabilities the product does not have; the real name behind
 the third is `publish_artifact`, which must not be defaulted because `full`
-publishing unattended is the ruling on issue #658. While policy HITL is
-disabled, the list is retained but inactive. A drift test still requires every
-future default entry to name its intended, declared tool target explicitly.
+publishing unattended is the ruling on issue #658. Under the default
+`supervised` mode the checkpoint taxonomy parks every `Spend` / `Sign` /
+`Publish` effect anyway, so the empty default costs no protection that was ever
+real. A drift test requires every future default entry to name its intended,
+declared tool target explicitly.
 
-### Legacy precedence at the tool gate
+### Precedence at the tool gate
 
-When policy HITL is enabled, a tool call is decided in this order:
+A tool call is decided in this order:
 
 1. `never_do` hard-deny — **reserved**; the delegation-rule compiler is still a
    Phase-1 stub, so no tool-level arm exists yet. It sits above the grant

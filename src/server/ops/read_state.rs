@@ -29,7 +29,6 @@ use serde_json::json;
 
 use crate::AppState;
 use crate::ports::read_state::ChannelRead;
-use crate::server::error::ApiError;
 use crate::server::ops::scope::{ScopedCompany, scoped};
 
 pub fn router() -> Router<AppState> {
@@ -75,16 +74,17 @@ pub(crate) struct MarkReadBody {
     last_read_at: i64,
 }
 
-async fn list_read_state(company: ScopedCompany) -> Result<Json<ReadStateDto>, Response> {
+async fn list_read_state(
+    company: ScopedCompany,
+) -> Result<Json<ReadStateDto>, crate::server::Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     let markers = company
         .runtime
         .read_state()
         .list(company.id(), &user)
-        .await
-        .map_err(|e| ApiError(e).into_response())?
+        .await?
         .into_iter()
         .map(ReadMarkerDto::from)
         .collect();
@@ -94,16 +94,17 @@ async fn list_read_state(company: ScopedCompany) -> Result<Json<ReadStateDto>, R
 async fn mark_read(
     company: ScopedCompany,
     Json(body): Json<MarkReadBody>,
-) -> Result<Json<ReadMarkerDto>, Response> {
+) -> Result<Json<ReadMarkerDto>, crate::server::Rejection> {
     let Some(user) = actor_id(&company) else {
-        return Err(unauthorized());
+        return Err(unauthorized().into());
     };
     if body.channel_id.trim().is_empty() {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "error": "channelId must not be empty", "code": "invalid_request" })),
         )
-            .into_response());
+            .into_response()
+            .into());
     }
     // The stored marker is returned rather than the requested one, because
     // `mark` is monotonic: a late request carrying an earlier instant leaves the
@@ -113,8 +114,7 @@ async fn mark_read(
         .runtime
         .read_state()
         .mark(company.id(), &user, &body.channel_id, body.last_read_at)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
+        .await?;
     Ok(Json(settled.into()))
 }
 
@@ -175,6 +175,8 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -186,9 +188,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();
@@ -286,6 +292,8 @@ mod tests {
         let store = FsCompanyStore::new(home.clone());
         store
             .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -297,9 +305,13 @@ mod tests {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_tool_grants: None,
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
             })
             .await
             .unwrap();

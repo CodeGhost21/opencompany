@@ -94,6 +94,28 @@ pub async fn run_workflow(
     input: Value,
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
+    // A single pool is the single-harness case: the router is just the default
+    // lane over that pool. Kept as its own entrypoint so the many single-pool
+    // tests (and any single-harness caller) need not hand-assemble a router.
+    let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+        crate::harness::built_in::run_turn::HarnessRunTurn::new(pool, Arc::new(deps.clone())),
+    );
+    run_workflow_lane_aware(turn, deps, record, workflow, input, ctx).await
+}
+
+/// [`run_workflow`] over an already-assembled, lane-aware router.
+///
+/// The production [`HarnessWorkflowRunner`] takes this path so a workflow
+/// `agent` node addressing a named-harness agent routes to that harness's
+/// engine instead of the default pool.
+pub async fn run_workflow_lane_aware(
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    deps: HarnessDeps,
+    record: &CompanyRecord,
+    workflow: &WorkflowFile,
+    input: Value,
+    ctx: &WorkflowRunContext,
+) -> Result<WorkflowRun> {
     // Issue #151 part a: refuse an unbounded re-entry before it takes the host
     // down. `run_workflow` is an orchestrator tool, and a workflow `agent` node
     // may address the orchestrator — so a graph whose agent node runs a
@@ -122,7 +144,7 @@ pub async fn run_workflow(
     WORKFLOW_DEPTH
         .scope(
             depth + 1,
-            run_workflow_inner(pool, deps, record, workflow, input, ctx),
+            run_workflow_inner(turn, deps, record, workflow, input, ctx),
         )
         .await
 }
@@ -135,20 +157,50 @@ pub async fn run_workflow(
 /// **same** channel, so the collector sees them in that order and a node's
 /// started event always journals ahead of its finished one.
 ///
-/// Deliberately scalars and no `ExecutionStep`: the engine's step carries the
-/// node's `output` items, and this hop exists partly to make it *impossible* for
-/// that payload to reach the journal — the same stance the live turn frames take
-/// on tool args. A `Started` frame carries the node id alone; the node has not
-/// run, so there is no status or duration to carry either. What is not carried
-/// cannot leak.
+/// Deliberately no whole `ExecutionStep`. A `Started` frame carries the node id
+/// alone; the node has not run, so there is no status, duration, or output to
+/// carry either. What is not carried cannot leak.
+///
+/// A `Finished` frame carries the node's `output` items (issue #1008) **as well
+/// as** its status and duration — but that payload is used for exactly one thing
+/// and is walled off from the journal: the collector accumulates it into a
+/// side map that feeds ONLY the durable, console-facing run-output store on the
+/// **failure/blocked arms**, where the engine returns no `outcome.output` to
+/// persist from. The journal still receives only `{node_id, status,
+/// elapsed_ms}` (see the `Finished` arm of the collector, which builds its
+/// `WorkflowNodeFinished` from those three scalars and never touches `output`) —
+/// the same stance the live turn frames take on tool args. Before #1008 the
+/// failure paths threw this output away, so a failed/blocked run's inspector
+/// wrongly claimed the run predated output capture.
 enum NodeProgress {
     /// A node began executing (issue #382) — the opening bracket. Id only.
     Started { node_id: String },
-    /// A node finished (issue #371) — its status and wall-clock duration.
+    /// A node finished (issue #371) — its status, wall-clock duration, and the
+    /// items it emitted (issue #1008; [`Value::Null`] on an error step). The
+    /// output is consumed only by the run-output persist on the failure arms;
+    /// it never reaches the journal.
     Finished {
         node_id: String,
         status: WorkflowNodeStatus,
         elapsed_ms: u64,
+        output: Value,
+        /// What the harness did inside this node, in order — empty for every
+        /// non-agent node and for a turn with no steps to fold.
+        ///
+        /// Rides this channel exactly as `output` does, and for the same reason:
+        /// it is per-node content the run response and the output snapshot want,
+        /// not a scalar the journal carries. Bounded per entry by the engine's
+        /// `TranscriptEntry::bounded` before it ever reaches here.
+        transcript: Vec<tinyflows::transcript::TranscriptEntry>,
+        /// Issue #1014: the config paths of this node's null-resolved
+        /// `=`-expressions — the engine's own broken-wiring list, lifted off
+        /// `ExecutionStep.diagnostics`. Paths only (each
+        /// `NullResolution.location`), never a resolved value: a null resolution
+        /// has no value, and the location is config the author wrote, so nothing
+        /// a node produced rides this channel. Carried onto the node row and the
+        /// `WorkflowNodeFinished` event; like the scalars beside it, never the
+        /// `output`.
+        diagnostics: Vec<String>,
     },
 }
 
@@ -193,6 +245,29 @@ impl tinyflows::observability::RunObserver for ProgressObserver {
             // `u128` millis is the engine's type; a node running longer than
             // 584 million years is not the failure mode worth a `Result`.
             elapsed_ms: u64::try_from(step.duration_ms).unwrap_or(u64::MAX),
+            // Issue #1014: the config path of every `=`-expression this node's
+            // execution resolved to `null` — the engine's own broken-wiring
+            // list. Only `NullResolution.location` (a dotted config path the
+            // author wrote, e.g. `args.to`) is taken; the `expression` and any
+            // resolved value are dropped here, so nothing but the wiring's
+            // address leaves the observer. Empty on error steps and for nodes
+            // with no expression config.
+            diagnostics: step
+                .diagnostics
+                .iter()
+                .map(|d| d.location.clone())
+                .collect(),
+            // Issue #1008: the node's emitted items, carried so the collector can
+            // accumulate a partial per-node output map for the failure/blocked
+            // arms (which have no `outcome.output` to persist from). A success
+            // step's `output` is the items array; an error step's is
+            // `Value::Null`. This clone rides the same channel as the scalars
+            // and never touches the journal.
+            output: step.output.clone(),
+            // The engine copied this off the `AgentRunOutcome` the harness
+            // returned. Cloned like `output` beside it; the observer must stay
+            // allocation-cheap but must not borrow past the callback.
+            transcript: step.transcript.clone(),
         });
     }
 }
@@ -200,7 +275,7 @@ impl tinyflows::observability::RunObserver for ProgressObserver {
 /// The run itself, always executed inside a [`WORKFLOW_DEPTH`] scope so a
 /// nested run sees this one on the chain.
 async fn run_workflow_inner(
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     workflow: &WorkflowFile,
@@ -210,8 +285,8 @@ async fn run_workflow_inner(
     let mut graph = super::translate::translate(workflow);
     // Policy-generated workflow HITL is disabled. Preserve an author's own
     // `requires_approval = true`, but add no gates merely because a tool call
-    // matches the company policy. Agent-driven approvals now enter through the
-    // explicit `request_approval` tool instead.
+    // matches company policy. Agent-driven approvals enter through explicit
+    // approval-producing tools instead.
     let gated = super::gate::policy_hitl_disabled(&mut graph);
     // Issue #846: a node whose call already left the building in an earlier run
     // of this lineage replays its recorded result instead of calling again.
@@ -287,6 +362,26 @@ async fn run_workflow_inner(
     // *outside* the capability bundle, so a hard abort that drops the engine future
     // (and with it the bundle and its board claim) still leaves every row already
     // collected readable here: a card is real once written, so it must stay listed.
+    // Issue #976: a graph whose only node is its trigger has nothing to execute.
+    // The engine runs it happily — there is no stage to fail — so it settles as
+    // an ordinary finished run, and a run row that says nothing is its own small
+    // lie: `QA Test Pipeline` on staging banked six of them. Said here, through
+    // the channel #638 built for exactly this shape of fact.
+    //
+    // A notice rather than an error, for the reason `notices` exists at all: an
+    // empty graph is not a failure. Nothing broke, nothing was attempted, and
+    // marking it failed would put a half-authored stub into the failure count
+    // next to runs that genuinely went wrong. Same call `NoDestinationConfigured`
+    // makes one level down (#925) — state the reason instead of leaving it to be
+    // inferred from an absence.
+    if !workflow.has_runnable_node() {
+        notices.push(crate::company::STAGELESS_WORKFLOW_NOTICE.to_string());
+        tracing::warn!(
+            company = %record.id,
+            workflow = %workflow.id,
+            "workflow run: the graph has no runnable node, so this run could not do anything"
+        );
+    }
     let board = super::caps::RunBoard::default();
     // Issue #881 / #880: the two sideways channels an agent node reports through
     // — that it blocked, and what it parked. Owned out here for exactly the
@@ -296,19 +391,47 @@ async fn run_workflow_inner(
     // run that ended badly must still be able to say it opened one.
     let blocks = super::caps::RunBlocks::default();
     let approvals = super::caps::RunApprovals::default();
+    // Card-less files written by agent nodes. Kept outside the capability
+    // bundle so a failed/blocked engine future cannot drop the capture before
+    // the durable run-output snapshot is assembled.
+    let run_artifacts = super::caps::RunArtifacts::default();
+    // Owned out here like `blocks` and `approvals`: the journal write that needs
+    // it happens in the collector task, which outlives the capability bundle the
+    // engine future drops.
+    let attempts = super::caps::RunAttempts::default();
+    // Read before `deps` moves into the builder below. A dry run records
+    // nothing: it makes no effects, so an attempt row would be a receipt for
+    // work that never happened.
+    let attempt_runs = (!dry_run).then(|| deps.workflow_runs.clone()).flatten();
+    let attempt_deep = (!dry_run).then(|| deps.deep_trace.clone()).flatten();
+    // Issue #617: one per-run record of every child the resolver gates. The
+    // resolver (invoked by the engine mid-run) writes it; the parking path
+    // (after the engine returns) reads it to name a child pause. Created out
+    // here and owned past the engine call — the engine future and the
+    // capability bundle drop before parking runs.
+    let child_gates = Arc::new(super::caps::resolver::ChildGateRegistry::default());
     let capabilities = super::caps::build_capabilities(
-        pool,
+        turn,
         deps,
         record,
         super::caps::RunContext {
             workflow_id: &workflow.id,
             run_id: &run_id,
             run_request,
+            trigger_input: &trigger_input,
+            started_by: ctx.started_by.clone(),
             dry_run,
             notices: notices.clone(),
             board: board.clone(),
             blocks: blocks.clone(),
             approvals: approvals.clone(),
+            artifacts: run_artifacts.clone(),
+            // A dry run records nothing: it makes no effects, so an attempt row
+            // for it would be a receipt for work that never happened.
+            runs: attempt_runs,
+            deep: attempt_deep,
+            attempts: attempts.clone(),
+            child_gates: child_gates.clone(),
         },
     )
     .await?;
@@ -327,6 +450,9 @@ async fn run_workflow_inner(
             workflow_id: workflow.id.clone(),
             run_id: run_id.clone(),
             scheduled: ctx.scheduled,
+            // Issue #1862 prerequisite: who triggered this run, stamped as a
+            // fact at start rather than guessed later at failure time.
+            started_by: Some(ctx.started_by.clone()),
         };
         if let Err(err) = events.append(&record.id, started).await {
             tracing::warn!(
@@ -349,14 +475,30 @@ async fn run_workflow_inner(
     // The journal is passed to the collector only in that case; `None` there
     // means "collect the rows, write nothing" — the shape the default build and
     // every dry run take.
+    //
+    // Issue #1008: the collector *additionally* accumulates a per-node output
+    // map (`{ "<id>": { "items": [ … ] } }`) from each `Finished` frame's
+    // output. This map exists solely to feed the durable run-output persist on
+    // the failure/blocked arms, where the engine returns no `outcome.output`. It
+    // is returned beside the rows and never journaled — the journal invariant
+    // (no node output) is preserved because the `WorkflowNodeFinished` event is
+    // still built from the three scalars alone.
     let journal_nodes = events.clone().filter(|_| !dry_run);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<NodeProgress>();
     let collector = tokio::spawn({
         let company = record.id.clone();
         let workflow_id = workflow.id.clone();
         let run_id = run_id.clone();
+        let collector_attempts = attempts.clone();
         async move {
             let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
+            // Issue #1008: node_id -> `{ "items": [ … ] }`, canonical-shaped so
+            // the console's `parseNodeMessages` reads it exactly like a clean
+            // run's `outcome.output["nodes"]`.
+            let mut partial_nodes = serde_json::Map::new();
+            let attempts = collector_attempts;
+            // node_id -> the ordered transcript entries that node produced.
+            let mut node_transcripts = serde_json::Map::new();
             while let Some(progress) = rx.recv().await {
                 match progress {
                     // Issue #382: the node's opening bracket. Journaled only when
@@ -387,6 +529,9 @@ async fn run_workflow_inner(
                         node_id,
                         status,
                         elapsed_ms,
+                        output,
+                        transcript,
+                        diagnostics,
                     } => {
                         if let Some(events) = journal_nodes.as_ref() {
                             let event = CompanyEvent::WorkflowNodeFinished {
@@ -395,6 +540,15 @@ async fn run_workflow_inner(
                                 node_id: node_id.clone(),
                                 status,
                                 elapsed_ms,
+                                // Issue #1014: the broken-wiring paths ride the
+                                // durable event too, so a re-read run (folded
+                                // from the journal) shows the same diagnostics
+                                // the synchronous response did.
+                                diagnostics: diagnostics.clone(),
+                                // The join, on the durable event: a console
+                                // folding this run from the journal reaches the
+                                // node's step trace without a second lookup.
+                                agent_run_id: attempts.get(&node_id),
                             };
                             if let Err(err) = events.append(&company, event).await {
                                 tracing::warn!(
@@ -407,6 +561,31 @@ async fn run_workflow_inner(
                                 );
                             }
                         }
+                        // Issue #1008: accumulate this node's output into the
+                        // partial map under the canonical `{ "items": [ … ] }`
+                        // shape. A success step's `output` is the items array; an
+                        // error (or any non-array) step contributes an empty
+                        // `items`, so the failing node still appears as "produced
+                        // none" rather than vanishing. Keyed before `node_id`
+                        // moves into the row below.
+                        let items = match output {
+                            Value::Array(_) => output,
+                            _ => Value::Array(Vec::new()),
+                        };
+                        partial_nodes
+                            .insert(node_id.clone(), serde_json::json!({ "items": items }));
+                        // Kept beside the output map rather than inside it: a
+                        // clean settle persists the ENGINE's `outcome.output`,
+                        // not this map, so the transcripts have to survive
+                        // separately and be merged in at each persist site.
+                        // Folding them in here would land them on the failure
+                        // arms only — which is the whole bug this avoids.
+                        if !transcript.is_empty() {
+                            node_transcripts.insert(
+                                node_id.clone(),
+                                serde_json::to_value(&transcript).unwrap_or(Value::Null),
+                            );
+                        }
                         // Collected for the response on every path — status is
                         // `Copy`, `node_id` moves in after its clone (if any)
                         // went to the event.
@@ -414,11 +593,16 @@ async fn run_workflow_inner(
                             node_id,
                             status,
                             elapsed_ms,
+                            // Issue #1014: the node's null-resolved config paths,
+                            // carried on the run response's per-node timeline.
+                            // `diagnostics` moves in after its clone above went
+                            // to the event.
+                            diagnostics,
                         });
                     }
                 }
             }
-            rows
+            (rows, partial_nodes, node_transcripts)
         }
     });
 
@@ -509,30 +693,43 @@ async fn run_workflow_inner(
     // clone somewhere longer-lived, this would log and move on with an empty
     // trail instead of wedging the run (and the host behind it) forever.
     drop(observer);
-    let nodes: Vec<crate::ports::WorkflowRunNodeRow> =
-        match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
-            Ok(Ok(rows)) => rows,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    company = %record.id,
-                    workflow = %workflow.id,
-                    %run_id,
-                    %err,
-                    "workflow: the node-progress collector did not shut down cleanly"
-                );
-                Vec::new()
-            }
-            Err(_) => {
-                tracing::warn!(
-                    company = %record.id,
-                    workflow = %workflow.id,
-                    %run_id,
-                    "workflow: node progress events did not drain in time; the run's finished \
-                     record may be journaled ahead of them"
-                );
-                Vec::new()
-            }
-        };
+    // Issue #1008: the collector now returns both the response rows and the
+    // accumulated per-node output map. The map feeds ONLY the run-output persist
+    // on the failure/blocked arms below; `nodes` stays the output-free row list
+    // the journal and `WorkflowRun.nodes` carry. A drain failure yields an empty
+    // map, so a persist on that path simply records "produced none".
+    let (nodes, partial_nodes, node_transcripts): (
+        Vec<crate::ports::WorkflowRunNodeRow>,
+        serde_json::Map<String, Value>,
+        serde_json::Map<String, Value>,
+    ) = match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(err)) => {
+            tracing::warn!(
+                company = %record.id,
+                workflow = %workflow.id,
+                %run_id,
+                %err,
+                "workflow: the node-progress collector did not shut down cleanly"
+            );
+            (Vec::new(), serde_json::Map::new(), serde_json::Map::new())
+        }
+        Err(_) => {
+            tracing::warn!(
+                company = %record.id,
+                workflow = %workflow.id,
+                %run_id,
+                "workflow: node progress events did not drain in time; the run's finished \
+                 record may be journaled ahead of them"
+            );
+            (Vec::new(), serde_json::Map::new(), serde_json::Map::new())
+        }
+    };
+    // The post-turn capture is a sideways channel because failed and blocked
+    // agent nodes return no engine output. Drain it only after the engine and
+    // progress collector are gone, then fold the same rows into every settle
+    // arm below.
+    let captured_artifacts = run_artifacts.take();
 
     // Resolved only AFTER the drain above, so a cancelled run's completed nodes
     // are journaled exactly like a completed run's before the caller writes the
@@ -554,8 +751,58 @@ async fn run_workflow_inner(
         // reports the error, and the block survives on the approval receipts.
         Some(Err(err)) => {
             let blocked = blocks.take();
+            // Issue #1008: the engine returns no `outcome.output` on this arm, so
+            // the run's per-node output lives ONLY in the map the progress
+            // observer accumulated. Persist that, flagged `partial`, on BOTH the
+            // genuine-failure and the blocked branches — before #1008 both threw
+            // it away, so the inspector wrongly reported "this run predates output
+            // capture" for every failed or blocked run.
+            let partial_output = merge_run_artifacts(
+                merge_transcripts(&Value::Object(partial_nodes), &node_transcripts),
+                &captured_artifacts,
+            );
             if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
-                return Err(map_engine_error(err));
+                // A genuine failure. Persist the partial capture so the inspector
+                // shows what the nodes that ran produced.
+                if !persist_run_output(
+                    run_output_store.as_deref(),
+                    &record.id,
+                    &workflow.id,
+                    &run_id,
+                    &partial_output,
+                    true,
+                )
+                .await
+                {
+                    // This branch used to be log-only, because it returns `Err`
+                    // and an `Err` had no `WorkflowRun` to hang a notice on. It
+                    // has one now (below), so the operator hears about a lost
+                    // snapshot on the failure arm exactly as on the blocked one.
+                    notices.push(run_output_persist_failed_notice());
+                }
+                // Issue #1008 (second half): the failure carries the partial run
+                // rather than only a message. The nodes that ran before the break
+                // really did open board cards, park approvals and raise notices,
+                // and those are durable facts by now — so the caller's
+                // `record_run_finished` can list them instead of journaling a
+                // failed run as an empty one. See `OpenCompanyError::partial_run`.
+                return Err(OpenCompanyError::WorkflowRunFailed {
+                    source: Box::new(map_engine_error(err)),
+                    partial: Box::new(WorkflowRun {
+                        output: partial_output,
+                        pending_approvals: Vec::new(),
+                        deliveries: Vec::new(),
+                        cancelled: false,
+                        nodes,
+                        notices: notices.take(),
+                        board: board.take(),
+                        // Non-empty exactly when a real failure and a block
+                        // happened together — the case the containment check
+                        // above refuses to relabel as a plain block.
+                        blocked_nodes: blocked,
+                        approvals: approvals.take(),
+                    }),
+                });
             }
             tracing::info!(
                 company = %record.id,
@@ -565,12 +812,61 @@ async fn run_workflow_inner(
                 "workflow: the run stopped because a node is waiting on an operator, not because \
                  it failed"
             );
+            // Issue #1008: minus the blocked nodes' own entries, and that
+            // subtraction is issue #881's invariant rather than tidiness. A node
+            // refused inside its model's tool loop ends its turn by writing
+            // *prose about being blocked*, and the engine records that prose as
+            // the step's output. #881 stopped that apology travelling to the next
+            // node; letting it ride the run inspector as the node's product would
+            // re-open the same lie one surface over. The node's `blocked` chip and
+            // the run's notice already say what happened.
+            // Remove the blocked node's refusal prose, then restore only the
+            // files it actually wrote. A partial artifact is a deliverable; an
+            // apology about why the turn stopped is not.
+            let partial_output =
+                merge_run_artifacts(without_nodes(partial_output, &blocked), &captured_artifacts);
+            // A blocked run DOES return a `WorkflowRun`, so a failed persist adds
+            // an operator-facing notice rather than only a log line (Part 6).
+            if !persist_run_output(
+                run_output_store.as_deref(),
+                &record.id,
+                &workflow.id,
+                &run_id,
+                &partial_output,
+                true,
+            )
+            .await
+            {
+                notices.push(run_output_persist_failed_notice());
+            }
+            // Issue #899 (Stage 1): this is the block-settle arm the DEFAULT
+            // `on_error = "stop"` takes — a blocked agent node reaches here as an
+            // `Err` the containment check reclassifies. Stash each blocked node's
+            // continuation facts so approving its parked calls re-dispatches the
+            // run. (The `on_error = "continue"/"route"` case settles on the main
+            // arm below, which arms the same stash there.)
+            stash_blocked_agent_nodes(
+                delivery.as_ref(),
+                &workflow.id,
+                &run_id,
+                &trigger_input,
+                &blocked,
+                &ctx.started_by,
+            )
+            .await;
             return Ok(blocked_run(BlockedRun {
                 nodes,
                 blocked,
                 notices,
                 board: board.take(),
                 approvals: approvals.take(),
+                // Issue #1008: the same capture the durable snapshot took, so a
+                // live run drawer and a run reopened from History show one thing
+                // rather than disagreeing about what the run produced. Wrapped
+                // under `nodes` because that is the shape every reader of
+                // `WorkflowRun.output` already parses — the durable record stores
+                // the bare map, the run body carries the engine's envelope.
+                output: serde_json::json!({ "nodes": partial_output }),
             }));
         }
         None => {
@@ -596,16 +892,34 @@ async fn run_workflow_inner(
         // show how far the run got and what each finished node made. This is an
         // outcome-bearing arm (unlike the hard-abort return above, which has no
         // outcome and persists nothing).
-        persist_run_output(
+        //
+        // Issue #1008: this is a CLEAN cancel with a real `outcome.output`, so it
+        // persists that canonical map with `partial = false` — the "partial"
+        // flag is reserved for the failure/blocked arms that have no outcome and
+        // fall back to the observer's accumulated capture. A failed write adds an
+        // operator notice (Part 6), since this arm returns a `WorkflowRun`.
+        let raw_nodes = outcome.output.get("nodes").cloned().unwrap_or(Value::Null);
+        // The transcripts the observer collected are not in the engine's run state,
+        // so a clean settle would otherwise persist a snapshot that says what every
+        // node emitted and nothing about what its agent did.
+        let raw_nodes = merge_run_artifacts(
+            merge_transcripts(&raw_nodes, &node_transcripts),
+            &captured_artifacts,
+        );
+        if !persist_run_output(
             run_output_store.as_deref(),
             &record.id,
             &workflow.id,
             &run_id,
-            &outcome.output,
+            &raw_nodes,
+            false,
         )
-        .await;
+        .await
+        {
+            notices.push(run_output_persist_failed_notice());
+        }
         return Ok(WorkflowRun {
-            output: outcome.output,
+            output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: true,
@@ -736,11 +1050,25 @@ async fn run_workflow_inner(
     // Only when the run actually paused: a run that reached the end has no
     // continuation coming, so there is nothing to guard against and nothing to
     // warn about.
-    let (performed, unreplayable) = if outcome.pending_approvals.is_empty() {
+    let (performed, mut unreplayable) = if outcome.pending_approvals.is_empty() {
         (Vec::new(), Vec::new())
     } else {
-        super::replay::outward_calls_performed(&graph, &outcome.output)
+        super::replay::outward_calls_performed(&graph, &outcome.output, workflow)
     };
+    // Issue #617: a child that paused namespaced gates (`sub::work`) will
+    // restart when its gate is approved, and a restart re-runs the child's
+    // ungated outward calls. Their results are not carried up when the child
+    // pauses, so nothing can be replayed — report them exactly like the
+    // top-level unreplayable calls above, so the operator is warned that
+    // approving restarts the child from the top.
+    if !outcome.pending_approvals.is_empty() {
+        unreplayable.extend(super::replay::child_calls_to_repeat(
+            &graph,
+            &outcome.pending_approvals,
+            &child_gates,
+            &trigger_input,
+        ));
+    }
     for call in &unreplayable {
         tracing::warn!(
             company = %record.id,
@@ -771,6 +1099,10 @@ async fn run_workflow_inner(
             // sign-off.
             output: &outcome.output,
             edges: &workflow.edges,
+            // Issue #617: the resolver's per-child gate record, so a namespaced
+            // child gate's card can name the child's tool and reason.
+            child_gates: &child_gates,
+            started_by: &ctx.started_by,
         },
     )
     .await;
@@ -779,14 +1111,24 @@ async fn run_workflow_inner(
     // completion AND the paused-with-`pending_approvals` case both reach here).
     // Best-effort, upstream of the WorkflowRun below so console/scheduled/
     // agent-tool runs all persist through this one site.
-    persist_run_output(
+    //
+    // Issue #1008: a clean settle carries the real `outcome.output`, so it
+    // persists that canonical map with `partial = false`; a failed write adds an
+    // operator notice (Part 6) since this arm returns a `WorkflowRun`.
+    let raw_nodes = outcome.output.get("nodes").cloned().unwrap_or(Value::Null);
+    let raw_nodes = merge_run_artifacts(raw_nodes, &captured_artifacts);
+    if !persist_run_output(
         run_output_store.as_deref(),
         &record.id,
         &workflow.id,
         &run_id,
-        &outcome.output,
+        &raw_nodes,
+        false,
     )
-    .await;
+    .await
+    {
+        notices.push(run_output_persist_failed_notice());
+    }
 
     // Issue #881: a node can block and the run still reach here — an author who
     // wrote `on_error = "continue"` or `"route"` asked for the branch to survive
@@ -796,6 +1138,19 @@ async fn run_workflow_inner(
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
+    // Issue #899 (Stage 1): stash the workflow id and trigger input each blocked
+    // agent node's continuation needs, keyed by the same per-(run, node) turn key
+    // its parked calls armed `ContinuationQueue` under. The resolve path releases
+    // both together and re-dispatches the run once the last call is decided.
+    stash_blocked_agent_nodes(
+        delivery.as_ref(),
+        &workflow.id,
+        &run_id,
+        &trigger_input,
+        &blocked_nodes,
+        &ctx.started_by,
+    )
+    .await;
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
     // via a `notices` sentence, not only via the node's own status — the
     // per-node chip is easy to miss on a run that otherwise looks fine, and a
@@ -807,7 +1162,7 @@ async fn run_workflow_inner(
     }
 
     Ok(WorkflowRun {
-        output: outcome.output,
+        output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
         pending_approvals,
         deliveries,
         cancelled: false,
@@ -898,6 +1253,10 @@ struct BlockedRun {
     notices: super::caps::RunNotices,
     board: Vec<crate::ports::WorkflowRunBoardRow>,
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// Issue #1008: what the nodes upstream of the block produced, in the
+    /// engine's `{ "nodes": { "<id>": { "items": [ … ] } } }` envelope, with the
+    /// blocked nodes' own entries already removed by the caller.
+    output: Value,
 }
 
 /// Settles a run that stopped because a node is waiting on an operator (issue
@@ -914,14 +1273,22 @@ struct BlockedRun {
 ///
 /// Each emptiness below is a claim rather than a shrug:
 ///
-/// * **no `output`** — the engine returned an error, not a final state. There is
-///   no partial state to report, and the per-node output snapshot the console
-///   inspector reads is likewise not written: nothing settled to persist. The
-///   blocked node in particular produced nothing, which is the entire point;
 /// * **no `deliveries`** — `deliver_outputs` runs off the settled output, which
 ///   does not exist here. An absent row already means "not reached" everywhere
 ///   else, and a run that stopped short must not mail anybody a report of work
 ///   it did not finish.
+///
+/// # `output` is threaded in, not emptied (issue #1008)
+///
+/// It used to be `Value::Null`, on the argument that "the engine returned an
+/// error, not a final state". That holds for the engine's *merged* state and not
+/// for the nodes: everything upstream of the block ran to completion and
+/// produced real items, which the progress observer collected on the way past.
+/// Reporting none of it made the run inspector say "no output for this node"
+/// about a node that had just written a draft. The caller threads its collected
+/// capture in — the same value it persisted — having first removed the blocked
+/// nodes' own entries, so "the blocked node produced nothing" stays literally
+/// true here.
 ///
 /// `notices` carries the operator-facing sentence, composed from the structural
 /// blocked rows so the wording lives in one place and no model prose or store
@@ -933,6 +1300,7 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
         notices,
         board,
         approvals,
+        output,
     } = settled;
     for b in &blocked {
         notices.push(blocked_notice(b));
@@ -940,7 +1308,7 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
     let mut pending_approvals = Vec::new();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked);
     WorkflowRun {
-        output: Value::Null,
+        output,
         pending_approvals,
         deliveries: Vec::new(),
         cancelled: false,
@@ -950,6 +1318,25 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
         blocked_nodes: blocked,
         approvals,
     }
+}
+
+/// Drops `blocked`'s nodes from a collected `{ "<id>": { "items": [ … ] } }`
+/// capture (issue #1008).
+///
+/// A blocked node produced nothing, so it must have no entry — see the call site
+/// for why that is issue #881's invariant and not a cosmetic choice. A value of
+/// another shape is returned untouched: this narrows a map it recognises and
+/// never invents one.
+fn without_nodes(mut output: Value, blocked: &[crate::ports::WorkflowBlockedNode]) -> Value {
+    if blocked.is_empty() {
+        return output;
+    }
+    if let Value::Object(nodes) = &mut output {
+        for b in blocked {
+            nodes.remove(&b.node_id);
+        }
+    }
+    output
 }
 
 /// The operator's sentence for one blocked node (issue #881).
@@ -975,7 +1362,9 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
     let mut tail = String::new();
     if parked > 0 {
         tail.push_str(&format!(
-            " It parked {parked} approval{}; decide {} in Approvals and run the workflow again.",
+            " It parked {parked} approval{}; approve {} in Approvals and this run continues on \
+             its own. Approving re-runs the step, so if the agent's next turn differs it may ask \
+             again.",
             if parked == 1 { "" } else { "s" },
             if parked == 1 { "it" } else { "them" }
         ));
@@ -1000,8 +1389,8 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
     )
 }
 
-/// Persists a settled run's per-node output to the durable, console-facing
-/// store (issue #596), best-effort.
+/// Persists a run's per-node output to the durable, console-facing store (issue
+/// #596; failure/blocked capture added in #1008), best-effort.
 ///
 /// One helper, called from every outcome-bearing arm of `run_workflow_inner`, so
 /// the bounding + write live in exactly one place. `store` is `None` on the
@@ -1009,40 +1398,138 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
 /// is logged at `warn` and never fails the run: the run's work is already done
 /// and correct, and losing an inspector snapshot must not discard it.
 ///
-/// The value persisted is `output["nodes"]` — the same capture the in-process
-/// [`RunOutputCache`](crate::harness::orchestrator::RunOutputCache) reads — but
-/// on a **separate** durable store, so the two consumers never share storage.
-/// Bounding happens inside
+/// The caller hands `raw_nodes` — the `{ "<id>": { "items": [ … ] } }` map — in
+/// directly: on the clean arms that is `outcome.output["nodes"]` (the same
+/// capture the in-process
+/// [`RunOutputCache`](crate::harness::orchestrator::RunOutputCache) reads), and
+/// on the failure/blocked arms (issue #1008) it is the map the progress observer
+/// accumulated, flagged `partial`. Bounding happens inside
 /// [`WorkflowRunOutputRecord::from_raw_nodes`](crate::ports::WorkflowRunOutputRecord::from_raw_nodes),
 /// which clips (never refuses) so the durable record always exists.
+///
+/// Returns `true` when the snapshot is safely stored (or there is no store to
+/// store it in — a no-op is not a failure), and `false` only when a store was
+/// present and the write errored. The notice-bearing callers (which return a
+/// `WorkflowRun`) use `false` to add an operator-facing notice; the genuine-`Err`
+/// caller has no `WorkflowRun` to hang one on and lets the `warn!` stand alone
+/// (issue #1008, Part 3).
+/// Folds the observer's per-node transcripts into a run-output `nodes` map.
+///
+/// The two halves arrive from different places and only meet here. A clean
+/// settle's `nodes` map is the ENGINE's own run state (`outcome.output`), which
+/// knows what each node emitted but nothing about what a harness did inside one;
+/// the transcripts come off `ExecutionStep.transcript`, which the progress
+/// observer collected. Merging at the persist site is what puts them on the same
+/// record on every arm — a clean run, a failed one, and a blocked one alike.
+///
+/// Non-destructive by construction: it only ever adds a `transcript` key to a
+/// node object that already exists in `nodes`, so a node the engine did not
+/// report cannot be invented here, and nothing the engine wrote is overwritten.
+/// A non-object `nodes` (or a node whose slot is not an object) passes through
+/// untouched rather than being coerced into one.
+fn merge_transcripts(nodes: &Value, transcripts: &serde_json::Map<String, Value>) -> Value {
+    if transcripts.is_empty() {
+        return nodes.clone();
+    }
+    let Value::Object(map) = nodes else {
+        return nodes.clone();
+    };
+    let mut merged = map.clone();
+    for (node_id, transcript) in transcripts {
+        let Some(Value::Object(slot)) = merged.get_mut(node_id) else {
+            continue;
+        };
+        slot.insert("transcript".to_string(), transcript.clone());
+    }
+    Value::Object(merged)
+}
+
+/// Adds card-less run artifacts to their node slots without changing items.
+///
+/// Unlike transcripts, artifacts may legitimately belong to a node that ended
+/// in error and therefore has no engine output slot. Such a slot is created
+/// with an empty `items` array so the inspector can surface the files while
+/// still truthfully showing no reply text.
+fn merge_run_artifacts(nodes: Value, artifacts: &serde_json::Map<String, Value>) -> Value {
+    if artifacts.is_empty() {
+        return nodes;
+    }
+    let mut nodes = match nodes {
+        Value::Object(nodes) => nodes,
+        _ => serde_json::Map::new(),
+    };
+    for (node_id, rows) in artifacts {
+        let slot = nodes
+            .entry(node_id.clone())
+            .or_insert_with(|| serde_json::json!({ "items": [] }));
+        if let Value::Object(slot) = slot {
+            slot.insert("artifacts".to_string(), rows.clone());
+        }
+    }
+    Value::Object(nodes)
+}
+
+/// Applies [`merge_run_artifacts`] to a full engine output envelope.
+fn merge_run_artifacts_envelope(
+    mut output: Value,
+    artifacts: &serde_json::Map<String, Value>,
+) -> Value {
+    if artifacts.is_empty() {
+        return output;
+    }
+    let Value::Object(envelope) = &mut output else {
+        return serde_json::json!({
+            "nodes": merge_run_artifacts(Value::Null, artifacts),
+        });
+    };
+    let nodes = envelope.remove("nodes").unwrap_or(Value::Null);
+    envelope.insert("nodes".to_string(), merge_run_artifacts(nodes, artifacts));
+    output
+}
+
 async fn persist_run_output(
     store: Option<&dyn crate::ports::run_output::WorkflowRunOutputStore>,
     company: &CompanyId,
     workflow_id: &str,
     run_id: &str,
-    output: &Value,
-) {
+    raw_nodes: &Value,
+    partial: bool,
+) -> bool {
     let Some(store) = store else {
-        return;
+        return true;
     };
-    // The engine's per-node map lives under `output["nodes"]`; a run with no such
-    // key persists an empty map, which the console renders as "produced none".
-    let raw_nodes = output.get("nodes").cloned().unwrap_or(Value::Null);
     let record = crate::ports::WorkflowRunOutputRecord::from_raw_nodes(
         run_id,
         workflow_id,
         crate::ports::now_millis(),
-        &raw_nodes,
+        raw_nodes,
+        partial,
     );
-    if let Err(err) = store.put_run_output(company, &record).await {
-        tracing::warn!(
-            company = %company,
-            workflow = %workflow_id,
-            %run_id,
-            %err,
-            "workflow: could not persist the run's per-node output; the run is unaffected"
-        );
+    match store.put_run_output(company, &record).await {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                workflow = %workflow_id,
+                %run_id,
+                %err,
+                "workflow: could not persist the run's per-node output; the run is unaffected"
+            );
+            false
+        }
     }
+}
+
+/// The operator-facing notice a notice-bearing arm adds when
+/// [`persist_run_output`] could not write the snapshot (issue #1008, Part 3).
+///
+/// The run's result itself is unaffected — this only warns that reopening the
+/// run later may show no output for its nodes, so the black-box silence has a
+/// visible cause instead of masquerading as "this run predates output capture".
+fn run_output_persist_failed_notice() -> String {
+    "This run's per-node output could not be saved, so reopening it later may show no output \
+     for some steps. The run itself was unaffected."
+        .to_string()
 }
 
 /// What a settled run left for the operator to decide.
@@ -1074,6 +1561,14 @@ struct PausedGates<'a> {
     /// untouched.
     output: &'a Value,
     edges: &'a [crate::company::WorkflowEdgeDef],
+    /// Issue #617: the resolver's per-child gate record, so a namespaced child
+    /// gate (`sub::work`) is described from what the gate pass classified
+    /// rather than falling back to an unclassified parent-graph lookup.
+    child_gates: &'a super::caps::resolver::ChildGateRegistry,
+    /// Issue #1862 prerequisite: the paused run's own attribution, stamped on
+    /// every card this pass parks so `spawn_continuation` can carry it into the
+    /// continuation instead of resetting to `Operator`.
+    started_by: &'a crate::ports::types::StartedBy,
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -1111,6 +1606,164 @@ struct PausedGates<'a> {
 /// continuation an approval starts knows what has already left the process.
 /// Without it, approving a gate re-mails every report upstream of it — the
 /// re-run semantics above applied to a side effect that reaches a real person.
+/// Stashes the facts each blocked agent node's continuation needs — the workflow
+/// id and this run's trigger input — keyed by the per-(run, node) turn key its
+/// gated calls armed `ContinuationQueue` under at park time (issue #899, Stage 1).
+///
+/// # Why the durable mirror is still written here, not where the calls are parked
+///
+/// The in-memory arm itself now happens where the calls are parked —
+/// `HarnessAgentRunner` is built with the run's trigger input (issue #1825, P1
+/// follow-up) precisely so `park_gated_calls` can call `arm` before a card is
+/// journaled and clickable, closing the race this function's own comment above
+/// describes. What that call site does *not* have is the settled `blocked`
+/// list — a node only shows up there once the engine has decided the run
+/// stopped for it — so the durable journal record still has to be written
+/// from here, once per this run's whole batch of blocked nodes, exactly as
+/// `park_pending_gates` is the one place a gate's facts come together. A node
+/// with no parked approval id is skipped: nothing can be decided, so nothing
+/// will ever release a stash.
+///
+/// A build with no approvals queue wired stashes nothing and is silent — the
+/// same node already logged its own "could not be parked" line, and there is no
+/// resolve path to release a stash to.
+async fn stash_blocked_agent_nodes(
+    delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
+    workflow_id: &str,
+    run_id: &str,
+    trigger_input: &serde_json::Value,
+    blocked: &[crate::ports::WorkflowBlockedNode],
+    started_by: &crate::ports::types::StartedBy,
+) {
+    let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
+        return;
+    };
+
+    // Issue #1816 (Stage 2 follow-up): arm every eligible node's in-memory
+    // stash BEFORE awaiting any durable journal write. This settle can name
+    // several blocked nodes at once (a fan-out that pauses on more than one
+    // gate), and their approval cards are already parked and clickable from
+    // agent execution — an operator can act on any of them the instant this
+    // function starts. The old loop interleaved the synchronous `arm()` with
+    // an awaited `record_blocked_node_stashed()` call per node, which opens a
+    // window, per node, where that node's card is clickable but its stash is
+    // not armed yet: a decision landing in that window finds nothing to
+    // release, consumes the approval anyway, and a later arm for that same
+    // turn then stashes facts with no remaining decision to release them —
+    // stranding the approved run. Arming every node up front (a purely
+    // in-memory, non-awaiting pass) closes that window for the whole batch at
+    // once instead of leaving it open per node; only the durable mirroring
+    // below still awaits.
+    //
+    // Issue #1825 (P1 follow-up): `arm` below is now a no-op for every node in
+    // `blocked` whose calls actually parked — `HarnessAgentRunner::park_gated_calls`
+    // arms the same stash itself, at node park time, before the first card is
+    // journaled and clickable (see `crate::runtime::blocked_nodes`'s module
+    // doc). This function ran only after the agent returned and the engine
+    // settled, which — even with the synchronous pass above — was still after
+    // every card for this run's blocked nodes had gone live; an operator fast
+    // enough to approve inside that outer window hit the same empty-stash race
+    // the paragraph above closed for the inner one. The pass stays here
+    // because it is still the only place with the full settled `blocked` list
+    // the durable mirror below needs, and `arm`'s first-write-wins semantics
+    // make the redundant call free.
+    //
+    // Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector):
+    // "free" stopped being true the moment park time started performing both
+    // arms. Every node reaching this filter has a non-empty `approval_ids`,
+    // which `park_gated_calls` only ever populates *after* its own
+    // unconditional arm has already run for this exact turn — so `is_armed`
+    // being false here cannot mean "never armed"; the only way to get here
+    // is a decision that resolved the node's whole batch and released the
+    // stash before this settle pass got to it (an operator fast enough to
+    // decide the *last* card in the window between the agent returning and
+    // this function running). Re-arming a released turn resurrects it with
+    // no decision left to redeem it, and the durable write two lines down
+    // would then append a `BlockedNodeStashed` *after* the `BlockedNodeReleased`
+    // that already retired it — durable on replay, and a late approval-bank
+    // retry landing on the resurrection can mark it approved and have a
+    // future boot's `reconcile_stranded_blocked_nodes` dispatch the run a
+    // second time. Filtering on `is_armed` here, before either write, is
+    // cheap and catches it before either arm happens rather than sweeping up
+    // after.
+    let turns: Vec<_> = blocked
+        .iter()
+        .filter(|node| !node.approval_ids.is_empty())
+        .filter_map(|node| {
+            let turn =
+                crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
+            if !parking.blocked_nodes.is_armed(&turn) {
+                tracing::info!(
+                    %workflow_id,
+                    %run_id,
+                    node = %node.node_id,
+                    "[approval] skipping this blocked node's settle-time stash: it is no \
+                     longer armed, meaning its whole batch was already decided and released \
+                     before this settle pass ran — re-arming it now would resurrect a turn \
+                     with nothing left to redeem it"
+                );
+                return None;
+            }
+            parking
+                .blocked_nodes
+                .arm(&turn, workflow_id, trigger_input, started_by);
+            Some((turn, &node.node_id))
+        })
+        .collect();
+
+    for (turn, node_id) in turns {
+        // Issue #1825 (P2, fourth follow-up — found by chatgpt-codex-connector):
+        // the `is_armed` check above ran once, synchronously, before this loop
+        // awaited anything — it only proves each turn was still live at the
+        // moment the whole batch was collected. For every turn but the first,
+        // a sibling's own awaited durable write (right below, one iteration
+        // ago) gives a landing decision time to run `retire_blocked_stash`
+        // in between: that clears this turn's in-memory stash and appends its
+        // `BlockedNodeReleased` before this iteration ever reaches it. Without
+        // this re-check, the write below would then append a `BlockedNodeStashed`
+        // behind that terminal record — durable on replay — resurrecting an
+        // already-dispatched turn for a future boot's `reconcile_stranded_blocked_nodes`
+        // to redeem a second time. Re-checking immediately before the write
+        // narrows the window to the same shape every other park-time write in
+        // this module already accepts (see the P1 fourth follow-up's own
+        // residual in `caps::park_gated_calls`), not the whole width of this
+        // batch's sibling I/O.
+        if !parking.blocked_nodes.is_armed(&turn) {
+            tracing::info!(
+                %workflow_id,
+                %run_id,
+                node = %node_id,
+                "[approval] skipping this blocked node's durable stash write: a decision \
+                 released it while an earlier sibling in this same settle batch was still \
+                 being durably written — re-appending now would resurrect an already-dispatched \
+                 turn"
+            );
+            continue;
+        }
+        // Issue #1816 (Stage 2): mirror the in-memory arm into the durable
+        // journal so an approval landing after a process/host replacement can
+        // still locate this run. Best-effort — a failed write leaves the
+        // in-memory stash serving the no-restart case, and failing the settled
+        // run over an approvals-queue write is the wrong trade (same stance as
+        // the park itself). The in-memory arm itself (with `started_by`) already
+        // happened in the synchronous pass above that built `turns`.
+        if let Err(error) = parking
+            .journal
+            .record_blocked_node_stashed(&turn, workflow_id, trigger_input, started_by)
+            .await
+        {
+            tracing::warn!(
+                %workflow_id,
+                %run_id,
+                node = %node_id,
+                %error,
+                "[approval] a blocked node's continuation facts could not be durably \
+                 stashed; the in-memory stash still covers a resolve without a restart"
+            );
+        }
+    }
+}
+
 async fn park_pending_gates(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     record: &CompanyRecord,
@@ -1129,6 +1782,10 @@ async fn park_pending_gates(
         // gate's card can carry the verbatim upstream content awaiting sign-off.
         output,
         edges,
+        // Issue #617: the resolver's per-child gate record, for a namespaced
+        // child gate's card.
+        child_gates,
+        started_by,
     } = paused;
     if pending.is_empty() {
         return;
@@ -1148,7 +1805,63 @@ async fn park_pending_gates(
         return;
     };
 
+    // Issue #978: the gates this lineage has already refused. A denied node is
+    // decided and final — replaying into it must not raise the question a second
+    // time, or a mixed verdict still nets new cards and "approving never
+    // increases pending approvals" is false again.
+    let denied = crate::runtime::workflow_resume::denied_in_input(trigger_input);
+
+    // Issue #978: every gate this run parks shares ONE turn key, so the N of a
+    // fan-out are one decision batch owed exactly one continuation. Keyed on the
+    // run because the run is what gets re-dispatched.
+    let turn = crate::runtime::workflow_resume::workflow_turn_key(run_id);
+
+    // Issue #1825 (P1, found by chatgpt-codex-connector): hold this turn's
+    // `ContinuationQueue` counter open across the whole loop below, the same
+    // shape of fix `park_gated_calls`'s fourth follow-up applied in
+    // `workflows::caps` for the identical race.
+    //
+    // The loop below parks this run's gates one at a time, and each successful
+    // `park_and_journal` arms the counter for its own card (issue #469/#978's
+    // per-card mechanism, unchanged, and closed against its OWN in-flight
+    // window by the fifth follow-up above `park_and_journal`). With no hold
+    // here, an operator can resolve an EARLIER card — already parked, already
+    // counted — while a LATER card in this loop is still being attempted. If
+    // that later park then fails, `park_and_journal`'s own error branch
+    // releases the slot it armed for it; when that release happens to be the
+    // batch's last decrement, the batch it hands back — every sibling decided
+    // while this loop was still running — is dropped inside that failure
+    // branch, with no caller left to route it through `resume_workflow_run`.
+    // The already-decided siblings are not lost from the approval journal
+    // (each was resolved and recorded independently of this counter); what is
+    // lost is the automatic re-dispatch, silently, with nothing telling the
+    // operator the run is now stranded.
+    //
+    // The hold pins outstanding at least 1 above the count of decided cards
+    // until every gate here has actually been attempted, so no single card's
+    // own arm/release pair — including a failed one's — can ever be the
+    // batch's last word while a sibling is still in flight. Released below,
+    // once the loop is done.
+    //
+    // Skipped for a single-gate run: there is no "rest of the batch" to
+    // protect against, and holding would only insert an extra decrement
+    // between that lone card's approval and its release.
+    let holds_continuation = pending.len() > 1;
+    if holds_continuation {
+        parking.continuations.arm(&turn);
+    }
+
     for node_id in pending {
+        if denied.iter().any(|refused| refused == node_id) {
+            tracing::info!(
+                company = %record.id,
+                workflow = %workflow_id,
+                node = %node_id,
+                %run_id,
+                "workflow: this gate was already refused, so it is not asked about again"
+            );
+            continue;
+        }
         // Issue #460: when the policy is what stopped this node, the card says
         // which tool and why.
         //
@@ -1163,7 +1876,24 @@ async fn park_pending_gates(
         let gate = match gated.iter().find(|gate| gate.node_id == *node_id) {
             Some(gate) => Some(gate),
             None => {
-                described = super::gate::describe_call(graph, node_id);
+                // Issue #617: a namespaced id (`sub::work`, nested one level
+                // per child as `sub::nested::work`) names a gate inside a child
+                // the resolver ran. The parent graph has no node with that id,
+                // so describe it from the child's own gate record, descending
+                // the registry through the `sub_workflow` nodes — resolving an
+                // expression-bound `workflow_id` against the trigger input
+                // where the engine's `once` scope allows — so the child's tool
+                // and reason reach the card the way a top-level policy gate's
+                // do. Falls back to the parent-graph read for every other gate
+                // (an authored child gate, which the registry never sees, keeps
+                // its pre-existing behaviour).
+                described = super::caps::resolver::child_gate_call(
+                    child_gates,
+                    graph,
+                    node_id,
+                    Some(trigger_input),
+                )
+                .or_else(|| super::gate::describe_call(graph, node_id));
                 described.as_ref()
             }
         };
@@ -1196,6 +1926,18 @@ async fn park_pending_gates(
             edges,
             node_id,
         );
+        // Issue #1862 prerequisite: stamp the paused run's own attribution on
+        // the card, so approving it can carry the same `StartedBy` into the
+        // continuation instead of resetting to `Operator` (see
+        // `started_by_of`/`spawn_continuation`). Outside `is_same_gate`'s
+        // dedupe identity, same as the ledgers below it — the decision is the
+        // same decision however it later gets re-parked.
+        if let Value::Object(ref mut payload) = effect.payload {
+            payload.insert(
+                crate::runtime::workflow_resume::PAYLOAD_STARTED_BY.to_string(),
+                serde_json::json!(started_by),
+            );
+        }
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
             tracing::debug!(
                 company = %record.id,
@@ -1214,6 +1956,7 @@ async fn park_pending_gates(
                 effect,
                 crate::runtime::journal::TaskLink::Unlinked,
                 None,
+                Some(turn.clone()),
             )
             .await
         {
@@ -1236,6 +1979,42 @@ async fn park_pending_gates(
                  continued"
             ),
         }
+    }
+
+    // Issue #1825 (P1): release the hold armed above, now that every gate in
+    // this run has actually been attempted — whether it parked or failed.
+    // `Some(batch)` back means this release was itself the batch's last
+    // decision: every card this loop parked was already decided by the time
+    // the loop finished attempting the rest, which needs an operator (or an
+    // API caller) faster than this function's own sequential parks.
+    //
+    // `park_pending_gates` runs deep inside the engine with no handle back to
+    // the `CompanyRuntime` that owns `resume_workflow_run` — the only place
+    // that spawns this run's continuation — short of re-entering this run's
+    // own execution while it is still mid-run, which is a worse hazard than
+    // the one this hold exists to close (a duplicate dispatch, just moved).
+    // So, exactly like `park_gated_calls`'s own release in `workflows::caps`,
+    // this rare batch is left exactly as the loop above already left it: every
+    // decision durably recorded in the approval journal, independent of this
+    // counter. Only the automatic re-dispatch is deferred — and unlike a
+    // blocked agent node, a workflow run has no boot-time reconciliation sweep
+    // of its own yet, so nothing recovers this automatically; the operator has
+    // to notice the run is still `Blocked` and re-run it. An empty batch
+    // (every gate below failed to park, so nothing was ever decided) needs no
+    // warning — there is nothing stranded.
+    if holds_continuation
+        && let Some(batch) = parking.continuations.decide(&turn, None)
+        && !batch.is_empty()
+    {
+        tracing::warn!(
+            company = %record.id,
+            workflow = %workflow_id,
+            %run_id,
+            decisions = batch.len(),
+            "workflow: every gate this run parked was already decided before the rest of the \
+             batch finished parking; the approvals are recorded but the run will not \
+             auto-resume — re-run the workflow to pick it back up"
+        );
     }
 }
 
@@ -1315,19 +2094,48 @@ fn map_engine_error(err: tinyflows::error::EngineError) -> OpenCompanyError {
 }
 
 /// The [`WorkflowRunner`] port backed by the embedded harness: it holds the
-/// shared pool, its deps, and the company record so it can ensure the roster is
-/// built before a run and route agent nodes onto it.
+/// lane-aware router so every agent node dispatches to the engine its harness
+/// demands, plus the deps and company record it needs to warm every lane before
+/// a run.
 pub struct HarnessWorkflowRunner {
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
+    /// The company record as of this runner's construction (runtime build /
+    /// rebuild). The run re-reads the live record from the store so a console
+    /// policy PUT since then reaches the run's gate; this snapshot is the
+    /// fallback when the store is unwired or the row is gone.
     record: CompanyRecord,
 }
 
 impl HarnessWorkflowRunner {
-    /// Builds a runner sharing `pool`/`deps` with the rest of the harness surface
-    /// for the company described by `record`.
-    pub fn new(pool: Arc<HarnessPool>, deps: HarnessDeps, record: CompanyRecord) -> Self {
-        Self { pool, deps, record }
+    /// Builds a runner dispatching through `turn`, sharing `deps` with the
+    /// rest of the harness surface for the company described by `record`.
+    pub fn new(
+        turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+        deps: HarnessDeps,
+        record: CompanyRecord,
+    ) -> Self {
+        Self { turn, deps, record }
+    }
+
+    /// The effective record for a run: the store's current one when it can be
+    /// read, the build-time snapshot otherwise.
+    ///
+    /// Issue #1455: the snapshot this runner was built with carries the policy
+    /// as of runtime build / rebuild. The cycle refreshes its record at the top
+    /// of every cycle, but a workflow run is dispatched outside that cadence —
+    /// an operator who tightens the spend cap and then starts an authored
+    /// workflow without rebuilding the runtime would otherwise have the run's
+    /// tool-call gate classified under the *old* cap, auto-approving what the
+    /// new cap would park. Re-reading here keeps the graph-level gate on the
+    /// same policy the roster rebuilds against. A store fault falls back to the
+    /// snapshot rather than failing the run, preserving the pre-#1455
+    /// behaviour of never touching the store on this path.
+    async fn effective_record(&self) -> Result<CompanyRecord> {
+        Ok(match self.deps.store.load(&self.record.id).await {
+            Ok(Some(record)) => record,
+            Ok(None) | Err(_) => self.record.clone(),
+        })
     }
 }
 
@@ -1340,14 +2148,20 @@ impl WorkflowRunner for HarnessWorkflowRunner {
         input: Value,
         ctx: &WorkflowRunContext,
     ) -> Result<WorkflowRun> {
-        // Idempotent: builds the roster on first use, a no-op after. The run
-        // addresses the record's own company; `_company` is the routed scope,
-        // which the runtime resolves to this same record.
-        self.pool.ensure(&self.record, &self.deps).await?;
-        run_workflow(
-            self.pool.clone(),
+        // Issue #1455: a console policy PUT/DELETE since this runner was built
+        // must reach this run's gate and the roster it warms. The store's live
+        // record carries the current overlay; the snapshot is only the fallback.
+        let record = self.effective_record().await?;
+        // Idempotent: builds the roster on first use, a no-op after. Warmed
+        // through the router so every lane's pool — not just the default's — is
+        // populated before a node addresses it. The run addresses the record's
+        // own company; `_company` is the routed scope, which the runtime
+        // resolves to this same record.
+        self.turn.ensure(&record).await?;
+        run_workflow_lane_aware(
+            self.turn.clone(),
             self.deps.clone(),
-            &self.record,
+            &record,
             workflow,
             input,
             ctx,
@@ -1364,6 +2178,264 @@ mod tests {
     use crate::harness::provider::MockProvider;
     use crate::ports::run_output::WorkflowRunOutputStore;
     use crate::store::{FsCompanyStore, FsContextStore, FsOps};
+
+    /// A workflow lane that records which agent it served. Its reply names the
+    /// lane so the run output proves the same routing decision as the call log.
+    struct RecordingLane {
+        label: &'static str,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingLane {
+        fn new(label: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                label,
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    /// A full workflow-node turn double that writes a real sandbox file before
+    /// either failing or parking an approval. It drives the real engine,
+    /// capability, mirror, output-store, and workspace-store seams; only model
+    /// inference is replaced.
+    struct ArtifactWritingTurn {
+        workspace_root: std::path::PathBuf,
+        approvals: crate::harness::policy::ApprovalRequestQueue,
+        blocked: bool,
+    }
+
+    impl ArtifactWritingTurn {
+        async fn execute(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+        ) -> Result<crate::harness::TurnOutcome> {
+            let workspace =
+                crate::harness::build::agent_workspace(&self.workspace_root, company, agent_id);
+            let report = workspace.join("reports/partial.md");
+            tokio::fs::create_dir_all(report.parent().expect("report parent")).await?;
+            tokio::fs::write(&report, b"# Partial report\n\nCaptured before settle.\n").await?;
+
+            if !self.blocked {
+                return Err(OpenCompanyError::Harness(
+                    "synthetic node failure after writing its file".to_string(),
+                ));
+            }
+
+            self.approvals
+                .push(crate::harness::policy::ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "synthetic approval after writing".to_string(),
+                    effect: crate::ports::types::Effect {
+                        kind: "shell".to_string(),
+                        group: crate::ports::types::EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: serde_json::json!({ "command": "finish-report" }),
+                        agent: Some(agent_id.to_string()),
+                        run_id: None,
+                    },
+                });
+            Ok(crate::harness::TurnOutcome {
+                reply: "Waiting for approval.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                // Test fixture, not the ACP fold (PR #1880 review).
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for ArtifactWritingTurn {
+        async fn run(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(company, agent_id).await
+        }
+    }
+
+    fn artifact_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "artifact_capture"
+name = "Artifact capture"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "work"
+kind = "agent"
+name = "Work"
+summary = "Write a report."
+agent = "ceo"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "work"
+[[edge]]
+from = "work"
+to = "done"
+"#,
+        )
+        .expect("artifact graph parses")
+    }
+
+    async fn assert_partial_run_artifact(blocked: bool) {
+        use crate::ports::workspace::WorkspaceStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(FsOps::new(dir.path()));
+        let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        deps.workspace = Some(store.clone());
+        deps.run_output_store = Some(store.clone());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ArtifactWritingTurn {
+            workspace_root: deps.workspace_root.clone(),
+            approvals: deps.approval_requests.clone(),
+            blocked,
+        });
+        let ctx = WorkflowRunContext::new(false);
+
+        let result = run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &artifact_graph(),
+            serde_json::json!({ "request": "make the report" }),
+            &ctx,
+        )
+        .await;
+        if blocked {
+            let run = result.expect("an approval-blocked run settles successfully");
+            assert!(
+                run.blocked_nodes.iter().any(|node| node.node_id == "work"),
+                "the synthetic approval must block work: {run:?}"
+            );
+        } else {
+            assert!(result.is_err(), "the synthetic failure must fail the run");
+        }
+
+        let stored = store
+            .get_run_output(&record.id, &ctx.run_id)
+            .await
+            .expect("run-output read")
+            .expect("failed and blocked runs both persist partial output");
+        assert!(stored.partial, "capture must be marked partial: {stored:?}");
+        let artifact = &stored.nodes["work"]["artifacts"][0];
+        assert_eq!(artifact["source"], "reports/partial.md");
+        let node_id = artifact["workspaceNodeId"]
+            .as_str()
+            .expect("capture links a workspace node");
+        let (node, body) = WorkspaceStore::read(store.as_ref(), &record.id, node_id)
+            .await
+            .expect("workspace read")
+            .expect("mirrored run artifact exists");
+        assert_eq!(node.name, "partial.md");
+        assert!(
+            body.contains("Captured before settle"),
+            "the mirrored node keeps the written body: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_agent_node_keeps_the_file_it_wrote_as_a_run_artifact() {
+        assert_partial_run_artifact(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_blocked_agent_node_keeps_the_file_it_wrote_as_a_run_artifact() {
+        assert_partial_run_artifact(true).await;
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for RecordingLane {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.seen.lock().unwrap().push(agent_id.to_string());
+            Ok(crate::harness::TurnOutcome {
+                reply: self.label.to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                // Test fixture, not the ACP fold (PR #1880 review).
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(company, agent_id, message, chat_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                company,
+                agent_id,
+                message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+    }
 
     fn record() -> CompanyRecord {
         let manifest = toml::from_str(
@@ -1382,6 +2454,8 @@ description = "Runs Acme."
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -1393,21 +2467,30 @@ description = "Runs Acme."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
     fn deps(dir: &std::path::Path) -> HarnessDeps {
         HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -1435,13 +2518,18 @@ description = "Runs Acme."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
+            tenant_search: None,
             workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
+            workflow_runs: None,
+            deep_trace: None,
         }
     }
 
@@ -1478,6 +2566,8 @@ allow = ["*"]
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -1489,9 +2579,13 @@ allow = ["*"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -1573,6 +2667,95 @@ to = "done"
         // the pool through the engine.
         let output = run.output.to_string();
         assert!(output.contains("hello-marker"), "{output}");
+    }
+
+    /// A GREET-shaped graph whose agent node carries a config `=`-expression
+    /// pointing at a trigger field that does not exist (issue #1014). The engine
+    /// resolves the expression to `null` and records a `NullResolution`, which
+    /// this test asserts reaches the run's per-node timeline.
+    const AGENT_NULL_BINDING: &str = r#"
+id = "greet"
+name = "Greet"
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+summary = "say hello-marker"
+agent = "ceo"
+
+[node.config]
+recipient = "=item.missing_field"
+
+[[node]]
+id = "done"
+kind = "output"
+name = "Report back"
+
+[[edge]]
+from = "start"
+to = "ceo"
+
+[[edge]]
+from = "ceo"
+to = "done"
+"#;
+
+    /// Issue #1014: a node whose config `=`-expression resolves to `null` yields
+    /// a [`WorkflowRunNodeRow`](crate::ports::WorkflowRunNodeRow) whose
+    /// `diagnostics` carries that config **path** — the engine's own broken-wiring
+    /// list, surfaced on the run response so an operator sees the unresolved
+    /// binding behind a bad step.
+    ///
+    /// The discriminating half is *paths only*: `diagnostics` carries the config
+    /// location (`recipient`) and never the expression text (`=item.missing_field`)
+    /// nor any resolved value — the no-payload stance the rest of the row takes.
+    #[tokio::test]
+    async fn a_null_resolved_config_expression_surfaces_as_a_node_diagnostic_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let deps = deps(dir.path());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(AGENT_NULL_BINDING).expect("workflow parses");
+        let run = run_workflow(
+            pool,
+            deps,
+            &rec,
+            &file,
+            // No `missing_field` on the trigger payload, so `=item.missing_field`
+            // resolves to `null` and the engine records the miss.
+            serde_json::json!({ "brief": "launch" }),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs");
+
+        let ceo = run
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "ceo")
+            .expect("the agent node finished and produced a row");
+
+        // The config path of the null-resolved binding rode all the way to the
+        // run's per-node timeline.
+        assert!(
+            ceo.diagnostics.iter().any(|d| d.contains("recipient")),
+            "expected the `recipient` config path in diagnostics, got {:?}",
+            ceo.diagnostics
+        );
+        // Paths only: neither the expression text nor a resolved value leaks.
+        assert!(
+            !ceo.diagnostics.iter().any(|d| d.contains("=item")),
+            "diagnostics must carry config paths, not expression text: {:?}",
+            ceo.diagnostics
+        );
     }
 
     // --- Durable per-node output persist-at-settle (issue #596) ---------------
@@ -1759,6 +2942,7 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         // No node row reported `Error` at all — a setup/validation failure the
         // engine raised before any node ran, for instance.
@@ -1779,11 +2963,13 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         let nodes = vec![crate::ports::WorkflowRunNodeRow {
             node_id: "work".to_string(),
             status: WorkflowNodeStatus::Error,
             elapsed_ms: 10,
+            diagnostics: Vec::new(),
         }];
         assert!(only_blocked_nodes_errored(&nodes, &blocked));
     }
@@ -1797,17 +2983,20 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         let nodes = vec![
             crate::ports::WorkflowRunNodeRow {
                 node_id: "work".to_string(),
                 status: WorkflowNodeStatus::Error,
                 elapsed_ms: 10,
+                diagnostics: Vec::new(),
             },
             crate::ports::WorkflowRunNodeRow {
                 node_id: "other".to_string(),
                 status: WorkflowNodeStatus::Error,
                 elapsed_ms: 5,
+                diagnostics: Vec::new(),
             },
         ];
         assert!(
@@ -1850,6 +3039,162 @@ to = "done"
                 .unwrap()
                 .is_none(),
             "a dry run must persist nothing durable"
+        );
+    }
+
+    /// Issue #1008 (the decisive change): a run whose first node SUCCEEDS and a
+    /// later node FAILS hard (default `on_error = "stop"`, so the engine returns
+    /// `Err`) must STILL persist the per-node output the observer captured before
+    /// the failure — flagged `partial`. Before #1008 this arm returned `Err`
+    /// without persisting anything, so the inspector wrongly claimed the run
+    /// predated output capture.
+    ///
+    /// `start → export (csv_export, succeeds) → boom (bogus_tool, unknown slug →
+    /// hard stop)`: the export node's frame is captured off the progress
+    /// observer, and the run fails on `boom`.
+    #[tokio::test]
+    async fn a_failed_run_persists_the_partial_output_it_reached() {
+        let src = r#"
+id = "partial_fail"
+name = "Partial fail"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "export"
+kind = "tool_call"
+name = "Export"
+[node.config]
+slug = "csv_export"
+[node.config.args]
+filename = "wf-out.csv"
+data = "[{\"name\":\"Ada\"},{\"name\":\"Bob\"}]"
+[[node]]
+id = "boom"
+kind = "tool_call"
+name = "Boom"
+[node.config]
+slug = "bogus_tool"
+[[edge]]
+from = "start"
+to = "export"
+[[edge]]
+from = "export"
+to = "boom"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsOps::new(dir.path()));
+        let mut deps = deps(dir.path());
+        deps.run_output_store = Some(store.clone());
+        let rec = tools_record();
+        let file = parse_workflow(src).expect("parses");
+        let ctx = WorkflowRunContext::new(false);
+        let run_id = ctx.run_id.clone();
+
+        let err = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &rec,
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &ctx,
+        )
+        .await
+        .expect_err("the run fails hard on the unknown-slug node");
+        assert!(
+            err.to_string().contains("bogus_tool") || err.to_string().contains("boom"),
+            "the failure should come from the failing node: {err}"
+        );
+
+        // The decisive assertion: the snapshot exists (was `None` pre-#1008,
+        // because the `Err` arm persisted nothing).
+        let stored = store
+            .get_run_output(&rec.id, &run_id)
+            .await
+            .expect("store read")
+            .expect("a failed run must still persist the output it reached before failing");
+        assert!(
+            stored.partial,
+            "a failure-arm capture must be flagged partial: {stored:?}"
+        );
+        assert_eq!(stored.workflow_id, "partial_fail");
+        assert_eq!(stored.run_id, run_id);
+        // The successful `export` node's output is present under the canonical
+        // `{ items: [...] }` shape the console renders.
+        assert!(
+            stored
+                .nodes
+                .get("export")
+                .and_then(|n| n.get("items"))
+                .is_some(),
+            "the node that succeeded before the failure must be in the partial snapshot: {}",
+            stored.nodes
+        );
+
+        // Issue #1008 (second half): the failure also carries the partial run up
+        // to the caller, so `record_run_finished` can journal what the run did
+        // before it broke instead of an all-empty row.
+        let partial = err
+            .partial_run()
+            .expect("a run that broke mid-graph reports what it had already done");
+        assert!(
+            partial.nodes.iter().any(|n| n.node_id == "export"),
+            "{:?}",
+            partial.nodes
+        );
+        assert!(
+            !partial.cancelled,
+            "a failure is not an operator stop, whatever else it carries"
+        );
+        assert!(
+            partial.output.get("export").is_some(),
+            "the partial run reports the same capture that was persisted: {}",
+            partial.output
+        );
+    }
+
+    /// Issue #1008: `without_nodes` removes exactly the blocked nodes' entries
+    /// and leaves everything else — including a capture of another shape —
+    /// untouched.
+    ///
+    /// Unit-level beside the end-to-end proof in `blocked_node_test`, because
+    /// the "leaves a value it does not recognise alone" half has no reachable
+    /// path through a real run and would otherwise be an untested branch.
+    #[test]
+    fn without_nodes_removes_only_the_blocked_entries() {
+        let blocked = |id: &str| crate::ports::WorkflowBlockedNode {
+            node_id: id.to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: Vec::new(),
+            unparkable: 0,
+            stranded: 0,
+        };
+
+        let capture = serde_json::json!({
+            "writer": { "items": ["draft"] },
+            "publish": { "items": ["apology prose"] },
+        });
+        let narrowed = without_nodes(capture, &[blocked("publish")]);
+        assert!(narrowed.get("writer").is_some(), "{narrowed}");
+        assert!(
+            narrowed.get("publish").is_none(),
+            "the blocked node produced nothing, so it must have no entry: {narrowed}"
+        );
+
+        // Nothing blocked: returned verbatim rather than rebuilt.
+        let untouched = serde_json::json!({ "writer": { "items": ["draft"] } });
+        assert_eq!(
+            without_nodes(untouched.clone(), &[]),
+            untouched,
+            "a run that blocked on nobody is byte-unchanged"
+        );
+
+        // A value of another shape is not a map to narrow — returned as-is
+        // rather than replaced with an invented one.
+        assert_eq!(
+            without_nodes(Value::Null, &[blocked("publish")]),
+            Value::Null
         );
     }
 
@@ -1965,7 +3310,12 @@ to = "done"
         let dir = tempfile::tempdir().unwrap();
         let pool = Arc::new(HarnessPool::new());
         let rec = record();
-        let runner = HarnessWorkflowRunner::new(pool, deps(dir.path()), rec.clone());
+        let deps = deps(dir.path());
+        let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            pool,
+            Arc::new(deps.clone()),
+        ));
+        let runner = HarnessWorkflowRunner::new(turn, deps, rec.clone());
 
         let file = parse_workflow(GREET).expect("workflow parses");
         let run = WorkflowRunner::run(
@@ -1980,6 +3330,84 @@ to = "done"
         assert!(run.output.to_string().contains("hello-marker"));
     }
 
+    /// Issue #1455 — a workflow run classifies its tool-call gate under the
+    /// store's *current* policy, not the build-time snapshot. An operator who
+    /// moves a policy axis on the console and then starts an authored workflow
+    /// without rebuilding the runtime must have the run honour the new value.
+    #[tokio::test]
+    async fn workflow_run_gate_reads_live_policy_not_the_build_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let deps = deps(dir.path());
+        let snapshot = record(); // build-time view: overlay_policy: None
+
+        // The console wrote a policy override since the runtime was built:
+        // every spend now parks (`auto_approve_under_usd` lowered to 0), a
+        // change the run's gate must classify under.
+        let live = CompanyRecord {
+            overlay_policy: Some(crate::ports::PolicyOverride {
+                mode: None,
+                always_approve: None,
+                auto_approve_under_usd: Some(Some(0.0)),
+                approval_ttl_hours: None,
+                set_by: crate::ports::Actor {
+                    kind: crate::ports::ActorKind::User,
+                    id: "console-operator".to_string(),
+                },
+                at_millis: 1_700_000_000_000,
+            }),
+            ..snapshot.clone()
+        };
+        deps.store
+            .save(&live)
+            .await
+            .expect("store accepts the live record");
+
+        let turn = Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            Arc::new(HarnessPool::new()),
+            Arc::new(deps.clone()),
+        ));
+        let runner = HarnessWorkflowRunner::new(turn, deps, snapshot.clone());
+
+        let effective = runner.effective_record().await.expect("effective record");
+        assert_eq!(
+            effective.overlay_policy, live.overlay_policy,
+            "the run must gate against the store's policy, not the snapshot's"
+        );
+    }
+
+    /// The workflow port keeps the lane-aware router intact: an agent bound to
+    /// a named harness must not fall back to the default engine.
+    #[tokio::test]
+    async fn port_impl_routes_an_agent_node_to_its_named_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = record();
+        let deps = deps(dir.path());
+        let default = RecordingLane::new("default-lane");
+        let deep = RecordingLane::new("deep-lane");
+        let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+            crate::harness::router::HarnessRouter::new("embedded")
+                .with_engine("embedded", default.clone())
+                .with_engine("deep", deep.clone())
+                .bind("ceo", "deep"),
+        );
+        let runner = HarnessWorkflowRunner::new(turn, deps, rec.clone());
+
+        let file = parse_workflow(GREET).expect("workflow parses");
+        let run = WorkflowRunner::run(
+            &runner,
+            &rec.id,
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs through the named lane");
+
+        assert!(run.output.to_string().contains("deep-lane"));
+        assert!(default.seen.lock().unwrap().is_empty());
+        assert_eq!(&*deep.seen.lock().unwrap(), &["ceo".to_string()]);
+    }
+
     /// A workflow with no trigger is a caller-facing bad request, not a harness
     /// error. (Built by hand — `parse_workflow` would reject it earlier.)
     #[tokio::test]
@@ -1988,9 +3416,11 @@ to = "done"
 
         let dir = tempfile::tempdir().unwrap();
         let file = WorkflowFile {
+            global: false,
             id: "bad".to_string(),
             name: "Bad".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![WorkflowNodeDef {
                 id: "only".to_string(),
                 kind: WorkflowNodeKind::Output,
@@ -2002,6 +3432,7 @@ to = "done"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                repeatable: None,
                 destination: None,
             }],
             edges: Vec::new(),
@@ -2297,6 +3728,72 @@ to = "done"
         assert!(
             err.to_string().contains("http_request"),
             "the failure should come from the guarded http client: {err}"
+        );
+    }
+
+    /// A run context with the dry flag set. `WorkflowRunContext::new` takes
+    /// `scheduled`, not `dry_run` — the dry flag defaults to false and is
+    /// flipped after construction, exactly as the run route does.
+    fn dry_context() -> WorkflowRunContext {
+        let mut ctx = WorkflowRunContext::new(false);
+        ctx.dry_run = true;
+        ctx
+    }
+
+    /// **Issue #1048.** The same graph as `t5`, dry-run: a target the real run
+    /// refuses must not report `ok`.
+    ///
+    /// Test run is the one control an operator has for checking a graph before
+    /// arming it on a schedule, so a green dry run followed by a real run that
+    /// cannot start is worse than no dry run at all — it converts "I checked it"
+    /// into a false belief.
+    ///
+    /// A loopback target is the lever because the upstream guard refuses
+    /// private/loopback addresses *regardless of the company's allowlist*
+    /// (see `t5_http_request_to_loopback_is_ssrf_denied`), so the verdict is
+    /// decidable from the URL alone — no DNS, no request, nothing performed.
+    #[tokio::test]
+    async fn a_dry_run_refuses_a_target_the_real_run_would_refuse() {
+        let src = r#"
+id = "dry-ssrf"
+name = "Dry SSRF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "http_request"
+name = "Fetch"
+[node.config]
+method = "GET"
+url = "http://127.0.0.1:9/"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "fetch"
+[[edge]]
+from = "fetch"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(src).expect("parses");
+        let err = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &dry_context(),
+        )
+        .await
+        .expect_err("a dry run must refuse a target the real run refuses");
+        assert!(
+            err.to_string().contains("http_request"),
+            "the dry refusal should name the node, as the live one does: {err}"
         );
     }
 
@@ -3166,6 +4663,13 @@ to = "done"
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: gate,
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
@@ -3268,6 +4772,258 @@ to = "done"
             .filter(|p| p.effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND)
             .count();
         assert_eq!(gates, 2);
+    }
+
+    /// The graph the next test uses: three sibling `requires_approval` gates
+    /// fanning out from one trigger — the run-level analogue of
+    /// `parallel_gate_fanout_test`'s `FANOUT_TOML`, sized to exercise
+    /// `park_pending_gates`'s own loop directly rather than a full
+    /// `CompanyRuntime`.
+    const THREE_GATES: &str = r#"
+id = "three-gate"
+name = "Three Gate"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate1"
+kind = "tool_call"
+name = "Gate1"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "gate2"
+kind = "tool_call"
+name = "Gate2"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "gate3"
+kind = "tool_call"
+name = "Gate3"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "gate1"
+[[edge]]
+from = "start"
+to = "gate2"
+[[edge]]
+from = "start"
+to = "gate3"
+[[edge]]
+from = "gate1"
+to = "done"
+[[edge]]
+from = "gate2"
+to = "done"
+[[edge]]
+from = "gate3"
+to = "done"
+"#;
+
+    /// Issue #1825 (P1, found by chatgpt-codex-connector): "Preserve a
+    /// completed batch when a later park fails."
+    ///
+    /// # The race this closes
+    ///
+    /// `park_pending_gates` parks a run's gates one at a time, and each
+    /// successful `park_and_journal` arms `ContinuationQueue` for the run's
+    /// shared turn key. An operator can resolve an EARLIER card while a
+    /// LATER card in this loop is still being attempted; if that later park
+    /// then fails, `park_and_journal`'s own error branch releases the slot it
+    /// armed for it. Pre-fix, nothing held the counter open across the loop,
+    /// so that release could itself be the batch's last decrement — and the
+    /// batch it got back (every sibling decided while this loop was still
+    /// running) was dropped inside that failure branch: no caller was left to
+    /// route it anywhere, and `ContinuationQueue::decide` discards the turn's
+    /// whole banked state, the already-approved sibling's event included, the
+    /// moment `outstanding` hits zero.
+    ///
+    /// # How this is reproduced deterministically
+    ///
+    /// Three gates share one turn. `RaceThenFail` wraps the approval gate
+    /// `park_pending_gates` parks through: its SECOND `park()` call first
+    /// decides the FIRST card via the SAME `ContinuationQueue` handle
+    /// `park_and_journal` arms — simulating a fast operator racing the loop —
+    /// then fails outright, exactly like a real `park()`/`record_parked()`
+    /// fault. The THIRD gate parks normally, on the same principle as
+    /// `approving_the_first_card_of_a_multi_call_node_does_not_complete_the_batch_early`
+    /// in `workflows::caps::mod`. If the first card's decision survived the
+    /// second card's faulted park, deciding the third (simulating the
+    /// operator's next click) must hand back BOTH events; if it was dropped,
+    /// only the third's.
+    #[tokio::test]
+    async fn a_batch_completed_by_a_failed_park_is_not_silently_dropped() {
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Effect, PolicyDecision, Verdict};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Mutex as AsyncMutex;
+
+        /// Delegates every call to `inner`, except that the SECOND `park` it
+        /// sees first decides the FIRST approval it minted — via the same
+        /// `ContinuationQueue` the real park path arms — then fails,
+        /// simulating an operator racing ahead of `park_pending_gates`'s own
+        /// loop into a park that then errors.
+        struct RaceThenFail {
+            inner: Arc<dyn ApprovalGate>,
+            continuations: crate::runtime::continuation::ContinuationQueue,
+            turn: String,
+            calls: AtomicUsize,
+            first_approval: AsyncMutex<Option<ApprovalId>>,
+            third_approval: AsyncMutex<Option<ApprovalId>>,
+            /// What `ContinuationQueue::decide` returned for the interleaved
+            /// decision on the first card — the assertion this test exists
+            /// for. Outer `Option`: whether the interleave actually ran.
+            early_decide_result: AsyncMutex<Option<Option<Vec<CompanyEvent>>>>,
+        }
+
+        #[async_trait]
+        impl ApprovalGate for RaceThenFail {
+            async fn evaluate(
+                &self,
+                company: &CompanyId,
+                effect: &Effect,
+            ) -> crate::Result<PolicyDecision> {
+                self.inner.evaluate(company, effect).await
+            }
+
+            async fn park(&self, company: &CompanyId, effect: Effect) -> crate::Result<ApprovalId> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => {
+                        let id = self.inner.park(company, effect).await?;
+                        *self.first_approval.lock().await = Some(id.clone());
+                        Ok(id)
+                    }
+                    1 => {
+                        let first = self
+                            .first_approval
+                            .lock()
+                            .await
+                            .clone()
+                            .expect("the first card must have parked before the second");
+                        let event = CompanyEvent::ApprovalResolved {
+                            approval_id: first,
+                            verdict: Verdict::Approve,
+                            by: Actor {
+                                kind: ActorKind::Operator,
+                                id: "operator".to_string(),
+                            },
+                        };
+                        let result = self.continuations.decide(&self.turn, Some(event));
+                        *self.early_decide_result.lock().await = Some(result);
+                        Err(OpenCompanyError::InvalidRequest(
+                            "simulated park fault".to_string(),
+                        ))
+                    }
+                    2 => {
+                        let id = self.inner.park(company, effect).await?;
+                        *self.third_approval.lock().await = Some(id.clone());
+                        Ok(id)
+                    }
+                    other => panic!("unexpected park call #{other}"),
+                }
+            }
+
+            async fn resolve(
+                &self,
+                id: &ApprovalId,
+                verdict: Verdict,
+                by: Actor,
+            ) -> crate::Result<Option<Effect>> {
+                self.inner.resolve(id, verdict, by).await
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut deps, _journal) = deps_with_parking(dir.path());
+        let file = parse_workflow(THREE_GATES).expect("parses");
+
+        let ctx = WorkflowRunContext::new(false);
+        let turn = crate::runtime::workflow_resume::workflow_turn_key(&ctx.run_id);
+
+        let parking = deps
+            .delivery
+            .as_ref()
+            .and_then(|d| d.parking.clone())
+            .expect("deps_with_parking wires parking");
+        let race = Arc::new(RaceThenFail {
+            inner: parking.approvals.clone(),
+            continuations: parking.continuations.clone(),
+            turn: turn.clone(),
+            calls: AtomicUsize::new(0),
+            first_approval: AsyncMutex::new(None),
+            third_approval: AsyncMutex::new(None),
+            early_decide_result: AsyncMutex::new(None),
+        });
+        deps.delivery
+            .as_mut()
+            .unwrap()
+            .parking
+            .as_mut()
+            .unwrap()
+            .approvals = race.clone();
+
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &tools_record(),
+            &file,
+            serde_json::json!({ "request": "quarterly numbers" }),
+            &ctx,
+        )
+        .await
+        .expect("run pauses cleanly even though one gate's park faulted");
+
+        assert_eq!(
+            run.pending_approvals.len(),
+            3,
+            "the engine pauses on all three gates regardless of parking outcome: {:?}",
+            run.pending_approvals
+        );
+
+        assert_eq!(
+            race.early_decide_result.lock().await.clone(),
+            Some(None),
+            "an earlier card's decision must not complete the batch while a later card is \
+             still being attempted"
+        );
+
+        let third = race
+            .third_approval
+            .lock()
+            .await
+            .clone()
+            .expect("the third gate must have parked cleanly");
+        let final_event = CompanyEvent::ApprovalResolved {
+            approval_id: third,
+            verdict: Verdict::Approve,
+            by: Actor {
+                kind: ActorKind::Operator,
+                id: "operator".to_string(),
+            },
+        };
+        let batch = parking
+            .continuations
+            .decide(&turn, Some(final_event))
+            .expect("deciding the last outstanding card must release the batch");
+        assert_eq!(
+            batch.len(),
+            2,
+            "the first card's decision, banked while the faulted second park was still in \
+             flight, must still be in the batch the last decision releases — not dropped by \
+             the faulted park's own slot release: {batch:?}"
+        );
     }
 
     /// A run an operator stopped parks nothing. They are not asking to be asked
@@ -3421,6 +5177,7 @@ to = "gate"
                     id: "u1".to_string(),
                     email: "ada@acme.test".to_string(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Active,
                     password_hash: None,
@@ -3447,7 +5204,7 @@ to = "gate"
                     port: 587,
                     security: crate::server::ops::smtp::SmtpSecurity::Starttls,
                     username: "acme".into(),
-                    password: "hunter2".into(),
+                    password: crate::ports::types::SecretValue("hunter2".into()),
                     from_name: "Acme".into(),
                     from_email: "acme@opencompany.test".into(),
                 },
@@ -3459,6 +5216,13 @@ to = "gate"
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: Arc::new(crate::policy::ManifestApprovalGate::new(policy)),
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
@@ -3516,8 +5280,17 @@ to = "gate"
             .find(|p| p.effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND)
             .expect("the paused gate is waiting on the operator")
             .effect;
-        let continuation = crate::runtime::workflow_resume::continuation_input(&card)
-            .expect("a well-formed card continues");
+        let continuation = crate::runtime::workflow_resume::continuation_input(
+            &card,
+            &[
+                card.payload[crate::runtime::workflow_resume::PAYLOAD_NODE_ID]
+                    .as_str()
+                    .expect("the card names its gate")
+                    .to_string(),
+            ],
+            &[],
+        )
+        .expect("a well-formed card continues");
 
         // --- run 2: the same graph, from the trigger, with the gate approved.
         let second = run_workflow(
@@ -3866,10 +5639,16 @@ to = "gate"
                     run_id,
                     workflow_id,
                     scheduled,
+                    started_by,
                 } => {
                     assert_eq!(run_id, &ctx.run_id);
                     assert_eq!(workflow_id, "greet");
                     assert!(!scheduled, "a manual run is not flagged scheduled");
+                    assert_eq!(
+                        started_by,
+                        &Some(ctx.started_by.clone()),
+                        "the runner writes the context's started_by into the journal (issue #1862 prerequisite)"
+                    );
                 }
                 CompanyEvent::WorkflowNodeStarted {
                     run_id,
@@ -4909,5 +6688,514 @@ to = "done"
             journal.is_empty(),
             "a dry run journals nothing at all: {journal:?}"
         );
+    }
+
+    // --- #1825 (P1, found by chatgpt-codex-connector): arm every blocked
+    // node before awaiting journal I/O ----------------------------------
+
+    /// A [`JournalStore`] whose `append_journal` parks the caller mid-await the
+    /// first time a line matches `match_substr`, after signalling `reached` —
+    /// so a test can inspect state from a second task while the first is
+    /// genuinely suspended inside the write, not merely about to make it.
+    /// [`release`](Self::release) lets the parked append through; every append
+    /// after that — including a second match — passes straight through so
+    /// nothing deadlocks the loop under test.
+    struct GatedJournalStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        match_substr: &'static str,
+        armed: std::sync::atomic::AtomicBool,
+        reached: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl GatedJournalStore {
+        fn new(match_substr: &'static str) -> Self {
+            Self {
+                inner: Default::default(),
+                match_substr,
+                armed: std::sync::atomic::AtomicBool::new(true),
+                reached: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::ports::JournalStore for GatedJournalStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::Durability,
+        ) -> Result<()> {
+            // CodeRabbit nitpick (review 5038258829): check the substring
+            // before disarming. `swap` first meant any append that reached
+            // this store ahead of the `match_substr` line consumed the armed
+            // flag on a non-match, so the real target line would never gate —
+            // today's tests only pass because nothing writes here before it,
+            // a property this double shares with nothing that enforces it.
+            if line.contains(self.match_substr)
+                && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.reached.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// Deps whose `DeliveryParking` journals over a caller-supplied store,
+    /// otherwise wired exactly like [`deps_with_parking`] — a real gate, a
+    /// fresh [`BlockedNodeQueue`], no continuations/gates state this test
+    /// needs.
+    fn deps_with_parking_over(
+        dir: &std::path::Path,
+        store: Arc<dyn crate::ports::JournalStore>,
+    ) -> super::super::delivery::WorkflowDeliveryDeps {
+        let policy = toml::from_str("mode = \"full\"\n").expect("valid [policy] block");
+        let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));
+        let journal = Arc::new(crate::runtime::journal::RuntimeJournal::with_store(
+            store,
+            record().id,
+        ));
+        super::super::delivery::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
+            users: Arc::new(crate::store::FsOps::new(dir)),
+            bootstrap_admin: None,
+            channels: Vec::new(),
+            parking: Some(super::super::delivery::DeliveryParking {
+                approvals: gate,
+                journal,
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
+            }),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
+        }
+    }
+
+    /// A run that settles **two** blocked nodes in one call must arm both of
+    /// their in-memory stashes before either's durable mirror is awaited.
+    ///
+    /// # The race this closes
+    ///
+    /// `stash_blocked_agent_nodes` used to interleave the synchronous `arm()`
+    /// with an awaited `record_blocked_node_stashed()` call, one node at a
+    /// time. Both nodes' approval cards are already parked and clickable from
+    /// agent execution by the time this function starts — so while the first
+    /// node's durable write is suspended, its stash is armed but the second
+    /// node's is not yet, even though its card is just as clickable. A single-
+    /// node test cannot see this: the window only opens *between* nodes, so it
+    /// takes two blocked nodes in one settle, with the first node's write
+    /// gated open, to observe the second node's stash mid-window.
+    ///
+    /// This freezes the store mid-append on the *first* matching line (the
+    /// first node's `BlockedNodeStashed` write) and, while still frozen, reads
+    /// the second node's stash straight off the queue the real resolve path
+    /// reads at decide time — the same `peek` a landing decision would use to
+    /// find what to release. Fixed: both stashes are already armed by the time
+    /// the first append is even attempted, so this succeeds while frozen. On
+    /// the old interleaved loop this fails while frozen — the second node's
+    /// arm has not run yet — which is exactly the failure mode: a decision
+    /// landing on the second node in this window finds no stash, consumes the
+    /// approval anyway, and the loop's own later arm then writes a stash with
+    /// no decision left to release it, permanently stranding the run.
+    ///
+    /// Both turns are pre-armed here, matching what `park_gated_calls` does at
+    /// real park time (issue #1825, P1 second follow-up) — `stash_blocked_agent_nodes`
+    /// now skips (rather than re-arms) any turn `is_armed` reports false for,
+    /// since after that fix the only way a node with non-empty `approval_ids`
+    /// reaches this function unarmed is a released turn (see
+    /// `a_released_turn_is_not_resurrected_by_the_settle_pass` below), and this
+    /// test's whole premise depends on the settle pass actually reaching its
+    /// own durable-mirror loop for both nodes. Pre-arming only touches
+    /// `BlockedNodeQueue`, not the journal's own `blocked_stashes`, so the
+    /// durable append this test gates on still runs for real.
+    #[tokio::test]
+    async fn every_blocked_node_is_armed_before_the_first_journal_write_is_awaited() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatedJournalStore::new("BlockedNodeStashed"));
+        let deps = deps_with_parking_over(dir.path(), store.clone());
+        let parking = deps.parking.clone().expect("wired above");
+
+        let blocked = vec![
+            crate::ports::WorkflowBlockedNode {
+                node_id: "first".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-first".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+            crate::ports::WorkflowBlockedNode {
+                node_id: "second".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-second".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+        ];
+
+        let run_id = "run-1".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key("run-1", "first");
+        let second_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+        // Simulates what `park_gated_calls` already did at real park time,
+        // for both nodes, before this settle pass ever runs.
+        parking.blocked_nodes.arm(
+            &first_turn,
+            "wf-1",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+        parking.blocked_nodes.arm(
+            &second_turn,
+            "wf-1",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+
+        let handle = tokio::spawn(async move {
+            stash_blocked_agent_nodes(
+                Some(&deps),
+                "wf-1",
+                &run_id,
+                &trigger_input,
+                &blocked,
+                &crate::ports::types::StartedBy::Operator,
+            )
+            .await;
+        });
+
+        // Blocks until the store is genuinely suspended inside the first
+        // node's durable write — not merely about to make it.
+        store.reached.notified().await;
+
+        // While that write is still frozen: the second node's card is exactly
+        // as parked and clickable as the first's, so the resolve path must
+        // already be able to find its stash here.
+        assert!(
+            parking.blocked_nodes.peek(&second_turn).is_some(),
+            "the second blocked node's stash must be armed before the first \
+             node's durable journal write is even attempted, not after it \
+             returns — a decision landing in this window must have something \
+             to release"
+        );
+
+        store.release.notify_one();
+        handle
+            .await
+            .expect("stash_blocked_agent_nodes does not panic");
+
+        // Both nodes are armed once the settle finishes, and the durable
+        // mirror caught up for both too.
+        assert!(parking.blocked_nodes.peek(&first_turn).is_some());
+        assert!(parking.blocked_nodes.peek(&second_turn).is_some());
+    }
+
+    /// Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector): a
+    /// turn whose whole batch was already decided and released before this
+    /// settle pass runs must not be resurrected by it.
+    ///
+    /// After the P1 second follow-up, every node with a non-empty
+    /// `approval_ids` was armed by `park_gated_calls` at real park time — so
+    /// if `is_armed` is false for such a node here, the only way that
+    /// happened is a release: an operator decided the node's *last* pending
+    /// card and the run dispatched (`resume_blocked_agent_node` →
+    /// `retire_blocked_stash`) in the window between the agent turn returning
+    /// and this settle pass running. Simulates that ordering directly: arms
+    /// the turn, releases it (as `retire_blocked_stash` would have), then
+    /// runs the settle pass over a `blocked` batch that still names the node
+    /// (the engine's own settled view predates the release). Pre-fix this
+    /// re-arms the released turn and durably re-stashes it, after its own
+    /// `BlockedNodeReleased`; post-fix the settle pass skips it and leaves no
+    /// trace, in memory or in the journal.
+    #[tokio::test]
+    async fn a_released_turn_is_not_resurrected_by_the_settle_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn crate::ports::JournalStore> =
+            Arc::new(crate::ports::journal::MemoryJournalStore::default());
+        let deps = deps_with_parking_over(dir.path(), store);
+        let parking = deps.parking.clone().expect("wired above");
+        let journal = parking.journal.clone();
+
+        let run_id = "run-1825-p2d".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "solo");
+
+        // What `park_gated_calls` already did at real park time.
+        parking.blocked_nodes.arm(
+            &turn,
+            "wf-1825-p2d",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+        // What deciding this turn's last card already did, in the window
+        // before this settle pass got here: dispatched and retired.
+        parking.blocked_nodes.release(&turn);
+        journal
+            .record_blocked_node_released(&turn)
+            .await
+            .expect("release journals cleanly");
+
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "solo".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-solo".to_string()],
+            unparkable: 0,
+            stranded: 0,
+        }];
+        stash_blocked_agent_nodes(
+            Some(&deps),
+            "wf-1825-p2d",
+            &run_id,
+            &trigger_input,
+            &blocked,
+            &crate::ports::types::StartedBy::Operator,
+        )
+        .await;
+
+        assert!(
+            !parking.blocked_nodes.is_armed(&turn),
+            "the settle pass must not resurrect a turn that was already released before it ran"
+        );
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .all(|(t, ..)| t != turn),
+            "the settle pass must not durably re-stash an already-released turn either — a \
+             late approval-bank retry landing on the resurrection could make a future boot \
+             dispatch this run a second time"
+        );
+    }
+
+    /// Issue #1825 (P2, fourth follow-up — found by chatgpt-codex-connector):
+    /// "Make the settle-time stash check atomic with its append".
+    ///
+    /// # The race this closes
+    ///
+    /// `a_released_turn_is_not_resurrected_by_the_settle_pass` above proves a
+    /// turn released *before* the settle pass starts is not resurrected — its
+    /// `is_armed` check, run once while collecting `turns`, already catches
+    /// that. This test proves the gap that check alone does not close: a turn
+    /// released *during* the settle pass, while an earlier sibling's own
+    /// durable write is still awaited, one loop iteration before this turn's
+    /// own write is reached. `is_armed` was true for it when `turns` was
+    /// built (its card is exactly as clickable as any other), but by the time
+    /// its OWN await comes up, the decision has already run
+    /// `retire_blocked_stash` — the same interleaving
+    /// `every_blocked_node_is_armed_before_the_first_journal_write_is_awaited`
+    /// above freezes to prove the *arm* side lands in time; this freezes the
+    /// same point to drive a *release* through it and prove the *write* side
+    /// does not go ahead once one has.
+    ///
+    /// Pre-fix, the durable write below runs unconditionally once a turn is in
+    /// `turns`, so it appends a `BlockedNodeStashed` behind the release's own
+    /// `BlockedNodeReleased` — durable on replay, resurrecting an
+    /// already-dispatched turn. Post-fix, the write is skipped and the journal
+    /// carries no trace of it.
+    #[tokio::test]
+    async fn a_turn_released_mid_settle_batch_is_not_stashed_behind_its_own_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatedJournalStore::new("BlockedNodeStashed"));
+        let deps = deps_with_parking_over(dir.path(), store.clone());
+        let parking = deps.parking.clone().expect("wired above");
+        let journal = parking.journal.clone();
+
+        let blocked = vec![
+            crate::ports::WorkflowBlockedNode {
+                node_id: "first".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-first".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+            crate::ports::WorkflowBlockedNode {
+                node_id: "second".to_string(),
+                tools: vec!["shell".to_string()],
+                approval_ids: vec!["appr-second".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            },
+        ];
+
+        let run_id = "run-1825-p2e".to_string();
+        let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
+        let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "first");
+        let second_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+        // What `park_gated_calls` already did for both, at real park time,
+        // before this settle pass ever runs.
+        parking.blocked_nodes.arm(
+            &first_turn,
+            "wf-1825-p2e",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+        parking.blocked_nodes.arm(
+            &second_turn,
+            "wf-1825-p2e",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+
+        let handle = tokio::spawn(async move {
+            stash_blocked_agent_nodes(
+                Some(&deps),
+                "wf-1825-p2e",
+                &run_id,
+                &trigger_input,
+                &blocked,
+                &crate::ports::types::StartedBy::Operator,
+            )
+            .await;
+        });
+
+        // Blocks until the settle pass is genuinely suspended inside the
+        // FIRST node's durable write — after `turns` was built (both `first`
+        // and `second` already passed their `is_armed` check), but before
+        // `second`'s own write is even attempted.
+        store.reached.notified().await;
+
+        // What deciding `second`'s last card right now, mid-batch, already
+        // does to the in-memory stash: `retire_blocked_stash` releases it,
+        // the same call `a_released_turn_is_not_resurrected_by_the_settle_pass`
+        // above reproduces directly. Its durable `BlockedNodeReleased`
+        // half is deliberately NOT reproduced here while `first`'s write is
+        // still frozen: `RuntimeJournal::append` takes `write_lock` around
+        // the whole store call (see its doc comment), which `first`'s
+        // in-flight append is still holding at this exact point, so a second
+        // append attempted here would deadlock against itself — a test
+        // artifact of freezing one append to observe another, not a real
+        // constraint on the two decisions in production (there they run on
+        // separate turns' own append calls, each taking and releasing the
+        // lock in turn). The in-memory release alone is the only signal the
+        // fix under test reads (`BlockedNodeQueue::is_armed`), so it is
+        // sufficient on its own to pose the race.
+        parking.blocked_nodes.release(&second_turn);
+
+        // Let `first`'s write complete; the loop now reaches `second`.
+        store.release.notify_one();
+        handle
+            .await
+            .expect("stash_blocked_agent_nodes does not panic");
+
+        assert!(
+            !parking.blocked_nodes.is_armed(&second_turn),
+            "a turn released mid-batch must not be resurrected in memory either"
+        );
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .all(|(t, ..)| t != second_turn),
+            "a turn released mid-batch must not be durably re-stashed behind its own release — \
+             a late approval-bank retry landing on the resurrection could make a future boot \
+             dispatch this run a second time"
+        );
+        // The sibling that was never touched is unaffected.
+        assert!(parking.blocked_nodes.is_armed(&first_turn));
+        assert!(
+            journal
+                .blocked_stashes()
+                .into_iter()
+                .any(|(t, ..)| t == first_turn)
+        );
+    }
+
+    // ---- merging harness transcripts into the run-output snapshot ----------
+
+    mod transcript_merge {
+        use super::super::merge_transcripts;
+        use serde_json::{Map, Value, json};
+
+        fn transcripts(pairs: &[(&str, Value)]) -> Map<String, Value> {
+            pairs
+                .iter()
+                .map(|(id, v)| ((*id).to_string(), v.clone()))
+                .collect()
+        }
+
+        #[test]
+        fn no_transcripts_leaves_the_map_identical() {
+            // The overwhelmingly common case — every workflow with no agent node.
+            let nodes = json!({ "cost": { "items": [] } });
+            assert_eq!(merge_transcripts(&nodes, &Map::new()), nodes);
+        }
+
+        #[test]
+        fn a_transcript_lands_beside_the_nodes_items() {
+            let nodes = json!({ "solve": { "items": [{ "json": { "answer": 837799 } }] } });
+            let merged = merge_transcripts(
+                &nodes,
+                &transcripts(&[(
+                    "solve",
+                    json!([{ "atMs": 0, "kind": "tool_call", "text": "shell" }]),
+                )]),
+            );
+            // The engine's own data survives untouched...
+            assert_eq!(merged["solve"]["items"][0]["json"]["answer"], 837799);
+            // ...and the transcript joins it.
+            assert_eq!(merged["solve"]["transcript"][0]["kind"], "tool_call");
+        }
+
+        #[test]
+        fn only_the_named_nodes_are_touched() {
+            let nodes = json!({
+                "restate": { "items": [1] },
+                "solve": { "items": [2] },
+            });
+            let merged =
+                merge_transcripts(&nodes, &transcripts(&[("solve", json!([{ "kind": "x" }]))]));
+            assert!(merged["restate"].get("transcript").is_none());
+            assert!(merged["solve"].get("transcript").is_some());
+        }
+
+        #[test]
+        fn a_transcript_for_an_unknown_node_is_dropped() {
+            // Never invent a node the engine did not report: the snapshot is a
+            // record of the run, and a node that appears only because a stray
+            // transcript named it would be a lie about what executed.
+            let nodes = json!({ "solve": { "items": [] } });
+            let merged =
+                merge_transcripts(&nodes, &transcripts(&[("ghost", json!([{ "kind": "x" }]))]));
+            assert!(merged.get("ghost").is_none());
+            assert_eq!(merged.as_object().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn a_non_object_nodes_map_passes_through() {
+            // A failed drain yields `Value::Null`; coercing it into an object
+            // here would fabricate a snapshot for a run that captured none.
+            for nodes in [Value::Null, json!([]), json!("nope")] {
+                assert_eq!(
+                    merge_transcripts(&nodes, &transcripts(&[("solve", json!([]))])),
+                    nodes
+                );
+            }
+        }
+
+        #[test]
+        fn a_non_object_node_slot_is_left_alone() {
+            let nodes = json!({ "solve": "not-an-object" });
+            assert_eq!(
+                merge_transcripts(&nodes, &transcripts(&[("solve", json!([]))])),
+                nodes
+            );
+        }
     }
 }

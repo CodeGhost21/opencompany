@@ -6,6 +6,14 @@
 //! way to send it anywhere. A node's
 //! [`destination`](crate::company::WorkflowDestinationDef) closes that gap.
 //!
+//! `destination` is **optional**, and a node without one is the pre-#170 shape
+//! rather than a deliberate "route nothing": every graph authored before it
+//! existed still has one, including all 21 seeded company templates. Such a node
+//! is not delivered from, but it does now produce a `Skipped` /
+//! [`NoDestinationConfigured`](crate::ports::DeliveryReason::NoDestinationConfigured)
+//! row (issue #925) so that an unconfigured destination is distinguishable from
+//! a run that genuinely had nothing to route. Silence made those two identical.
+//!
 //! # Where this runs, and why here
 //!
 //! Delivery is **host-side and post-engine**: [`deliver_outputs`] is called from
@@ -242,6 +250,31 @@ pub struct DeliveryParking {
     /// The durable record of the park. This is what `/approvals` lists and what
     /// boot replay rehydrates, so it is what makes the card survive a restart.
     pub journal: Arc<RuntimeJournal>,
+    /// How many decisions each turn is still blocked on (issue #469), so a park
+    /// raised **outside** a cycle can join a batch too.
+    ///
+    /// Added by issue #978. Before it, this path armed nothing and passed no
+    /// turn key, so every gate of a fan-out was its own batch of one: each
+    /// believed it was the last decision outstanding and each re-dispatched the
+    /// whole run. The same handle the runtime resolves against — a second queue
+    /// would count parks nobody releases.
+    pub continuations: crate::runtime::continuation::ContinuationQueue,
+    /// Which gate node each parked workflow approval is deciding, and the
+    /// trigger input its run paused with (issue #978).
+    ///
+    /// Armed in lockstep with [`continuations`](Self::continuations) and for the
+    /// same reason they are one struct rather than two options: a run whose
+    /// decisions are counted but whose gates are not recorded releases a batch
+    /// the host cannot re-dispatch.
+    pub gates: crate::runtime::workflow_gates::WorkflowGateQueue,
+    /// The workflow id and trigger input each blocked agent node needs to
+    /// re-dispatch its run (issue #899, Stage 1).
+    ///
+    /// Armed by the runner at block-settle (not here, and not in
+    /// [`park_and_journal`](DeliveryParking::park_and_journal) — the parker has
+    /// no trigger input), and released by the runtime's `continue_turn`. The same
+    /// handle both sides share, for [`gates`](Self::gates)' reason.
+    pub blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
 }
 
 impl std::fmt::Debug for WorkflowDeliveryDeps {
@@ -307,12 +340,14 @@ pub async fn deliver_outputs(
         if node.kind != WorkflowNodeKind::Output {
             continue;
         }
-        let Some(destination) = &node.destination else {
-            continue;
-        };
         // An output node the run never reached (untaken branch, or a path that
         // paused for approval) is not a delivery that failed — it is a delivery
         // that was never owed. No attempt, no row.
+        //
+        // Checked BEFORE the destination arm below, and that order is the whole
+        // of issue #925: a node with no destination still has to be reached
+        // before its absence is worth reporting. An unreached node contributes
+        // nothing either way, exactly as before.
         if !node_was_reached(output, &node.id) {
             tracing::debug!(
                 company = %record.id,
@@ -322,6 +357,60 @@ pub async fn deliver_outputs(
             );
             continue;
         }
+        // Issue #925: the run reached a terminal report-back node that names
+        // nowhere to report to. This used to be a bare `continue` — no row, no
+        // log, nothing — which is why every run of a graph authored before
+        // destinations existed ends `Finished — this run routed no reports.`
+        // That sentence is true and useless: it reads identically whether the
+        // author routed nothing deliberately or never configured a destination,
+        // and the second is a fixable mistake nobody could see.
+        let Some(destination) = &node.destination else {
+            // An output node that exists to PAUSE is control flow, not a
+            // report-back that lost its address: `requires_approval` makes the
+            // engine stop on it, and a graph can use an `output` node for
+            // nothing else (`DELIVER_THEN_GATE` in `workflows::runner` is
+            // exactly that shape). Telling its author to "give the node a
+            // destination" would be wrong advice on every run of a correct
+            // workflow, and a row nobody should act on is how a row everybody
+            // should act on gets ignored.
+            //
+            // The trade-off, stated plainly: an author who forgets a destination
+            // on an approval-gated output node is not warned about that node.
+            // Every ungated output node in the same graph still reports, and a
+            // false alarm on every gated run is the worse of the two.
+            if node.requires_approval.unwrap_or(false) {
+                tracing::debug!(
+                    company = %record.id,
+                    workflow = %workflow.id,
+                    node = %node.id,
+                    "workflow delivery: approval-gated output node has no destination; \
+                     treated as a gate, not a missing address"
+                );
+                continue;
+            }
+            tracing::info!(
+                company = %record.id,
+                workflow = %workflow.id,
+                node = %node.id,
+                "workflow delivery: output node has no destination; nothing was routed"
+            );
+            reports.push(DeliveryReport {
+                node: node.id.clone(),
+                // No destination was authored, so there is no kind to echo. The
+                // literal reads correctly in the operator's row (`→ none — …`)
+                // and keeps the field a plain token rather than an empty string
+                // the console would render as a gap.
+                kind: "none".to_string(),
+                target: None,
+                status: DeliveryStatus::Skipped,
+                detail: "this output node has no destination, so its report was not sent \
+                         anywhere — open the workflow and give the node a destination to \
+                         deliver it"
+                    .to_string(),
+                reason: DeliveryReason::NoDestinationConfigured,
+            });
+            continue;
+        };
 
         // Issue #438: a run earlier in this approval lineage already delivered
         // this node's report. The continuation reached the node again because
@@ -411,10 +500,13 @@ pub async fn deliver_outputs(
 ///
 /// For every reached `output` node that carries a destination it pushes one
 /// `Skipped` / [`DeliveryReason::DryRun`] row naming where the report *would*
-/// have gone. Nothing leaves the process: no transport, no cold-recipient park,
-/// no journal write. A node the run never reached contributes no row, exactly as
-/// in the live path — so the rows are an honest map of the reached output
-/// destinations, which is what a test run exists to prove.
+/// have gone; a reached node that names **no** destination pushes a `Skipped` /
+/// [`DeliveryReason::NoDestinationConfigured`] row instead (issue #925), because
+/// "nowhere" is the answer a test run most needs to give. Nothing leaves the
+/// process: no transport, no cold-recipient park, no journal write. A node the
+/// run never reached contributes no row, exactly as in the live path — so the
+/// rows are an honest map of the reached output destinations, which is what a
+/// test run exists to prove.
 ///
 /// Takes no [`WorkflowDeliveryDeps`] and needs none: a dry run wires no delivery
 /// ports (and no journal write is owed), so this is a pure function of the graph
@@ -431,9 +523,6 @@ pub fn deliver_outputs_dry(
         if node.kind != WorkflowNodeKind::Output {
             continue;
         }
-        let Some(destination) = &node.destination else {
-            continue;
-        };
         // The routing half: an output node the run never reached is not a
         // delivery that was skipped, it is one that was never owed — no row, the
         // same rule the live path takes.
@@ -446,6 +535,33 @@ pub fn deliver_outputs_dry(
             );
             continue;
         }
+        // Issue #925, same rule as the live path. A test run exists to answer
+        // "where would this go?", and "nowhere, because the node names no
+        // destination" is the answer an author most needs to see *before*
+        // scheduling it.
+        let Some(destination) = &node.destination else {
+            // A gate is control flow, not a report — same rule as the live path.
+            if node.requires_approval.unwrap_or(false) {
+                continue;
+            }
+            tracing::info!(
+                company = %record.id,
+                workflow = %workflow.id,
+                node = %node.id,
+                "workflow dry delivery: output node has no destination; nothing would be routed"
+            );
+            reports.push(DeliveryReport {
+                node: node.id.clone(),
+                kind: "none".to_string(),
+                target: None,
+                status: DeliveryStatus::Skipped,
+                detail: "this output node has no destination, so a real run would not send its \
+                         report anywhere — give the node a destination to deliver it"
+                    .to_string(),
+                reason: DeliveryReason::NoDestinationConfigured,
+            });
+            continue;
+        };
         let where_to = match destination
             .target
             .as_deref()
@@ -824,6 +940,10 @@ async fn park_cold_recipient(
             effect,
             crate::runtime::journal::TaskLink::Unlinked,
             None,
+            // Issue #978: no turn. A cold-recipient card is one delivery's own
+            // decision, not one of a run's batch — it resolves and sends on its
+            // own, exactly as before.
+            None,
         )
         .await
     {
@@ -941,8 +1061,41 @@ impl DeliveryParking {
         effect: Effect,
         task_link: crate::runtime::journal::TaskLink,
         thread: Option<String>,
+        turn: Option<String>,
     ) -> Result<ApprovalId, crate::error::OpenCompanyError> {
-        let approval_id = self.approvals.park(company, effect.clone()).await?;
+        // Issue #1825 (P1, fifth follow-up — found by chatgpt-codex-connector):
+        // arm this card's continuation slot BEFORE anything below can make the
+        // approval visible to a concurrent resolver. `record_parked`'s
+        // synchronous in-memory insert — the write `approval_cycle` reads to
+        // route a resolution through the continuation batch — lands as soon as
+        // that call's synchronous portion runs, strictly before its own async
+        // durable append (below) returns; a resolve racing in on another tokio
+        // worker thread during that window used to see a turn whose only armed
+        // slot was `park_gated_calls`'s pre-loop synthetic hold — this card's
+        // own arm had not run yet, still gated behind the journal write below —
+        // consumed it, and released the batch before this card (or the rest of
+        // the node's batch) had finished parking. This card's own arm then
+        // still ran once the journal write returned, into a queue entry the
+        // premature decision had already removed: a fresh, orphaned slot no
+        // further decision would ever redeem, doubling the eventual dispatch.
+        // Arming here, before the approval gate has even minted an id, closes
+        // the window by construction — nothing below can make this card
+        // resolvable before its slot is already counted.
+        if let Some(turn) = turn.as_deref() {
+            self.continuations.arm(turn);
+        }
+        let approval_id = match self.approvals.park(company, effect.clone()).await {
+            Ok(id) => id,
+            Err(err) => {
+                // Nothing was ever parked, so no decision will ever come along
+                // to release the slot armed above — release it now instead of
+                // leaving the turn blocked on a card that will never exist.
+                if let Some(turn) = turn.as_deref() {
+                    self.continuations.decide(turn, None);
+                }
+                return Err(err);
+            }
+        };
         if let Err(err) = self
             .journal
             .record_parked(
@@ -959,12 +1112,22 @@ impl DeliveryParking {
                     thread,
                     parent: None,
                 },
-                // No turn key (issue #469): a workflow node's request is not
-                // raised by a cycle, so there is no turn holding a continuation
-                // for it. It resolves and continues on its own, exactly as it
-                // always has — the gate only ever groups approvals a single
-                // cycle parked together.
-                None,
+                // The turn this park belongs to, when it belongs to one
+                // (issues #469, #978).
+                //
+                // `None` for a cold-recipient delivery and for an agent node's
+                // gated tool call: neither is raised by anything that holds a
+                // continuation, so each resolves and continues on its own,
+                // exactly as it always has.
+                //
+                // `Some` for a `requires_approval` gate, where issue #978 found
+                // the opposite: the N gates one run pauses on ARE a batch, and
+                // recording no key for them is what let every branch of a
+                // fan-out believe it was the last decision and re-dispatch the
+                // whole run. A run is a turn in precisely the sense #469 means —
+                // one unit of work, blocked on several decisions, owed exactly
+                // one continuation when the last of them lands.
+                turn.clone(),
             )
             .await
         {
@@ -994,7 +1157,23 @@ impl DeliveryParking {
             // and ignored: there is no `ApprovalParked` line on disk to pair
             // with.
             let _ = self.journal.record_resolved(&approval_id).await;
+            // Same as the park failure above: the card this slot was armed for
+            // was just retracted, so release it rather than leave the turn
+            // blocked forever on a decision that can never arrive.
+            if let Some(turn) = turn.as_deref() {
+                self.continuations.decide(turn, None);
+            }
             return Err(err);
+        }
+        // Issue #978: arm the gate queue once the park is durable. `gates` is
+        // looked up by `approval_id` (minted above) rather than by turn alone,
+        // so — unlike `continuations`, moved ahead of this function's first
+        // await for the reason at the top — it has no visibility-before-count
+        // window of its own to close: nothing can look this approval's gate up
+        // before `approval_id` exists, which is true either way. `park_pending_gates`'
+        // dedupe skip never reaches here at all.
+        if let Some(turn) = turn {
+            self.gates.arm(&turn, &approval_id, &effect);
         }
         Ok(approval_id)
     }
@@ -1200,24 +1379,20 @@ async fn post_to_channel(
     // The built-in operator adapter is an in-memory response spy, not a
     // durable delivery surface. Interactive chat journals its own replies
     // after the cycle; workflow delivery has no such reader, so naming
-    // `operator` must fail rather than report a successful discard.
-    if channel_id == crate::runtime::channel::OPERATOR_CHANNEL {
-        let wired: Vec<&str> = delivery
+    // `operator` must fail rather than report a successful discard. The rule
+    // and this sentence both live beside the operator-channel constant (issue
+    // #981) — the save-time guard on the write routes reads the same two, so a
+    // destination this refuses is one the author was never offered.
+    if !crate::runtime::channel::is_deliverable_channel(channel_id) {
+        let deliverable: Vec<&str> = delivery
             .channels
             .iter()
-            .filter(|channel| channel.channel_id() != crate::runtime::channel::OPERATOR_CHANNEL)
             .map(|channel| channel.channel_id())
+            .filter(|id| crate::runtime::channel::is_deliverable_channel(id))
             .collect();
         return Err((
             DeliveryReason::ChannelNotWired,
-            format!(
-                "`{channel_id}` is not a workflow delivery channel — this runtime has: {}",
-                if wired.is_empty() {
-                    "no durable channels".to_string()
-                } else {
-                    wired.join(", ")
-                }
-            ),
+            crate::runtime::channel::undeliverable_channel_message(channel_id, &deliverable),
         ));
     }
     let Some(adapter) = delivery
@@ -1247,9 +1422,11 @@ async fn post_to_channel(
             message_id: None,
             task_id: None,
             channel: channel_id.to_string(),
+            agent: None,
             text: format!("{subject}\n\n{text}"),
             steps: Vec::new(),
             reply_to: None,
+            mentions: Vec::new(),
         })
         .await
         // `err` is the adapter's own words. Same rule as mail: it rides
@@ -1349,6 +1526,7 @@ mod tests {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::UserRecord;
     use crate::ports::types::CompanyId;
+    use crate::ports::types::SecretValue;
     use crate::runtime::channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
     use crate::server::ops::mailer::{MailSender, RecordingMailSender};
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
@@ -1386,6 +1564,27 @@ to = "done"
         parse_workflow(&src).expect("test graph is valid")
     }
 
+    /// The same graph with **no** `[node.destination]` stanza at all — the
+    /// pre-#170 shape every seeded company template still ships (issue #925).
+    fn graph_without_destination() -> WorkflowFile {
+        let src = r#"
+id = "report_flow"
+name = "Report flow"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Owner summary"
+[[edge]]
+from = "start"
+to = "done"
+"#;
+        parse_workflow(src).expect("a graph whose output node names no destination is still valid")
+    }
+
     /// A run output in which `done` produced one text item — the reached case.
     fn reached_output() -> Value {
         serde_json::json!({
@@ -1417,6 +1616,8 @@ allow = [{allow}]
         ))
         .expect("valid manifest");
         CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),
@@ -1428,9 +1629,13 @@ allow = [{allow}]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_tool_grants: None,
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
         }
     }
 
@@ -1440,7 +1645,7 @@ allow = [{allow}]
             port: 587,
             security: SmtpSecurity::Starttls,
             username: "acme".into(),
-            password: "hunter2".into(),
+            password: SecretValue("hunter2".into()),
             from_name: "Acme".into(),
             from_email: COMPANY_ADDRESS.into(),
         }
@@ -1575,6 +1780,13 @@ admins = [{list}]
             self.deps.parking = Some(DeliveryParking {
                 approvals: gate.clone(),
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
             });
             self.gate = Some(gate);
             self.journal = Some(journal);
@@ -1599,6 +1811,13 @@ admins = [{list}]
             self.deps.parking = Some(DeliveryParking {
                 approvals: gate.clone(),
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
             });
             self.gate = Some(gate);
             self.journal = Some(journal);
@@ -1614,6 +1833,7 @@ admins = [{list}]
                         id: id.to_string(),
                         email: email.to_string(),
                         display_name: None,
+                        avatar: None,
                         role: UserRole::Admin,
                         status: UserStatus::Active,
                         password_hash: None,
@@ -1731,7 +1951,7 @@ admins = [{list}]
         fn subscribe(
             &self,
             _company: &CompanyId,
-        ) -> futures::stream::BoxStream<'static, crate::ports::types::StoredEvent> {
+        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -1860,6 +2080,7 @@ admins = [{list}]
                         id: id.to_string(),
                         email: email.to_string(),
                         display_name: None,
+                        avatar: None,
                         role,
                         status,
                         password_hash: None,
@@ -2050,6 +2271,7 @@ admins = [{list}]
                     id: "founder".to_string(),
                     email: "founder@acme.test".to_string(),
                     display_name: None,
+                    avatar: None,
                     role: UserRole::Admin,
                     status: UserStatus::Suspended,
                     password_hash: None,
@@ -2576,7 +2798,7 @@ admins = [{list}]
     }
 
     /// **The default-configuration case (after #230).** A company with no
-    /// `[tools]` section at all now defaults to `["*", "media", "composio"]`,
+    /// `[tools]` section at all now defaults to the globals `default_allow`,
     /// and `*` satisfies the `email` grant — so on the majority of tenants the
     /// grant gate is open and the established-thread gate is the one actually
     /// holding the line. Pin that it does: a default-configured company still
@@ -2886,10 +3108,17 @@ mode = "full"
         assert!(h.channel.sent().is_empty());
     }
 
-    /// An `output` node with no `destination` is the pre-#170 shape: it still
-    /// shows in the run drawer and produces no delivery row.
+    /// An `output` node with no `destination` is the pre-#170 shape. It still
+    /// shows in the run drawer, still sends nothing, and — since #925 — says so
+    /// with a `Skipped` row instead of contributing nothing at all.
+    ///
+    /// **This assertion is inverted from what it was.** It previously read
+    /// `reports.is_empty()`, which is the behaviour #925 was filed against:
+    /// silence made "the author routed nothing on purpose" and "the author never
+    /// configured a destination" the same observation. The transport assertions
+    /// below are the part that must not change — nothing is sent either way.
     #[tokio::test]
-    async fn an_output_node_without_a_destination_produces_no_row() {
+    async fn an_output_node_without_a_destination_reports_the_gap_and_sends_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let h = Harness::new(dir.path(), true, true);
         let plain = parse_workflow(
@@ -2920,7 +3149,13 @@ to = "done"
             &[],
         )
         .await;
-        assert!(reports.is_empty(), "{reports:?}");
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped);
+        assert_eq!(reports[0].reason, DeliveryReason::NoDestinationConfigured);
+        assert!(
+            h.mail.sent().is_empty() && h.channel.sent().is_empty(),
+            "the row is a statement about configuration; nothing may leave the process"
+        );
     }
 
     /// The #169 lesson: an unwired delivery bundle must be LOUD. It writes a
@@ -3335,6 +3570,123 @@ to = "done"
         );
     }
 
+    // --- issue #925: an unconfigured destination is not the same as no report --
+
+    /// **The regression.** A run that reaches an output node naming no
+    /// destination used to return an empty `deliveries` list, which the console
+    /// renders as `Finished — this run routed no reports.` — the same sentence
+    /// it shows a workflow that deliberately routed nothing. The row is what
+    /// tells the two apart, and it carries the reason as a closed token so a
+    /// reader does not have to parse prose.
+    ///
+    /// Deps are `None` here on purpose: the check must land *before* anything
+    /// touches a transport, so this passes on a runtime with no delivery ports
+    /// and would fail with a `NotWired` row if the arms were ever reordered.
+    #[tokio::test]
+    async fn a_reached_output_node_with_no_destination_says_so() {
+        let reports = deliver_outputs(
+            None,
+            &record(&["*"]),
+            &graph_without_destination(),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].node, "done");
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped);
+        assert_eq!(reports[0].reason, DeliveryReason::NoDestinationConfigured);
+        assert_eq!(
+            reports[0].target, None,
+            "there is no destination, so there is no target to name"
+        );
+        assert!(
+            reports[0].detail.contains("no destination"),
+            "the row has to say what is missing: {}",
+            reports[0].detail
+        );
+    }
+
+    /// The other half of the same rule: an output node with no destination that
+    /// the run never reached still contributes nothing. "Never configured" is
+    /// only worth reporting about a node the run actually arrived at — otherwise
+    /// every untaken branch would file a complaint.
+    #[tokio::test]
+    async fn an_unreached_output_node_with_no_destination_stays_silent() {
+        let output = serde_json::json!({ "nodes": { "start": { "items": [] } } });
+        let reports = deliver_outputs(
+            None,
+            &record(&["*"]),
+            &graph_without_destination(),
+            "run-1",
+            &output,
+            &[],
+        )
+        .await;
+
+        assert!(
+            reports.is_empty(),
+            "an unreached node owes no report either way: {reports:?}"
+        );
+    }
+
+    /// An `output` node that only exists to pause for approval is control flow,
+    /// not a report-back that lost its address. It contributes no row, so a
+    /// correct gated workflow does not grow a "not delivered" badge on every
+    /// continuation run.
+    #[tokio::test]
+    async fn an_approval_gate_with_no_destination_is_not_reported_as_misconfigured() {
+        let gate = parse_workflow(
+            r#"
+id = "gated"
+name = "Gated"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Gate"
+requires_approval = true
+[[edge]]
+from = "start"
+to = "done"
+"#,
+        )
+        .expect("a gate graph is valid");
+        let reports = deliver_outputs(
+            None,
+            &record(&["*"]),
+            &gate,
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+        assert!(
+            reports.is_empty(),
+            "a gate is not a report-back with a missing address: {reports:?}"
+        );
+    }
+
+    /// A test run is where an author most wants to find this, so the dry router
+    /// takes the same rule.
+    #[test]
+    fn deliver_outputs_dry_reports_a_node_with_no_destination() {
+        let reports = deliver_outputs_dry(
+            &record(&["email"]),
+            &graph_without_destination(),
+            &reached_output(),
+        );
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].node, "done");
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped);
+        assert_eq!(reports[0].reason, DeliveryReason::NoDestinationConfigured);
+    }
+
     /// An output node the dry run never reached contributes no row at all —
     /// exactly the "absent means not reached" rule the live path takes.
     #[test]
@@ -3346,6 +3698,186 @@ to = "done"
         assert!(
             reports.is_empty(),
             "an unreached node routes nothing: {reports:?}"
+        );
+    }
+
+    /// Issue #1825 (P1, fifth follow-up — found by chatgpt-codex-connector):
+    /// "Prevent the synthetic hold from consuming a real decision".
+    ///
+    /// Pre-fix, `park_and_journal` called `self.approvals.park` — which is what
+    /// makes an approval id exist for an operator to resolve — strictly
+    /// *before* arming this card's own `ContinuationQueue` slot (that arm ran
+    /// only after `record_parked` returned, on the success path). A resolve
+    /// racing in on another tokio worker thread during `record_parked`'s own
+    /// async durable append therefore saw a turn whose only armed slot was
+    /// `park_gated_calls`'s pre-loop synthetic hold, decided against it, and
+    /// released the batch before this card had been counted; this card's own
+    /// arm then still landed once the journal write returned, into a fresh,
+    /// orphaned queue entry no further decision would ever redeem.
+    ///
+    /// This spies on the approval gate `park_and_journal` calls first and
+    /// captures `continuations.outstanding(turn)` at that exact point —
+    /// deterministic, no wall-clock race needed, on the same principle as
+    /// `approving_the_first_card_of_a_multi_call_node_does_not_complete_the_batch_early`
+    /// in `workflows::caps::mod`. Pre-fix this captures `0` (nothing armed
+    /// yet); post-fix it must capture `1`.
+    #[tokio::test]
+    async fn park_and_journal_arms_the_continuation_slot_before_the_card_is_parkable() {
+        use crate::ports::types::PolicyDecision;
+
+        /// Delegates every call to `inner`, except that `park` first records
+        /// how many decisions `turn` is already counted as blocking on —
+        /// the moment an operator's resolve could first reach this approval.
+        struct Spy {
+            inner: Arc<dyn ApprovalGate>,
+            continuations: crate::runtime::continuation::ContinuationQueue,
+            turn: String,
+            outstanding_at_park: std::sync::Mutex<Option<usize>>,
+        }
+
+        #[async_trait]
+        impl ApprovalGate for Spy {
+            async fn evaluate(
+                &self,
+                company: &CompanyId,
+                effect: &Effect,
+            ) -> crate::Result<PolicyDecision> {
+                self.inner.evaluate(company, effect).await
+            }
+
+            async fn park(&self, company: &CompanyId, effect: Effect) -> crate::Result<ApprovalId> {
+                *self.outstanding_at_park.lock().expect("spy lock") =
+                    Some(self.continuations.outstanding(&self.turn));
+                self.inner.park(company, effect).await
+            }
+
+            async fn resolve(
+                &self,
+                id: &ApprovalId,
+                verdict: Verdict,
+                by: Actor,
+            ) -> crate::Result<Option<Effect>> {
+                self.inner.resolve(id, verdict, by).await
+            }
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p1-5-")
+            .tempdir()
+            .expect("tempdir");
+        let h = Harness::new(dir.path(), false, false).with_parking(dir.path(), "full");
+        let parking = h.deps.parking.clone().expect("with_parking wired it");
+
+        let turn = "workflow-node:run-1825-p1-5:work".to_string();
+        let spy = Arc::new(Spy {
+            inner: parking.approvals.clone(),
+            continuations: parking.continuations.clone(),
+            turn: turn.clone(),
+            outstanding_at_park: std::sync::Mutex::new(None),
+        });
+        let mut spied_parking = parking.clone();
+        spied_parking.approvals = spy.clone();
+
+        let effect = Effect {
+            kind: "shell".to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "call": "shell" }),
+            agent: Some("ceo".to_string()),
+            run_id: None,
+        };
+
+        let approval_id = spied_parking
+            .park_and_journal(
+                &CompanyId::new("acme"),
+                effect,
+                crate::runtime::journal::TaskLink::Unlinked,
+                None,
+                Some(turn.clone()),
+            )
+            .await
+            .expect("parks");
+
+        let captured = spy
+            .outstanding_at_park
+            .lock()
+            .expect("spy lock")
+            .expect("park was called");
+        assert_eq!(
+            captured, 1,
+            "this card's continuation slot must already be armed by the time the approval \
+             gate's park() runs, before record_parked's synchronous insert can make the card \
+             resolvable to a concurrent operator — otherwise a decision racing in during \
+             record_parked's async durable append can consume a hold this card was never \
+             counted against"
+        );
+
+        // Sanity: the ordinary, non-racing shape is unchanged — one card on
+        // this turn, one decision, releases it immediately.
+        assert_eq!(parking.continuations.outstanding(&turn), 1);
+        let event = CompanyEvent::ApprovalResolved {
+            approval_id,
+            verdict: Verdict::Approve,
+            by: Actor {
+                kind: ActorKind::Operator,
+                id: "operator".to_string(),
+            },
+        };
+        assert!(
+            parking.continuations.decide(&turn, Some(event)).is_some(),
+            "the only card parked on this turn must still release it on its own decision"
+        );
+    }
+
+    /// Companion to the test above: when the durable journal write fails, the
+    /// slot armed before the attempt must be released rather than left
+    /// blocking the turn on a card that will now never exist.
+    #[tokio::test]
+    async fn park_and_journal_releases_the_continuation_slot_when_the_journal_write_fails() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1825-p1-5-fail-")
+            .tempdir()
+            .expect("tempdir");
+        let h = Harness::new(dir.path(), false, false).with_failing_journal(dir.path(), "full");
+        let parking = h
+            .deps
+            .parking
+            .clone()
+            .expect("with_failing_journal wired it");
+
+        let turn = "workflow-node:run-1825-p1-5-fail:work".to_string();
+        let effect = Effect {
+            kind: "shell".to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "call": "shell" }),
+            agent: Some("ceo".to_string()),
+            run_id: None,
+        };
+
+        let result = parking
+            .park_and_journal(
+                &CompanyId::new("acme"),
+                effect,
+                crate::runtime::journal::TaskLink::Unlinked,
+                None,
+                Some(turn.clone()),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "the failing journal must still fail the park"
+        );
+        assert_eq!(
+            parking.continuations.outstanding(&turn),
+            0,
+            "a park whose durable write failed leaves no card for an operator to ever decide, \
+             so the slot armed for it before the attempt must be released — otherwise the turn \
+             is left permanently blocked on a decision that can never arrive"
         );
     }
 }

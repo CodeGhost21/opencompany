@@ -47,22 +47,27 @@
 default        | tested       | (default)                       | The `Rust` job's bare `cargo test --locked`.
 oauth          | tested       | (default)                       | In the default set, so the default lanes run it.
 platform-jwt   | tested       | (default)                       | In the default set (see Cargo.toml for why it ships by default).
-openhuman      | tested       | openhuman,tinycortex            | `rust-gated` runs `--tests`, which selects lib+bin units and every tests/ target.
-tinycortex     | tested       | openhuman,tinycortex            | Same lane, same unfiltered `--tests`.
+documents      | tested       | (default)                       | In the default set: the Brain drop zone is a console surface, so a shipped build must read a dropped PDF (see Cargo.toml).
+openhuman      | tested       | openhuman                       | `rust-gated` runs `--tests`, which selects lib+bin units and every tests/ target.
+tinymemory     | tested       | (default)                       | In the default set, so the bare `cargo test --locked` runs its tests unfiltered (see Cargo.toml for why the memory-engine catalog must not ship half-disabled).
 tinyplace      | tested       | tinyplace                       | Runs the whole `--lib` deliberately (issue #477) — it gates code across the tree.
 
 # --- Partial: a lane exists, but filtered ----------------------------------
 
 sqlite         | partial      | sqlite                          | store::sqlite
 mongodb        | partial      | mongodb                         | store::mongodb store::select
-acp            | partial      | acp                             | server::acp harness::acp_run_turn
-runner         | partial      | runner                          | runner
-mcp            | partial      | openhuman,mcp,telegram,media    | harness::build::tests app::types
-media          | partial      | openhuman,mcp,telegram,media    | harness::build::tests harness::toolbelt
-composio       | partial      | openhuman,tinycortex,composio   | harness::composio::isolation_tests harness::composio::ops_helper_tests harness::composio::live::live_tests server::ops::composio::tests::gated_tests
+acp            | partial      | acp,runner,tinymemory | server::acp harness::acp::run_turn
+runner         | partial      | acp,runner,tinymemory | runner
+mcp            | partial      | openhuman,mcp,media    | harness::built_in::build::tests app::types
+media          | partial      | openhuman,mcp,media    | harness::built_in::build::tests harness::built_in::toolbelt
+composio       | partial      | openhuman,chargebee,paypal,composio | composio
 export         | partial      | export                          | store::export
-imap           | partial      | imap,smtp                       | server::ops::imap
+imap           | partial      | imap,smtp                       | server::ops::imap send_then_receive_roundtrip
+smtp           | partial      | imap,smtp                       | send_then_receive_roundtrip
+chargebee      | partial      | openhuman,chargebee,paypal,composio | chargebee server::ops::finance
+paypal         | partial      | openhuman,chargebee,paypal,composio | paypal server::ops::finance
 sidecar        | partial      | sidecar                         | brain::sidecar
+analytics      | partial      | analytics                       | analytics
 
 # --- Owed a lane: gated tests exist, and they are currently RED -------------
 #
@@ -102,8 +107,5 @@ webhooks       | compile-only | - | Only `HttpWebhookSink` / `HmacSha256Signer` 
 dns            | compile-only | - | Only `HickoryDnsResolver` is gated. The `DnsResolver` trait, `StaticDnsResolver` and the pure record generation test at default features.
 
 # --- Compile-only, no gated test exists yet ---------------------------------
-
-smtp           | compile-only | - | Only `LettreMailSender` is gated and it carries no gated test; the `MailSender` trait and `RecordingMailSender` test at default features. The mail lane compiles smtp beside imap so a gated test added later has a home — RECLASSIFY THIS ROW to `partial` when one is added, which this script will force.
-telegram       | compile-only | - | Only `HttpTelegramApi` is gated and carries no gated test; the trait, inbound parsing, token scrubbing and `RecordingTelegramApi` test at default features. The feature IS enabled on the belt lane, for the belt contract rather than for tests of its own.
 tiny           | compile-only | - | A dependency switch: it brings the vendored `tinyagents` crate into scope for `openhuman`. No code is gated on `tiny` itself, so there is nothing for a lane to run.
 tinyagents     | compile-only | - | The implicit feature of the optional `tinyagents` dependency, enabled only via `tiny`. Nothing is gated on it directly.

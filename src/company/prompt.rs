@@ -45,16 +45,50 @@ const BUNDLE_HEADING: &str = "\n\n## Your brief\n";
 /// This is what makes the agent answer *as* the CEO of Acme rather than falling
 /// back to the runtime's own assistant identity.
 ///
-/// The inline `prompt` is **appended** to that framing rather than replacing it:
-/// an operator writing a prompt is stating how the role should work, not
-/// disclaiming which role it is, and a prompt that replaced the framing would
-/// silently cost the agent its identity.
-pub fn persona_prompt(company_name: &str, agent: &Agent) -> String {
-    let mut prompt = format!(
-        "You are the {role} at {company}. Speak in the first person as this role.",
-        role = agent.role,
-        company = company_name,
-    );
+/// An agent carrying a [`name`](Agent::name) — an operator-added teammate — is
+/// framed as that name *and* the role, because the console addresses it by name
+/// everywhere (DM header, subtitle, composer) and an agent told only its role
+/// contradicts the interface it is speaking through (issue #1105). The name is
+/// stated as an address, not a character: a teammate should answer to it
+/// without inventing a persona around it.
+///
+/// The `instructions` — the agent's **effective** persona text, resolved by the
+/// caller through [`CompanyRecord::effective_instructions`](crate::ports::types::CompanyRecord::effective_instructions)
+/// (an operator override when one is set, else the manifest agent's `prompt`,
+/// else `None`) — are **appended** to that framing rather than replacing it: an
+/// operator writing instructions is stating how the role should work, not
+/// disclaiming which role it is, and text that replaced the framing would
+/// silently cost the agent its identity (issue #1530).
+///
+/// Taken as a parameter rather than read off `agent.prompt` so the single
+/// injection point serves both agent kinds uniformly: a manifest agent whose
+/// persona an operator edited from the console, and an overlay teammate that has
+/// no manifest `prompt` at all, both arrive here as the same resolved
+/// `Option<&str>`. A blank or whitespace-only value adds nothing.
+pub fn persona_prompt(company_name: &str, agent: &Agent, instructions: Option<&str>) -> String {
+    // Blank is absent, as it is for `description` and `prompt` below. A name
+    // that just restates the role is dropped too, or the framing reads "You are
+    // Content Writer, the Content Writer at Acme."
+    let named = agent
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(agent.role.trim()));
+    let mut prompt = match named {
+        Some(name) => format!(
+            "You are {name}, the {role} at {company}. Speak in the first person as this role. \
+             Teammates and the operator address you as {name}; it is how you are called here, \
+             not a separate character to play.",
+            name = name,
+            role = agent.role,
+            company = company_name,
+        ),
+        None => format!(
+            "You are the {role} at {company}. Speak in the first person as this role.",
+            role = agent.role,
+            company = company_name,
+        ),
+    };
     if let Some(description) = agent.description.as_deref() {
         let description = description.trim();
         if !description.is_empty() {
@@ -62,7 +96,7 @@ pub fn persona_prompt(company_name: &str, agent: &Agent) -> String {
             prompt.push_str(description);
         }
     }
-    if let Some(custom) = agent.prompt.as_deref() {
+    if let Some(custom) = instructions {
         let custom = custom.trim();
         if !custom.is_empty() {
             prompt.push_str("\n\n");
@@ -156,17 +190,34 @@ pub fn clamp(text: &str, budget: usize) -> String {
     kept
 }
 
+/// Caps operator-authored persona instructions to the prompt budget.
+///
+/// `instructions` written through the team/agent edit surfaces are injected,
+/// verbatim, into every turn of the teammate's system prompt via
+/// [`persona_prompt`]. Unlike `bundle_section`/`context_section`, that injection
+/// point applied no budget of its own — the persona grew without ceiling as an
+/// operator pasted more text, inflating every dispatch. Capping here, at the
+/// write boundary (mirroring [`crate::ports::tasks::cap_discussion`]), keeps the
+/// stored override bounded without refusing an operator's edit; the leading,
+/// most-important portion is preserved and a cut is marked.
+pub fn cap_persona_instructions(text: &str) -> String {
+    clamp(text, PROMPT_FILE_BUDGET_CHARS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn agent(role: &str) -> Agent {
         Agent {
+            global: false,
             id: "a".into(),
             role: role.into(),
+            name: None,
             description: None,
             tier: None,
-            tools: Vec::new(),
+            harness: None,
+            tools: None,
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
@@ -174,14 +225,69 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+            model: None,
         }
     }
 
     #[test]
     fn the_persona_names_the_role_and_company() {
-        let prompt = persona_prompt("Acme", &agent("Copywriter"));
+        let prompt = persona_prompt("Acme", &agent("Copywriter"), None);
         assert!(prompt.contains("Copywriter"), "{prompt}");
         assert!(prompt.contains("Acme"), "{prompt}");
+    }
+
+    #[test]
+    fn a_named_teammate_is_framed_as_the_name_and_the_role() {
+        // Issue #1105: the console addresses an operator-added teammate by name
+        // everywhere, so the model has to be told the name it is answering to —
+        // without losing the role, which is what it is here to do.
+        let mut a = agent("Content Writer");
+        a.name = Some("Alex".into());
+
+        let prompt = persona_prompt("Acme", &a, None);
+        assert!(
+            prompt.contains("You are Alex, the Content Writer at Acme"),
+            "{prompt}"
+        );
+        // Stated as an address rather than a character to inhabit.
+        assert!(prompt.contains("address you as Alex"), "{prompt}");
+        assert!(
+            prompt.contains("not a separate character to play"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_teammate_with_no_name_keeps_the_role_only_framing() {
+        // The unnamed arm must stay byte-identical: every manifest teammate
+        // takes it, and its wording is pinned by tests elsewhere.
+        assert_eq!(
+            persona_prompt("Acme", &agent("Content Writer"), None),
+            "You are the Content Writer at Acme. Speak in the first person as this role."
+        );
+    }
+
+    #[test]
+    fn a_blank_name_falls_back_to_the_role_only_framing() {
+        let mut a = agent("Content Writer");
+        a.name = Some("   \n ".into());
+        assert_eq!(
+            persona_prompt("Acme", &a, None),
+            persona_prompt("Acme", &agent("Content Writer"), None)
+        );
+    }
+
+    #[test]
+    fn a_name_that_restates_the_role_is_not_repeated() {
+        // Otherwise: "You are Content Writer, the Content Writer at Acme."
+        let mut a = agent("Content Writer");
+        a.name = Some("content writer".into());
+        assert_eq!(
+            persona_prompt("Acme", &a, None),
+            persona_prompt("Acme", &agent("Content Writer"), None)
+        );
     }
 
     #[test]
@@ -190,7 +296,7 @@ mod tests {
         a.description = Some("Write ads.".into());
         a.prompt = Some("Write in the brand's voice.".into());
 
-        let prompt = persona_prompt("Acme", &a);
+        let prompt = persona_prompt("Acme", &a, a.prompt.as_deref());
         // The identity framing survives — that is the whole reason this appends.
         assert!(
             prompt.contains("You are the Copywriter at Acme"),
@@ -210,8 +316,8 @@ mod tests {
         let mut a = agent("Copywriter");
         a.prompt = Some("   \n  ".into());
         assert_eq!(
-            persona_prompt("Acme", &a),
-            persona_prompt("Acme", &agent("Copywriter"))
+            persona_prompt("Acme", &a, a.prompt.as_deref()),
+            persona_prompt("Acme", &agent("Copywriter"), None)
         );
     }
 
@@ -297,6 +403,30 @@ mod tests {
     fn multibyte_text_within_the_codepoint_budget_is_not_cut() {
         let text = "🙂🙂🙂"; // 3 chars, 12 bytes
         assert_eq!(clamp(text, 4), text);
+    }
+
+    /// Overlong persona instructions are capped to the prompt budget at the
+    /// write boundary, keeping the leading portion and marking the cut — the
+    /// same budget `bundle_section`/`context_section` already apply, applied
+    /// here because `instructions` are injected into every turn's prompt.
+    #[test]
+    fn persona_instructions_are_capped_to_the_prompt_budget() {
+        let over = "x".repeat(PROMPT_FILE_BUDGET_CHARS + 50);
+        let capped = cap_persona_instructions(&over);
+        assert!(capped.starts_with(&"x".repeat(PROMPT_FILE_BUDGET_CHARS)));
+        assert!(capped.contains("truncated"), "a cut is marked: {capped:?}");
+
+        // Under-budget text passes through untouched.
+        let short = "Answer only in haiku.";
+        assert_eq!(cap_persona_instructions(short), short);
+
+        // The cut is on a character boundary for multi-byte text.
+        let many = "é".repeat(PROMPT_FILE_BUDGET_CHARS + 100);
+        let capped = cap_persona_instructions(&many);
+        assert!(
+            capped.starts_with(&"é".repeat(PROMPT_FILE_BUDGET_CHARS)),
+            "multi-byte text is cut whole, never panicking: {capped:?}"
+        );
     }
 
     #[test]

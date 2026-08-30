@@ -11,10 +11,10 @@
 //
 // The three-state answer matters more than it looks. `mcpInBuild` is optional on
 // the wire: a host predating the field sends nothing, and rendering that silence
-// as "no agent can use these" would be a fresh lie in the other direction. Only
+// as "no teammate can use these" would be a fresh lie in the other direction. Only
 // an explicit `false` is absence.
 
-import type { CapabilityStatusDto } from "@/api/types";
+import type { CapabilityStatusDto, McpHealth } from "@/api/types";
 
 /**
  * What this build can do with MCP servers.
@@ -56,6 +56,67 @@ export function mcpBridgeState(status: CapabilityStatusDto | null | undefined): 
  */
 export function mcpAddedMessage(name: string, bridge: McpBridgeState): string {
   return bridge === "absent"
-    ? `Added ${name}. It is stored, but no agent can call it until this deployment is rebuilt with the MCP bridge.`
-    : `Added ${name}. Agents pick it up on their next turn.`;
+    ? `Added ${name}. It is stored, but no teammate can call it until this deployment is rebuilt with the MCP bridge.`
+    : `Added ${name}. Teammates pick it up on their next turn.`;
+}
+
+/**
+ * The visual register a server-health badge is entitled to.
+ *
+ * - `delivering` — the success colour. The probe answered AND the bridge carries
+ *   its tools to teammates.
+ * - `configured` — the neutral register: stored/reachable, but NOT delivering.
+ *   The success colour is withheld here on purpose.
+ * - `warn` / `error` — a genuine probe problem, bridge or no bridge.
+ */
+export type McpBadgeTone = "delivering" | "configured" | "warn" | "error";
+
+export interface McpBadgeDescriptor {
+  tone: McpBadgeTone;
+  label: string;
+}
+
+/**
+ * What the per-row MCP health badge should read, folding the bridge state in
+ * (issue #1405).
+ *
+ * The badge used to derive entirely from `health.status`, so a reachable server
+ * read a green `ok · N tools` even under the banner saying no teammate can call
+ * any of them — reachability rendered as delivery. `HostingView` solved the same
+ * shape by folding `inBuild` into its `connected` expression; this does the
+ * equivalent for MCP. On `bridge === "absent"` every affirmative reading drops
+ * out of the success colour into the neutral `configured` register — the badge
+ * then says the same thing as the banner. `needs_config` / `error` are real
+ * problems either way and keep their own registers. `unknown` (an older host, or
+ * a failed capability read) is treated as delivering: claiming non-delivery
+ * there would be the #567 lie in the other direction.
+ *
+ * Returns `null` when there is nothing to show — never probed and no stored
+ * credential, or a probe status the badge does not render.
+ */
+export function mcpHealthBadge(
+  health: McpHealth | undefined,
+  authConfigured: boolean,
+  bridge: McpBridgeState,
+): McpBadgeDescriptor | null {
+  const delivers = bridge !== "absent";
+  if (!health) {
+    if (!authConfigured) return null;
+    return delivers
+      ? { tone: "delivering", label: "auth set" }
+      : { tone: "configured", label: "auth set · not delivered" };
+  }
+  const tools = `${health.toolCount} tool${health.toolCount === 1 ? "" : "s"}`;
+  switch (health.status) {
+    case "ok":
+      return delivers
+        ? { tone: "delivering", label: `ok · ${tools}` }
+        : { tone: "configured", label: `reachable · ${tools}, not delivered` };
+    case "needs_config":
+      return { tone: "warn", label: "needs config" };
+    case "error":
+      return { tone: "error", label: "error" };
+    default:
+      return null;
+  }
 }
