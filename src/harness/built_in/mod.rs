@@ -35,6 +35,7 @@
 //! offline [`MockProvider`](provider::MockProvider) does not, so test turns stay
 //! inert.
 
+pub mod approval_tool;
 /// Issue #775: the fail-closed shell audit wrapper — one intent line appended
 /// (and fsynced) *before* a command runs, refusing the command outright when
 /// that append fails. Pairs with the host-owned, per-agent sink
@@ -3866,8 +3867,9 @@ impl HarnessPool {
             }),
             _ => None,
         };
-        let (outcome, turn_costs) = agent
-            .run_with_steer(
+        let (outcome, turn_costs) = deps
+            .approval_requests
+            .turn_scoped(agent.run_with_steer(
                 &augmented,
                 steer,
                 stream_ctx,
@@ -3879,7 +3881,7 @@ impl HarnessPool {
                     LiveStream::On { thread_root, .. } => *thread_root,
                     LiveStream::Workflow { .. } | LiveStream::Off => None,
                 },
-            )
+            ))
             .await?;
         // Issue #1846: park a durable re-issue marker the moment a pause is
         // seen, mirroring the grant-reissue precedent (`crate::runtime::grants`)
@@ -4766,6 +4768,7 @@ pub(crate) fn build_roster(
         // the blueprint without cloning the borrowed `&ManifestAgent`.
         let effective_instructions = company.effective_instructions(&manifest_agent.id);
         let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
+            .with_policy_hitl_disabled()
             .with_requests(deps.approval_requests.clone())
             // Issue #243: stamp who the parked effect belongs to, so approving it
             // can hand the grant back to this agent rather than to nobody.
@@ -4866,6 +4869,7 @@ pub(crate) fn build_roster(
         // one reason `overlay_agent_to_manifest` can keep `prompt: None`.
         let effective_instructions = company.effective_instructions(&manifest_agent.id);
         let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
+            .with_policy_hitl_disabled()
             .with_requests(deps.approval_requests.clone())
             // An overlay teammate is a real roster agent and re-dispatches the
             // same way a manifest one does (issue #243).

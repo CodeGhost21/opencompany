@@ -283,32 +283,11 @@ async fn run_workflow_inner(
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
     let mut graph = super::translate::translate(workflow);
-    // Issue #460: the company's `ApprovalPolicy` decides which `tool_call`
-    // nodes stop for an operator, and says so by marking them with the engine's
-    // own `requires_approval` flag — so a gated tool call inherits #395's whole
-    // pause → park → resume path instead of needing a second one. BEFORE
-    // `compile`, because the flag is read off the compiled node config.
-    //
-    // Skipped for a dry run: every effect is stubbed, so there is nothing to
-    // approve, and pausing would stop the dry run walking the rest of the graph
-    // — the one thing it exists to do. See `super::gate` for why the gate is
-    // not in the invoker, and for the deviations this takes deliberately.
-    let gated = if ctx.dry_run {
-        Vec::new()
-    } else {
-        super::gate::apply_policy_gates(
-            &mut graph,
-            record,
-            &workflow.id,
-            &ctx.run_id,
-            // Issue #1098: the company's live permission set, so a workflow the
-            // operator granted standing permission does not park again. Reached
-            // through the queue the rest of the approval round-trip already
-            // travels on, so nothing new threads through the runner.
-            &deps.approval_requests.grants(),
-        )
-        .await
-    };
+    // Policy-generated workflow HITL is disabled. Preserve an author's own
+    // `requires_approval = true`, but add no gates merely because a tool call
+    // matches company policy. Agent-driven approvals enter through explicit
+    // approval-producing tools instead.
+    let gated = super::gate::policy_hitl_disabled(&mut graph);
     // Issue #846: a node whose call already left the building in an earlier run
     // of this lineage replays its recorded result instead of calling again.
     // Driven entirely off the trigger input's ledger, so a first run rewrites
