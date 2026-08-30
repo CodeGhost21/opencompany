@@ -227,7 +227,6 @@ impl Brain for HostedMedullaBrain {
         // `orch:usage` frames; stays zero when the upstream reports none, which
         // the runtime then meters as nothing rather than as a fake charge.
         let mut token_usage = TokenUsage::default();
-
         for (index, event) in req.events.iter().enumerate() {
             // Prefer the durable EventLog seq; fall back to the position when a
             // caller did not thread seqs (idempotency then holds within a cycle).
@@ -247,12 +246,39 @@ impl Brain for HostedMedullaBrain {
 
             // Drain the cycle's frames, deduping on callId (at-least-once).
             let mut seen: HashSet<String> = HashSet::new();
-            let mut frames = self.transport.cycle_frames(&cycle_id);
-            while let Some(frame) = frames.next().await {
+            let mut stream = self.transport.cycle_frames(&cycle_id);
+            let mut frames = Vec::new();
+            while let Some(frame) = stream.next().await {
                 match frame? {
                     InboundFrame::CycleComplete => break,
+                    frame => frames.push(frame),
+                }
+            }
+            let requests_approval = frames.iter().any(|frame| {
+                matches!(
+                    frame,
+                    InboundFrame::ToolCall(call)
+                        if call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                )
+            });
+            for frame in frames {
+                match frame {
                     InboundFrame::Effect(effect_frame) => {
                         if !seen.insert(effect_frame.call_id.clone()) {
+                            continue;
+                        }
+                        if requests_approval {
+                            self.transport
+                                .ack_effect(EffectResult {
+                                    call_id: effect_frame.call_id,
+                                    ok: false,
+                                    error: Some(
+                                        "effect cannot execute in an approval-request cycle"
+                                            .to_string(),
+                                    ),
+                                    result: None,
+                                })
+                                .await?;
                             continue;
                         }
                         let outcome = self.service_effect(host, &effect_frame).await?;
@@ -272,6 +298,23 @@ impl Brain for HostedMedullaBrain {
                     }
                     InboundFrame::ToolCall(call) => {
                         if !seen.insert(call.call_id.clone()) {
+                            continue;
+                        }
+                        if requests_approval
+                            && call.name != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                            && context_op_from_call(&call.name, &call.args).is_none()
+                        {
+                            self.transport
+                                .answer_tool_call(ToolResultFrame {
+                                    call_id: call.call_id,
+                                    ok: false,
+                                    result: None,
+                                    error: Some(
+                                        "tool cannot execute in an approval-request cycle"
+                                            .to_string(),
+                                    ),
+                                })
+                                .await?;
                             continue;
                         }
                         let approval_boundary =
@@ -303,6 +346,7 @@ impl Brain for HostedMedullaBrain {
                         );
                         token_usage.fold(&reported);
                     }
+                    InboundFrame::CycleComplete => unreachable!("cycle completion was drained"),
                 }
             }
 

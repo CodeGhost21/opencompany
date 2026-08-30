@@ -245,6 +245,38 @@ async fn duplicate_effect_frame_is_handled_once() {
     assert_eq!(result.channel_responses.len(), 1);
 }
 
+#[tokio::test]
+async fn effect_before_request_approval_cannot_cross_the_cycle_boundary() {
+    let transport = Arc::new(MockTransport::new());
+    transport.script_cycle(
+        cid(),
+        vec![
+            effect_frame(
+                "send_dm",
+                0,
+                json!({ "to": "operator", "body": "too early" }),
+            ),
+            tool_call_frame(
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                1,
+                json!({ "reason": "send the message" }),
+            ),
+        ],
+    );
+    let brain = brain(transport.clone());
+    let host = RecordingHost::executing();
+
+    let result = brain.run_cycle(operator_request(), &host).await.unwrap();
+
+    assert!(result.channel_responses.is_empty());
+    assert!(host.effects.lock().unwrap().is_empty());
+    assert_eq!(host.tool_calls.lock().unwrap().len(), 1);
+    assert_eq!(transport.acks().len(), 1);
+    assert!(!transport.acks()[0].ok);
+    assert_eq!(transport.tool_answers().len(), 1);
+    assert!(transport.tool_answers()[0].ok);
+}
+
 // ── Issue #174: usage frames make the hosted path meterable ─────────────────
 
 /// Without this the hosted path is structurally unmetered: the model runs
