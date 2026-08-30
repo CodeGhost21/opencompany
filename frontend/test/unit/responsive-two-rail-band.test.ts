@@ -78,6 +78,27 @@ describe("settings sub-rail collapses to chips below lg (issue #1383)", () => {
     expect(settings).toContain("flex gap-1 overflow-x-auto p-2");
     expect(settings).not.toContain("border-b sm:hidden");
   });
+
+  /**
+   * Codex review on PR #1931: `ContentSurface` overlays every page's top 28px
+   * with an absolutely-positioned, pointer-events-enabled drag band
+   * (`WindowDragBar`, z-20) on the macOS desktop so the window stays movable
+   * without a native title bar. This chip row is the one place in the console
+   * that puts real, clickable navigation into that exact strip below `lg` —
+   * so without a higher stacking order than the drag band, its links are
+   * unreachable at 880–1023px window widths on macOS.
+   *
+   * jsdom cannot evaluate the actual overlap (that is the drag band's own
+   * media query and stacking order in a real compositor), so this pins the
+   * source contract the fix rests on: the chip row's wrapper carries its own
+   * `relative z-30` stacking context, above the drag band's `z-20`.
+   */
+  it("keeps the chip row above the macOS drag band (z-30 over the band's z-20)", () => {
+    const idx = settings.indexOf('border-b lg:hidden');
+    expect(idx).toBeGreaterThan(-1);
+    const wrapper = settings.slice(Math.max(0, idx - 60), idx);
+    expect(wrapper).toContain("relative z-30");
+  });
 });
 
 describe("composer keeps Send in-flow in a narrow pane (issue #1383)", () => {

@@ -46,7 +46,7 @@ const LEGEND_ABOVE_SHEET = 'max-[820px]:bottom-[calc(55%+0.5rem)]';
 export function KnowledgeGraphFullscreen({
   deptList, currentTeamId, currentDept,
   toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot, statusSlot,
-  onNavDept, onBack, covered = false, emptyState = false, children,
+  onNavDept, onBack, covered = false, emptyState = false, noDesks = false, children,
 }: {
   deptList: DeptLite[];
   currentTeamId: string | null;
@@ -68,8 +68,21 @@ export function KnowledgeGraphFullscreen({
   /** an outage overlay covers the shell; the graph must not answer the
       keyboard at all (issue #1314) */
   covered?: boolean;
-  /** the loaded company has no desks, so the graph cannot show its pillars */
+  /**
+   * The graph is bare — nothing but the company's core node — so the canvas is
+   * replaced by an explanation rather than left looking broken.
+   *
+   * This used to mean "the company has no desks", which suppressed the canvas
+   * for every deskless company, including ones with a roster, tools, saved
+   * workflows and a memory constellation to draw. Those hang off the core in
+   * the model and always had; only this view refused to render them.
+   */
   emptyState?: boolean;
+  /**
+   * The company declares no desks, so the graph has no pillars. The graph is
+   * drawn regardless — this only adds the note that says so.
+   */
+  noDesks?: boolean;
   onNavDept: (teamId: string) => void;
   onBack: () => void;
   children: React.ReactNode;
@@ -292,6 +305,21 @@ export function KnowledgeGraphFullscreen({
                   asked for something the page made impossible. */}
               {deptList.length > 0 ? 'Desks' : 'No desks yet'}
             </span>
+            {/* With no pillars the graph still draws — teammates, tools and
+                workflows hang off the core — so this corner is where the fact
+                is stated and where the one control that changes it lives. It
+                was previously the empty-state overlay's job, and that overlay
+                took the whole canvas with it. Only on an answered read: an
+                unread `/desks` has `deptList` empty too, and must not be
+                offered as a company that has none. */}
+            {deptList.length === 0 && noDesks && (
+              <a
+                href="#/company/desks"
+                className="mt-0.5 inline-flex w-fit rounded-sm-t border border-os-border-strong bg-os-surface px-2 py-0.5 text-2xs font-medium text-os-text transition-colors hover:bg-os-bg"
+              >
+                Create a desk
+              </a>
+            )}
             {deptList.length > 0 && (
               <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
                 {deptList.map((d) => {
@@ -352,9 +380,15 @@ export function KnowledgeGraphFullscreen({
         )}
 
         {/* A newly provisioned company has only its core node. The graph is
-            useful once desks give it pillars, so say that plainly and lead to
-            the one place that can create one instead of leaving inert graph
-            controls around an empty canvas (issue #1313). */}
+            useful once there is something to draw, so say that plainly and lead
+            to the one place that can start it, instead of leaving inert graph
+            controls around an empty canvas (issue #1313).
+
+            Drawn only when the field really is bare. It used to be drawn for
+            every deskless company, over a canvas that was itself suppressed —
+            so a company with a roster, tools and saved workflows was told it
+            had nothing, while the graph that could have shown all three was
+            never rendered. */}
         {emptyState && (
           <div className="absolute inset-0 z-20 grid place-items-center p-5">
             <section
@@ -362,10 +396,14 @@ export function KnowledgeGraphFullscreen({
               className="max-w-md rounded-sm-t border border-os-border-strong bg-os-bg/90 px-6 py-5 text-center shadow-lg backdrop-blur"
             >
               <p className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">Company overview</p>
-              <h2 id="overview-empty-title" className="mt-2 text-lg font-semibold text-os-text">No desks yet</h2>
+              <h2 id="overview-empty-title" className="mt-2 text-lg font-semibold text-os-text">
+                {noDesks ? 'No desks yet' : 'Nothing to draw yet'}
+              </h2>
               <p className="mt-2 text-sm leading-6 text-os-muted">
                 This graph shows how your company&apos;s desks, teammates, work, and workflows connect.
-                Create a desk to add its first pillar.
+                {noDesks
+                  ? ' Create a desk to add its first pillar.'
+                  : ' Nothing has been declared for it to draw.'}
               </p>
               <a
                 href="#/company/desks"
@@ -382,7 +420,7 @@ export function KnowledgeGraphFullscreen({
             The right paddle steps aside when the detail panel is open — see
             `clearOfRail`, which is what finally made that sentence true
             (issue #1307). */}
-        {!coreOpen && !emptyState && (
+        {!coreOpen && !emptyState && deptList.length > 0 && (
           <>
             <button
               onClick={() => step(-1)}
