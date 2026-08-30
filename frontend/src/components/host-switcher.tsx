@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/sidebar";
 import { isDesktopRuntime } from "@/api/transport";
 import { hostShortcutLabel, useHosts } from "@/connections/HostsContext";
+import type { CompanyStatus } from "@/api/types";
 import type { Connection, ConnectionStatus } from "@/connections/types";
 import { cn } from "@/lib/utils";
 
@@ -350,8 +351,66 @@ export function HostSwitcher({
     );
   }
 
+  // Whether there is anything to offer under Companies. Hidden entirely on a
+  // console with one company and nowhere else to go — the same condition the
+  // sidebar footer row used before it moved in here.
+  const showCompanies = !!(
+    (companies.length > 1 && onSwitchCompany) ||
+    onBackToPicker ||
+    onCreateCompany
+  );
+
   const renderMenu = (side: "right" | "bottom") => (
     <DropdownMenuContent className="min-w-72 rounded-lg" align="start" side={side} sideOffset={4}>
+      {/* Companies first, and hosts below: the trigger names the COMPANY, so
+          the first group in the menu it opens should be the thing it named.
+
+          This group is the sidebar footer's old "Switch company" row, moved
+          rather than removed (issues #1807, #1401). Company switching, "All
+          companies…" and provisioning a new one have no other entry point in
+          the console, and the switcher is where an operator already goes to
+          change which company is on screen — the footer row was a second
+          control for the same act, one nav row lower. */}
+      {showCompanies && (
+        <>
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>Companies</DropdownMenuLabel>
+            {onSwitchCompany &&
+              companies.map((c) => (
+                <DropdownMenuItem
+                  key={c.id}
+                  data-testid={`company-row-${c.id}`}
+                  aria-current={c.id === activeCompany}
+                  onClick={() => onSwitchCompany(c.id)}
+                  className="gap-2"
+                >
+                  <span className={cn("flex-1 truncate", c.id === activeCompany && "font-medium")}>
+                    {c.name}
+                  </span>
+                  {c.id === activeCompany && <Check className="size-4 shrink-0" />}
+                </DropdownMenuItem>
+              ))}
+            {onBackToPicker && (
+              <DropdownMenuItem onClick={onBackToPicker}>All companies…</DropdownMenuItem>
+            )}
+            {onCreateCompany && (
+              // Disabled rather than hidden when this sign-in can't provision,
+              // so the capability is discoverable and honest about why it is
+              // out of reach — never an enabled item that 401s (#1401).
+              <DropdownMenuItem
+                onClick={onCreateCompany}
+                disabled={!canCreateCompany}
+                data-testid="switcher-new-company"
+                className="gap-2"
+              >
+                <Plus className="size-4" />
+                <span>New company</span>
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+        </>
+      )}
       {/* `DropdownMenuLabel` is Base UI's `Menu.GroupLabel`, and it throws
             outside a `Menu.Group` — the group is what it labels. */}
       <DropdownMenuGroup>
