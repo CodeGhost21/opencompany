@@ -563,6 +563,23 @@ impl ApprovalRequestQueue {
             .unwrap_or_default()
     }
 
+    /// Whether the current turn has already made an explicit approval request.
+    /// Tool execution is serial whenever OpenHuman's tool middleware is wired;
+    /// this lets the policy refuse every later sibling call in a provider
+    /// response after `request_approval` has established the turn boundary.
+    fn explicit_request_pending(&self) -> bool {
+        let scope = Self::current_scope();
+        self.inner
+            .lock()
+            .expect("approval request queue")
+            .get(&scope)
+            .is_some_and(|requests| {
+                requests.iter().any(|request| {
+                    request.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL
+                })
+            })
+    }
+
     /// Takes exclusive ownership of `scope`'s bucket for the life of the
     /// returned claim (issue #439).
     ///
@@ -1477,6 +1494,18 @@ impl ToolPolicy for ApprovalPolicy {
             return ToolPolicyDecision::Allow;
         }
 
+        // `request_approval` is a real turn boundary, not advice in a tool
+        // result. The hosted profile requests one call per assistant message;
+        // this is the fail-closed second layer for a provider that nevertheless
+        // returns several calls. Once the explicit request tool has queued its
+        // card, every later call in the serial tool fold is refused.
+        if self.requests.explicit_request_pending() {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' was not run because this turn already asked the operator for approval; \
+                 stop and wait for the decision"
+            ));
+        }
+
         // 0. `never_do` hard-deny — RESERVED SLOT, deliberately empty.
         //
         // The manifest's `never_do` list is compiled by the delegation-rule
@@ -1843,6 +1872,45 @@ mod tests {
     fn request(tool: &str, args: serde_json::Value) -> ToolPolicyRequest {
         let ctx = ToolCallContext::session("s", "chat", "ceo", "call-1", 0);
         ToolPolicyRequest::new(tool, args, ctx)
+    }
+
+    #[tokio::test]
+    async fn an_explicit_request_refuses_later_calls_in_the_same_turn() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+
+        let decision = claim
+            .scoped(async {
+                queue.push(ApprovalRequest {
+                    tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                    reason: "May I send this?".to_string(),
+                    effect: Effect {
+                        kind: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                        group: EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: serde_json::json!({
+                            "title": "Send update",
+                            "question": "May I send it?"
+                        }),
+                        agent: Some("ceo".to_string()),
+                        run_id: None,
+                    },
+                });
+                policy
+                    .check(&request("composio_execute", composio_send_args()))
+                    .await
+            })
+            .await;
+
+        let ToolPolicyDecision::Deny { reason } = decision else {
+            panic!("later sibling call must be refused");
+        };
+        assert!(reason.contains("already asked the operator"));
     }
 
     /// May this call be granted standing? The rule as the mint path asks it,

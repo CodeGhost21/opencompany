@@ -616,7 +616,12 @@ static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
         ..Modalities::default()
     },
     tool_calling: true,
-    parallel_tool_calls: true,
+    // An explicit approval request is a turn boundary. Asking the provider for
+    // at most one native tool call prevents a sibling effect from being emitted
+    // in the same assistant message and running before the operator sees the
+    // request. The policy queue adds a second serial-execution barrier for a
+    // provider that violates this capability contract.
+    parallel_tool_calls: false,
     // This field activates both `ContextCompressionMiddleware` and
     // `ImageAwareMessageTrimMiddleware`. `TurnModels::effective_context_window`
     // reads `direct.profile().and_then(|p| p.max_input_tokens)`, and the turn
@@ -3226,6 +3231,10 @@ mod tests {
         assert!(
             profile.tool_calling,
             "native tool calling must be advertised"
+        );
+        assert!(
+            !profile.parallel_tool_calls,
+            "one native call per assistant message keeps request_approval a turn boundary"
         );
     }
 

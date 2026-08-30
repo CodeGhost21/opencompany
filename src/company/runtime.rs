@@ -3448,6 +3448,20 @@ impl CompanyRuntime {
             ids.push(grant.approval_id);
         }
 
+        for continuation in self.grants.sweep_continuations(now, GRANT_TTL_MILLIS) {
+            let id = continuation.call.approval_id;
+            self.journal
+                .record_approval_continuation_expired(&id, now)
+                .await?;
+            self.announce_to_operator(&format!(
+                "The `{}` approval decision for `{}` could not be delivered within 15 minutes — \
+                 ask the agent again if the work still matters.",
+                continuation.call.tool, continuation.call.agent
+            ))
+            .await;
+            ids.push(id);
+        }
+
         // Issue #374: standing grants lapse on the same maintenance tick.
         //
         // The sweep is housekeeping and an operator notice, never the

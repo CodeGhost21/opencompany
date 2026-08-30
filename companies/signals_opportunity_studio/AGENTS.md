@@ -41,9 +41,9 @@ documents, and does nothing else. Each agent's own `tools` narrows that further,
 so `search` has to appear on the scout, the analyst and the research agent
 individually — a company grant alone leaves an agent silently searchless.
 
-`[policy].mode = "supervised"` parks every consequential action, and
-`publish_artifact` is named in `always_approve` so it keeps being parked even if
-the studio is ever moved to a looser tier.
+Neither `[policy].mode = "supervised"` nor `always_approve` creates approval
+requests. Before publishing needs human sign-off, call `request_approval` with
+the exact decision and wait for the operator's answer.
 
 ## Ledgers
 

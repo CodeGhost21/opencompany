@@ -123,5 +123,6 @@ home.
 
 Editorial standards, in the manifest's words: the publish decision on anything
 contested, anything legally exposed, and every correction.
-`[policy].mode = "auto"` runs the roster's own sandbox writes and outward reads
-unattended and parks everything that leaves the newsroom or spends money.
+`[policy].mode = "auto"` does not request sign-off by itself. Before an action needs human
+approval, call `request_approval` with the exact decision and wait for the
+operator's answer.

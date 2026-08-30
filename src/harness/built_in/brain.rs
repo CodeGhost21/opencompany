@@ -631,45 +631,45 @@ impl HarnessBrain {
         }
 
         let grants = self.deps.approval_requests.grants();
-        let grant = if let Some(grant) = grants.peek(approval_id) {
-            if grant.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL {
-                let title = grant
-                    .args
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("your request");
-                let decision = match verdict {
-                    Verdict::Approve => "APPROVED. Continue based on that decision",
-                    Verdict::Deny => {
-                        "DENIED. Respect that decision and continue safely or stop the proposed work"
-                    }
-                };
-                Redispatch {
-                    instruction: format!(
-                        "The operator {decision} for your explicit approval request: {title}. Do \
+        let grant = if let Some(continuation) = grants.peek_continuation(approval_id) {
+            let grant = continuation.call;
+            debug_assert_eq!(continuation.verdict, verdict);
+            let title = grant
+                .args
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("your request");
+            let decision = match continuation.verdict {
+                Verdict::Approve => "APPROVED. Continue based on that decision",
+                Verdict::Deny => {
+                    "DENIED. Respect that decision and continue safely or stop the proposed work"
+                }
+            };
+            Redispatch {
+                instruction: format!(
+                    "The operator {decision} for your explicit approval request: {title}. Do \
                          not call `request_approval` again for the same action unless circumstances \
                          materially change."
-                    ),
-                    tool: grant.tool,
-                    agent: grant.agent,
-                    explicit_request: true,
-                    origin_thread: grant.origin_thread,
-                    origin_parent: grant.origin_parent,
-                }
-            } else {
-                let args = serde_json::to_string(&grant.args).unwrap_or_else(|_| "{}".to_string());
-                Redispatch {
-                    instruction: format!(
-                        "Operator approved your `{tool}` call. Re-issue it now with EXACTLY these \
-                         arguments: {args}. Do not modify them.",
-                        tool = grant.tool,
-                    ),
-                    tool: grant.tool,
-                    agent: grant.agent,
-                    explicit_request: false,
-                    origin_thread: grant.origin_thread,
-                    origin_parent: grant.origin_parent,
-                }
+                ),
+                tool: grant.tool,
+                agent: grant.agent,
+                explicit_request: true,
+                origin_thread: grant.origin_thread,
+                origin_parent: grant.origin_parent,
+            }
+        } else if let Some(grant) = grants.peek(approval_id) {
+            let args = serde_json::to_string(&grant.args).unwrap_or_else(|_| "{}".to_string());
+            Redispatch {
+                instruction: format!(
+                    "Operator approved your `{tool}` call. Re-issue it now with EXACTLY these \
+                     arguments: {args}. Do not modify them.",
+                    tool = grant.tool,
+                ),
+                tool: grant.tool,
+                agent: grant.agent,
+                explicit_request: false,
+                origin_thread: grant.origin_thread,
+                origin_parent: grant.origin_parent,
             }
         } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
             // No exact-arguments pin, and deliberately so: a standing grant
@@ -8901,18 +8901,21 @@ members = ["eng1", "eng2"]
         let requests = crate::harness::policy::ApprovalRequestQueue::default();
         requests
             .grants()
-            .grant(crate::runtime::grants::GrantedCall {
-                approval_id: ApprovalId::new("appr-explicit"),
-                agent: "ceo".into(),
-                tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.into(),
-                args: serde_json::json!({
-                    "title": "Publish the announcement",
-                    "question": "May I publish it?"
-                }),
-                at_millis: now_millis(),
-                origin_thread: None,
-                origin_parent: None,
-                origin_task: None,
+            .continue_approval(crate::runtime::grants::ApprovalContinuation {
+                call: crate::runtime::grants::GrantedCall {
+                    approval_id: ApprovalId::new("appr-explicit"),
+                    agent: "ceo".into(),
+                    tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.into(),
+                    args: serde_json::json!({
+                        "title": "Publish the announcement",
+                        "question": "May I publish it?"
+                    }),
+                    at_millis: now_millis(),
+                    origin_thread: None,
+                    origin_parent: None,
+                    origin_task: None,
+                },
+                verdict,
             });
         let grants = requests.grants();
         let brain = brain_with_queue_and_events(dir.path(), requests, log);
@@ -8930,7 +8933,11 @@ members = ["eng1", "eng2"]
         assert!(text.contains(expected), "{text}");
         assert!(text.contains("Publish the announcement"), "{text}");
         assert!(!text.contains("Re-issue it"), "{text}");
-        assert!(grants.peek(&ApprovalId::new("appr-explicit")).is_none());
+        assert!(
+            grants
+                .peek_continuation(&ApprovalId::new("appr-explicit"))
+                .is_none()
+        );
     }
 
     #[tokio::test]

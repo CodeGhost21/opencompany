@@ -122,5 +122,6 @@ shared active-work document — plus its own `agents/<id>/` home.
 
 Creative and design direction, in the manifest's words: what the game is, what
 gets cut, and anything published under the studio's name.
-`[policy].mode = "auto"` runs the roster's own sandbox writes and outward reads
-unattended and parks everything that leaves the studio or spends money.
+`[policy].mode = "auto"` does not request sign-off by itself. Before an action needs human
+approval, call `request_approval` with the exact decision and wait for the
+operator's answer.

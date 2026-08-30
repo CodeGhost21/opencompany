@@ -45,7 +45,9 @@ use crate::runtime::delegation_tools::{
     DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, chat_responder, desk_lead,
     unknown_desk_message,
 };
-use crate::runtime::grants::{GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant};
+use crate::runtime::grants::{
+    ApprovalContinuation, GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant,
+};
 use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
@@ -861,6 +863,21 @@ impl<'a> CycleRunner<'a> {
                 );
             }
         }
+        for id in self.rt.grants.drain_consumed_continuations() {
+            if let Err(err) = self
+                .rt
+                .journal
+                .record_approval_continuation_consumed(&id)
+                .await
+            {
+                tracing::warn!(
+                    approval_id = %id,
+                    error = %err,
+                    "[approval] an explicit decision continuation completed but its journal \
+                     record failed; a restart may repeat the follow-up turn"
+                );
+            }
+        }
 
         let (executed_effects, parked) = host.into_outcomes();
         Ok(CycleReport {
@@ -1236,6 +1253,14 @@ approval.]"
         self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
         match outcome {
+            ResolveOutcome::Approved(effect)
+                if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND =>
+            {
+                if let Some(agent) = effect.agent.clone() {
+                    self.mint_approval_continuation(id, agent, effect, Verdict::Approve)
+                        .await?;
+                }
+            }
             ResolveOutcome::Approved(effect) => {
                 self.settle_approved_effect(id, effect, by.clone(), scope)
                     .await?;
@@ -1244,10 +1269,8 @@ approval.]"
                 if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND =>
             {
                 if let Some(agent) = effect.agent.clone() {
-                    // An explicit question needs a durable continuation on
-                    // either answer. The brain consumes this token without
-                    // re-invoking `request_approval`.
-                    self.mint_grant(id, agent, effect).await?;
+                    self.mint_approval_continuation(id, agent, effect, Verdict::Deny)
+                        .await?;
                 }
             }
             // Issue #1458: a standing denial is minted from the effect the
@@ -1631,6 +1654,43 @@ approval.]"
         Ok(())
     }
 
+    /// Journals then arms a verdict-bearing continuation for an explicit
+    /// `request_approval` call. It is intentionally disjoint from executable
+    /// grants: both yes and no resume the conversation, and neither authorises
+    /// a tool call by itself.
+    async fn mint_approval_continuation(
+        &self,
+        id: &ApprovalId,
+        agent: String,
+        effect: Effect,
+        verdict: Verdict,
+    ) -> Result<()> {
+        let conversation = self
+            .rt
+            .journal
+            .approval_conversation(id)
+            .unwrap_or_default();
+        let continuation = ApprovalContinuation {
+            call: GrantedCall {
+                approval_id: id.clone(),
+                agent,
+                tool: effect.kind,
+                args: effect.payload,
+                at_millis: now_millis(),
+                origin_thread: conversation.thread,
+                origin_parent: conversation.parent,
+                origin_task: self.approval_work_key(id),
+            },
+            verdict,
+        };
+        self.rt
+            .journal
+            .record_approval_continuation(&continuation)
+            .await?;
+        self.rt.grants.continue_approval(continuation);
+        Ok(())
+    }
+
     /// The work unit a parked approval belongs to, for stamping a grant's
     /// `origin_task` (issue #796).
     ///
@@ -1897,6 +1957,9 @@ approval.]"
     pub async fn recover(&self) -> Result<()> {
         self.rt.journal.load().await?;
         self.rt.grants.rehydrate(self.rt.journal.replayed_grants());
+        self.rt
+            .grants
+            .rehydrate_continuations(self.rt.journal.replayed_approval_continuations());
         // Issue #374: standing grants outlive a restart too — a week-long
         // permission that evaporated on every deploy would be worse than not
         // offering one. Anything already past its deadline is folded out by the
@@ -5020,9 +5083,24 @@ members = ["writer"]
             .await
             .unwrap();
 
-        let continuation = rt.grants.peek(&id).expect("denial resumes its asker");
-        assert_eq!(continuation.agent, "finance");
-        assert_eq!(continuation.args, args);
+        let continuation = rt
+            .grants
+            .peek_continuation(&id)
+            .expect("denial resumes its asker");
+        assert_eq!(continuation.verdict, Verdict::Deny);
+        assert_eq!(continuation.call.agent, "finance");
+        assert_eq!(continuation.call.args, args);
+        assert!(
+            rt.journal
+                .replayed_grants()
+                .into_iter()
+                .all(|grant| grant.approval_id != id),
+            "a denied request must never replay as executable authority"
+        );
+        assert_eq!(
+            rt.journal.replayed_approval_continuations(),
+            vec![continuation]
+        );
     }
 
     /// An approval that expired past its TTL grants nothing either, even though

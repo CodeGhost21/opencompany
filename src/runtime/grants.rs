@@ -105,6 +105,7 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::ports::generate_id;
 use crate::ports::types::{
     Actor, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, Mention, MessageIntent,
+    Verdict,
 };
 
 /// How long an unredeemed grant stays live: 15 minutes.
@@ -183,6 +184,18 @@ pub struct GrantedCall {
     /// mean there is no task checkout to resume, which is the pre-#796 behaviour.
     #[serde(default)]
     pub origin_task: Option<String>,
+}
+
+/// A durable follow-up owed after an agent explicitly asked the operator a
+/// question. This is deliberately not a grant: either verdict resumes the
+/// conversation, and a denial must never appear in the audit log as authority
+/// to execute a tool call.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalContinuation {
+    /// Routing and agent context for the follow-up turn.
+    pub call: GrantedCall,
+    /// The operator decision the follow-up must report.
+    pub verdict: Verdict,
 }
 
 /// The hard ceiling on a standing grant's life: 7 days.
@@ -536,6 +549,9 @@ pub struct GrantSet {
 #[derive(Default)]
 struct GrantState {
     live: HashMap<ApprovalId, GrantedCall>,
+    /// Explicit request continuations, kept separate from executable grants so
+    /// a denied request can never be mistaken for admitted authority.
+    continuations: HashMap<ApprovalId, ApprovalContinuation>,
     /// Grants consumed since the last [`GrantSet::drain_consumed`].
     ///
     /// Consumption happens deep inside a `ToolPolicy::check`, which is sync and
@@ -556,6 +572,8 @@ struct GrantState {
     /// it means recording the redemption where it happens, which needs a journal
     /// handle at the `ToolPolicy::check` seam.
     consumed: Vec<ApprovalId>,
+    /// Explicit continuations completed since the last journal drain.
+    consumed_continuations: Vec<ApprovalId>,
     /// Standing grants (issue #374), keyed by their own id.
     ///
     /// A second map rather than a second variant in `live`: the two are matched
@@ -604,6 +622,15 @@ impl GrantSet {
             .insert(call.approval_id.clone(), call);
     }
 
+    /// Arms a verdict-bearing conversation continuation.
+    pub fn continue_approval(&self, continuation: ApprovalContinuation) {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .continuations
+            .insert(continuation.call.approval_id.clone(), continuation);
+    }
+
     /// Redeems a grant for `(agent, tool, args)`, removing it.
     ///
     /// The match and the removal happen under one lock, so two concurrent turns
@@ -641,14 +668,22 @@ impl GrantSet {
             .cloned()
     }
 
-    /// Consumes a grant as a continuation token without matching a tool call.
-    /// The explicit approval tool asks a question; after approval the agent
-    /// continues the work instead of invoking the question tool a second time.
-    pub fn consume_continuation(&self, id: &ApprovalId) -> Option<GrantedCall> {
+    /// Reads an explicit approval continuation without consuming it.
+    pub fn peek_continuation(&self, id: &ApprovalId) -> Option<ApprovalContinuation> {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .continuations
+            .get(id)
+            .cloned()
+    }
+
+    /// Consumes a completed explicit approval continuation.
+    pub fn consume_continuation(&self, id: &ApprovalId) -> Option<ApprovalContinuation> {
         let mut state = self.inner.lock().expect("grant set poisoned");
-        let call = state.live.remove(id)?;
-        state.consumed.push(id.clone());
-        Some(call)
+        let continuation = state.continuations.remove(id)?;
+        state.consumed_continuations.push(id.clone());
+        Some(continuation)
     }
 
     /// Removes every grant minted more than `ttl_millis` before `now_millis`,
@@ -667,6 +702,26 @@ impl GrantSet {
             .collect()
     }
 
+    /// Removes explicit continuations that were never delivered before their
+    /// short consent window elapsed.
+    pub fn sweep_continuations(
+        &self,
+        now_millis: u64,
+        ttl_millis: u64,
+    ) -> Vec<ApprovalContinuation> {
+        let mut state = self.inner.lock().expect("grant set poisoned");
+        let expired: Vec<ApprovalId> = state
+            .continuations
+            .iter()
+            .filter(|(_, c)| now_millis.saturating_sub(c.call.at_millis) >= ttl_millis)
+            .map(|(id, _)| id.clone())
+            .collect();
+        expired
+            .into_iter()
+            .filter_map(|id| state.continuations.remove(&id))
+            .collect()
+    }
+
     /// Seeds the live set from a journal replay (boot recovery).
     pub fn rehydrate(&self, calls: impl IntoIterator<Item = GrantedCall>) {
         let mut state = self.inner.lock().expect("grant set poisoned");
@@ -675,9 +730,33 @@ impl GrantSet {
         }
     }
 
+    /// Seeds explicit continuations from journal replay.
+    pub fn rehydrate_continuations(
+        &self,
+        continuations: impl IntoIterator<Item = ApprovalContinuation>,
+    ) {
+        let mut state = self.inner.lock().expect("grant set poisoned");
+        for continuation in continuations {
+            state
+                .continuations
+                .insert(continuation.call.approval_id.clone(), continuation);
+        }
+    }
+
     /// Takes the ids consumed since the last drain, so they can be journaled.
     pub fn drain_consumed(&self) -> Vec<ApprovalId> {
         std::mem::take(&mut self.inner.lock().expect("grant set poisoned").consumed)
+    }
+
+    /// Takes explicit continuation ids completed since the last journal drain.
+    pub fn drain_consumed_continuations(&self) -> Vec<ApprovalId> {
+        std::mem::take(
+            &mut self
+                .inner
+                .lock()
+                .expect("grant set poisoned")
+                .consumed_continuations,
+        )
     }
 
     /// How many grants are live (tests / observability).
