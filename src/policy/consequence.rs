@@ -463,6 +463,9 @@ const DECLARED: &[Declared] = &[
     d("grep", EffectGroup::Other, Reach::Nothing),
     d("list", EffectGroup::Other, Reach::Nothing),
     d("memory_recall", EffectGroup::Other, Reach::Nothing),
+    // Queues an internal operator question. It does not perform the proposed
+    // action and must stay callable even while the company is read-only.
+    d("request_approval", EffectGroup::Other, Reach::Nothing),
     d("image_info", EffectGroup::Other, Reach::Nothing),
     // ---- The agent's own sandboxed workspace: writes -----------------------
     // These mutate, so `readonly` must still deny them and `supervised` must

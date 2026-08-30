@@ -584,9 +584,9 @@ impl HarnessBrain {
     /// asynchronously, long after the turn that spawned it has answered, so the
     /// operator had to know to go and look. The note is still written — it stays
     /// the durable record — and the post-back is additive.
-    /// Re-dispatches the agent that holds a single-use grant for `approval_id`,
-    /// instructing it to re-issue the exact call the operator approved
-    /// (issue #243).
+    /// Re-dispatches the agent that owns `approval_id`. Legacy policy approvals
+    /// re-issue the exact granted call; an explicit `request_approval` receives
+    /// the operator's approve/deny decision and continues without asking again.
     ///
     /// Returns the agent's reply as a bubble on its own channel, or `None` when
     /// there is no grant to redeem — which is the common case and must stay a
@@ -607,6 +607,7 @@ impl HarnessBrain {
     async fn redispatch_granted_call(
         &self,
         approval_id: &crate::ports::types::ApprovalId,
+        verdict: Verdict,
     ) -> Result<Option<OutboundMessage>> {
         // What the resolution actually minted, whichever scope it was (#374).
         //
@@ -620,6 +621,7 @@ impl HarnessBrain {
             agent: String,
             tool: String,
             instruction: String,
+            explicit_request: bool,
             origin_thread: Option<String>,
             /// The thread within `origin_thread` the approval was raised in
             /// (#1890). Both grant kinds already record it; dropping it here
@@ -629,11 +631,33 @@ impl HarnessBrain {
         }
 
         let grants = self.deps.approval_requests.grants();
-        let grant = if let Some(grant) = grants.peek(approval_id) {
-            // Re-issue verbatim. The grant admits ONE call matching these
-            // arguments exactly, so any drift the model introduces will simply
-            // re-park — the instruction is emphatic because a re-worded argument
-            // silently costs the operator a second approval round-trip.
+        let grant = if let Some(continuation) = grants.peek_continuation(approval_id) {
+            let grant = continuation.call;
+            debug_assert_eq!(continuation.verdict, verdict);
+            let title = grant
+                .args
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("your request");
+            let decision = match continuation.verdict {
+                Verdict::Approve => "APPROVED. Continue based on that decision",
+                Verdict::Deny => {
+                    "DENIED. Respect that decision and continue safely or stop the proposed work"
+                }
+            };
+            Redispatch {
+                instruction: format!(
+                    "The operator {decision} for your explicit approval request: {title}. Do \
+                         not call `request_approval` again for the same action unless circumstances \
+                         materially change."
+                ),
+                tool: grant.tool,
+                agent: grant.agent,
+                explicit_request: true,
+                origin_thread: grant.origin_thread,
+                origin_parent: grant.origin_parent,
+            }
+        } else if let Some(grant) = grants.peek(approval_id) {
             let args = serde_json::to_string(&grant.args).unwrap_or_else(|_| "{}".to_string());
             Redispatch {
                 instruction: format!(
@@ -643,10 +667,14 @@ impl HarnessBrain {
                 ),
                 tool: grant.tool,
                 agent: grant.agent,
+                explicit_request: false,
                 origin_thread: grant.origin_thread,
                 origin_parent: grant.origin_parent,
             }
-        } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
+        } else if let Some(standing) = grants
+            .peek_standing_by_approval(approval_id)
+            .filter(|standing| standing.verdict == Verdict::Approve)
+        {
             // No exact-arguments pin, and deliberately so: a standing grant
             // admits any arguments, which is precisely what the operator
             // consented to by choosing this scope. Pinning them anyway would
@@ -660,6 +688,7 @@ impl HarnessBrain {
                 ),
                 tool: standing.tool,
                 agent: standing.agent,
+                explicit_request: false,
                 origin_thread: standing.origin_thread,
                 origin_parent: standing.origin_parent,
             }
@@ -810,7 +839,17 @@ impl HarnessBrain {
             // button rather than a button that cannot work.
             Ok(outcome) => match &outcome.budget_paused {
                 Some(pause) => budget_pause_notice_no_resend(pause),
-                None => outcome.reply,
+                None => {
+                    if grant.explicit_request && grants.consume_continuation(approval_id).is_none()
+                    {
+                        tracing::warn!(
+                            approval_id = %approval_id,
+                            "explicit approval continuation was already consumed or expired; \
+                             the agent's turn still ran"
+                        );
+                    }
+                    outcome.reply
+                }
             },
             Err(err) => {
                 // The grant stays live: the call did not go through, so the
@@ -2746,15 +2785,16 @@ impl HarnessBrain {
     /// [`MAX_APPROVAL_REQUESTS_PER_TURN`](crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
     /// anything past the cap is discarded rather than flooding the queue.
     ///
-    /// **A failed park never takes the batch or the turn down with it.**
+    /// **A failed park never takes the batch or the turn down with it, but it
+    /// is never silent.**
     /// [`ApprovalRequestQueue::drain`](crate::harness::policy::ApprovalRequestQueue::drain)
     /// empties the shared queue up front, so propagating the first
     /// [`CycleHost::park_effect`](crate::ports::brain::CycleHost::park_effect)
     /// error with `?` would lose every *later* request in the batch — already out
     /// of the queue and never retried — and would discard the turn's
-    /// already-computed operator reply along with it. That is precisely the
-    /// silent-disappearance failure this issue exists to fix, so each failure is
-    /// logged at `error` and the drain continues.
+    /// already-computed operator reply along with it. The drain therefore
+    /// continues, then returns an operator-visible notice naming how many
+    /// requests were not saved and how to retry them.
     async fn park_approval_requests(&self, host: &dyn CycleHost) -> Result<Option<String>> {
         let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
         let drained = self.deps.approval_requests.drain(cap);
@@ -2773,7 +2813,8 @@ impl HarnessBrain {
 
         // No `cap` argument: the drain carries the one it was taken against, so
         // the sentence cannot name a limit this turn was not held to.
-        let notice = drained.overflow_notice();
+        let mut notices: Vec<String> = drained.overflow_notice().into_iter().collect();
+        let mut failed = 0usize;
         for request in drained.requests {
             match host.park_effect(request.effect).await {
                 Ok(approval_id) => log::info!(
@@ -2783,14 +2824,24 @@ impl HarnessBrain {
                 ),
                 // Loud, and the only trace of a request the operator will never
                 // see — the queue entry is already gone.
-                Err(err) => log::error!(
-                    "[harness::brain] failed to park '{}' for operator approval ({}): {err}",
-                    request.tool,
-                    request.reason
-                ),
+                Err(err) => {
+                    failed += 1;
+                    log::error!(
+                        "[harness::brain] failed to park '{}' for operator approval ({}): {err}",
+                        request.tool,
+                        request.reason
+                    );
+                }
             }
         }
-        Ok(notice)
+        if failed > 0 {
+            let requests = if failed == 1 { "request" } else { "requests" };
+            notices.push(format!(
+                "{failed} approval {requests} could not be saved, so no decision is pending for \
+                 that work and it was not run. Ask the agent to request approval again."
+            ));
+        }
+        Ok((!notices.is_empty()).then(|| notices.join("\n\n")))
     }
 
     /// Executes one drained delegation from the orchestrator's turn.
@@ -3633,9 +3684,9 @@ impl HarnessBrain {
                         channel_responses.push(message);
                     }
                 }
-                // Issue #243: an approval the operator APPROVED that minted a
-                // single-use grant — re-dispatch the granting agent so it
-                // actually makes the call.
+                // Approval resolutions return to the asking agent. Legacy
+                // approved calls redeem their grant; explicit requests resume
+                // on either verdict with the decision itself.
                 //
                 // This arm is the reason the feature was invisible before. The
                 // match had exactly two arms and everything else fell into
@@ -3645,10 +3696,12 @@ impl HarnessBrain {
                 // happened — indistinguishable from the tool having run.
                 CompanyEvent::ApprovalResolved {
                     approval_id,
-                    verdict: Verdict::Approve,
+                    verdict,
                     ..
                 } => {
-                    if let Some(message) = self.redispatch_granted_call(approval_id).await? {
+                    if let Some(message) =
+                        self.redispatch_granted_call(approval_id, *verdict).await?
+                    {
                         channel_responses.push(message);
                     }
                 }
@@ -8611,16 +8664,19 @@ members = ["eng1", "eng2"]
         }
 
         let host = FlakyParkingHost::default();
-        brain
+        let notice = brain
             .park_approval_requests(&host)
             .await
-            .expect("a park failure is logged, not propagated");
+            .expect("a park failure is surfaced without aborting the batch")
+            .expect("the operator is told a request was not saved");
 
         // The first park failed; the two after it still reached the operator.
         let parked = host.parked();
         assert_eq!(parked.len(), 2, "the batch continued past the failure");
         assert_eq!(parked[0].kind, "second_tool");
         assert_eq!(parked[1].kind, "third_tool");
+        assert!(notice.contains("1 approval request could not be saved"));
+        assert!(notice.contains("Ask the agent to request approval again"));
     }
 
     // --- Re-dispatching a granted call (issue #243) --------------------------
@@ -8857,6 +8913,66 @@ members = ["eng1", "eng2"]
             no_replies_journaled(&log).await,
             "the brain must not journal the reply a second time; the runtime owns it"
         );
+    }
+
+    async fn assert_explicit_decision_continues(verdict: Verdict, expected: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        requests
+            .grants()
+            .continue_approval(crate::runtime::grants::ApprovalContinuation {
+                call: crate::runtime::grants::GrantedCall {
+                    approval_id: ApprovalId::new("appr-explicit"),
+                    agent: "ceo".into(),
+                    tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.into(),
+                    args: serde_json::json!({
+                        "title": "Publish the announcement",
+                        "question": "May I publish it?"
+                    }),
+                    at_millis: now_millis(),
+                    origin_thread: None,
+                    origin_parent: None,
+                    origin_task: None,
+                },
+                verdict,
+                by: crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::User,
+                    id: "operator".into(),
+                },
+            });
+        let grants = requests.grants();
+        let brain = brain_with_queue_and_events(dir.path(), requests, log);
+
+        let result = brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-explicit", verdict)]),
+                &NoopHost,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.channel_responses.len(), 1);
+        let text = &result.channel_responses[0].text;
+        assert!(text.contains(expected), "{text}");
+        assert!(text.contains("Publish the announcement"), "{text}");
+        assert!(!text.contains("Re-issue it"), "{text}");
+        assert!(
+            grants
+                .peek_continuation(&ApprovalId::new("appr-explicit"))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_approval_continues_without_reissuing_the_request_tool() {
+        assert_explicit_decision_continues(Verdict::Approve, "APPROVED").await;
+    }
+
+    #[tokio::test]
+    async fn an_explicit_denial_also_returns_to_the_requesting_agent() {
+        assert_explicit_decision_continues(Verdict::Deny, "DENIED").await;
     }
 
     /// A threaded approval continuation must preserve the approval's thread root
@@ -9099,6 +9215,26 @@ members = ["eng1", "eng2"]
                 origin_thread: None,
                 origin_parent: None,
                 origin_task: None,
+            });
+        requests
+            .grants()
+            .grant_standing(crate::runtime::grants::StandingGrant {
+                id: crate::runtime::grants::GrantId::new("deny-1"),
+                agent: "ceo".into(),
+                workflow: None,
+                tool: "workspace_write".into(),
+                verdict: Verdict::Deny,
+                granted_by: crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::User,
+                    id: "user-1".into(),
+                },
+                approval_id: ApprovalId::new("appr-1"),
+                at_millis: now_millis(),
+                expires_at_millis: now_millis() + 60_000,
+                origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
+                scope: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
 

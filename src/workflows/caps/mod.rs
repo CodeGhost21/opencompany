@@ -244,6 +244,7 @@ pub async fn build_capabilities(
     // it can mark those graphs before tinyflows runs them. `None` for a dry run
     // because every effect slot is inert there.
     let gates = (!dry_run).then(|| self::resolver::ChildPolicyGates {
+        policy_hitl_enabled: false,
         policy: record.effective_policy(),
         run_id: run_id.to_string(),
         grants: deps.approval_requests.grants(),

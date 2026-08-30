@@ -71,9 +71,9 @@ const DEFAULT_POLICY_MODE = "auto";
 /** The approval tiers the host accepts (`POLICY_MODES` in `company/types.rs`). */
 const POLICY_MODES: { value: string; label: string }[] = [
   { value: "readonly", label: "Read-only — never acts on its own" },
-  { value: "supervised", label: "Supervised — asks before acting" },
-  { value: "auto", label: "Auto — acts, asks on the risky calls" },
-  { value: "full", label: "Full — acts without asking" },
+  { value: "supervised", label: "Supervised — conservative execution" },
+  { value: "auto", label: "Auto — balanced execution" },
+  { value: "full", label: "Full — broadest execution" },
 ];
 
 /** The honest line a gated trigger shows in place of an enabled control. */

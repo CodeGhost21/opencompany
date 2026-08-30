@@ -46,7 +46,7 @@ prompt_files = ["prompts/finance.md"]
 # `[tools].allow` follows, and for the same reason: a short list here REPLACES
 # the belt rather than adding to it.
 #
-# `chargebee_send_invoice` and `chargebee_create_customer` are declared
-# `Reach::Consequence`, so they still park for approval under this company's
-# `auto` policy. Holding the tools is not the same as invoicing unattended.
+# Holding the Chargebee tools is not the same as invoicing unattended. Before
+# `chargebee_send_invoice` or `chargebee_create_customer`, call
+# `request_approval` with the exact action and wait for the operator.
 tools = ["*", "workspace.*", "workspace.write", "media", "composio", "search", "mcp:*", "chargebee"]

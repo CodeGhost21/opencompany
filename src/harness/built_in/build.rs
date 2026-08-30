@@ -320,6 +320,14 @@ pub fn build_agent(
     // Deliberate-memory tools, oc-authored over this company's own context
     // port — see `memory_tools`'s doc comment for why not the vendored ones.
     let mut tools: Vec<Box<dyn Tool>> = memory_tools(deps, company, &manifest_agent.id);
+    // Approvals are an explicit agent action, not a policy side effect. Every
+    // roster agent gets this intrinsic tool regardless of external grants.
+    tools.push(Box::new(
+        crate::harness::approval_tool::RequestApprovalTool::new(
+            manifest_agent.id.clone(),
+            deps.approval_requests.clone(),
+        ),
+    ));
     #[cfg(feature = "mcp")]
     {
         // These read the installed-server registry, so installs and lifecycle
@@ -407,7 +415,7 @@ pub fn build_agent(
     // run commands with a tool that is not there.
     let mut shell_wired = false;
     if wants_shell || wants_code || wants_web {
-        let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.mode()));
+        let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.toolbelt_mode()));
         // `shell` and `code` are separate grant namespaces and are wired from
         // separate tool vectors — a company granting only one MUST NOT receive
         // the other's tools (the production `CapabilityFilter` is identity and
@@ -2614,6 +2622,7 @@ mod tests {
             "memory_recall",
             "memory_store",
             "read_workspace_state",
+            "request_approval",
             "shell",
             "web_fetch",
         ];
@@ -2634,6 +2643,12 @@ mod tests {
             expected.sort();
         }
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
+    }
+
+    #[test]
+    fn request_approval_is_intrinsic_and_needs_no_manifest_grant() {
+        let names = built_tool_names(&[], false);
+        assert!(names.contains(&"request_approval".to_string()), "{names:?}");
     }
 
     /// Issue #988: the tool-iteration ceiling is **stated** on every agent this

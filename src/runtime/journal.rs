@@ -35,7 +35,7 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::Result;
 use crate::ports::journal::{Durability, JournalStore};
 use crate::ports::types::{Actor, ApprovalId, CompanyId, Effect, EventSeq, StartedBy};
-use crate::runtime::grants::{GrantId, GrantedCall, StandingGrant};
+use crate::runtime::grants::{ApprovalContinuation, GrantId, GrantedCall, StandingGrant};
 pub use crate::runtime::types::TaskLink;
 use crate::store::fs::FsJournalStore;
 
@@ -240,6 +240,34 @@ enum JournalRecord {
     ApprovalGranted {
         /// The grant, whole.
         grant: GrantedCall,
+    },
+    /// A follow-up turn owed after an agent explicitly asked the operator a
+    /// question. Unlike `ApprovalGranted`, this carries either verdict and
+    /// conveys no authority to execute a tool call.
+    ApprovalContinuationQueued {
+        /// The verdict and routing context, whole.
+        continuation: ApprovalContinuation,
+    },
+    /// An explicit decision follow-up is committed to one dispatch attempt.
+    /// Written before the agent turn starts so recovery never repeats external
+    /// actions from a continuation that may already have partially run.
+    ApprovalContinuationDispatched {
+        /// The approval whose follow-up was claimed.
+        id: ApprovalId,
+        /// Epoch-millis the dispatch was committed.
+        at_millis: u64,
+    },
+    /// An explicit approval continuation was delivered to its requesting agent.
+    ApprovalContinuationConsumed {
+        /// The approval whose follow-up completed.
+        id: ApprovalId,
+    },
+    /// An explicit approval continuation expired before it could be delivered.
+    ApprovalContinuationExpired {
+        /// The approval whose follow-up expired.
+        id: ApprovalId,
+        /// Epoch-millis the expiry was recorded.
+        at_millis: u64,
     },
     /// A grant redeemed by its agent — the tool ran.
     GrantConsumed {
@@ -592,6 +620,19 @@ impl JournalRecord {
             // direction — the cost of the loss is an extra question, never an
             // extra call.
             Self::ApprovalGranted { .. } => Durability::Process,
+            // Conversation continuations carry no execution authority. Losing
+            // a queued one means the agent misses a verdict; losing a terminal
+            // line can repeat a model follow-up, but cannot repeat an effect.
+            // Losing the dispatch claim can replay an entire model turn whose
+            // earlier tool call already left the company. Host durability buys
+            // at-most-once dispatch; a crash after the claim but before the turn
+            // takes the safe at-most-once direction and may drop the follow-up.
+            // Losing the queue record after `ApprovalResolved` survived leaves
+            // a decided request with no card and no follow-up to recover.
+            Self::ApprovalContinuationQueued { .. }
+            | Self::ApprovalContinuationDispatched { .. } => Durability::Host,
+            Self::ApprovalContinuationConsumed { .. }
+            | Self::ApprovalContinuationExpired { .. } => Durability::Process,
             // The same direction as `ApprovalGranted`, one scope wider.
             Self::StandingGrantMinted { .. } => Durability::Process,
             // Deadline arithmetic rather than state: `replayed_standing_grants`
@@ -992,6 +1033,9 @@ struct State {
     /// consumed or expired entry here would re-arm a tool call that already ran
     /// (or that the operator was already told had lapsed) on every restart.
     grants: HashMap<ApprovalId, GrantedCall>,
+    /// Explicit approval follow-ups still owed after replay. Kept separate from
+    /// grants because a denial is a continuation, never executable authority.
+    approval_continuations: HashMap<ApprovalId, ApprovalContinuation>,
     /// Standing grants minted and not yet revoked or expired (issue #374).
     ///
     /// Removed from on both terminal records for the same reason as
@@ -1343,6 +1387,16 @@ impl RuntimeJournal {
             }
             JournalRecord::ApprovalGranted { grant } => {
                 state.grants.insert(grant.approval_id.clone(), grant);
+            }
+            JournalRecord::ApprovalContinuationQueued { continuation } => {
+                state
+                    .approval_continuations
+                    .insert(continuation.call.approval_id.clone(), continuation);
+            }
+            JournalRecord::ApprovalContinuationDispatched { id, .. }
+            | JournalRecord::ApprovalContinuationConsumed { id }
+            | JournalRecord::ApprovalContinuationExpired { id, .. } => {
+                state.approval_continuations.remove(&id);
             }
             JournalRecord::GrantConsumed { id, effect } => {
                 state.grants.remove(&id);
@@ -2264,6 +2318,72 @@ impl RuntimeJournal {
         .await
     }
 
+    /// Records a verdict-bearing explicit approval continuation before it is
+    /// armed in memory.
+    pub async fn record_approval_continuation(
+        &self,
+        continuation: &ApprovalContinuation,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .insert(continuation.call.approval_id.clone(), continuation.clone());
+        self.append(&JournalRecord::ApprovalContinuationQueued {
+            continuation: continuation.clone(),
+        })
+        .await
+    }
+
+    /// Records that an explicit approval continuation reached its agent.
+    pub async fn record_approval_continuation_consumed(&self, id: &ApprovalId) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .remove(id);
+        self.append(&JournalRecord::ApprovalContinuationConsumed { id: id.clone() })
+            .await
+    }
+
+    /// Durably claims one explicit continuation before its agent turn starts.
+    /// Replay removes a claimed continuation from the recovery queue, choosing
+    /// a possibly missed follow-up over repeating an external action.
+    pub async fn record_approval_continuation_dispatched(
+        &self,
+        id: &ApprovalId,
+        at_millis: u64,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .remove(id);
+        self.append(&JournalRecord::ApprovalContinuationDispatched {
+            id: id.clone(),
+            at_millis,
+        })
+        .await
+    }
+
+    /// Records that an explicit approval continuation expired undelivered.
+    pub async fn record_approval_continuation_expired(
+        &self,
+        id: &ApprovalId,
+        at_millis: u64,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .remove(id);
+        self.append(&JournalRecord::ApprovalContinuationExpired {
+            id: id.clone(),
+            at_millis,
+        })
+        .await
+    }
+
     /// Records that a grant was redeemed — the agent re-issued the call and the
     /// tool ran. Removes it from the replay set so a restart cannot re-arm it.
     ///
@@ -2315,6 +2435,17 @@ impl RuntimeJournal {
             .lock()
             .expect("journal state poisoned")
             .grants
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Explicit approval continuations still owed according to journal replay.
+    pub fn replayed_approval_continuations(&self) -> Vec<ApprovalContinuation> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
             .values()
             .cloned()
             .collect()
@@ -3583,6 +3714,56 @@ mod test {
         );
     }
 
+    #[tokio::test]
+    async fn a_denied_explicit_request_replays_only_as_a_verdict_continuation() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+        let continuation = ApprovalContinuation {
+            call: GrantedCall {
+                tool: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.into(),
+                ..grant("appr-denied", 1_000)
+            },
+            verdict: crate::ports::types::Verdict::Deny,
+            by: Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "operator".into(),
+            },
+        };
+
+        journal
+            .record_approval_continuation(&continuation)
+            .await
+            .unwrap();
+
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert!(
+            reloaded.replayed_grants().is_empty(),
+            "a denial must never replay as executable authority"
+        );
+        assert_eq!(
+            reloaded.replayed_approval_continuations(),
+            vec![continuation.clone()]
+        );
+
+        reloaded
+            .record_approval_continuation_dispatched(&continuation.call.approval_id, 2_000)
+            .await
+            .unwrap();
+        let after_dispatch = RuntimeJournal::new(&path);
+        after_dispatch.load().await.unwrap();
+        assert!(
+            after_dispatch.replayed_approval_continuations().is_empty(),
+            "a host-durable dispatch claim prevents restart from repeating the turn"
+        );
+
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(raw.contains("ApprovalContinuationQueued"));
+        assert!(raw.contains("ApprovalContinuationDispatched"));
+        assert!(!raw.contains("ApprovalGranted"));
+    }
+
     /// The other half, and the one that actually matters for safety: a grant
     /// that already fired — or that lapsed and was announced as lapsed — must
     /// NOT come back on replay.
@@ -4281,6 +4462,24 @@ mod test {
             JournalRecord::ApprovalGranted {
                 grant: grant("a", 4),
             },
+            JournalRecord::ApprovalContinuationQueued {
+                continuation: ApprovalContinuation {
+                    call: grant("continuation", 4),
+                    verdict: crate::ports::types::Verdict::Approve,
+                    by: revoker(),
+                },
+            },
+            JournalRecord::ApprovalContinuationDispatched {
+                id: ApprovalId::new("continuation"),
+                at_millis: 4,
+            },
+            JournalRecord::ApprovalContinuationConsumed {
+                id: ApprovalId::new("continuation"),
+            },
+            JournalRecord::ApprovalContinuationExpired {
+                id: ApprovalId::new("continuation"),
+                at_millis: 5,
+            },
             JournalRecord::GrantConsumed {
                 id: ApprovalId::new("a"),
                 effect: None,
@@ -4356,12 +4555,12 @@ mod test {
     /// pinned separately below (issue #1145) — deliberately not by loosening
     /// this list, which is the assertion that would have stopped noticing.
     #[test]
-    fn host_durable_kinds_are_exactly_the_seven_that_could_repeat_an_action() {
+    fn host_durable_kinds_are_exactly_the_nine_that_protect_approval_work() {
         let all = every_record_kind();
         let tags: HashSet<String> = all.iter().map(record_tag).collect();
         assert_eq!(
             tags.len(),
-            17,
+            21,
             "every JournalRecord variant must appear once in every_record_kind"
         );
 
@@ -4374,6 +4573,8 @@ mod test {
         assert_eq!(
             host,
             vec![
+                "ApprovalContinuationDispatched".to_string(),
+                "ApprovalContinuationQueued".to_string(),
                 "BlockedNodeApproved".to_string(),
                 "BlockedNodeDispatched".to_string(),
                 "BlockedNodeReleased".to_string(),
@@ -4382,10 +4583,11 @@ mod test {
                 "GrantConsumed".to_string(),
                 "StandingGrantRevoked".to_string()
             ],
-            "the host-durable set is these seven kinds and nothing else; \
+            "the host-durable set is these nine kinds and nothing else; \
              widening it taxes the hot path, narrowing it lets an effect duplicate, \
-             a spent grant re-arm, or a blocked node's stash/approval/dispatch survive a \
-             process restart but not the host crash it also promises to survive"
+             a spent grant re-arm, an explicit follow-up repeat, or a blocked node's \
+             stash/approval/dispatch survive a process restart but not the host crash it also \
+             promises to survive"
         );
     }
 

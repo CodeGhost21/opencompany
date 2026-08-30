@@ -2375,7 +2375,10 @@ impl RuntimeBuilder {
             Some(h) => h.approval_gate.clone(),
             None => {
                 let gate = self.approvals.unwrap_or_else(|| {
-                    Arc::new(ManifestApprovalGate::new(self.manifest.policy.clone()))
+                    Arc::new(
+                        ManifestApprovalGate::new(self.manifest.policy.clone())
+                            .with_policy_hitl_disabled(),
+                    )
                 });
                 for pending in journal.pending() {
                     // Rehydrate from the deadline anchor, not `at_millis`
@@ -2415,6 +2418,7 @@ impl RuntimeBuilder {
             None => {
                 let grants = crate::runtime::grants::GrantSet::default();
                 grants.rehydrate(journal.replayed_grants());
+                grants.rehydrate_continuations(journal.replayed_approval_continuations());
                 grants
             }
         };
@@ -3637,6 +3641,30 @@ impl RuntimeBuilder {
                             tool_catalog.push(entry);
                         }
                     }
+                    // Fallback cognition still needs the same explicit approval
+                    // surface as HarnessBrain. The device services this call by
+                    // parking a question; it is not a policy-generated gate.
+                    if !tool_catalog.iter().any(|entry| {
+                        entry.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    }) {
+                        tool_catalog.push(ToolManifestEntry {
+                            name: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.to_string(),
+                            description: Some(
+                                "Ask the operator to approve one concrete proposed action, then stop and wait for the decision."
+                                    .to_string(),
+                            ),
+                            input_schema: Some(serde_json::json!({
+                                "type": "object",
+                                "properties": {
+                                    "title": { "type": "string" },
+                                    "question": { "type": "string" },
+                                    "context": { "type": "string" }
+                                },
+                                "required": ["title", "question"],
+                                "additionalProperties": false
+                            })),
+                        });
+                    }
                     select_hosted_or_echo(
                         self.brain_mode.unwrap_or(BrainMode::Hosted),
                         self.credential,
@@ -3975,6 +4003,7 @@ impl RuntimeBuilder {
         // under the `openhuman` harness arm) is in place, so a stash this
         // finds ready has somewhere real to resume to.
         if handover.is_none() {
+            runtime.arm_replayed_continuation_recovery();
             runtime.reconcile_stranded_blocked_nodes().await;
         }
 

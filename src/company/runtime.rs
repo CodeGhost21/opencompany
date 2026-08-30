@@ -393,6 +393,9 @@ pub struct CompanyRuntime {
     /// replaces it in the registry, or the rebuild failed and
     /// [`resume`](Self::resume) puts this one back to work.
     pub(crate) quiesced: Arc<AtomicBool>,
+    /// Set by a cold build when replay found explicit decision continuations;
+    /// consumed once when the runtime enters the production registry.
+    replay_continuations_on_register: AtomicBool,
     /// WS4: the embedded openhuman harness pool, when wired via
     /// [`RuntimeBuilder::with_harness`](crate::runtime::RuntimeBuilder::with_harness).
     /// Feature-gated so the default build is unaffected.
@@ -526,6 +529,7 @@ impl CompanyRuntime {
             per_agent: Arc::new(TokioMutex::new(HashMap::new())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
+            replay_continuations_on_register: AtomicBool::new(false),
             #[cfg(feature = "openhuman")]
             harness: None,
             #[cfg(feature = "openhuman")]
@@ -2133,6 +2137,26 @@ impl CompanyRuntime {
         {
             return self.resume_workflow_run(&approval_id, turn, batch).await;
         }
+        // An explicit question raised inside a workflow agent node is still a
+        // conversation continuation for that agent, not authority to replay the
+        // workflow node. The ordinary blocked-node path intentionally drops an
+        // all-denied batch; doing that here would swallow the operator's answer
+        // and leave the durable ApprovalContinuation live until expiry. The
+        // request tool is a turn boundary, so this batch is all-explicit by
+        // construction; keep the `all` guard fail-closed if a legacy mixed
+        // batch is ever replayed.
+        if let Some(turn) = turn.as_deref()
+            && crate::runtime::workflow_resume::is_node_turn(turn)
+            && batch.iter().all(|event| {
+                let CompanyEvent::ApprovalResolved { approval_id, .. } = event else {
+                    return false;
+                };
+                self.grants.peek_continuation(approval_id).is_some()
+            })
+        {
+            self.retire_blocked_stash(turn).await;
+            return self.run_continuation(&approval_id, batch).await;
+        }
         // Issue #899 (Stage 1): a blocked agent node, likewise not a brain turn.
         // Its gated calls parked under a `workflow-node:` key (disjoint from the
         // `workflow-run:` gate key above), so the same batch counting releases
@@ -2635,7 +2659,16 @@ impl CompanyRuntime {
         approval_id: &ApprovalId,
         batch: Vec<CompanyEvent>,
     ) -> Result<CycleReport> {
-        match CycleRunner::new(self).run(batch).await {
+        let claims = batch
+            .iter()
+            .filter_map(|event| match event {
+                CompanyEvent::ApprovalResolved { approval_id, .. } => {
+                    self.grants.peek_continuation(approval_id)
+                }
+                _ => None,
+            })
+            .collect();
+        match CycleRunner::new(self).run_continuation(batch, claims).await {
             Ok(mut report) => {
                 self.publish_continuation(approval_id, &mut report).await;
                 Ok(report)
@@ -3319,11 +3352,44 @@ impl CompanyRuntime {
         reason: ExpiryReason,
         at_millis: u64,
     ) -> Result<()> {
+        let explicit_request = self
+            .approval_gate
+            .take_expired_effect(id)
+            .filter(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+            .and_then(|effect| effect.agent.clone().map(|agent| (agent, effect)));
         self.journal.record_expired(id, at_millis, reason).await?;
         // Issue #796: the parked approval is gone, so its work unit is no
         // longer awaiting a resume — drop the pending mark so the checkout it
         // was holding across the park becomes sweepable.
         self.grants.clear_pending(id);
+        if let Some((agent, effect)) = explicit_request {
+            let by = Actor {
+                kind: ActorKind::System,
+                id: "expiry".into(),
+            };
+            if let Err(error) = CycleRunner::new(self)
+                .mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
+                .await
+            {
+                tracing::error!(
+                    approval_id = %id,
+                    %error,
+                    "[approval] an expired explicit request could not queue its denial \
+                     continuation; continuing the retirement sweep"
+                );
+            } else {
+                // Route through the ordinary settled-verdict path so chat and
+                // workflow-node requests both reach the asking agent.
+                drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                    CompanyEvent::ApprovalResolved {
+                        approval_id: id.clone(),
+                        verdict: Verdict::Deny,
+                        by,
+                    },
+                ))));
+                return Ok(());
+            }
+        }
         // Issue #469: releasing the turn this approval was blocking, and
         // running its continuation when this expiry was the last thing it
         // waited on. Spawned rather than awaited: the continuation is a full
@@ -3448,6 +3514,20 @@ impl CompanyRuntime {
             ids.push(grant.approval_id);
         }
 
+        for continuation in self.grants.sweep_continuations(now, GRANT_TTL_MILLIS) {
+            let id = continuation.call.approval_id;
+            self.journal
+                .record_approval_continuation_expired(&id, now)
+                .await?;
+            self.announce_to_operator(&format!(
+                "The `{}` approval decision for `{}` could not be delivered within 15 minutes — \
+                 ask the agent again if the work still matters.",
+                continuation.call.tool, continuation.call.agent
+            ))
+            .await;
+            ids.push(id);
+        }
+
         // Issue #374: standing grants lapse on the same maintenance tick.
         //
         // The sweep is housekeeping and an operator notice, never the
@@ -3538,8 +3618,40 @@ impl CompanyRuntime {
 
     /// Replays the journal to rebuild the executed-key set, the approval queue,
     /// and the live single-use grants (issue #243).
-    pub async fn recover(&self) -> Result<()> {
-        CycleRunner::new(self).recover().await
+    pub async fn recover(self: &Arc<Self>) -> Result<()> {
+        CycleRunner::new(self).recover().await?;
+        self.arm_replayed_continuation_recovery();
+        self.schedule_replayed_continuations();
+        Ok(())
+    }
+
+    /// Arms cold-boot delivery when replay found an explicit decision whose
+    /// detached follow-up had not yet been dispatch-claimed.
+    pub(crate) fn arm_replayed_continuation_recovery(&self) {
+        if !self.journal.replayed_approval_continuations().is_empty() {
+            self.replay_continuations_on_register
+                .store(true, Ordering::Release);
+        }
+    }
+
+    /// Detaches replayed decision follow-ups once the runtime is addressable.
+    /// The atomic makes a duplicate registration or rebuild swap a no-op.
+    pub(crate) fn schedule_replayed_continuations(self: &Arc<Self>) {
+        if !self
+            .replay_continuations_on_register
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        for continuation in self.journal.replayed_approval_continuations() {
+            drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                CompanyEvent::ApprovalResolved {
+                    approval_id: continuation.call.approval_id,
+                    verdict: continuation.verdict,
+                    by: continuation.by,
+                },
+            ))));
+        }
     }
 
     /// What every approval ever parked was, keyed by id — including approvals
@@ -3782,7 +3894,9 @@ impl CompanyRuntime {
                 // the same `subject_of` the resolve route's 400 and the mint use,
                 // so the control the card offers and the answer a resolve gets
                 // cannot disagree.
-                broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
+                broadly_grantable: p.effect.kind
+                    != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
                 // Issue #1458: a standing **denial** is enforced only on the
                 // agent turn path (`standing_deny_applies`); the workflow gate
@@ -3791,10 +3905,12 @@ impl CompanyRuntime {
                 // deny control is offered only where the runtime will actually
                 // enforce it — an agent subject — while the grant half above
                 // still covers a workflow, which can hold a standing permission.
-                broadly_deniable: matches!(
-                    crate::runtime::grants::subject_of(&p.effect),
-                    Some(crate::runtime::grants::GrantSubject::Agent(_))
-                ),
+                broadly_deniable: p.effect.kind
+                    != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && matches!(
+                        crate::runtime::grants::subject_of(&p.effect),
+                        Some(crate::runtime::grants::GrantSubject::Agent(_))
+                    ),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction
