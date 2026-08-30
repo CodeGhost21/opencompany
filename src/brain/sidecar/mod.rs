@@ -256,8 +256,14 @@ impl Brain for SidecarBrain {
                         if !seen.insert(call.call_id.clone()) {
                             continue;
                         }
+                        let approval_boundary =
+                            call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND;
                         let answer = self.service_tool_call(host, &call).await?;
+                        let boundary_accepted = approval_boundary && answer.ok;
                         self.transport.answer_tool_call(answer).await?;
+                        if boundary_accepted {
+                            break;
+                        }
                     }
                     SidecarFrame::Inference { call_id, request } => {
                         if !seen.insert(call_id.clone()) {

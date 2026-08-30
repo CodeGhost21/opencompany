@@ -2659,22 +2659,16 @@ impl CompanyRuntime {
         approval_id: &ApprovalId,
         batch: Vec<CompanyEvent>,
     ) -> Result<CycleReport> {
-        // The continuation gate has released the whole batch. Only now claim
-        // each explicit follow-up: claiming in `spawn_follow_up`, before
-        // `continue_turn` counted sibling approvals, made a still-waiting
-        // verdict look delivered after restart. The host-durable claim remains
-        // immediately before the model turn, preserving at-most-once execution
-        // for an email/payment/publish that succeeds before a crash.
-        for event in &batch {
-            if let CompanyEvent::ApprovalResolved { approval_id, .. } = event
-                && self.grants.peek_continuation(approval_id).is_some()
-            {
-                self.journal
-                    .record_approval_continuation_dispatched(approval_id, now_millis())
-                    .await?;
-            }
-        }
-        match CycleRunner::new(self).run(batch).await {
+        let claims = batch
+            .iter()
+            .filter_map(|event| match event {
+                CompanyEvent::ApprovalResolved { approval_id, .. } => {
+                    self.grants.peek_continuation(approval_id)
+                }
+                _ => None,
+            })
+            .collect();
+        match CycleRunner::new(self).run_continuation(batch, claims).await {
             Ok(mut report) => {
                 self.publish_continuation(approval_id, &mut report).await;
                 Ok(report)
@@ -3373,20 +3367,28 @@ impl CompanyRuntime {
                 kind: ActorKind::System,
                 id: "expiry".into(),
             };
-            CycleRunner::new(self)
+            if let Err(error) = CycleRunner::new(self)
                 .mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
-                .await?;
-            // Route through the ordinary settled-verdict path so chat and
-            // workflow-node requests both reach the asking agent, and the
-            // at-most-once dispatch claim is written before its model turn.
-            drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
-                CompanyEvent::ApprovalResolved {
-                    approval_id: id.clone(),
-                    verdict: Verdict::Deny,
-                    by,
-                },
-            ))));
-            return Ok(());
+                .await
+            {
+                tracing::error!(
+                    approval_id = %id,
+                    %error,
+                    "[approval] an expired explicit request could not queue its denial \
+                     continuation; continuing the retirement sweep"
+                );
+            } else {
+                // Route through the ordinary settled-verdict path so chat and
+                // workflow-node requests both reach the asking agent.
+                drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                    CompanyEvent::ApprovalResolved {
+                        approval_id: id.clone(),
+                        verdict: Verdict::Deny,
+                        by,
+                    },
+                ))));
+                return Ok(());
+            }
         }
         // Issue #469: releasing the turn this approval was blocking, and
         // running its continuation when this expiry was the last thing it

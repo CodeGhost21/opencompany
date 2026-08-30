@@ -412,6 +412,7 @@ impl<'a> CycleRunner<'a> {
         self.run_bracketed(
             events.into_iter().map(|event| (None, event)).collect(),
             None,
+            Vec::new(),
         )
         .await
     }
@@ -450,6 +451,22 @@ impl<'a> CycleRunner<'a> {
                 .map(|(seq, event)| (Some(seq), event))
                 .collect(),
             run_id,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Runs a released explicit-approval batch, claiming its continuations only
+    /// after this cycle owns the company/agent lock.
+    pub async fn run_continuation(
+        &self,
+        events: Vec<CompanyEvent>,
+        continuations: Vec<ApprovalContinuation>,
+    ) -> Result<CycleReport> {
+        self.run_bracketed(
+            events.into_iter().map(|event| (None, event)).collect(),
+            None,
+            continuations,
         )
         .await
     }
@@ -460,6 +477,7 @@ impl<'a> CycleRunner<'a> {
         &self,
         events: Vec<(Option<EventSeq>, CompanyEvent)>,
         run_id: Option<String>,
+        continuation_claims: Vec<ApprovalContinuation>,
     ) -> Result<CycleReport> {
         let cycle_id = crate::ports::generate_id();
         let trigger = cycle_trigger_of(&events);
@@ -520,6 +538,32 @@ impl<'a> CycleRunner<'a> {
             }
             None => self.rt.serial.clone().lock_owned().await,
         };
+        let mut claimed: Vec<ApprovalContinuation> = Vec::new();
+        for continuation in continuation_claims {
+            if let Err(error) = self
+                .rt
+                .journal
+                .record_approval_continuation_dispatched(
+                    &continuation.call.approval_id,
+                    now_millis(),
+                )
+                .await
+            {
+                for previous in &claimed {
+                    if let Err(requeue_error) =
+                        self.rt.journal.record_approval_continuation(previous).await
+                    {
+                        tracing::error!(
+                            approval_id = %previous.call.approval_id,
+                            %requeue_error,
+                            "[approval] a partial batch dispatch claim could not be requeued"
+                        );
+                    }
+                }
+                return Err(error);
+            }
+            claimed.push(continuation);
+        }
         let mut effects = EffectCounts::default();
         // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
         // the ambient `RedeemContext` for this cycle, read by every
