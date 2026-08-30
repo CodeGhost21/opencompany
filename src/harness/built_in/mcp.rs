@@ -494,7 +494,14 @@ impl Tool for OcMcpCallTool {
                     )
                     .await;
                 }
-                let mut result: ToolResult = result.rendered.into();
+                // A free function, not `.into()`. `ToolResult` moved into the
+                // shared `tinytools` vocabulary, and `McpToolResult` belongs to
+                // `tinymcp-bus` — two foreign types, so the orphan rule forbids
+                // the `From` impl this used to call. OpenHuman spells the
+                // conversion once, in `skills::types`, rather than at each call
+                // site, because written out by hand it is three chances to get
+                // the error flag the wrong way round.
+                let mut result: ToolResult = oh::skills::types::tool_result_from_mcp(result.rendered);
                 if options.prefer_markdown && result.markdown_formatted.is_none() {
                     result.markdown_formatted = Some(result.output());
                 }
