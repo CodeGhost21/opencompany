@@ -246,34 +246,26 @@ impl Brain for HostedMedullaBrain {
 
             // Drain the cycle's frames, deduping on callId (at-least-once).
             let mut seen: HashSet<String> = HashSet::new();
-            let mut stream = self.transport.cycle_frames(&cycle_id);
-            let mut frames = Vec::new();
-            while let Some(frame) = stream.next().await {
+            // Provider adapters reject a model response that co-batches
+            // request_approval with another call. This guard is the transport
+            // backstop for any later frames in the same orchestration cycle;
+            // answers remain streaming because the peer may await each one.
+            let mut approval_requested = false;
+            let mut frames = self.transport.cycle_frames(&cycle_id);
+            while let Some(frame) = frames.next().await {
                 match frame? {
                     InboundFrame::CycleComplete => break,
-                    frame => frames.push(frame),
-                }
-            }
-            let requests_approval = frames.iter().any(|frame| {
-                matches!(
-                    frame,
-                    InboundFrame::ToolCall(call)
-                        if call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
-                )
-            });
-            for frame in frames {
-                match frame {
                     InboundFrame::Effect(effect_frame) => {
                         if !seen.insert(effect_frame.call_id.clone()) {
                             continue;
                         }
-                        if requests_approval {
+                        if approval_requested {
                             self.transport
                                 .ack_effect(EffectResult {
                                     call_id: effect_frame.call_id,
                                     ok: false,
                                     error: Some(
-                                        "effect cannot execute in an approval-request cycle"
+                                        "effect cannot execute after a request_approval boundary"
                                             .to_string(),
                                     ),
                                     result: None,
@@ -300,8 +292,7 @@ impl Brain for HostedMedullaBrain {
                         if !seen.insert(call.call_id.clone()) {
                             continue;
                         }
-                        if requests_approval
-                            && call.name != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                        if approval_requested
                             && context_op_from_call(&call.name, &call.args).is_none()
                         {
                             self.transport
@@ -310,18 +301,20 @@ impl Brain for HostedMedullaBrain {
                                     ok: false,
                                     result: None,
                                     error: Some(
-                                        "tool cannot execute in an approval-request cycle"
+                                        "tool cannot execute after a request_approval boundary"
                                             .to_string(),
                                     ),
                                 })
                                 .await?;
                             continue;
                         }
+                        let requests_approval =
+                            call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND;
                         let answer = self.service_tool_call(host, &call).await?;
+                        approval_requested |= requests_approval && answer.ok;
                         self.transport.answer_tool_call(answer).await?;
-                        // Keep draining: every sibling frame in an approval-request
-                        // cycle must receive its rejection, including frames that
-                        // arrived after the accepted boundary.
+                        // Keep draining: every later sibling frame must receive
+                        // its explicit refusal instead of being abandoned.
                     }
                     InboundFrame::Usage(usage) => {
                         // Deduped like every other frame: delivery is
@@ -343,7 +336,6 @@ impl Brain for HostedMedullaBrain {
                         );
                         token_usage.fold(&reported);
                     }
-                    InboundFrame::CycleComplete => unreachable!("cycle completion was drained"),
                 }
             }
 

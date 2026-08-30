@@ -235,48 +235,26 @@ impl Brain for SidecarBrain {
             // Drain the cycle's frames, deduping on callId (at-least-once).
             let mut seen: HashSet<String> = HashSet::new();
             let mut passes = 0usize;
-            let mut stream = self.transport.cycle_frames(&cycle_id);
-            let mut frames = Vec::new();
-            while let Some(frame) = stream.next().await {
+            // The provider response parser owns the atomic batch invariant:
+            // request_approval cannot share a model response with another call.
+            // Keep this transport streaming and reject any later actionable
+            // frame, since inference/tool answers may unblock the next frame.
+            let mut approval_requested = false;
+            let mut frames = self.transport.cycle_frames(&cycle_id);
+            while let Some(frame) = frames.next().await {
                 match frame? {
                     SidecarFrame::CycleComplete => break,
-                    SidecarFrame::Inference { call_id, request } => {
-                        if !seen.insert(call_id.clone()) {
-                            continue;
-                        }
-                        // Inference answers unblock the sidecar's cycle, so they
-                        // cannot wait for CycleComplete with effectful frames.
-                        if passes >= self.max_passes {
-                            break;
-                        }
-                        passes += 1;
-                        let response = self.inference.infer(request).await?;
-                        token_usage.fold(&response.token_usage);
-                        self.transport.answer_inference(&call_id, response).await?;
-                    }
-                    frame => frames.push(frame),
-                }
-            }
-            let requests_approval = frames.iter().any(|frame| {
-                matches!(
-                    frame,
-                    SidecarFrame::ToolCall(call)
-                        if call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
-                )
-            });
-            for frame in frames {
-                match frame {
                     SidecarFrame::Effect(effect_frame) => {
                         if !seen.insert(effect_frame.call_id.clone()) {
                             continue;
                         }
-                        if requests_approval {
+                        if approval_requested {
                             self.transport
                                 .ack_effect(EffectResult {
                                     call_id: effect_frame.call_id,
                                     ok: false,
                                     error: Some(
-                                        "effect cannot execute in an approval-request cycle"
+                                        "effect cannot execute after a request_approval boundary"
                                             .to_string(),
                                     ),
                                     result: None,
@@ -296,8 +274,7 @@ impl Brain for SidecarBrain {
                         if !seen.insert(call.call_id.clone()) {
                             continue;
                         }
-                        if requests_approval
-                            && call.name != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                        if approval_requested
                             && context_op_from_call(&call.name, &call.args).is_none()
                         {
                             self.transport
@@ -306,21 +283,34 @@ impl Brain for SidecarBrain {
                                     ok: false,
                                     result: None,
                                     error: Some(
-                                        "tool cannot execute in an approval-request cycle"
+                                        "tool cannot execute after a request_approval boundary"
                                             .to_string(),
                                     ),
                                 })
                                 .await?;
                             continue;
                         }
+                        let requests_approval =
+                            call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND;
                         let answer = self.service_tool_call(host, &call).await?;
+                        approval_requested |= requests_approval && answer.ok;
                         self.transport.answer_tool_call(answer).await?;
                         // Keep draining so every sibling gets an explicit refusal.
                     }
-                    SidecarFrame::Inference { .. } => {
-                        unreachable!("inference frames are serviced while streaming")
+                    SidecarFrame::Inference { call_id, request } => {
+                        if !seen.insert(call_id.clone()) {
+                            continue;
+                        }
+                        // Honor the pass cap while streaming: inference answers
+                        // are what unblock the sidecar's next frame.
+                        if passes >= self.max_passes {
+                            break;
+                        }
+                        passes += 1;
+                        let response = self.inference.infer(request).await?;
+                        token_usage.fold(&response.token_usage);
+                        self.transport.answer_inference(&call_id, response).await?;
                     }
-                    SidecarFrame::CycleComplete => unreachable!("cycle completion was drained"),
                 }
             }
 

@@ -246,20 +246,20 @@ async fn duplicate_effect_frame_is_handled_once() {
 }
 
 #[tokio::test]
-async fn effect_before_request_approval_cannot_cross_the_cycle_boundary() {
+async fn request_approval_refuses_later_effect_and_tool_frames() {
     let transport = Arc::new(MockTransport::new());
     transport.script_cycle(
         cid(),
         vec![
-            effect_frame(
-                "send_dm",
-                0,
-                json!({ "to": "operator", "body": "too early" }),
-            ),
             tool_call_frame(
                 crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                0,
+                json!({ "title": "Send the message", "question": "May I send it?" }),
+            ),
+            effect_frame(
+                "send_dm",
                 1,
-                json!({ "reason": "send the message" }),
+                json!({ "to": "operator", "body": "too early" }),
             ),
             tool_call_frame("noop", 2, json!({ "too": "late" })),
         ],
