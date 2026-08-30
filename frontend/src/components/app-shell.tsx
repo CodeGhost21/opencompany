@@ -48,8 +48,8 @@ import { HostSwitcher } from "@/components/host-switcher";
 import { RouteLoading } from "@/components/route-loading";
 import {
   RESTING_ROW,
-  SidebarCollapseButton,
   SidebarControls,
+  SidebarUtilityBar,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
 import {
@@ -323,7 +323,13 @@ const NAV: NavItem[] = [
   // (issue #1311). Remove a nav row here and the surface is hidden; remove it
   // from `console-routes.ts` and the surface is gone.
   // { view: "pages", label: "Pages", icon: AppWindow },
-  { view: "settings", label: "Settings", icon: Settings2 },
+  // Settings is NOT here, and its absence is deliberate in the same way the
+  // Pages line above is. It is a utility, not a place an operator works, so it
+  // sits on the sidebar's utility bar with Feedback, Discord and Collapse
+  // (`SidebarUtilityBar`) — which still carries the `data-tour="nav-settings"`
+  // anchor the guided tour spotlights. `#/settings` keeps answering because of
+  // its entry in `@/lib/console-routes`; removing THAT is what would take the
+  // surface away.
 ];
 
 // The console is hash-routed, so a normal `href="#main-content"` would also
@@ -3116,11 +3122,13 @@ export function AppShell({
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* The header is the column talking about itself: which host this
-              console is looking at, and whether the column is showing.
+              console is looking at, the utilities that act on the console
+              rather than on the company, and whether the column is showing.
               Everything BELOW it — the nav group and the footer's standing
-              controls — takes you somewhere. Collapse used to be the first row
-              under the switcher, which put a chrome control at the head of a
-              list of destinations and made it read as one (issue #1177).
+              controls — is the company. Collapse used to be the first row under
+              the switcher, which put a chrome control at the head of a list of
+              destinations and made it read as one (issue #1177); it now sits on
+              the utility bar with the three other controls of its kind.
 
               `flex-col` on the rail is not a preference. The collapsed column
               is `--sidebar-width-icon` (3rem) and this block is `p-2`, leaving
@@ -3138,8 +3146,11 @@ export function AppShell({
             <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
               <HostSwitcher companyName={feed.status.name} />
             </div>
-            <SidebarCollapseButton />
           </div>
+          {/* Directly under the switcher: Settings, Feedback, Discord and
+              Collapse, as one bar of icons rather than four full-width rows
+              spread across the nav and the footer. See `SidebarUtilityBar`. */}
+          <SidebarUtilityBar view={view} onNavigate={setView} />
         </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
@@ -3159,8 +3170,6 @@ export function AppShell({
             onBackToPicker={onBackToPicker}
             onCreateCompany={onCreateCompany}
             canCreateCompany={client.carriesPlatformBearer}
-            view={view}
-            onNavigate={setView}
           />
         </SidebarFooter>
         </nav>
