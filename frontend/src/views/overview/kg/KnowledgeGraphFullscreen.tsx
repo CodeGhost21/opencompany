@@ -365,9 +365,15 @@ export function KnowledgeGraphFullscreen({
         )}
 
         {/* A newly provisioned company has only its core node. The graph is
-            useful once desks give it pillars, so say that plainly and lead to
-            the one place that can create one instead of leaving inert graph
-            controls around an empty canvas (issue #1313). */}
+            useful once there is something to draw, so say that plainly and lead
+            to the one place that can start it, instead of leaving inert graph
+            controls around an empty canvas (issue #1313).
+
+            Drawn only when the field really is bare. It used to be drawn for
+            every deskless company, over a canvas that was itself suppressed —
+            so a company with a roster, tools and saved workflows was told it
+            had nothing, while the graph that could have shown all three was
+            never rendered. */}
         {emptyState && (
           <div className="absolute inset-0 z-20 grid place-items-center p-5">
             <section
@@ -375,10 +381,14 @@ export function KnowledgeGraphFullscreen({
               className="max-w-md rounded-sm-t border border-os-border-strong bg-os-bg/90 px-6 py-5 text-center shadow-lg backdrop-blur"
             >
               <p className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">Company overview</p>
-              <h2 id="overview-empty-title" className="mt-2 text-lg font-semibold text-os-text">No desks yet</h2>
+              <h2 id="overview-empty-title" className="mt-2 text-lg font-semibold text-os-text">
+                {noDesks ? 'No desks yet' : 'Nothing to draw yet'}
+              </h2>
               <p className="mt-2 text-sm leading-6 text-os-muted">
                 This graph shows how your company&apos;s desks, teammates, work, and workflows connect.
-                Create a desk to add its first pillar.
+                {noDesks
+                  ? ' Create a desk to add its first pillar.'
+                  : ' Nothing has been declared for it to draw.'}
               </p>
               <a
                 href="#/company/desks"
@@ -395,7 +405,7 @@ export function KnowledgeGraphFullscreen({
             The right paddle steps aside when the detail panel is open — see
             `clearOfRail`, which is what finally made that sentence true
             (issue #1307). */}
-        {!coreOpen && !emptyState && (
+        {!coreOpen && !emptyState && deptList.length > 0 && (
           <>
             <button
               onClick={() => step(-1)}
