@@ -533,7 +533,12 @@ export function HostSwitcher({
   }
 
   return (
-    <SidebarHeaderTrigger triggerData={triggerData} nameplate={nameplate} renderMenu={renderMenu} />
+    <SidebarHeaderTrigger
+      triggerData={triggerData}
+      nameplate={nameplate}
+      renderMenu={renderMenu}
+      tooltip={switcherTooltip}
+    />
   );
 }
 
@@ -570,11 +575,14 @@ function SidebarHeaderTrigger({
   triggerData,
   nameplate,
   renderMenu,
+  tooltip,
 }: {
   triggerData: Record<string, string | number>;
   nameplate: React.ReactNode;
   /** Mobile has no room to the right of the sidebar, so the menu drops instead. */
   renderMenu: (side: "right" | "bottom") => React.ReactNode;
+  /** The collapsed-rail tooltip text — see `switcherTooltip` in `HostSwitcher`. */
+  tooltip: string;
 }) {
   const { isMobile } = useSidebar();
   return (
@@ -591,7 +599,7 @@ function SidebarHeaderTrigger({
             size="lg"
             className="data-[popup-open]:bg-sidebar-accent data-[popup-open]:text-sidebar-accent-foreground"
             render={<DropdownMenuTrigger />}
-            tooltip={switcherTooltip}
+            tooltip={tooltip}
             {...triggerData}
           >
             {nameplate}
