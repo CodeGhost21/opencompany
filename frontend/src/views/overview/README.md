@@ -4,6 +4,13 @@
 has a top bar; its remaining controls live in the sidebar. The graph fills the
 shell's content surface beside the sidebar.
 
+A company with **no desks** still draws: the model hangs a deskless worker, and
+an unplaced workflow, off the core node, so the roster, its tools and the saved
+flows are all there without a single pillar. The corner says "No desks yet" and
+offers the one control that changes it. The full-canvas empty state is reserved
+for a graph with nothing but its core node — a fact about the graph, not about
+desks. Those were one flag until recently, and it suppressed the canvas.
+
 Issue #1321 moved it to `#/company/graph` and gave `#/overview` to an operator
 landing page. That swap is undone — the graph is the overview again — and
 `#/company/graph` is kept as an alias, so links minted while it lived there
