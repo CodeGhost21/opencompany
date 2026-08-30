@@ -521,7 +521,11 @@ mod test {
         ];
         let out = rank(candidates.into_iter(), "revenue margin quarter report", 1);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].addr.as_ref(), "new", "sorting belongs before cutting");
+        assert_eq!(
+            out[0].addr.as_ref(),
+            "new",
+            "sorting belongs before cutting"
+        );
     }
 
     #[test]
@@ -533,7 +537,10 @@ mod test {
 
     #[test]
     fn the_score_stays_inside_the_port_contract() {
-        for (_, score) in scores("revenue margin", &[("a", "revenue margin"), ("b", "revenue")]) {
+        for (_, score) in scores(
+            "revenue margin",
+            &[("a", "revenue margin"), ("b", "revenue")],
+        ) {
             assert!((0.0..=1.0).contains(&score), "score outside [0,1]: {score}");
         }
     }
