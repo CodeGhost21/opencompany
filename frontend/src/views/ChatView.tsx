@@ -720,11 +720,26 @@ export function ChatView({
    * own desks gets its own channels instead of the generic strategy/creative/
    * front-desk trio.
    *
-   * Two outcomes are *not* failures and fall back to the static defaults: a
-   * host with no `.../desks` route at all (404, the pre-#53 shape the
-   * Conversation path also tolerates) and a host that answers with no desks.
-   * Both mean "this company has no desks surface", which the defaults exist
-   * for. Anything else — a 500, a timeout, an offline tab — is a genuine
+   * Three outcomes, and they are three different facts:
+   *
+   * **A list, empty or not** — the host answered. An empty list means this
+   * company has no desks, which is a fact about the company and is rendered as
+   * itself: `#general` and the DMs, and no channels beside them. It used to
+   * fall back to the fabricated trio, so a company that had never declared a
+   * `[[group_chat]]` showed a Strategy desk, a Creative studio and a Front desk
+   * that did not exist and could not be opened — while the overview graph, which
+   * has no such fallback, correctly said the company had no desks. Two surfaces
+   * disagreeing about the same read is how the fabrication was finally noticed;
+   * the graph was right. This is the same rule as issue #370, applied to the
+   * answer rather than to the failure: console-side desk invention is
+   * indistinguishable from a real desk, so it does not happen.
+   *
+   * **404** — the host has no `.../desks` route at all (the pre-#53 shape the
+   * Conversation path also tolerates). That is not an answer about the company,
+   * so the static defaults still stand in: an old host's rail would otherwise
+   * be empty of everything it once had.
+   *
+   * **Anything else** — a 500, a timeout, an offline tab — is a genuine
    * failure, and pinning the fabricated desks on top of it is what made a
    * broken `/desks` permanently show `#general` while the URL claimed a real
    * desk (issue #370). Those surface as an error the operator can retry.
@@ -736,8 +751,9 @@ export function ChatView({
     try {
       const dtos = await client.listDesks(company);
       if (run !== desksRun.current) return;
-      desksAreFallback.current = dtos.length === 0;
-      setDesks(dtos.length ? dtos.map(deskFromDto) : defaultDesks());
+      // An answered read is never the fallback set, empty or not.
+      desksAreFallback.current = false;
+      setDesks(dtos.map(deskFromDto));
     } catch (error) {
       if (run !== desksRun.current) return;
       if (error instanceof ApiError && error.status === 404) {
