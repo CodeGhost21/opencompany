@@ -121,7 +121,9 @@ describe("no surface fabricates desks over an answered read", () => {
   it("the approvals topology read no longer imports the fabricated set", () => {
     const src = read("components/approval-card.tsx");
 
-    expect(src).not.toContain("defaultDesks(");
+    // The import is the check, not a mention: the file still *explains* the
+    // fabricated set in prose, and should.
+    expect(src).not.toMatch(/import \{[^}]*\bdefaultDesks\b[^}]*\} from "@\/lib\/desks"/);
     expect(src).toContain(".catch(() => null)");
   });
 
@@ -138,11 +140,18 @@ describe("defaultDesks itself", () => {
     // A grep guard rather than a behavioural one: the fabricated set is still
     // correct for a host that has no `/desks` route, so it cannot simply be
     // deleted — what matters is that nothing else reaches for it.
+    // Import sites, not mentions — every one of these files discusses the
+    // fabricated set in a comment, and the comments are the point.
+    const imports = (src: string) =>
+      /import \{[^}]*\bdefaultDesks\b[^}]*\} from "@\/lib\/desks"/.test(src) ||
+      /^\s*defaultDesks,$/m.test(src);
     const callers = ["views/ChatView.tsx", "components/app-shell.tsx"];
-    const others = ["components/approval-card.tsx", "views/chat/model.ts", "lib/threads.ts"];
+    const others = ["components/approval-card.tsx", "views/chat/model.ts"];
 
-    for (const file of callers) expect(read(file)).toContain("defaultDesks()");
-    for (const file of others) expect(read(file)).not.toContain("defaultDesks()");
+    for (const file of callers) expect(imports(read(file)), file).toBe(true);
+    for (const file of others) expect(imports(read(file)), file).toBe(false);
+    // `threads.ts` declares `defaultThreads` next to it and imports neither.
+    expect(read("lib/threads.ts")).not.toContain('from "@/lib/desks"');
   });
 });
 
