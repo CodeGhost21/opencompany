@@ -179,6 +179,12 @@ pub(crate) struct NativeCopilotModel {
     /// assert whether a later turn's first invoke replayed an earlier turn's
     /// transcript (issue #1042).
     seen_messages: StdMutex<Vec<Vec<Message>>>,
+    /// The `request.tools` names seen on each `invoke`, in call order — so a test
+    /// can assert the model actually got offered a given tool (issue #1931
+    /// regression: `propose_company_workflow` was silently withheld by the
+    /// vendored toolpacks registry, and the model dutifully called a tool it was
+    /// never advertised).
+    seen_tool_names: StdMutex<Vec<Vec<String>>>,
 }
 
 impl NativeCopilotModel {
@@ -206,6 +212,7 @@ impl NativeCopilotModel {
                 ..ModelProfile::default()
             },
             seen_messages: StdMutex::new(Vec::new()),
+            seen_tool_names: StdMutex::new(Vec::new()),
         })
     }
 
@@ -232,6 +239,11 @@ impl NativeCopilotModel {
         self.seen_messages.lock().unwrap().clone()
     }
 
+    /// The `request.tools` names recorded for each invoke so far, in call order.
+    fn seen_tool_names(&self) -> Vec<Vec<String>> {
+        self.seen_tool_names.lock().unwrap().clone()
+    }
+
     fn next_step(&self) -> NativeStep {
         let mut steps = self.steps.lock().unwrap();
         if let Some(step) = steps.pop_front() {
@@ -254,6 +266,13 @@ impl ChatModel<()> for NativeCopilotModel {
 
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen_tool_names.lock().unwrap().push(
+            request
+                .tools
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>(),
+        );
         self.seen_messages.lock().unwrap().push(request.messages);
         let step = self.next_step();
         let tool_calls: Vec<ToolCall> = step
@@ -1653,11 +1672,11 @@ async fn check_workflow_flags_gate_failures_and_passes_a_clean_graph() {
 // (envelope-null bindings, prose-as-expression prompts) prove `check_workflow`
 // runs `gates::failures` and surfaces its findings.
 
-/// `propose_workflow` accepts a good spec — running the SAME host authority the
+/// `propose_company_workflow` accepts a good spec — running the SAME host authority the
 /// old inline path did (a host-minted id, name dedup, stripped approval gating) —
 /// and stashes `(summary, spec, notes)` in the shared cell.
 #[tokio::test]
-async fn propose_workflow_accepts_a_good_spec_under_host_authority() {
+async fn propose_company_workflow_accepts_a_good_spec_under_host_authority() {
     let (_home, runtime) = evidence_runtime().await;
     seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
     let ctx = copilot_ctx(&runtime, "email the weekly digest every Monday", &[], &[]).await;
@@ -1704,12 +1723,12 @@ async fn propose_workflow_accepts_a_good_spec_under_host_authority() {
     assert!(diag.lock().unwrap().is_empty());
 }
 
-/// `propose_workflow` rejects via each of the three host gates — the node-kind
+/// `propose_company_workflow` rejects via each of the three host gates — the node-kind
 /// refusal, `ground_and_validate` (an unknown agent), and `courtesy_validate_draft`
 /// (an ungranted `tool_call`) — never stashing a proposal, and recording the
 /// sentence for the caller's fallback.
 #[tokio::test]
-async fn propose_workflow_rejects_via_each_host_gate() {
+async fn propose_company_workflow_rejects_via_each_host_gate() {
     let (_home, runtime) = evidence_runtime().await;
 
     async fn propose(runtime: &Arc<CompanyRuntime>, description: &str, workflow: Value) -> String {
@@ -1801,7 +1820,7 @@ async fn propose_workflow_rejects_via_each_host_gate() {
 /// script.
 pub(crate) fn propose_step(summary: &str, workflow: Value) -> NativeStep {
     NativeStep::call(
-        "propose_workflow",
+        "propose_company_workflow",
         json!({ "summary": summary, "workflow": workflow }),
     )
 }
@@ -1845,6 +1864,46 @@ async fn a_description_drafts_a_graph_via_the_agent() {
     assert!(spec.nodes.iter().all(|n| n.requires_approval.is_none()));
     assert_eq!(spec.nodes[0].schedule.as_deref(), Some("0 9 * * 1"));
     assert!(model.calls() >= 1, "the model ran at least once");
+}
+
+/// Issue #1931 regression: the vendored `openhuman` runtime compiles in a
+/// `workflows` toolpack that claims the bare name `propose_workflow`, owned only
+/// by openhuman's OWN `workflow_builder`/`flow_discovery` agents — and withholds
+/// any tool sharing that name from every OTHER agent's advertised belt,
+/// regardless of who actually registered it (`strip_packed_from_visible` matches
+/// by name alone). That silently dropped this copilot's propose tool from the
+/// model's very first request: the model still called it (from the system
+/// prompt), got back `unknown tool`, and gave up narrating prose instead of
+/// drafting a graph — so every downstream assertion about the drafted graph
+/// failed, none of them naming the real cause.
+///
+/// This pins the invariant that would have caught it directly: the FIRST model
+/// request of a turn must advertise all three of the copilot's own tools,
+/// including the propose tool, by name — not a downstream side effect of it
+/// being missing.
+#[tokio::test]
+async fn the_first_model_request_advertises_all_three_copilot_tools() {
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("email the weekly digest", good_workflow()),
+        NativeStep::done("Proposed the weekly digest workflow for your review."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model.clone(), None).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    let _ = draft_workflow_from_description(&runtime, "email the weekly digest every Monday").await;
+
+    let seen = model.seen_tool_names();
+    let first_request_tools = seen.first().expect("the model was invoked at least once");
+    for tool in [
+        "list_effective_tools",
+        "check_workflow",
+        "propose_company_workflow",
+    ] {
+        assert!(
+            first_request_tools.iter().any(|name| name == tool),
+            "the first model request must advertise `{tool}`; got {first_request_tools:?}"
+        );
+    }
 }
 
 /// Issue #1042 regression: drafting the SAME description twice must draft a graph
@@ -2193,7 +2252,7 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
     assert!(
         system.contains("list_effective_tools")
             && system.contains("check_workflow")
-            && system.contains("propose_workflow"),
+            && system.contains("propose_company_workflow"),
         "the persona names its three tools: {system}"
     );
     assert!(

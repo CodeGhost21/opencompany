@@ -379,7 +379,7 @@ impl Tool for CheckWorkflowTool {
 }
 
 // ---------------------------------------------------------------------------
-// propose_workflow
+// propose_company_workflow
 // ---------------------------------------------------------------------------
 
 /// The acceptance signal (issue #840). Runs the SAME host authority the old
@@ -409,7 +409,25 @@ impl ProposeWorkflowTool {
 #[async_trait]
 impl Tool for ProposeWorkflowTool {
     fn name(&self) -> &str {
-        "propose_workflow"
+        // NOT `propose_workflow` (issue #1931 regression, vendor bump to
+        // upstream `main`): the vendored `openhuman` runtime compiles in a
+        // `workflows` toolpack (`vendor/openhuman/src/openhuman/tools/toolpacks/
+        // registry.rs`) whose member list claims that bare name, owned only by
+        // openhuman's OWN `workflow_builder`/`flow_discovery` agents. Every
+        // pack defaults to `GroupMode::Withheld`, and `strip_packed_from_visible`
+        // matches by NAME ALONE across every registered agent — it has no idea
+        // this tool is ours, not theirs. An agent whose `agent_definition_name`
+        // is not in that pack's `owners` (ours is `workflow:copilot`) silently
+        // has any tool sharing a packed name stripped from the model's
+        // advertised belt and replaced with `load_skill`/`use_skill`, which this
+        // copilot doesn't register — so the model called a tool that no longer
+        // existed on the wire. There is no ownership/group-mode escape hatch
+        // reachable without editing the vendored tree: pack `owners` are a
+        // `&'static` compile-time list, and per-pack `GroupMode` is read from an
+        // ambient `CoreContext` OpenCompany never establishes (and flipping it
+        // would be process-wide, not scoped to this one agent). Keeping this
+        // name unmistakably ours is the durable fix.
+        "propose_company_workflow"
     }
 
     fn description(&self) -> &str {
@@ -418,7 +436,7 @@ impl Tool for ProposeWorkflowTool {
          host re-checks it under its own authority — it assigns the id, dedups the name, sets \
          approval gating, grounds every teammate and tool, and refuses an unsupported node kind. \
          If it passes you are DONE: reply in one short line. If it returns problems, fix every one \
-         and call propose_workflow again. Always run check_workflow first."
+         and call propose_company_workflow again. Always run check_workflow first."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -541,7 +559,7 @@ impl Tool for ProposeWorkflowTool {
         } else {
             *lock_vec(&self.diag) = errors.clone();
             Ok(ToolResult::success(format!(
-                "Not accepted yet — fix each of these and call propose_workflow again:\n- {}",
+                "Not accepted yet — fix each of these and call propose_company_workflow again:\n- {}",
                 errors.join("\n- ")
             )))
         }
