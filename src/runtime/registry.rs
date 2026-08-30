@@ -58,12 +58,15 @@ impl CompanyRegistry {
         // same lock, and the drain snapshots the map only afterwards. A company
         // is therefore either in that snapshot or born quiesced — never neither.
         let mut map = self.inner.write().expect("registry poisoned");
-        if self.shutting_down.load(Ordering::SeqCst) {
+        let shutting_down = self.shutting_down.load(Ordering::SeqCst);
+        if shutting_down {
             runtime.mark_quiesced();
         }
         map.insert(id, runtime.clone());
         drop(map);
-        runtime.schedule_replayed_continuations();
+        if !shutting_down {
+            runtime.schedule_replayed_continuations();
+        }
     }
 
     /// Marks the host as shutting down, so every subsequent

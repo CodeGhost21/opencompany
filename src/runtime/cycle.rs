@@ -3246,6 +3246,42 @@ pub(crate) fn assignment_matches(record: &CompanyRecord, target: &str, assignee:
 #[async_trait]
 impl CycleHost for CycleHostImpl<'_> {
     async fn call_tool(&self, call: ToolCall) -> Result<ToolResult> {
+        if call.tool == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND {
+            for field in ["title", "question"] {
+                if !call
+                    .args
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return Err(OpenCompanyError::InvalidRequest(format!(
+                        "`{field}` must be a non-empty string"
+                    )));
+                }
+            }
+            let approval_id = self
+                .park_effect(Effect {
+                    kind: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.to_string(),
+                    group: EffectGroup::Other,
+                    amount_usd: None,
+                    established_thread: false,
+                    first_time_counterparty: false,
+                    payload: call.args,
+                    // Fallback cognition has no local roster identity, but the
+                    // continuation still needs a subject so approve/deny routes
+                    // back into that brain rather than native effect execution.
+                    agent: Some("fallback-brain".to_string()),
+                    run_id: None,
+                })
+                .await?;
+            return Ok(ToolResult {
+                ok: true,
+                output: serde_json::json!({
+                    "status": "pending",
+                    "approval_id": approval_id.as_ref()
+                }),
+            });
+        }
         if call.tool == SEND_EMAIL_TOOL {
             return self.send_email(call.args).await;
         }
@@ -5311,6 +5347,46 @@ members = ["writer"]
         .await
         .expect("recovery dispatches the owed follow-up");
         assert_eq!(brain.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_registration_defers_replayed_approval_work_to_next_boot() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one(
+            home.clone(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ),
+        )
+        .await;
+        CycleRunner::new(&rt)
+            .settle_approval(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        drop(rt);
+
+        let brain = Arc::new(CountingBrain::default());
+        let recovered = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let registry = crate::runtime::CompanyRegistry::new();
+        registry.begin_shutdown();
+        registry.insert(recovered.id().clone(), recovered.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(recovered.is_quiesced());
+        assert_eq!(brain.calls(), 0);
+        assert_eq!(recovered.journal.replayed_approval_continuations().len(), 1);
     }
 
     #[tokio::test]
@@ -8525,6 +8601,43 @@ members = ["writer"]
             .unwrap();
         assert!(res.ok);
         assert_eq!(rt.tasks().list(rt.id()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fallback_call_tool_parks_an_explicit_approval_request() {
+        let home_dir = tmp_home();
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .build()
+            .await
+            .unwrap();
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "fallback-approval".into(),
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+
+        let result = host
+            .call_tool(ToolCall {
+                tool: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.to_string(),
+                args: serde_json::json!({
+                    "title": "Submit filing",
+                    "question": "May I submit it?"
+                }),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.output["status"], "pending");
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].kind,
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+        );
     }
 
     #[tokio::test]

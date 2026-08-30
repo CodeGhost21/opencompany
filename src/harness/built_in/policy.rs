@@ -130,6 +130,7 @@
 //! which un-declares it. Only this last arm reads the path; every arm above
 //! decides identically on both.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -472,6 +473,10 @@ tokio::task_local! {
     /// not a new dependency — `with_stop_hooks` is itself a task-local scope on
     /// this exact path.
     static CURRENT_SCOPE: ApprovalScope;
+    /// Whether this one actual agent turn has already executed
+    /// `request_approval`. Unlike `CURRENT_SCOPE`, this resets for every model
+    /// turn inside a shared cycle/workflow bucket.
+    static EXPLICIT_REQUEST_PENDING: Cell<bool>;
 }
 
 /// A turn's exclusive claim on one [`ApprovalScope`]'s bucket (issue #439).
@@ -540,6 +545,7 @@ impl ApprovalRequestQueue {
     /// separate: two different turns asking for the same tool are two requests,
     /// and collapsing them would hide one turn's ask behind another's.
     pub fn push(&self, request: ApprovalRequest) {
+        let explicit = request.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL;
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
         let bucket = guard.entry(scope).or_default();
@@ -549,6 +555,9 @@ impl ApprovalRequestQueue {
             return;
         }
         bucket.push(request);
+        if explicit {
+            let _ = EXPLICIT_REQUEST_PENDING.try_with(|pending| pending.set(true));
+        }
     }
 
     /// The scope pushes are currently filing into.
@@ -568,16 +577,17 @@ impl ApprovalRequestQueue {
     /// this lets the policy refuse every later sibling call in a provider
     /// response after `request_approval` has established the turn boundary.
     fn explicit_request_pending(&self) -> bool {
-        let scope = Self::current_scope();
-        self.inner
-            .lock()
-            .expect("approval request queue")
-            .get(&scope)
-            .is_some_and(|requests| {
-                requests.iter().any(|request| {
-                    request.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL
-                })
-            })
+        EXPLICIT_REQUEST_PENDING
+            .try_with(Cell::get)
+            .unwrap_or(false)
+    }
+
+    /// Runs one real agent turn with a fresh explicit-approval boundary.
+    pub async fn turn_scoped<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        EXPLICIT_REQUEST_PENDING.scope(Cell::new(false), fut).await
     }
 
     /// Takes exclusive ownership of `scope`'s bucket for the life of the
@@ -1896,7 +1906,7 @@ mod tests {
         let claim = queue.claim(ApprovalScope::Cycle);
 
         let (second_request, later_call) = claim
-            .scoped(async {
+            .scoped(queue.turn_scoped(async {
                 queue.push(ApprovalRequest {
                     tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
                     reason: "May I send this?".to_string(),
@@ -1927,7 +1937,7 @@ mod tests {
                     .check(&request("composio_execute", composio_send_args()))
                     .await;
                 (second_request, later_call)
-            })
+            }))
             .await;
 
         assert!(
@@ -1938,6 +1948,15 @@ mod tests {
             panic!("later sibling call must be refused");
         };
         assert!(reason.contains("already asked the operator"));
+
+        let unrelated_turn = queue
+            .turn_scoped(policy.check(&request("composio_execute", composio_send_args())))
+            .await;
+        assert_eq!(
+            unrelated_turn,
+            ToolPolicyDecision::Allow,
+            "a later agent turn in the same cycle/run scope gets a fresh boundary"
+        );
     }
 
     /// May this call be granted standing? The rule as the mint path asks it,

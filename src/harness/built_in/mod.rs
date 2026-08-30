@@ -3867,8 +3867,9 @@ impl HarnessPool {
             }),
             _ => None,
         };
-        let (outcome, turn_costs) = agent
-            .run_with_steer(
+        let (outcome, turn_costs) = deps
+            .approval_requests
+            .turn_scoped(agent.run_with_steer(
                 &augmented,
                 steer,
                 stream_ctx,
@@ -3880,7 +3881,7 @@ impl HarnessPool {
                     LiveStream::On { thread_root, .. } => *thread_root,
                     LiveStream::Workflow { .. } | LiveStream::Off => None,
                 },
-            )
+            ))
             .await?;
         // Issue #1846: park a durable re-issue marker the moment a pause is
         // seen, mirroring the grant-reissue precedent (`crate::runtime::grants`)
