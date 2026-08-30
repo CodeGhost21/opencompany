@@ -145,22 +145,18 @@ describe("the autonomy direction", () => {
     expect(widensSpendCap(10, 10)).toBe(false);
   });
 
-  it("rejects a blank spend cap without sending a policy update", async () => {
+  it("keeps the spend threshold inert while policy HITL is disabled", async () => {
     const { client, put } = makeClient(status("supervised"));
     await mount(client);
     const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
-    const noCap = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("No cap"));
-    noCap?.click();
-    await type(input, "   ");
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent?.includes("Save cap"))!
-        .click();
-    });
+    expect(input.disabled).toBe(true);
+    expect(
+      [...container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Save cap"),
+      )?.disabled,
+    ).toBe(true);
     expect(put).not.toHaveBeenCalled();
-    expect(toasts.error).toHaveBeenCalledWith(
-      "Enter a non-negative amount, or choose no cap.",
-    );
+    expect(container.textContent).toContain("Spend approval threshold (inactive)");
   });
 
   it("gates the same way the host matcher does", () => {
@@ -298,14 +294,8 @@ describe("changing the autonomy tier", () => {
     expect(put).not.toHaveBeenCalled();
   });
 
-  it("does not apply a stale always-ask save after a company switch", async () => {
-    let resolvePut!: (v: PolicyStatus) => void;
-    const put = vi.fn(
-      () =>
-        new Promise<PolicyStatus>((res) => {
-          resolvePut = res;
-        }),
-    );
+  it("does not offer an always-ask save while policy HITL is disabled", async () => {
+    const put = vi.fn();
     const client = {
       scopeFor: () => "/api/v1/acme",
       get: async (path: string) =>
@@ -315,17 +305,8 @@ describe("changing the autonomy tier", () => {
     } as unknown as OpenCompanyClient;
     await mount(client);
 
-    // The operator edits the list and hits "Save list"; the PUT hangs.
-    await type(
-      container.querySelector<HTMLInputElement>("#always-approve")!,
-      "shell, http_request",
-    );
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent?.includes("Save list"))!
-        .click();
-    });
-    expect(put).toHaveBeenCalledTimes(1);
+    expect(container.querySelector<HTMLInputElement>("#always-approve")?.disabled).toBe(true);
+    expect(put).not.toHaveBeenCalled();
 
     // The scope moves to another company while the PUT is in flight.
     await act(async () => {
@@ -333,13 +314,6 @@ describe("changing the autonomy tier", () => {
       await Promise.resolve();
     });
 
-    // The stale response resolves late: it must not apply to the new company's
-    // card — no success toast, no state repaint. (A later save would otherwise
-    // send the old company's list to the new company's endpoint.)
-    await act(async () => {
-      resolvePut(status("full"));
-      await Promise.resolve();
-    });
     expect(toasts.success).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain("Always-ask list updated");
   });
@@ -569,68 +543,42 @@ describe("resetting to the manifest's policy", () => {
 });
 
 describe("changing the spend cap", () => {
-  it("confirms a direct cap raise with the before-and-after threshold", async () => {
+  it("does not offer a cap raise while policy HITL is disabled", async () => {
     const initial: PolicyStatus = { ...status("supervised"), autoApproveUnderUsd: 5 };
     const { client, put } = makeClient(initial);
     await mount(client);
 
     const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
-    await type(input, "100");
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent?.includes("Save cap"))!
-        .click();
-    });
+    expect(input.disabled).toBe(true);
     expect(put).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
-    expect(document.body.textContent).toContain("Today spend under $5 asks nothing.");
-    expect(document.body.textContent).toContain("Raising the cap to 100");
-    expect(document.body.textContent).toContain(
-      "the daily budget still stops spending after its limit",
-    );
-
-    await act(async () => {
-      document
-        .querySelector<HTMLButtonElement>("[data-testid=policy-tier-confirm]")!
-        .click();
-      await Promise.resolve();
-    });
-    expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { autoApproveUnderUsd: 100 });
-  });
-
-  it("sends a tightening cap change in one click", async () => {
-    const initial: PolicyStatus = { ...status("supervised"), autoApproveUnderUsd: 100 };
-    const { client, put } = makeClient(initial);
-    await mount(client);
-
-    const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
-    await type(input, "25");
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent?.includes("Save cap"))!
-        .click();
-      await Promise.resolve();
-    });
-    expect(put).toHaveBeenCalledWith("/api/v1/acme/policy", { autoApproveUnderUsd: 25 });
+    expect(document.body.textContent).toContain("Spend approval threshold (inactive)");
     expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
   });
 
-  it("allows selecting no cap after clearing a finite cap", async () => {
+  it("does not offer a tightening cap change while policy HITL is disabled", async () => {
     const initial: PolicyStatus = { ...status("supervised"), autoApproveUnderUsd: 100 };
     const { client, put } = makeClient(initial);
     await mount(client);
 
     const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
-    await type(input, "");
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent?.includes("Set no cap"))!
-        .click();
-      await Promise.resolve();
-    });
+    expect(input.disabled).toBe(true);
+    expect(put).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-testid=policy-tier-confirm]")).toBeNull();
+  });
+
+  it("does not offer selecting no cap while policy HITL is disabled", async () => {
+    const initial: PolicyStatus = { ...status("supervised"), autoApproveUnderUsd: 100 };
+    const { client, put } = makeClient(initial);
+    await mount(client);
+
+    const input = container.querySelector<HTMLInputElement>("#spend-cap")!;
     expect(put).not.toHaveBeenCalled();
     expect(input.disabled).toBe(true);
-    expect(document.body.textContent).toContain("No cap");
+    expect(
+      [...container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Set no cap"),
+      )?.disabled,
+    ).toBe(true);
   });
 
   it("keeps an unsaved always-ask edit when saving the deadline", async () => {
@@ -750,23 +698,17 @@ describe("loading the policy", () => {
     expect(container.querySelector<HTMLInputElement>("#approval-deadline")?.value).toBe("24");
   });
 
-  it("discards a save response that resolves after the company changed", async () => {
-    // `get` parks every policy read in call order (mount, then the switch) and
-    // `put` parks the save, so the test controls the response order. The
-    // scenario is the reviewer's: the new company's load resolves FIRST, then
-    // the old company's save resolves — and the late save must not paint the
-    // new company's card with the old company's policy.
+  it("never starts an inactive cap save across a company switch", async () => {
     const heldGet: Array<(value: PolicyStatus) => void> = [];
-    let releasePut!: (value: PolicyStatus) => void;
     const acme = { ...status("supervised"), autoApproveUnderUsd: 10 };
+    const put = vi.fn(async () => acme);
     const client = {
       scopeFor: () => "/api/v1/acme",
       get: (path: string) =>
         path.endsWith("/policy")
           ? new Promise<PolicyStatus>((resolve) => heldGet.push(resolve))
           : Promise.resolve({ slugs: [], unwired: [] }),
-      put: () =>
-        new Promise<PolicyStatus>((resolve) => (releasePut = resolve)),
+      put,
       del: async () => acme,
     } as unknown as OpenCompanyClient;
 
@@ -779,15 +721,8 @@ describe("loading the policy", () => {
       await Promise.resolve();
     });
 
-    // Save a tightening cap change (10 -> 5); the PUT stays in flight.
-    await act(async () => {
-      await type(container.querySelector<HTMLInputElement>("#spend-cap")!, "5");
-    });
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent?.includes("Save cap"))!
-        .click();
-    });
+    expect(container.querySelector<HTMLInputElement>("#spend-cap")?.disabled).toBe(true);
+    expect(put).not.toHaveBeenCalled();
 
     // The operator switches companies while the save is still pending.
     await act(async () => {
@@ -804,25 +739,14 @@ describe("loading the policy", () => {
       container.querySelector<HTMLElement>("[data-testid=policy-tier-full]")?.getAttribute("aria-checked"),
     ).toBe("true");
 
-    // The stale "acme" save resolves late; it must not overwrite "other"'s
-    // card or drafts with the old company's cap value.
-    await act(async () => {
-      releasePut({ ...acme, autoApproveUnderUsd: 5 });
-      await Promise.resolve();
-    });
     expect(
       container.querySelector<HTMLElement>("[data-testid=policy-tier-full]")?.getAttribute("aria-checked"),
     ).toBe("true");
     expect(
       container.querySelector<HTMLElement>("[data-testid=policy-tier-supervised]")?.getAttribute("aria-checked"),
     ).toBe("false");
-    // `full` has no cap, so the draft stays empty — "5" from the stale save
-    // must never land in it.
     expect(container.querySelector<HTMLInputElement>("#spend-cap")?.value).toBe("");
-    expect(toasts.success).not.toHaveBeenCalledWith(
-      "Spend cap updated",
-      expect.anything(),
-    );
+    expect(put).not.toHaveBeenCalled();
   });
 
   it("discards a manual retry that resolves after the company changed", async () => {
