@@ -170,8 +170,7 @@ const SCAN_SKIP_DIRS: [&str; 7] = [
 /// produced nothing — exactly the `audit.log` false positive above, for a file
 /// the harness itself just started writing. Their `.builtin-hash` sidecars
 /// need no entry of their own; `is_hidden` already skips any dot-prefixed name.
-const SCAN_SKIP_FILES: [&str; 5] =
-    ["audit.log", "STYLE.md", "SOUL.md", "IDENTITY.md", "ROLE.md"];
+const SCAN_SKIP_FILES: [&str; 5] = ["audit.log", "STYLE.md", "SOUL.md", "IDENTITY.md", "ROLE.md"];
 
 /// Whether a directory entry is hidden, and therefore skipped.
 ///
