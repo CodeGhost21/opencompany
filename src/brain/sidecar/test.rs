@@ -437,7 +437,6 @@ fn debug_does_not_expose_internals_beyond_labels() {
 // ---------------------------------------------------------------------------
 
 use crate::company::CompanyManifest;
-use crate::ports::types::{Actor, ActorKind, Verdict};
 use crate::runtime::RuntimeBuilder;
 
 fn tmp_home() -> tempfile::TempDir {
@@ -550,7 +549,7 @@ async fn e2e_inference_then_gated_send_dm_drives_a_channel_response() {
 }
 
 #[tokio::test]
-async fn e2e_supervised_effect_parks_through_the_real_gate() {
+async fn e2e_supervised_effect_runs_without_policy_hitl() {
     let home_dir = tmp_home();
     let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockSidecarTransport::new());
@@ -585,30 +584,19 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
         transport.unmatched_cycles()
     );
 
-    // The Sign-group effect parked under supervised policy: an approval is
-    // queued and no channel response emitted.
-    assert_eq!(report.parked.len(), 1);
-    assert_eq!(rt.pending_approvals().len(), 1);
+    // Policy HITL is disabled on the production runtime gate. The Sign-group
+    // effect executes immediately even under supervised mode; only an explicit
+    // approval-producing tool creates a card.
+    assert!(report.parked.is_empty());
+    assert!(rt.pending_approvals().is_empty());
+    assert_eq!(report.executed_effects.len(), 1);
     assert!(report.responses.is_empty());
 
-    // The sidecar was told the effect is pending, not that it succeeded.
+    // The sidecar is told the effect succeeded rather than receiving a pending
+    // approval disposition.
     let acks = transport.acks();
     assert_eq!(acks.len(), 1);
-    assert!(!acks[0].ok);
-
-    // Resolving the approval drains the queue.
-    let approval_id = report.parked[0].clone();
-    rt.resolve_approval(
-        &approval_id,
-        Verdict::Approve,
-        Actor {
-            kind: ActorKind::Operator,
-            id: "owner".into(),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(rt.pending_approvals().is_empty());
+    assert!(acks[0].ok);
 }
 
 /// The trap that hid #800 for as long as the sidecar lane went unrun.
