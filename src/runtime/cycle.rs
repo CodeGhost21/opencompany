@@ -5129,9 +5129,10 @@ members = ["writer"]
                 .all(|grant| grant.approval_id != id),
             "a denied request must never replay as executable authority"
         );
-        assert_eq!(
-            rt.journal.replayed_approval_continuations(),
-            vec![continuation]
+        assert!(
+            rt.journal.replayed_approval_continuations().is_empty(),
+            "the spawned follow-up host-durably claimed this continuation, so restart must not \
+             repeat its model turn"
         );
     }
 
