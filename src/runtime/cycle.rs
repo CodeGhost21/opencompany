@@ -1219,6 +1219,21 @@ approval.]"
         if let GrantScope::Tool { .. } = scope {
             self.check_broadly_scoped(id, verdict)?;
         }
+        if self
+            .rt
+            .approval_gate
+            .parked_effect(id)
+            .is_some_and(|effect| {
+                effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && effect.agent.is_none()
+            })
+        {
+            return Err(OpenCompanyError::InvalidRequest(
+                "the explicit approval request is missing its requesting agent and cannot be \
+                 resumed; the card remains pending"
+                    .to_string(),
+            ));
+        }
         let outcome = self
             .rt
             .approval_gate
@@ -1256,16 +1271,12 @@ approval.]"
             ResolveOutcome::Approved(effect)
                 if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND =>
             {
-                if let Some(agent) = effect.agent.clone() {
-                    self.mint_approval_continuation(
-                        id,
-                        agent,
-                        effect,
-                        Verdict::Approve,
-                        by.clone(),
-                    )
+                let agent = effect
+                    .agent
+                    .clone()
+                    .expect("explicit request agent validated before resolution");
+                self.mint_approval_continuation(id, agent, effect, Verdict::Approve, by.clone())
                     .await?;
-                }
             }
             ResolveOutcome::Approved(effect) => {
                 self.settle_approved_effect(id, effect, by.clone(), scope)
@@ -1274,10 +1285,12 @@ approval.]"
             ResolveOutcome::Denied(effect)
                 if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND =>
             {
-                if let Some(agent) = effect.agent.clone() {
-                    self.mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
-                        .await?;
-                }
+                let agent = effect
+                    .agent
+                    .clone()
+                    .expect("explicit request agent validated before resolution");
+                self.mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
+                    .await?;
             }
             // Issue #1458: a standing denial is minted from the effect the
             // resolve carried, not `journal.approval_effect` — the journal keeps
@@ -5201,6 +5214,29 @@ members = ["writer"]
         assert_eq!(rt.pending_approvals().len(), 1);
         assert!(rt.standing_grants().is_empty());
         assert!(rt.grants.peek_continuation(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_question_without_an_agent_stays_pending_with_an_error() {
+        let home_dir = tmp_home();
+        let mut effect = harness_effect(
+            "finance",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({
+                "title": "Submit the filing",
+                "question": "May I submit it?"
+            }),
+        );
+        effect.agent = None;
+        let (rt, id) = park_one(home_dir.path().to_path_buf(), effect).await;
+
+        let error = rt
+            .resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .expect_err("an explicit request must name the agent to resume");
+
+        assert!(error.to_string().contains("missing its requesting agent"));
+        assert_eq!(rt.pending_approvals().len(), 1);
     }
 
     #[tokio::test]
