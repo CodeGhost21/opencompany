@@ -1,4 +1,4 @@
-import { MessageSquareWarning, PanelLeftClose, PanelLeftOpen, Settings2 } from "lucide-react";
+import { MessageSquareWarning, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
 
 import type { View } from "@/components/app-shell";
 
@@ -171,7 +171,7 @@ export function SidebarUtilityBar({
     >
       <UtilityButton
         label="Settings"
-        icon={<Settings2 />}
+        icon={<Settings />}
         active={view === "settings"}
         onClick={() => navigate("settings")}
         data-tour="nav-settings"
