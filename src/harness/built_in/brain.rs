@@ -10248,15 +10248,6 @@ members = ["eng1", "eng2"]
             // abstention left it. A test that wants the narrowing drives it
             // through `DelegationRunner::with_triage` directly, where the
             // verdict is scripted.
-            eprintln!(
-                "DEBUG invoke: is_triage={} messages={:?}",
-                is_triage_request(&request),
-                request
-                    .messages
-                    .iter()
-                    .map(|m| format!("{:?}: {}", m, m.text().chars().take(80).collect::<String>()))
-                    .collect::<Vec<_>>()
-            );
             if is_triage_request(&request) {
                 return Ok(ModelResponse::assistant("chatter".to_string()));
             }
