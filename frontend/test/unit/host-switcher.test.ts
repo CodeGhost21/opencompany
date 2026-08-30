@@ -149,7 +149,12 @@ describe("the collapsed rail keeps the lifecycle signal (issue #1931 review)", (
   });
 
   it("wires the tooltip onto both the plain nameplate and the dropdown trigger", () => {
-    const occurrences = source.split("tooltip={switcherTooltip}").length - 1;
-    expect(occurrences).toBe(2);
+    // The plain (non-menu) trigger passes it directly; the menu trigger goes
+    // through `SidebarHeaderTrigger`, which takes it as its own `tooltip` prop
+    // (split out because `useSidebar` throws outside a `SidebarProvider`) and
+    // forwards it onto its `SidebarMenuButton`.
+    expect(source).toContain("tooltip={switcherTooltip}");
+    expect(source).toContain("tooltip={tooltip}");
+    expect(source).toMatch(/tooltip: string;/);
   });
 });
