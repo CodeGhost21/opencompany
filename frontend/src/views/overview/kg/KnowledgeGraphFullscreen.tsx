@@ -46,7 +46,7 @@ const LEGEND_ABOVE_SHEET = 'max-[820px]:bottom-[calc(55%+0.5rem)]';
 export function KnowledgeGraphFullscreen({
   deptList, currentTeamId, currentDept,
   toolWiki, extraDetail, coreOpen = false, onCollapseCore, searchSlot, legendSlot, statusSlot,
-  onNavDept, onBack, covered = false, emptyState = false, children,
+  onNavDept, onBack, covered = false, emptyState = false, noDesks = false, children,
 }: {
   deptList: DeptLite[];
   currentTeamId: string | null;
@@ -68,8 +68,21 @@ export function KnowledgeGraphFullscreen({
   /** an outage overlay covers the shell; the graph must not answer the
       keyboard at all (issue #1314) */
   covered?: boolean;
-  /** the loaded company has no desks, so the graph cannot show its pillars */
+  /**
+   * The graph is bare — nothing but the company's core node — so the canvas is
+   * replaced by an explanation rather than left looking broken.
+   *
+   * This used to mean "the company has no desks", which suppressed the canvas
+   * for every deskless company, including ones with a roster, tools, saved
+   * workflows and a memory constellation to draw. Those hang off the core in
+   * the model and always had; only this view refused to render them.
+   */
   emptyState?: boolean;
+  /**
+   * The company declares no desks, so the graph has no pillars. The graph is
+   * drawn regardless — this only adds the note that says so.
+   */
+  noDesks?: boolean;
   onNavDept: (teamId: string) => void;
   onBack: () => void;
   children: React.ReactNode;
