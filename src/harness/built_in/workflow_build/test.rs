@@ -179,6 +179,12 @@ pub(crate) struct NativeCopilotModel {
     /// assert whether a later turn's first invoke replayed an earlier turn's
     /// transcript (issue #1042).
     seen_messages: StdMutex<Vec<Vec<Message>>>,
+    /// The `request.tools` names seen on each `invoke`, in call order — so a test
+    /// can assert the model actually got offered a given tool (issue #1931
+    /// regression: `propose_company_workflow` was silently withheld by the
+    /// vendored toolpacks registry, and the model dutifully called a tool it was
+    /// never advertised).
+    seen_tool_names: StdMutex<Vec<Vec<String>>>,
 }
 
 impl NativeCopilotModel {
