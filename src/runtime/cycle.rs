@@ -5314,6 +5314,55 @@ members = ["writer"]
     }
 
     #[tokio::test]
+    async fn explicit_dispatch_claim_waits_for_every_sibling_decision() {
+        let home_dir = tmp_home();
+        let brain = Arc::new(CountingBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "explicit-batch".into(),
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+        let first = host
+            .park_effect(harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({ "title": "First", "question": "First?" }),
+            ))
+            .await
+            .unwrap();
+        let second = host
+            .park_effect(harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({ "title": "Second", "question": "Second?" }),
+            ))
+            .await
+            .unwrap();
+
+        rt.resolve_approval(&first, Verdict::Deny, operator())
+            .await
+            .unwrap();
+        assert_eq!(brain.calls(), 0, "one sibling is still pending");
+        assert_eq!(rt.journal.replayed_approval_continuations().len(), 1);
+
+        rt.resolve_approval(&second, Verdict::Deny, operator())
+            .await
+            .unwrap();
+        assert_eq!(brain.calls(), 1, "the released batch runs one follow-up");
+        assert!(rt.journal.replayed_approval_continuations().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_denied_explicit_request_from_a_workflow_node_returns_to_its_agent() {
         let home_dir = tmp_home();
         let brain = Arc::new(CountingBrain::default());

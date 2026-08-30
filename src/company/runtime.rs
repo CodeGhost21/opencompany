@@ -1796,19 +1796,6 @@ impl CompanyRuntime {
                 }
                 ResolveReceipt::Settled(event) => *event,
             };
-            if let CompanyEvent::ApprovalResolved { approval_id, .. } = &event
-                && rt.grants.peek_continuation(approval_id).is_some()
-            {
-                // Claim before the model turn. A crash after an effectful tool
-                // succeeds but before cycle-end consumption must not replay the
-                // whole continuation and repeat that effect. The failure
-                // direction is deliberately at-most-once: a crash after this
-                // host-durable claim may lose the follow-up, never duplicate an
-                // email, payment, or publish.
-                rt.journal
-                    .record_approval_continuation_dispatched(approval_id, now_millis())
-                    .await?;
-            }
             rt.continue_turn(event).await
         })
     }
@@ -2672,6 +2659,21 @@ impl CompanyRuntime {
         approval_id: &ApprovalId,
         batch: Vec<CompanyEvent>,
     ) -> Result<CycleReport> {
+        // The continuation gate has released the whole batch. Only now claim
+        // each explicit follow-up: claiming in `spawn_follow_up`, before
+        // `continue_turn` counted sibling approvals, made a still-waiting
+        // verdict look delivered after restart. The host-durable claim remains
+        // immediately before the model turn, preserving at-most-once execution
+        // for an email/payment/publish that succeeds before a crash.
+        for event in &batch {
+            if let CompanyEvent::ApprovalResolved { approval_id, .. } = event
+                && self.grants.peek_continuation(approval_id).is_some()
+            {
+                self.journal
+                    .record_approval_continuation_dispatched(approval_id, now_millis())
+                    .await?;
+            }
+        }
         match CycleRunner::new(self).run(batch).await {
             Ok(mut report) => {
                 self.publish_continuation(approval_id, &mut report).await;
