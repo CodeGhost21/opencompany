@@ -1671,7 +1671,7 @@ approval.]"
     /// `request_approval` call. It is intentionally disjoint from executable
     /// grants: both yes and no resume the conversation, and neither authorises
     /// a tool call by itself.
-    async fn mint_approval_continuation(
+    pub(crate) async fn mint_approval_continuation(
         &self,
         id: &ApprovalId,
         agent: String,
@@ -3847,6 +3847,46 @@ members = ["writer"]
         }
     }
 
+    #[derive(Default)]
+    struct ExplicitExpiryBrain {
+        decisions: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Brain for ExplicitExpiryBrain {
+        async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
+            for event in &req.events {
+                match event {
+                    CompanyEvent::OperatorMessage { .. } => {
+                        host.park_effect(harness_effect(
+                            "finance",
+                            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                            serde_json::json!({
+                                "title": "Submit the filing",
+                                "question": "May I submit it?"
+                            }),
+                        ))
+                        .await?;
+                    }
+                    CompanyEvent::ApprovalResolved {
+                        verdict: Verdict::Deny,
+                        ..
+                    } => {
+                        self.decisions
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(&req.cycle_id, "explicit expiry")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
     /// A brain that counts how many times it was asked to think, and bills for
     /// it — the instrument for issue #1725, where the cost of a turn is the
     /// thing under test.
@@ -5983,6 +6023,54 @@ members = ["writer"]
             .await
             .unwrap();
         assert!(raw.contains("ApprovalExpired"));
+    }
+
+    #[tokio::test]
+    async fn an_expired_explicit_request_returns_a_system_denial_to_its_agent() {
+        let home_dir = tmp_home();
+        let gate = Arc::new(
+            ManifestApprovalGate::new(manifest("supervised").policy.clone()).with_ttl_millis(0),
+        );
+        let brain = Arc::new(ExplicitExpiryBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(brain.clone())
+                .with_approvals(gate)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                parent: None,
+                text: "file it".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+                attachments: Vec::new(),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(report.parked.len(), 1);
+        assert_eq!(rt.continuations.outstanding(&report.cycle_id), 1);
+
+        rt.sweep_expired_approvals().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while brain.decisions.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the expiry denial reaches the asking agent; outstanding={}, continuation_live={}",
+                rt.continuations.outstanding(&report.cycle_id),
+                rt.grants.peek_continuation(&report.parked[0]).is_some()
+            )
+        });
+        assert_eq!(brain.decisions.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // ── Issue #174: the generic cycle seam meters inference usage ────────────

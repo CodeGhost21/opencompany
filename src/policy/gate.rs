@@ -173,6 +173,9 @@ pub struct ManifestApprovalGate {
     policy_hitl_enabled: AtomicBool,
     ttl_millis: AtomicU64,
     parked: Mutex<HashMap<ApprovalId, ParkedEffect>>,
+    /// Effects removed by TTL expiry, retained only until the runtime completes
+    /// their retirement transaction.
+    expired_effects: Mutex<HashMap<ApprovalId, Effect>>,
     /// The governance kill switch (issue #86).
     ///
     /// An `AtomicBool` rather than a lock because `evaluate` reads it on every
@@ -214,6 +217,7 @@ impl ManifestApprovalGate {
             policy_hitl_enabled: AtomicBool::new(true),
             ttl_millis: AtomicU64::new(ttl_millis),
             parked: Mutex::new(HashMap::new()),
+            expired_effects: Mutex::new(HashMap::new()),
             emergency: AtomicBool::new(false),
         }
     }
@@ -417,9 +421,23 @@ impl ManifestApprovalGate {
         expired.truncate(limit);
         let expired: Vec<ApprovalId> = expired.into_iter().map(|(_, id)| id).collect();
         for id in &expired {
-            map.remove(id);
+            if let Some(parked) = map.remove(id) {
+                self.expired_effects
+                    .lock()
+                    .expect("expired effects poisoned")
+                    .insert(id.clone(), parked.effect);
+            }
         }
         expired
+    }
+
+    /// Takes the effect removed by an expiry, if its runtime retirement has not
+    /// consumed it yet.
+    pub fn take_expired_effect(&self, id: &ApprovalId) -> Option<Effect> {
+        self.expired_effects
+            .lock()
+            .expect("expired effects poisoned")
+            .remove(id)
     }
 
     /// A clone of a parked effect without resolving it.
@@ -483,6 +501,10 @@ impl ManifestApprovalGate {
             return ResolveOutcome::NotParked;
         };
         if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
+            self.expired_effects
+                .lock()
+                .expect("expired effects poisoned")
+                .insert(id.clone(), parked.effect);
             return ResolveOutcome::Expired;
         }
         ResolveOutcome::Approved(amended)
@@ -509,6 +531,10 @@ impl ManifestApprovalGate {
             return ResolveOutcome::NotParked;
         };
         if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
+            self.expired_effects
+                .lock()
+                .expect("expired effects poisoned")
+                .insert(id.clone(), parked.effect);
             return ResolveOutcome::Expired;
         }
         match verdict {

@@ -3356,11 +3356,36 @@ impl CompanyRuntime {
         reason: ExpiryReason,
         at_millis: u64,
     ) -> Result<()> {
+        let explicit_request = self
+            .approval_gate
+            .take_expired_effect(id)
+            .filter(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+            .and_then(|effect| effect.agent.clone().map(|agent| (agent, effect)));
         self.journal.record_expired(id, at_millis, reason).await?;
         // Issue #796: the parked approval is gone, so its work unit is no
         // longer awaiting a resume — drop the pending mark so the checkout it
         // was holding across the park becomes sweepable.
         self.grants.clear_pending(id);
+        if let Some((agent, effect)) = explicit_request {
+            let by = Actor {
+                kind: ActorKind::System,
+                id: "expiry".into(),
+            };
+            CycleRunner::new(self)
+                .mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
+                .await?;
+            // Route through the ordinary settled-verdict path so chat and
+            // workflow-node requests both reach the asking agent, and the
+            // at-most-once dispatch claim is written before its model turn.
+            drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                CompanyEvent::ApprovalResolved {
+                    approval_id: id.clone(),
+                    verdict: Verdict::Deny,
+                    by,
+                },
+            ))));
+            return Ok(());
+        }
         // Issue #469: releasing the turn this approval was blocking, and
         // running its continuation when this expiry was the last thing it
         // waited on. Spawned rather than awaited: the continuation is a full
