@@ -87,21 +87,24 @@ interface Props {
    * the click — never silently hidden (the #1401 dishonest-button lesson).
    */
   canCreateCompany?: boolean;
-  /** The active view, so the Feedback row can show as selected. */
-  view: View;
-  onNavigate: (view: View) => void;
 }
 
 /**
  * The sidebar's standing controls.
  *
  * No page carries a header of its own any more, so what is left of the old top
- * bar lives here: the company's state and the switcher. Collapsing is NOT one
- * of these — it is chrome rather than a destination, so it is a button in the
- * sidebar's header beside the host switcher (`SidebarCollapseButton`, below)
- * rather than a row in either menu. Theming and flagging are deliberately
- * absent — Settings owns both, under Appearance and "Something off?", and a
- * second entry point would just be two places to keep in step.
+ * bar lives here: the company's state, and the switcher.
+ *
+ * What is NOT here is anything that is chrome rather than a fact about the
+ * company. Collapse, Settings, Feedback and Discord are all utilities — three
+ * of them go somewhere, but none of them is a place you *work* — and a full
+ * sidebar row each cost four rows of column for controls reached once a
+ * session. They share one icon bar under the switcher now
+ * ({@link SidebarUtilityBar}), which is where OpenHuman's own shell puts the
+ * same four (`app/src/components/layout/shell/SidebarHeader.tsx`). Theming and
+ * flagging remain absent for the older reason: Settings owns both, under
+ * Appearance and "Something off?", and a second entry point would just be two
+ * places to keep in step.
  */
 export function SidebarControls({
   lifecycleState,
@@ -112,16 +115,8 @@ export function SidebarControls({
   onBackToPicker,
   onCreateCompany,
   canCreateCompany,
-  view,
-  onNavigate,
 }: Props) {
   const { label, tone } = lifecycle(lifecycleState, emergencyPaused);
-  const { isMobile, setOpenMobile } = useSidebar();
-
-  const navigate = (next: View) => {
-    onNavigate(next);
-    if (isMobile) setOpenMobile(false);
-  };
 
   return (
     <SidebarMenu>
