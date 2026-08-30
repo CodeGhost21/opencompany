@@ -527,7 +527,19 @@ fn required_string_arg(args: &Value, key: &str) -> anyhow::Result<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("missing required `{key}`"))?;
-    Ok(value.to_string())
+    // Models routinely wrap identifiers in markdown emphasis when they answer
+    // in prose style (`server: \`werkplaats\``). A trailing backtick is part of
+    // the markdown, not the name: strip wrapping / trailing fence characters
+    // so the registry lookup matches the configured server name. Only *leading
+    // and trailing* occurrences are removed — a legitimate name never starts
+    // or ends with one of these, so stripping cannot mangle a real id.
+    let cleaned = value
+        .trim_start_matches(['`', '*', '_'])
+        .trim_end_matches(['`', '*', '_', '.', ',', ';', ':', '!']);
+    if cleaned.is_empty() {
+        return Err(anyhow::anyhow!("missing required `{key}`"));
+    }
+    Ok(cleaned.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -879,6 +891,21 @@ mod tests {
     }
 
     #[test]
+    fn server_name_strips_markdown_fences() {
+        // Models wrap identifiers in markdown when answering in prose style;
+        // the fence characters belong to the answer, not the server name
+        // (seen live: server="werkplaats`" -> "unknown mcp server `werkplaats``").
+        let mk = |v: &str| serde_json::json!({ "server": v });
+        let parsed = |v: &str| required_string_arg(&mk(v), "server").unwrap();
+        assert_eq!(parsed("werkplaats"), "werkplaats");
+        assert_eq!(parsed("werkplaats`"), "werkplaats");
+        assert_eq!(parsed("`werkplaats`"), "werkplaats");
+        assert_eq!(parsed("*werkplaats*"), "werkplaats");
+        assert_eq!(parsed("werkplaats."), "werkplaats");
+        assert_eq!(parsed("werk"), "werk");
+        assert!(required_string_arg(&mk("```"), "server").is_err());
+    }
+
     fn ungranted_agent_gets_no_registry() {
         let decls = vec![decl("notion", "https://notion.example/mcp")];
         // No mcp grant at all.
