@@ -11,7 +11,6 @@ import {
   type Reaction,
 } from "@/lib/chat";
 import {
-  defaultDesks,
   deskClaimsGeneralChannel,
   GENERAL_CHANNEL,
   isGeneralChannel,
