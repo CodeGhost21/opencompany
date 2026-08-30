@@ -45,6 +45,7 @@ import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import { RouteLoading } from "@/components/route-loading";
+import { WindowControlsInset } from "@/components/window-chrome";
 import {
   RESTING_ROW,
   SidebarUtilityBar,
@@ -3120,6 +3121,11 @@ export function AppShell({
         </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
+          {/* macOS floats the traffic lights over this corner once the window
+              gives up its title bar, and this corner is the company switcher.
+              Reserve the strip they land in, and let it drag. Renders nothing
+              anywhere else — see `window-chrome.tsx`. */}
+          <WindowControlsInset />
           {/* The header is the column talking about itself: which host this
               console is looking at, the utilities that act on the console
               rather than on the company, and whether the column is showing.
