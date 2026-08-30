@@ -671,7 +671,10 @@ impl HarnessBrain {
                 origin_thread: grant.origin_thread,
                 origin_parent: grant.origin_parent,
             }
-        } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
+        } else if let Some(standing) = grants
+            .peek_standing_by_approval(approval_id)
+            .filter(|standing| standing.verdict == Verdict::Approve)
+        {
             // No exact-arguments pin, and deliberately so: a standing grant
             // admits any arguments, which is precisely what the operator
             // consented to by choosing this scope. Pinning them anyway would
@@ -837,10 +840,13 @@ impl HarnessBrain {
             Ok(outcome) => match &outcome.budget_paused {
                 Some(pause) => budget_pause_notice_no_resend(pause),
                 None => {
-                    if grant.explicit_request {
-                        grants
-                            .consume_continuation(approval_id)
-                            .expect("the explicit decision continuation was still live");
+                    if grant.explicit_request && grants.consume_continuation(approval_id).is_none()
+                    {
+                        tracing::warn!(
+                            approval_id = %approval_id,
+                            "explicit approval continuation was already consumed or expired; \
+                             the agent's turn still ran"
+                        );
                     }
                     outcome.reply
                 }
@@ -9190,6 +9196,26 @@ members = ["eng1", "eng2"]
                 origin_thread: None,
                 origin_parent: None,
                 origin_task: None,
+            });
+        requests
+            .grants()
+            .grant_standing(crate::runtime::grants::StandingGrant {
+                id: crate::runtime::grants::GrantId::new("deny-1"),
+                agent: "ceo".into(),
+                workflow: None,
+                tool: "workspace_write".into(),
+                verdict: Verdict::Deny,
+                granted_by: crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::User,
+                    id: "user-1".into(),
+                },
+                approval_id: ApprovalId::new("appr-1"),
+                at_millis: now_millis(),
+                expires_at_millis: now_millis() + 60_000,
+                origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
+                scope: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
 

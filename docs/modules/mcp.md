@@ -89,9 +89,9 @@ needs sign-off calls `request_approval` explicitly before invoking it.
 local registration state with credentials already redacted and reach nothing.
 This matters more than one saved prompt: the persona brief appended to every
 MCP-granted agent *instructs* it to answer capability questions from a live
-`mcp_list_servers` call rather than from memory, so while these parked, the
-guidance written to stop stale answers could only be followed by interrupting an
-operator. An agent's very first move parked, before it had done anything.
+`mcp_list_servers` call rather than from memory. These reads must remain
+uninterrupted so the guidance that prevents stale answers is usable on an
+agent's first move.
 
 The classifications remain declared in
 [`policy::consequence`](../../src/policy/consequence.rs) for audit and for a

@@ -837,7 +837,7 @@ async fn a_supervised_turn_reads_and_writes_the_workspace_without_policy_hitl() 
         Turn::Say("done"),
     ])
     .await;
-    let (_pool, deps, _record, _store) = harness(base, "\"workspace\"", dir.path()).await;
+    let (_pool, deps, _record, store) = harness(base, "\"workspace\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"workspace\"").await;
 
     pool.run(
@@ -860,6 +860,12 @@ async fn a_supervised_turn_reads_and_writes_the_workspace_without_policy_hitl() 
         tool_results(&script).len() >= 2,
         "both the read and write must have run and fed a result back"
     );
+    let (_, content) = store
+        .read(&record.id, "n-eng")
+        .await
+        .expect("workspace read succeeds")
+        .expect("standards note remains");
+    assert_eq!(content, "# Engineering\nRewritten.");
 }
 
 /// The other side of the same boundary, so the feature is not proved dead:
@@ -867,7 +873,7 @@ async fn a_supervised_turn_reads_and_writes_the_workspace_without_policy_hitl() 
 #[tokio::test]
 async fn a_write_to_the_agents_own_workspace_runs_without_policy_hitl() {
     let dir = tempfile::tempdir().unwrap();
-    let (base, _script) = spawn_script(vec![
+    let (base, script) = spawn_script(vec![
         Turn::Call {
             tool: "file_write",
             args: json!({ "path": "notes.md", "content": "draft" }),
@@ -895,6 +901,16 @@ async fn a_write_to_the_agents_own_workspace_runs_without_policy_hitl() {
         .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
     assert!(parked.requests.is_empty(), "{parked:?}");
+    assert!(
+        tool_results(&script)
+            .iter()
+            .all(|result| !result.contains("error")),
+        "the file write must succeed: {:?}",
+        tool_results(&script)
+    );
+    let note =
+        crate::harness::build::agent_workspace(dir.path(), &record.id, "ceo").join("notes.md");
+    assert_eq!(std::fs::read_to_string(note).unwrap(), "draft");
 }
 
 /// Issue #443, through the turn loop: the reads that used to park.

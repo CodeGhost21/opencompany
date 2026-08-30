@@ -1362,6 +1362,13 @@ approval.]"
         let Some(effect) = self.rt.approval_gate.parked_effect(id) else {
             return Ok(());
         };
+        if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND {
+            return Err(OpenCompanyError::InvalidRequest(
+                "an explicit approval question can only be decided once; a standing scope would \
+                 govern the request_approval tool rather than the proposed action"
+                    .to_string(),
+            ));
+        }
         // Issue #1098: a teammate, or the authored workflow a gate belongs to.
         // Neither means the runtime itself is performing this, and there is
         // genuinely nothing to hold a permission — the refusal below is the same
@@ -5101,6 +5108,33 @@ members = ["writer"]
             rt.journal.replayed_approval_continuations(),
             vec![continuation]
         );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_question_refuses_a_standing_scope() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ),
+        )
+        .await;
+
+        let error = rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+            .expect_err("the question tool is not the proposed action");
+
+        assert!(error.to_string().contains("can only be decided once"));
+        assert_eq!(rt.pending_approvals().len(), 1);
+        assert!(rt.standing_grants().is_empty());
+        assert!(rt.grants.peek_continuation(&id).is_none());
     }
 
     /// An approval that expired past its TTL grants nothing either, even though
