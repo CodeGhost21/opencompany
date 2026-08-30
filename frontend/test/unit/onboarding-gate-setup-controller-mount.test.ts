@@ -271,6 +271,13 @@ describe("AppShell keeps SetupController mounted across its branch transitions",
 
     // The fix: same position in both branches, so the controller was never
     // torn down and never re-read the roster.
-    expect(listTeam.mock.calls.length).toBe(readsWhilePending);
+    //
+    // The ordinary branch's Overview draws the company graph again, and the
+    // graph's snapshot takes one roster read of its own on mount. That read
+    // belongs to the graph, not to a re-mounted controller, so it is accounted
+    // for exactly rather than folded into a `>=` that would let a genuine
+    // re-read through unnoticed.
+    const GRAPH_ROSTER_READS = 1;
+    expect(listTeam.mock.calls.length).toBe(readsWhilePending + GRAPH_ROSTER_READS);
   });
 });
