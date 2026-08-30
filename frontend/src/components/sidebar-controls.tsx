@@ -150,20 +150,6 @@ export function SidebarControls({
         </SidebarMenuButton>
       </SidebarMenuItem>
 
-      {/* Feedback is a destination like any nav item, but it belongs with the
-          standing controls at the bottom rather than in the working nav. */}
-      <SidebarMenuItem>
-        <SidebarMenuButton
-          tooltip="Feedback"
-          isActive={view === "feedback"}
-          onClick={() => navigate("feedback")}
-          className={RESTING_ROW}
-        >
-          <MessageSquareWarning />
-          <span>Feedback</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-
       {/* Switching companies lived in the header block that was removed. It
           is a real capability, so it moves here rather than disappearing —
           hidden entirely when there is only one company to be in and no
@@ -209,32 +195,6 @@ export function SidebarControls({
           </DropdownMenu>
         </SidebarMenuItem>
       )}
-
-      <SidebarMenuItem>
-        {/* Deliberately NOT `RESTING_ROW`.
-
-            The resting dim is `opacity-60`, which is safe for a row of
-            near-white text — 16.87:1 becomes 6.60:1 — and destroys a
-            mid-tone hue: the blurple measures 6.36:1 at full strength and
-            3.04:1 dimmed, under the 4.5:1 a 14px label needs. Recovering
-            that inside the dim would mean lightening the blurple by five
-            steps, at which point it is a pale lavender and no longer reads
-            as Discord's colour at all.
-
-            So this row is not dimmed. Its hue already sets it apart from the
-            nav above, without help from the property doing the damage. */}
-        <SidebarMenuButton
-          tooltip="Join our Discord"
-          className={cn(
-            DISCORD_BLURPLE,
-            "hover:text-(--brand-discord-on-light) dark:hover:text-(--brand-discord-on-dark)",
-          )}
-          render={<a href={DISCORD_INVITE_URL} target="_blank" rel="noreferrer" />}
-        >
-          <DiscordIcon className="size-4" />
-          <span>Join our Discord</span>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
 
     </SidebarMenu>
   );
