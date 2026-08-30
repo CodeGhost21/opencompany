@@ -2669,7 +2669,18 @@ impl ContextStore for FsContextStore {
         Ok(true)
     }
 
+    /// Weighted token overlap rather than `body.find(query)` — see
+    /// [`crate::store::lexical`]. One implementation for every backend, because
+    /// these three stood here three times over with the same defect, and that is
+    /// exactly the kind of thing that drifts apart again.
+    ///
+    /// Blobs are read one at a time and weighed immediately; only the snippets
+    /// of candidates *with* overlap are kept.
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
+        let mut ranker = crate::store::lexical::Ranker::new(query);
+        if ranker.matches_nothing() {
+            return Ok(Vec::new());
+        }
         let bundle = self.bundle(id);
         let index = read_jsonl::<IndexEntry>(&bundle.context_index_jsonl()).await?;
         // One hit per ADDRESS, not per index row: a hit carries no label, and
@@ -2678,11 +2689,7 @@ impl ContextStore for FsContextStore {
         // this, recall would report the same body once per claim, where every
         // other backend (which scans bodies, not claims) reports it once.
         let mut seen: HashSet<String> = HashSet::new();
-        let mut hits = Vec::new();
         for entry in index {
-            if hits.len() >= limit {
-                break;
-            }
             if !seen.insert(entry.addr.clone()) {
                 continue;
             }
@@ -2690,20 +2697,9 @@ impl ContextStore for FsContextStore {
             let Ok(body) = tokio::fs::read_to_string(&blob_path).await else {
                 continue;
             };
-            if let Some(pos) = body.find(query) {
-                // The ±24-byte window can land mid-codepoint on a multibyte
-                // body; widen to the boundary rather than panic the slice.
-                hits.push(ChunkHit {
-                    addr: ChunkAddr::new(entry.addr),
-                    snippet: slice_on_char_boundaries(
-                        &body,
-                        pos.saturating_sub(24)..pos + query.len() + 24,
-                    ),
-                    score: 1.0,
-                });
-            }
+            ranker.offer(&entry.addr, &body);
         }
-        Ok(hits)
+        Ok(ranker.best(limit))
     }
 }
 
@@ -3725,6 +3721,14 @@ mod test {
         // blob was replaced by a directory, so the read fails — the point
         // pinned is that delete's answer did not depend on it either way.
         let _ = store.peek(&id, &addr, None).await;
+    }
+
+    /// The same search semantics as every other backend.
+    #[tokio::test]
+    async fn conformance_context_search_ranking() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_context_search_ranking(Arc::new(FsContextStore::new(&root))).await;
     }
 
     /// Two event logs over one data root must not hand out the same sequence
