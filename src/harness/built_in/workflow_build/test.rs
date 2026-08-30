@@ -1893,10 +1893,12 @@ async fn the_first_model_request_advertises_all_three_copilot_tools() {
     let _ = draft_workflow_from_description(&runtime, "email the weekly digest every Monday").await;
 
     let seen = model.seen_tool_names();
-    let first_request_tools = seen
-        .first()
-        .expect("the model was invoked at least once");
-    for tool in ["list_effective_tools", "check_workflow", "propose_company_workflow"] {
+    let first_request_tools = seen.first().expect("the model was invoked at least once");
+    for tool in [
+        "list_effective_tools",
+        "check_workflow",
+        "propose_company_workflow",
+    ] {
         assert!(
             first_request_tools.iter().any(|name| name == tool),
             "the first model request must advertise `{tool}`; got {first_request_tools:?}"
