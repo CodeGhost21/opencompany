@@ -47,7 +47,6 @@ import { HostSwitcher } from "@/components/host-switcher";
 import { RouteLoading } from "@/components/route-loading";
 import {
   RESTING_ROW,
-  SidebarControls,
   SidebarUtilityBar,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
@@ -3143,7 +3142,21 @@ export function AppShell({
                 `min-w-0` so the nameplate truncates instead of pushing the
                 button off the end of a 13.5rem column. */}
             <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
-              <HostSwitcher companyName={feed.status.name} />
+              <HostSwitcher
+                companyName={feed.status.name}
+                // The company's lifecycle, and every company on this host:
+                // both were rows in the sidebar footer, and both are facts
+                // about *which company you are in* — which is what this control
+                // is. See `HostSwitcher`'s `companyState` for why the lifecycle
+                // is not folded into the connection dot.
+                companyState={lifecycle(feed.status.lifecycle, feed.status.emergency_paused)}
+                companies={companies}
+                activeCompany={company}
+                onSwitchCompany={onSwitchCompany}
+                onBackToPicker={onBackToPicker}
+                onCreateCompany={onCreateCompany}
+                canCreateCompany={client.carriesPlatformBearer}
+              />
             </div>
           </div>
           {/* Directly under the switcher: Settings, Feedback, Discord and
@@ -3156,20 +3169,17 @@ export function AppShell({
           <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
         <SidebarFooter>
-          {/* Who you are signed in as, above the controls that act on the
-              company. It renders nothing where there is nobody to name — a host
-              with no sign-in, or a session that has just gone. */}
+          {/* Who you are signed in as, and nothing else.
+
+              The lifecycle row and the "Switch company" row that used to stand
+              here have both moved into the host switcher at the top of the
+              column — see its `companyState` and its Companies group. Both were
+              answers to "which company am I in, and how is it doing", asked at
+              the opposite end of the sidebar from the control that names it.
+
+              It renders nothing where there is nobody to name — a host with no
+              sign-in, or a session that has just gone. */}
           <ProfileRow client={client} company={company} />
-          <SidebarControls
-            lifecycleState={feed.status.lifecycle}
-            emergencyPaused={feed.status.emergency_paused}
-            companies={companies}
-            activeCompany={company}
-            onSwitchCompany={onSwitchCompany}
-            onBackToPicker={onBackToPicker}
-            onCreateCompany={onCreateCompany}
-            canCreateCompany={client.carriesPlatformBearer}
-          />
         </SidebarFooter>
         </nav>
         <SidebarRail />
