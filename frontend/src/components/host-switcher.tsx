@@ -74,6 +74,17 @@ export const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string 
  * severity ordering, and every `switch` over the union would have to grow a
  * branch for a state that behaves identically.
  */
+/**
+ * The company lifecycle's tone as a text colour, for the nameplate's second
+ * line. Lifted verbatim from the sidebar footer row it replaces, so a paused or
+ * stopped company reads exactly as it did there.
+ */
+const LIFECYCLE_TEXT: Record<"live" | "idle" | "stopped", string> = {
+  live: "text-status-done-text",
+  idle: "text-status-blocked-text",
+  stopped: "text-status-failed-text",
+};
+
 export function statusCopy(connection: Connection): { label: string; dot: string } {
   const copy = STATUS_COPY[connection.status];
   return connection.waking ? { ...copy, label: "Waking…" } : copy;
@@ -191,9 +202,52 @@ interface Props {
    * Absent on the standalone chrome, which has no company yet.
    */
   companyName?: string;
+  /**
+   * The company's lifecycle, as `lib/language`'s {@link lifecycle} reads it.
+   *
+   * This used to be a row of its own in the sidebar's footer — a dot and a word
+   * under every page. It is here now, on the second line of the nameplate,
+   * because that is where an operator already looks to answer "which company am
+   * I in", and the two facts belong together.
+   *
+   * It is NOT the same fact as the status dot above, and folding it into that
+   * dot would have lost the half that matters most. The dot is the *connection*:
+   * whether this console can reach its hosts. This is the *company*: whether it
+   * is running, paused, suspended, or stopped by the governance kill switch
+   * (issue #86). A perfectly reachable host can be serving an emergency-stopped
+   * company, and that is exactly the case an operator must not have to hunt for.
+   *
+   * Shown only when it is something other than live, so an ordinary running
+   * company spends its one line on the host instead of on a permanent "Live"
+   * that never changes.
+   */
+  companyState?: { label: string; tone: "live" | "idle" | "stopped" };
+  /** Every company on this host the operator can reach, for the switcher. */
+  companies?: CompanyStatus[];
+  activeCompany?: string | null;
+  onSwitchCompany?: (id: string) => void;
+  onBackToPicker?: () => void;
+  /** Start the New-company flow (issue #1807). Omitted when unavailable. */
+  onCreateCompany?: () => void;
+  /**
+   * Whether provisioning is reachable on this sign-in. When false the New
+   * company item renders disabled with an honest note rather than 401ing after
+   * the click — never silently hidden (the #1401 dishonest-button lesson).
+   */
+  canCreateCompany?: boolean;
 }
 
-export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
+export function HostSwitcher({
+  variant = "sidebar",
+  companyName,
+  companyState,
+  companies = [],
+  activeCompany,
+  onSwitchCompany,
+  onBackToPicker,
+  onCreateCompany,
+  canCreateCompany,
+}: Props) {
   const hosts = useHosts();
   const { connections, selected, hub } = hosts;
 
@@ -238,10 +292,15 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
   // The host on the second line, but only when it says something the first line
   // does not. Most hosts serve one company and are named after it, so repeating
   // the name in both rows would spend the only line the trigger has on nothing.
+  // A company that is not simply running says so, ahead of the host's name and
+  // ahead of "Current company": it is the more urgent of the two, and it is the
+  // only place the kill switch is visible now that the footer row is gone.
+  const lifecycleLine = companyState && companyState.tone !== "live" ? companyState.label : null;
   const secondary = companyName
-    ? connections.length > 1 && active && active.label !== companyName
-      ? active.label
-      : "Current company"
+    ? (lifecycleLine ??
+      (connections.length > 1 && active && active.label !== companyName
+        ? active.label
+        : "Current company"))
     : worst
       ? STATUS_COPY[worst].label
       : "Not connected";
@@ -251,7 +310,17 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
       {glyph}
       <div className="grid flex-1 text-left leading-tight">
         <span className="truncate text-sm font-semibold">{primary}</span>
-        <span className="truncate text-xs text-muted-foreground">{secondary}</span>
+        <span
+          data-testid="host-switcher-secondary"
+          className={cn(
+            "truncate text-xs",
+            // A stopped or paused company is stated in its own tone, the way
+            // the footer row it replaces was. Everything else stays muted.
+            lifecycleLine ? LIFECYCLE_TEXT[companyState!.tone] : "text-muted-foreground",
+          )}
+        >
+          {secondary}
+        </span>
       </div>
     </>
   );
