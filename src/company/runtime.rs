@@ -1792,6 +1792,19 @@ impl CompanyRuntime {
                 }
                 ResolveReceipt::Settled(event) => *event,
             };
+            if let CompanyEvent::ApprovalResolved { approval_id, .. } = &event
+                && rt.grants.peek_continuation(approval_id).is_some()
+            {
+                // Claim before the model turn. A crash after an effectful tool
+                // succeeds but before cycle-end consumption must not replay the
+                // whole continuation and repeat that effect. The failure
+                // direction is deliberately at-most-once: a crash after this
+                // host-durable claim may lose the follow-up, never duplicate an
+                // email, payment, or publish.
+                rt.journal
+                    .record_approval_continuation_dispatched(approval_id, now_millis())
+                    .await?;
+            }
             rt.continue_turn(event).await
         })
     }

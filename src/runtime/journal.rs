@@ -248,6 +248,15 @@ enum JournalRecord {
         /// The verdict and routing context, whole.
         continuation: ApprovalContinuation,
     },
+    /// An explicit decision follow-up is committed to one dispatch attempt.
+    /// Written before the agent turn starts so recovery never repeats external
+    /// actions from a continuation that may already have partially run.
+    ApprovalContinuationDispatched {
+        /// The approval whose follow-up was claimed.
+        id: ApprovalId,
+        /// Epoch-millis the dispatch was committed.
+        at_millis: u64,
+    },
     /// An explicit approval continuation was delivered to its requesting agent.
     ApprovalContinuationConsumed {
         /// The approval whose follow-up completed.
@@ -614,6 +623,11 @@ impl JournalRecord {
             // Conversation continuations carry no execution authority. Losing
             // a queued one means the agent misses a verdict; losing a terminal
             // line can repeat a model follow-up, but cannot repeat an effect.
+            // Losing the dispatch claim can replay an entire model turn whose
+            // earlier tool call already left the company. Host durability buys
+            // at-most-once dispatch; a crash after the claim but before the turn
+            // takes the safe at-most-once direction and may drop the follow-up.
+            Self::ApprovalContinuationDispatched { .. } => Durability::Host,
             Self::ApprovalContinuationQueued { .. }
             | Self::ApprovalContinuationConsumed { .. }
             | Self::ApprovalContinuationExpired { .. } => Durability::Process,
@@ -1377,7 +1391,8 @@ impl RuntimeJournal {
                     .approval_continuations
                     .insert(continuation.call.approval_id.clone(), continuation);
             }
-            JournalRecord::ApprovalContinuationConsumed { id }
+            JournalRecord::ApprovalContinuationDispatched { id, .. }
+            | JournalRecord::ApprovalContinuationConsumed { id }
             | JournalRecord::ApprovalContinuationExpired { id, .. } => {
                 state.approval_continuations.remove(&id);
             }
@@ -2327,6 +2342,26 @@ impl RuntimeJournal {
             .remove(id);
         self.append(&JournalRecord::ApprovalContinuationConsumed { id: id.clone() })
             .await
+    }
+
+    /// Durably claims one explicit continuation before its agent turn starts.
+    /// Replay removes a claimed continuation from the recovery queue, choosing
+    /// a possibly missed follow-up over repeating an external action.
+    pub async fn record_approval_continuation_dispatched(
+        &self,
+        id: &ApprovalId,
+        at_millis: u64,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .remove(id);
+        self.append(&JournalRecord::ApprovalContinuationDispatched {
+            id: id.clone(),
+            at_millis,
+        })
+        .await
     }
 
     /// Records that an explicit approval continuation expired undelivered.
@@ -3707,11 +3742,23 @@ mod test {
         );
         assert_eq!(
             reloaded.replayed_approval_continuations(),
-            vec![continuation]
+            vec![continuation.clone()]
+        );
+
+        reloaded
+            .record_approval_continuation_dispatched(&continuation.call.approval_id, 2_000)
+            .await
+            .unwrap();
+        let after_dispatch = RuntimeJournal::new(&path);
+        after_dispatch.load().await.unwrap();
+        assert!(
+            after_dispatch.replayed_approval_continuations().is_empty(),
+            "a host-durable dispatch claim prevents restart from repeating the turn"
         );
 
         let raw = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(raw.contains("ApprovalContinuationQueued"));
+        assert!(raw.contains("ApprovalContinuationDispatched"));
         assert!(!raw.contains("ApprovalGranted"));
     }
 
@@ -4413,6 +4460,24 @@ mod test {
             JournalRecord::ApprovalGranted {
                 grant: grant("a", 4),
             },
+            JournalRecord::ApprovalContinuationQueued {
+                continuation: ApprovalContinuation {
+                    call: grant("continuation", 4),
+                    verdict: crate::ports::types::Verdict::Approve,
+                    by: revoker(),
+                },
+            },
+            JournalRecord::ApprovalContinuationDispatched {
+                id: ApprovalId::new("continuation"),
+                at_millis: 4,
+            },
+            JournalRecord::ApprovalContinuationConsumed {
+                id: ApprovalId::new("continuation"),
+            },
+            JournalRecord::ApprovalContinuationExpired {
+                id: ApprovalId::new("continuation"),
+                at_millis: 5,
+            },
             JournalRecord::GrantConsumed {
                 id: ApprovalId::new("a"),
                 effect: None,
@@ -4488,12 +4553,12 @@ mod test {
     /// pinned separately below (issue #1145) — deliberately not by loosening
     /// this list, which is the assertion that would have stopped noticing.
     #[test]
-    fn host_durable_kinds_are_exactly_the_seven_that_could_repeat_an_action() {
+    fn host_durable_kinds_are_exactly_the_eight_that_could_repeat_an_action() {
         let all = every_record_kind();
         let tags: HashSet<String> = all.iter().map(record_tag).collect();
         assert_eq!(
             tags.len(),
-            17,
+            21,
             "every JournalRecord variant must appear once in every_record_kind"
         );
 
@@ -4506,6 +4571,7 @@ mod test {
         assert_eq!(
             host,
             vec![
+                "ApprovalContinuationDispatched".to_string(),
                 "BlockedNodeApproved".to_string(),
                 "BlockedNodeDispatched".to_string(),
                 "BlockedNodeReleased".to_string(),
@@ -4514,10 +4580,11 @@ mod test {
                 "GrantConsumed".to_string(),
                 "StandingGrantRevoked".to_string()
             ],
-            "the host-durable set is these seven kinds and nothing else; \
+            "the host-durable set is these eight kinds and nothing else; \
              widening it taxes the hot path, narrowing it lets an effect duplicate, \
-             a spent grant re-arm, or a blocked node's stash/approval/dispatch survive a \
-             process restart but not the host crash it also promises to survive"
+             a spent grant re-arm, an explicit follow-up repeat, or a blocked node's \
+             stash/approval/dispatch survive a process restart but not the host crash it also \
+             promises to survive"
         );
     }
 

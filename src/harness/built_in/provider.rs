@@ -483,6 +483,10 @@ fn attach_tools(
     }
     body["tool_choice"] = wire_tool_choice(tool_choice);
     body["tools"] = serde_json::Value::Array(tools);
+    // Profile metadata is local; put the turn-boundary promise on the actual
+    // OpenAI-compatible request so the remote model cannot validly emit an
+    // effectful sibling beside `request_approval`.
+    body["parallel_tool_calls"] = serde_json::Value::Bool(false);
 }
 
 // ## Guarding intra-turn history growth
@@ -3185,6 +3189,7 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "check_inventory");
         assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["parallel_tool_calls"], false);
 
         // An assistant tool-call turn → null content + wire tool_calls; the tool
         // result → a `tool` role message carrying its `tool_call_id`.
@@ -3552,6 +3557,10 @@ mod tests {
         assert!(
             plan.body.get("tool_choice").is_none(),
             "no tool_choice without tools"
+        );
+        assert!(
+            plan.body.get("parallel_tool_calls").is_none(),
+            "no parallel-tool setting without tools"
         );
         assert_eq!(plan.bearer.as_deref(), Some("or-key"));
         assert!(plan.url.ends_with("/chat/completions"), "{}", plan.url);
