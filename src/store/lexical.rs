@@ -519,7 +519,7 @@ mod test {
             ("old3", "revenue"),
             ("new", "revenue margin quarter report"),
         ];
-        let out = rank(candidates.into_iter(), "revenue margin quarter report", 1);
+        let out = rank(candidates, "revenue margin quarter report", 1);
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].addr.as_ref(),
