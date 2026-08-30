@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   Activity,
   // AppWindow,  // re-add with the Pages nav entry below
+  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -173,6 +174,12 @@ const ObservatoryView = lazy(() =>
 const WorkspaceView = lazy(() =>
   import("@/views/WorkspaceView").then((m) => ({ default: m.WorkspaceView })),
 );
+// The company's durable memory. Its own route since it left the settings rail;
+// lazy for the same reason its neighbours are — the shell should paint before a
+// page nobody has asked for yet is parsed.
+const MemoryView = lazy(() =>
+  import("@/views/MemoryView").then((m) => ({ default: m.MemoryView })),
+);
 // The Finance section: Overview (the ledger fold), Invoicing (Chargebee) and
 // Wallet (PayPal). Load on demand — its Overview page is Recharts-backed and
 // its two provider pages are only reached by an operator who went looking.
@@ -302,6 +309,11 @@ const NAV: NavItem[] = [
   // `NAV` for why this is one row rather than one per list or a tab strip.
   { view: "ledgers", label: "Work", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
+  // What the company remembers, beside what it keeps. It was a settings
+  // sub-page, which put a surface an operator *reads* behind the rail where
+  // they *change* things — and three clicks in front of "does it already know
+  // this". `#/settings/brain` and `#/memory` both rewrite onto this row.
+  { view: "brain", label: "Brain", icon: Brain },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   // Re-listed. Issue #302 parked the flat Finances page — a single ledger
   // projection with nowhere to go. What comes back is a section: that same
@@ -3486,6 +3498,11 @@ export function AppShell({
                 // the host rather than this shell guessing here.
                 initialNodeId={sub}
               />
+            </Suspense>
+          )}
+          {view === "brain" && (
+            <Suspense fallback={<RouteLoading title="Brain" label="Loading what your company remembers…" />}>
+              <MemoryView client={client} company={company} />
             </Suspense>
           )}
           {view === "approvals" && (
