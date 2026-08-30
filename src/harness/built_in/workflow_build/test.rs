@@ -212,6 +212,7 @@ impl NativeCopilotModel {
                 ..ModelProfile::default()
             },
             seen_messages: StdMutex::new(Vec::new()),
+            seen_tool_names: StdMutex::new(Vec::new()),
         })
     }
 
