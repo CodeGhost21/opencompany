@@ -161,7 +161,13 @@ export function SidebarUtilityBar({
       role="group"
       aria-label="Console utilities"
       data-testid="sidebar-utilities"
-      className="flex items-center gap-0.5 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1"
+      // Centred, not left-aligned under the switcher's glyph. Four icons in a
+      // 13.5rem column left no honest edge to align to: flush left they hung
+      // under the nameplate's text with a ragged right, and the row reads as
+      // one object rather than four list items when it is centred in the
+      // column it belongs to. On the rail it is already the full width, so
+      // centring is what the column does anyway.
+      className="flex items-center justify-center gap-1 group-data-[collapsible=icon]:flex-col"
     >
       <UtilityButton
         label="Settings"
