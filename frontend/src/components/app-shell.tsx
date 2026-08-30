@@ -1360,7 +1360,11 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        const chatDesks = desks.length ? desks.map(deskFromDto) : defaultDesks();
+        // The host answered, so this is the company's desk list — empty
+        // included. `defaultDesks()` stands in only on the `.catch` leg below,
+        // where nothing was answered at all; a company that simply declares no
+        // `[[group_chat]]` used to be given three fabricated ones here.
+        const chatDesks = desks.map(deskFromDto);
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
