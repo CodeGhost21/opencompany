@@ -18,7 +18,6 @@ import {
   type LucideIcon,
   Settings2,
   Sparkles,
-  Brain,
   UserCog,
 } from "lucide-react";
 
