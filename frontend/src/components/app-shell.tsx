@@ -131,7 +131,7 @@ import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
-import { OperatorOverview } from "@/views/OperatorOverview";
+import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
@@ -3184,17 +3184,13 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
+          {/* `#/overview` is the company graph again — the picture #1321 swapped
+              out for the operator landing page. The landing page's panels are
+              not lost: they keep their own address at `#/company/graph`'s
+              sibling below, and the graph keeps the alias #1321 gave it so
+              every link minted while it lived there still resolves. */}
           {(view === "overview" || view === "setup") && (
-            <OperatorOverview
-              client={client}
-              company={company}
-              feed={feed}
-              scope={scope}
-              // Issue #1015: re-read the run panels when a run parks or fails
-              // while this page stays open (the same tick TaskDetailView
-              // re-reads on).
-              attemptEventTick={attemptEventTick}
-            />
+            <Overview client={client} company={company} companyName={feed.status.name} />
           )}
           {view === "company" && (
             <CompanyView
