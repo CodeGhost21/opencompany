@@ -546,18 +546,22 @@ impl ApprovalRequestQueue {
     /// and collapsing them would hide one turn's ask behind another's.
     pub fn push(&self, request: ApprovalRequest) {
         let explicit = request.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL;
+        if explicit {
+            // The turn boundary is established by making the request, even if
+            // its card is a duplicate of one already queued in this scope.
+            let _ = EXPLICIT_REQUEST_PENDING.try_with(|pending| pending.set(true));
+        }
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
         let bucket = guard.entry(scope).or_default();
         if bucket.iter().any(|q| {
-            q.effect.kind == request.effect.kind && q.effect.payload == request.effect.payload
+            q.effect.kind == request.effect.kind
+                && q.effect.payload == request.effect.payload
+                && q.effect.agent == request.effect.agent
         }) {
             return;
         }
         bucket.push(request);
-        if explicit {
-            let _ = EXPLICIT_REQUEST_PENDING.try_with(|pending| pending.set(true));
-        }
     }
 
     /// The scope pushes are currently filing into.
@@ -1956,6 +1960,85 @@ mod tests {
             unrelated_turn,
             ToolPolicyDecision::Allow,
             "a later agent turn in the same cycle/run scope gets a fresh boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_explicit_request_still_establishes_a_fresh_turn_boundary() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+        let approval_request = ApprovalRequest {
+            tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+            reason: "May I send this?".to_string(),
+            effect: Effect {
+                kind: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "title": "Send update",
+                    "question": "May I send it?"
+                }),
+                agent: Some("ceo".to_string()),
+                run_id: None,
+            },
+        };
+
+        claim
+            .scoped(async { queue.push(approval_request.clone()) })
+            .await;
+        let later_call = claim
+            .scoped(queue.turn_scoped(async {
+                queue.push(approval_request);
+                policy
+                    .check(&request("composio_execute", composio_send_args()))
+                    .await
+            }))
+            .await;
+
+        assert!(matches!(later_call, ToolPolicyDecision::Deny { .. }));
+        assert_eq!(
+            claim.scoped(async { queue.drain(8).requests.len() }).await,
+            1,
+            "the duplicate card is suppressed without suppressing the boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_explicit_requests_from_different_agents_are_not_deduplicated() {
+        let queue = ApprovalRequestQueue::default();
+        let claim = queue.claim(ApprovalScope::Cycle);
+        claim
+            .scoped(async {
+                for agent in ["finance", "legal"] {
+                    queue.push(ApprovalRequest {
+                        tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                        reason: "Proceed?".to_string(),
+                        effect: Effect {
+                            kind: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({
+                                "title": "Proceed",
+                                "question": "Proceed?"
+                            }),
+                            agent: Some(agent.to_string()),
+                            run_id: None,
+                        },
+                    });
+                }
+            })
+            .await;
+
+        assert_eq!(
+            claim.scoped(async { queue.drain(8).requests.len() }).await,
+            2
         );
     }
 

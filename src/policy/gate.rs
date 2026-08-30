@@ -748,7 +748,9 @@ impl ApprovalGate for ManifestApprovalGate {
 
         if !self.policy_hitl_enabled.load(Ordering::Relaxed) {
             let policy = self.policy.read().expect("policy lock poisoned");
-            if policy.mode.eq_ignore_ascii_case("readonly") && effect.group != EffectGroup::Other {
+            if policy.mode.eq_ignore_ascii_case("readonly")
+                && effect.kind != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+            {
                 return Ok(PolicyDecision::Deny);
             }
             return Ok(PolicyDecision::Allow);
@@ -889,6 +891,21 @@ mod test {
         assert_eq!(
             decide(&readonly, &effect("payment.send", EffectGroup::Spend)).await,
             PolicyDecision::Deny
+        );
+        assert_eq!(
+            decide(&readonly, &effect("notification.post", EffectGroup::Other)).await,
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            decide(
+                &readonly,
+                &effect(
+                    crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                    EffectGroup::Other
+                )
+            )
+            .await,
+            PolicyDecision::Allow
         );
     }
 

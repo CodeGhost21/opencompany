@@ -2785,15 +2785,16 @@ impl HarnessBrain {
     /// [`MAX_APPROVAL_REQUESTS_PER_TURN`](crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
     /// anything past the cap is discarded rather than flooding the queue.
     ///
-    /// **A failed park never takes the batch or the turn down with it.**
+    /// **A failed park never takes the batch or the turn down with it, but it
+    /// is never silent.**
     /// [`ApprovalRequestQueue::drain`](crate::harness::policy::ApprovalRequestQueue::drain)
     /// empties the shared queue up front, so propagating the first
     /// [`CycleHost::park_effect`](crate::ports::brain::CycleHost::park_effect)
     /// error with `?` would lose every *later* request in the batch — already out
     /// of the queue and never retried — and would discard the turn's
-    /// already-computed operator reply along with it. That is precisely the
-    /// silent-disappearance failure this issue exists to fix, so each failure is
-    /// logged at `error` and the drain continues.
+    /// already-computed operator reply along with it. The drain therefore
+    /// continues, then returns an operator-visible notice naming how many
+    /// requests were not saved and how to retry them.
     async fn park_approval_requests(&self, host: &dyn CycleHost) -> Result<Option<String>> {
         let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
         let drained = self.deps.approval_requests.drain(cap);
@@ -2812,7 +2813,8 @@ impl HarnessBrain {
 
         // No `cap` argument: the drain carries the one it was taken against, so
         // the sentence cannot name a limit this turn was not held to.
-        let notice = drained.overflow_notice();
+        let mut notices: Vec<String> = drained.overflow_notice().into_iter().collect();
+        let mut failed = 0usize;
         for request in drained.requests {
             match host.park_effect(request.effect).await {
                 Ok(approval_id) => log::info!(
@@ -2822,14 +2824,24 @@ impl HarnessBrain {
                 ),
                 // Loud, and the only trace of a request the operator will never
                 // see — the queue entry is already gone.
-                Err(err) => log::error!(
-                    "[harness::brain] failed to park '{}' for operator approval ({}): {err}",
-                    request.tool,
-                    request.reason
-                ),
+                Err(err) => {
+                    failed += 1;
+                    log::error!(
+                        "[harness::brain] failed to park '{}' for operator approval ({}): {err}",
+                        request.tool,
+                        request.reason
+                    );
+                }
             }
         }
-        Ok(notice)
+        if failed > 0 {
+            let requests = if failed == 1 { "request" } else { "requests" };
+            notices.push(format!(
+                "{failed} approval {requests} could not be saved, so no decision is pending for \
+                 that work and it was not run. Ask the agent to request approval again."
+            ));
+        }
+        Ok((!notices.is_empty()).then(|| notices.join("\n\n")))
     }
 
     /// Executes one drained delegation from the orchestrator's turn.
@@ -8652,16 +8664,19 @@ members = ["eng1", "eng2"]
         }
 
         let host = FlakyParkingHost::default();
-        brain
+        let notice = brain
             .park_approval_requests(&host)
             .await
-            .expect("a park failure is logged, not propagated");
+            .expect("a park failure is surfaced without aborting the batch")
+            .expect("the operator is told a request was not saved");
 
         // The first park failed; the two after it still reached the operator.
         let parked = host.parked();
         assert_eq!(parked.len(), 2, "the batch continued past the failure");
         assert_eq!(parked[0].kind, "second_tool");
         assert_eq!(parked[1].kind, "third_tool");
+        assert!(notice.contains("1 approval request could not be saved"));
+        assert!(notice.contains("Ask the agent to request approval again"));
     }
 
     // --- Re-dispatching a granted call (issue #243) --------------------------
