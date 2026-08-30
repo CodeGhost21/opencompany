@@ -476,8 +476,16 @@ export function Overview({ client, company, companyName }: Props) {
             // there is nothing beyond the core node to look at, which is the
             // only case where covering an empty field with an explanation is
             // better than leaving it bare.
+            //
+            // `graph.nodes` alone undercounts this: durable memory is passed
+            // to `KnowledgeGraph` separately via the `memory` prop rather than
+            // folded into `graph.nodes`, so a deskless company with a memory
+            // constellation but no roster, tasks, or workflows still has
+            // something to look at even though `graph.nodes` holds only the
+            // core. Counting `memoryGraph.nodes` too keeps that constellation
+            // reachable instead of covering it with "No desks yet".
             noDesks={desksAnswered && sources.desks.length === 0}
-            emptyState={desksAnswered && graph.nodes.length <= 1}
+            emptyState={desksAnswered && graph.nodes.length <= 1 && memoryGraph.nodes.length === 0}
           />
         </Suspense>
       </div>
