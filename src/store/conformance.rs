@@ -3592,7 +3592,10 @@ pub async fn assert_context_search_ranking(context: Arc<dyn ContextStore>) {
     );
 
     // And the noise was not thrown away: it is still there, it just scores lower.
-    assert_eq!(context.list(&alpha, "").await.unwrap().len(), noise.len() + 1);
+    assert_eq!(
+        context.list(&alpha, "").await.unwrap().len(),
+        noise.len() + 1
+    );
 }
 
 /// Asserts the [`UsageMeter`] contract: isolation, record, and windowed query.

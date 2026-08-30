@@ -1108,6 +1108,21 @@ pub fn build_agent(
         Box::new(AttrTolerantXmlDispatcher::default())
     };
 
+    // OpenHuman's tool-pack table withholds `composio_*` schemas unless the
+    // session identifies as its integrations specialist. OpenCompany already
+    // narrows this agent's actual belt by the explicit company and agent grants
+    // above; once that grants Composio, use the supported specialist identity
+    // so the model can call the real tools rather than being offered an absent
+    // pack proxy.
+    #[cfg(feature = "composio")]
+    let agent_definition_name = if composio_toolkits.is_some() {
+        "integrations_agent"
+    } else {
+        manifest_agent.id.as_str()
+    };
+    #[cfg(not(feature = "composio"))]
+    let agent_definition_name = manifest_agent.id.as_str();
+
     let mut agent = AgentBuilder::default()
         // `HarnessModel` upcasts to the tinyagents `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
@@ -1129,7 +1144,7 @@ pub fn build_agent(
         })
         .model_name(model)
         .workspace_dir(workspace)
-        .agent_definition_name(manifest_agent.id.clone())
+        .agent_definition_name(agent_definition_name)
         .auto_save(false)
         .build()
         .map_err(|e| {

@@ -906,6 +906,7 @@ mod tests {
         assert!(required_string_arg(&mk("```"), "server").is_err());
     }
 
+    #[test]
     fn ungranted_agent_gets_no_registry() {
         let decls = vec![decl("notion", "https://notion.example/mcp")];
         // No mcp grant at all.
