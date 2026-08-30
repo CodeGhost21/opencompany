@@ -446,7 +446,6 @@ impl Tool for ProposeWorkflowTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        eprintln!("DEBUG propose_company_workflow execute called with args={args}");
         let summary = args
             .get("summary")
             .and_then(Value::as_str)
