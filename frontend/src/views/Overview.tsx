@@ -29,16 +29,6 @@ interface Props {
    * node never claims a name this component was not given.
    */
   companyName?: string;
-  /**
-   * Drawn inside another page's section rather than as the whole view.
-   *
-   * The operator landing page carries the graph again as its first panel
-   * (issue #1321 moved it off; this brings the picture back without taking the
-   * attention panels away). That section names the graph with its own visible
-   * heading, so the `sr-only` `<h1>` below must not be drawn a second time —
-   * a page has one top-level heading, and the landing page's is "Overview".
-   */
-  embedded?: boolean;
 }
 
 /** Everything the graph is drawn from — a snapshot, taken on demand. */
@@ -109,7 +99,7 @@ const EMPTY: Sources = {
  * demand: the staleness is answered out loud instead of by omission, and an
  * operator is never reading an old wheel with no way to notice.
  */
-export function Overview({ client, company, companyName, embedded = false }: Props) {
+export function Overview({ client, company, companyName }: Props) {
   const [sources, setSources] = useState<Sources>(EMPTY);
   // Bumped by the refresh control; re-runs the read below and nothing else.
   const [reload, setReload] = useState(0);
@@ -401,9 +391,8 @@ export function Overview({ client, company, companyName, embedded = false }: Pro
     >
       {/* The graph is the page and draws no visible title of its own (issue
           #1221) — this names it for a screen reader the same way every other
-          view's title does. Embedded, the host section's heading does that job
-          instead. */}
-      {!embedded && <PageHeader hidden title="Company overview" />}
+          view's title does. */}
+      <PageHeader hidden title="Company overview" />
       {/* A complete read failure is the page's state, not a detail in the
           snapshot chrome. The opaque canvas keeps an unreachable host from
           looking like a genuinely empty company, and puts the retry beside the
