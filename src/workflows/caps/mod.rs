@@ -2105,12 +2105,11 @@ impl HarnessAgentRunner {
         //
         // A node whose declared `postcondition` the output fails does not feed
         // downstream, full stop — checked BEFORE the hit_iteration_cap decision
-        // below and before the attempt row settles Succeeded, on the same
-        // envelope shape that decision (and the eventual `Ok` return) builds.
-        // A capped turn's partial reply is exactly the truncation class this
-        // gate is meant to catch, so it is deliberately not special-cased here:
-        // if a postcondition is declared, it is checked regardless of whether
-        // the cap already would have failed the attempt on its own. This runs
+        // below and before the attempt row settles Succeeded. A capped turn's
+        // partial reply is exactly the truncation class this gate is meant to
+        // catch, so it is deliberately not special-cased here: if a
+        // postcondition is declared, it is checked regardless of whether the
+        // cap already would have failed the attempt on its own. This runs
         // AFTER the `abnormal_stop` check above: a refusal/cancellation has
         // already returned `Err` with no reply worth evaluating by the time
         // this is reached.
@@ -2120,7 +2119,25 @@ impl HarnessAgentRunner {
         // halts the branch at this node with no retry re-running the turn, and
         // nothing downstream ever sees the insufficient output.
         if let Some(spec) = request.get("postcondition") {
-            let envelope = json!({ "text": outcome.reply, "agent_ref": agent_ref });
+            // Codex review on #1937: `require = "field_present"`/
+            // `"non_empty_list"` document a dotted `field` like `json.items`,
+            // which only ever resolves against the engine's `{ json, text,
+            // raw }` capability-node envelope — so `json` here best-effort
+            // parses the agent's reply as JSON (an agent prompted to answer
+            // with structured output does), giving those two predicates real
+            // structured content to check instead of an object that can never
+            // be a `Value::Array`. A reply that is not valid JSON (the common
+            // case — agent nodes are prose by default) leaves `json` `Null`,
+            // so `field_present`/`non_empty_list` fail with their ordinary
+            // "missing"/"not a list" gap message rather than crashing or
+            // silently passing.
+            let parsed_reply =
+                serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null);
+            let envelope = json!({
+                "text": outcome.reply,
+                "agent_ref": agent_ref,
+                "json": parsed_reply,
+            });
             if let Err(gap) = postcondition::evaluate_postcondition(spec, &envelope) {
                 let message = format!(
                     "workflow node `{}` failed its postcondition: {gap}",
@@ -3389,6 +3406,143 @@ mod tests {
             .expect("an output that satisfies its postcondition must not be halted");
         assert_eq!(outcome.reply, "ok");
         assert_eq!(value["text"], "ok");
+    }
+
+    /// Codex review on #1937 (issue #1866) — the RED-on-old proof for
+    /// `non_empty_list`. The postcondition envelope this call site built was
+    /// always `{ "text": <reply>, "agent_ref": <ref> }`: an object, never a
+    /// `Value::Array`, so a `require = "non_empty_list"` declaration with no
+    /// `field` could never be satisfied by ANY agent reply — including a
+    /// reply that is itself the literal JSON text of a non-empty list, which
+    /// is exactly what this test sends. On the code as it stood before this
+    /// fix, this assertion fails: `run_turn` returns `Err` here because the
+    /// envelope's `json` never carried the agent's parsed reply.
+    #[tokio::test]
+    async fn a_reply_that_is_a_json_list_satisfies_non_empty_list_with_no_field() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-postcondition-list-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "[\"x\", \"y\"]".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937".to_string(),
+            "run-1937".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "list two things",
+                    "postcondition": { "require": "non_empty_list" }
+                }),
+            )
+            .await
+            .expect(
+                "a reply that IS the JSON text of a non-empty list must satisfy \
+                 `non_empty_list` with no `field` — this is the RED-on-old assertion: \
+                 pre-fix code always built a `{text, agent_ref}` envelope that could \
+                 never be seen as a `Value::Array`",
+            );
+        assert_eq!(outcome.reply, "[\"x\", \"y\"]");
+        assert_eq!(value["text"], "[\"x\", \"y\"]");
+    }
+
+    /// Companion: a plain-prose reply (the common case — agent nodes are not
+    /// asked for structured output by default) still fails `non_empty_list`
+    /// honestly, rather than the fix silently passing everything through
+    /// once a `json` key exists on the envelope.
+    #[tokio::test]
+    async fn a_prose_reply_still_fails_non_empty_list_with_no_field() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-postcondition-prose-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "here is a summary, not a list".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937b"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937b"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937b".to_string(),
+            "run-1937b".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "list two things",
+                    "postcondition": { "require": "non_empty_list" }
+                }),
+            )
+            .await;
+
+        let err = result.expect_err(
+            "a plain-prose reply must still fail `non_empty_list` — the fix must not \
+             silently pass every reply once the envelope carries a `json` key",
+        );
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("not a list"),
+            "the halting message should say the shape did not match: {message}"
+        );
     }
 
     /// Issue #638: a node that gates more calls than the cap allows leaves the

@@ -89,7 +89,16 @@ pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(),
         "non_empty_list" => {
             let target = match field {
                 Some(path) => resolve_path(output, path),
-                None => Some(output),
+                // No `field` given: for the standard `{ json, text, raw }`
+                // envelope, "the output" means the structured payload under
+                // `json`, not the envelope wrapper itself — the wrapper is
+                // always an object (it also carries `text`/`agent_ref`), so
+                // checking it directly could never see a `Value::Array` even
+                // when the underlying result genuinely is a list. Falls back
+                // to the raw value for any caller not using that envelope
+                // shape (no `json` key at all), which is the pre-existing
+                // behavior.
+                None => output.get("json").or(Some(output)),
             };
             let described = field
                 .map(|path| format!("`{path}`"))
@@ -222,6 +231,30 @@ mod tests {
     #[test]
     fn non_empty_list_fails_on_a_non_array() {
         let output = json!({ "text": "not a list" });
+        assert!(evaluate_postcondition(&spec("non_empty_list"), &output).is_err());
+    }
+
+    /// Codex review on #1937 (issue #1866): the no-`field` form must look at
+    /// the standard envelope's structured `json` payload, not the envelope
+    /// object itself — an agent-node envelope always carries `text`/
+    /// `agent_ref` alongside `json`, so checking the envelope directly could
+    /// never see a `Value::Array` even when the agent's parsed reply
+    /// genuinely is a non-empty list.
+    #[test]
+    fn non_empty_list_with_no_field_checks_the_envelopes_json_payload() {
+        let output = json!({ "text": "[\"a\",\"b\"]", "agent_ref": "a", "json": ["a", "b"] });
+        assert_eq!(
+            evaluate_postcondition(&spec("non_empty_list"), &output),
+            Ok(())
+        );
+    }
+
+    /// Companion RED-shape: when the envelope's `json` payload didn't parse
+    /// (a plain-prose reply), the no-`field` form still fails honestly —
+    /// it must not silently pass just because a `json` key exists.
+    #[test]
+    fn non_empty_list_with_no_field_fails_when_the_envelopes_json_is_null() {
+        let output = json!({ "text": "just prose, no list here", "agent_ref": "a", "json": null });
         assert!(evaluate_postcondition(&spec("non_empty_list"), &output).is_err());
     }
 
