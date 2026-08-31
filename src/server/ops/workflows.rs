@@ -95,10 +95,10 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
-    WorkflowNodeDef, WorkflowRetryDef, courtesy_validate_draft, create_company_workflow,
-    delete_company_workflow, list_workflows_with_globals, load_workflow_with_globals,
-    rollback_company_workflow, seed_file_exists, set_company_workflow_enabled,
-    update_company_workflow, workflow_version,
+    WorkflowNodeDef, WorkflowPostconditionDef, WorkflowRetryDef, courtesy_validate_draft,
+    create_company_workflow, delete_company_workflow, list_workflows_with_globals,
+    load_workflow_with_globals, rollback_company_workflow, seed_file_exists,
+    set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -389,6 +389,12 @@ struct WorkflowNode {
     /// camelCase gap to bridge and no second shape to drift from.
     #[serde(skip_serializing_if = "Option::is_none")]
     destination: Option<WorkflowDestinationDef>,
+    /// A node's declared deterministic postcondition (issue #1866), reused
+    /// verbatim like `destination` above. Round-tripped so a `GET` → edit →
+    /// `PUT` cycle in the console does not silently clear an existing gate —
+    /// see [`WorkflowPostconditionDef`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postcondition: Option<WorkflowPostconditionDef>,
 }
 
 /// The camelCase retry policy shape the console reads back (`maxAttempts` /
@@ -430,6 +436,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             requires_approval: n.requires_approval,
             repeatable: n.repeatable,
             destination: n.destination,
+            postcondition: n.postcondition,
         }
     }
 }
@@ -675,6 +682,13 @@ struct CreateNode {
     /// `parse_workflow` before anything is persisted.
     #[serde(default)]
     destination: Option<WorkflowDestinationDef>,
+    /// A node's declared deterministic postcondition (issue #1866): `{require:
+    /// "non_empty"|"field_present"|"non_empty_list", field?: "…"}`, checked
+    /// against the node's output before it is allowed to flow downstream.
+    /// Carried through create/validate/update so a caller-declared gate is not
+    /// silently discarded — see [`WorkflowPostconditionDef`].
+    #[serde(default)]
+    postcondition: Option<WorkflowPostconditionDef>,
 }
 
 /// The camelCase retry policy the create body carries (`maxAttempts` /
@@ -740,7 +754,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 requires_approval: n.requires_approval,
                 repeatable: n.repeatable,
                 destination: n.destination,
-                postcondition: None,
+                postcondition: n.postcondition,
             });
         }
         Ok(Self {
@@ -5551,6 +5565,85 @@ mod tests {
                 .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
                 .await
                 .unwrap()
+        }
+
+        /// [`create_body`] with `done` turned into an `agent` node naming the
+        /// roster teammate [`desk_manifest`] declares (`ceo`), carrying a
+        /// declared `postcondition` — the shape a real create/edit sends.
+        fn body_with_postcondition() -> serde_json::Value {
+            let mut body = create_body();
+            body["nodes"][1]["kind"] = serde_json::json!("agent");
+            body["nodes"][1]["agent"] = serde_json::json!("ceo");
+            body["nodes"][1]["postcondition"] = serde_json::json!({ "require": "non_empty" });
+            body
+        }
+
+        /// Codex review on #1937 (issue #1866, thread 1) — the RED-on-old
+        /// proof for BOTH halves the finding names: `CreateNode` never
+        /// deserialized `postcondition` (a caller's declared gate was
+        /// silently discarded on save), and `WorkflowNode` never serialized
+        /// it back out (a `GET` → edit → `PUT` round trip would clear any
+        /// postcondition already present, since the editor never even saw it
+        /// to carry forward).
+        ///
+        /// This is a genuine round trip through the real HTTP handlers: POST
+        /// create, GET and assert the field survived the write AND the read,
+        /// then PUT back the **exact GET body** unchanged (the shape a
+        /// console editor sends when nothing else on the node changed) and
+        /// GET once more to prove the postcondition is still there — not
+        /// silently cleared by the round trip. On the code as it stood
+        /// before this fix, the first GET's `nodes[1]["postcondition"]`
+        /// assertion already fails: `WorkflowNode` had no such field to
+        /// serialize.
+        #[tokio::test]
+        async fn a_postcondition_survives_create_get_put_get() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let created = post_create(state.clone(), body_with_postcondition()).await;
+            assert_eq!(created.status(), StatusCode::OK, "{:?}", created);
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut graph = json_body(response).await;
+            assert_eq!(
+                graph["nodes"][1]["postcondition"],
+                serde_json::json!({ "require": "non_empty" }),
+                "a postcondition declared on create must be readable back: {graph}"
+            );
+
+            // The console's edit flow: take exactly what GET returned, add the
+            // version token it must echo back, and PUT it — unchanged — as a
+            // no-op save.
+            let version = graph["version"]
+                .as_str()
+                .expect("GET returns a version")
+                .to_string();
+            graph["expectedVersion"] = serde_json::json!(version);
+            let put_response = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(graph),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(put_response.status(), StatusCode::OK, "{:?}", put_response);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph_after_put = json_body(response).await;
+            assert_eq!(
+                graph_after_put["nodes"][1]["postcondition"],
+                serde_json::json!({ "require": "non_empty" }),
+                "a GET -> PUT round trip must not silently clear an existing \
+                 postcondition: {graph_after_put}"
+            );
         }
 
         /// **The #981 regression.** `operator` was in the picker the console
