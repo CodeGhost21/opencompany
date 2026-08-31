@@ -7202,6 +7202,86 @@ mode = "full"
         );
     }
 
+    /// The fallback-address sibling of the test above (issue #1781 review,
+    /// Codex P2 follow-up): a manifest desk grandfathered onto the display
+    /// name `operator-feed` — `OPERATOR_CHANNEL_COLLISION_FALLBACK` itself —
+    /// rather than `Operator`. No desk or teammate here claims the *primary*
+    /// `operator` id or name, so `operator_feed_channel()` stays on the
+    /// literal address and never diverts; the fallback is purely this desk's
+    /// own pre-#1757 display name. `ensure_desk_writable` used to refuse the
+    /// fallback constant unconditionally, without resolving it through
+    /// `resolve_desk_id` first the way the primary branch does — so a send
+    /// addressed to this desk's own supported case-insensitive alias
+    /// (`chat: "operator-feed"`) was refused as if it named the synthetic
+    /// read-only system desk, even though nothing here is actually diverted.
+    /// A send to the desk's real id (`ops`) already sailed through either
+    /// way, which this also covers as the negative control.
+    #[tokio::test]
+    async fn a_manifest_desk_grandfathered_onto_the_fallback_name_stays_writable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let legacy_manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"ops\"\nname = \"operator-feed\"\nmembers = [\"ceo\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, legacy_manifest).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let record = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL,
+            "fixture must NOT be in the diverted state — this proves the \
+             fallback name is refused even with no primary collision at all, \
+             which the diverted case above does not exercise"
+        );
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // The desk's own real id still works — this was never broken.
+        let by_id = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"by id","chat":"ops"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            by_id.status().is_success(),
+            "a send addressed to the grandfathered desk's real id must stay writable, got {}",
+            by_id.status()
+        );
+
+        // The desk's supported display-name alias must now work too.
+        let by_name = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"by name","chat":"operator-feed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            by_name.status().is_success(),
+            "a send addressed to the grandfathered desk's own case-insensitive \
+             `operator-feed` alias must resolve to the real desk, not the \
+             read-only system feed, got {}",
+            by_name.status()
+        );
+    }
+
     /// Issue #1757 migration, the other namespace: a **teammate**, not a desk,
     /// already named `operator`. `ChatView` addresses a DM by the teammate's
     /// bare id (issue #364), so a message meant for this person also arrives
