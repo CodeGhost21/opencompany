@@ -15,8 +15,14 @@ import { TaskItem } from "@/views/TaskCard";
  * both the failure state and the fresh state — an operator had to open every
  * card in the column to tell a bounced retry candidate apart from work
  * nobody had picked up. This pins the rendered distinction: the chip shows
- * only in `todo`, carries the host's reason verbatim, and a card the host
- * never marked bounced renders nothing extra at all.
+ * only in the pending phase, carries the host's reason verbatim, and a card
+ * the host never marked bounced renders nothing extra at all.
+ *
+ * The fixture sends `column: "pending"` because that is what the board API
+ * actually serves: `TaskCard::from` maps the stored `todo` stage through
+ * `board::phase_of`, so the stage word never reaches the client. A fixture
+ * built on `column: "todo"` passes against a component reading either word,
+ * which is exactly how the chip shipped unrenderable.
  */
 
 const T0 = new Date("2026-03-02T10:00:00Z").getTime();
@@ -25,7 +31,7 @@ function card(over: Partial<Task> = {}): Task {
   return {
     id: "task-1",
     title: "Send the weekly digest",
-    column: "todo",
+    column: "pending",
     priority: "medium",
     assignee: "ops",
     updatedAt: T0,
@@ -67,7 +73,7 @@ afterEach(async () => {
 });
 
 describe("a card the host marked bounced", () => {
-  it("shows the reason verbatim while sitting in To-do", async () => {
+  it("shows the reason verbatim while sitting in the pending phase", async () => {
     await render(
       card({ bounced: "the provider refused the request: rate limited" }),
     );
@@ -81,7 +87,7 @@ describe("a card the host marked bounced", () => {
     expect(container.textContent).not.toContain("bounced:");
   });
 
-  it("does not render the chip outside To-do, even if the field is somehow present", async () => {
+  it("does not render the chip outside the pending phase, even if the field is somehow present", async () => {
     // Defensive: the host only ever writes `bounced` alongside a `todo`
     // landing, but the card's own render must not trust that invariant blindly
     // — a card an operator dragged into In Progress must never keep showing a

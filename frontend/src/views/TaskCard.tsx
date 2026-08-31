@@ -254,7 +254,14 @@ export function TaskItem({
           Workflow
         </div>
       )}
-      {task.column === "todo" && task.bounced && (
+      {/*
+        `pending`, not `todo`: the board API sends the card's *phase* in
+        `column` (`TaskCard::from` runs the stored stage through
+        `board::phase_of`), and `todo` is the only stage in the pending phase.
+        Reading the stage word here matched nothing on the wire, so the chip
+        never rendered for a real bounced card.
+      */}
+      {task.column === "pending" && task.bounced && (
         <BouncedBadgeRow reason={task.bounced} />
       )}
       {task.plan && <PlanBadgeRow plan={task.plan} />}
