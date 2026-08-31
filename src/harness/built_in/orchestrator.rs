@@ -11871,6 +11871,7 @@ name = "Morning"
                     workflow_id: "demo".to_string(),
                     run_id: "wf-run-1".to_string(),
                     scheduled: false,
+                    started_by: None,
                 },
                 at_millis: 1,
             },
