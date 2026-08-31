@@ -334,8 +334,11 @@ const READ_VERBS: &[&str] = &[
 const READ_PHRASES: &[&str] = &["walk me through", "let me know", "remind me"];
 
 /// Phrases that point at the board or a card already on it, rather than at a new
-/// deliverable. Matched anywhere in the message, word-boundary-checked so "the
-/// card" does not fire inside "the cardstock".
+/// deliverable. Word-boundary-checked so "the card" does not fire inside "the
+/// cardstock", and object-position-checked ([`board_deixis_is_object`]) so it
+/// only fires when the phrase is the request's actual object — not the head of
+/// a longer noun ("the board **presentation**") and not the topic of a
+/// different object ("a report **about** the board").
 const BOARD_DEIXIS: &[&str] = &[
     "the task card",
     "this card",
@@ -357,7 +360,14 @@ const BOARD_FIELD_NOUNS: &[&str] = &["the status", "the priority", "the assignee
 
 /// Words that, immediately after a [`BOARD_FIELD_NOUNS`] phrase, mark it as the
 /// object of a board operation rather than the head of a longer noun.
-const BOARD_CONNECTIVES: &[&str] = &["on", "of", "for", "to", "and"];
+///
+/// Deliberately excludes `of`: "the status **of** the landing page" makes the
+/// landing page the head of the noun phrase — the field belongs to it, so the
+/// object of the request is the page, not the card's status field on the
+/// board (PR #1949 review, CodeRabbit thread 3895107555). `on`/`to`/`for`/`and`
+/// instead introduce a board operation's target value ("change the assignee
+/// **to** nova"), which is why they stay.
+const BOARD_CONNECTIVES: &[&str] = &["on", "for", "to", "and"];
 
 /// Max length of a generated task title.
 const TITLE_MAX: usize = 80;
@@ -720,28 +730,53 @@ fn starts_with_action(lower: &str) -> bool {
 /// Whether the object of the request is the board itself or a card on it — a
 /// message *about* the kanban rather than a new deliverable.
 fn refers_to_board_entity(lower: &str) -> bool {
-    if BOARD_DEIXIS.iter().any(|p| contains_word_bounded(lower, p)) {
+    if BOARD_DEIXIS
+        .iter()
+        .any(|p| board_deixis_is_object(lower, p))
+    {
         return true;
     }
     field_noun_in_board_context(lower)
 }
 
-/// True when `phrase` occurs in `lower` with non-alphanumeric edges, so only a
-/// whole word matches.
-fn contains_word_bounded(lower: &str, phrase: &str) -> bool {
+/// True when `phrase` occurs in `lower`, word-bounded, in the request's actual
+/// object position: not the head of a longer noun ("the board
+/// **presentation**" — see [`followed_by_board_context`]) and not the topic of
+/// a different object ("a report **about** the board" — see
+/// [`preceded_by_topic_marker`]).
+fn board_deixis_is_object(lower: &str, phrase: &str) -> bool {
     let bytes = lower.as_bytes();
     let mut from = 0;
     while let Some(rel) = lower[from..].find(phrase) {
         let start = from + rel;
         let end = start + phrase.len();
+        from = start + 1;
         let before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
         let after = end == lower.len() || !bytes[end].is_ascii_alphanumeric();
-        if before && after {
+        if before
+            && after
+            && followed_by_board_context(&lower[end..])
+            && !preceded_by_topic_marker(&lower[..start])
+        {
             return true;
         }
-        from = start + 1;
     }
     false
+}
+
+/// Whether a topic-introducing word immediately precedes a deixis phrase,
+/// making the phrase the topic of a different, earlier object ("a memo
+/// **about** the board") rather than the object of the request itself. The
+/// verb's own complement prepositions ("look **at** the board", "move it
+/// **to** the board") are not topic markers and are left alone.
+fn preceded_by_topic_marker(lead: &str) -> bool {
+    const TOPIC_MARKERS: &[&str] = &["about", "regarding", "concerning"];
+    let last_word = lead
+        .trim_end()
+        .rsplit(|c: char| !c.is_alphanumeric())
+        .next()
+        .unwrap_or("");
+    TOPIC_MARKERS.contains(&last_word)
 }
 
 /// A [`BOARD_FIELD_NOUNS`] phrase used as a board operation's object: clause-final,
@@ -1053,11 +1088,14 @@ mod tests {
         );
     }
 
-    /// The predicate the board guard turns on: deixis matches anywhere, field
-    /// nouns demote only in board context, and everything else is real work.
+    /// The predicate the board guard turns on: deixis fires only when it is
+    /// the object of the request (see
+    /// [`board_deixis_must_be_the_objects_head_not_a_modifier_or_topic`] for
+    /// the cases that must NOT fire), field nouns demote only in board
+    /// context, and everything else is real work.
     #[test]
     fn board_entity_predicate_reads_the_object_of_the_request() {
-        // Tier 1 — deixis, matched anywhere in the message.
+        // Tier 1 — deixis, matched wherever it is the object of the request.
         for msg in [
             "update the status on the task card",
             "move this card to done",
@@ -1084,6 +1122,46 @@ mod tests {
         }
         // A boundary check: deixis must not fire inside a larger word.
         assert!(!refers_to_board_entity("restock the cardstock"));
+    }
+
+    /// PR #1949 review (Codex thread 3895066476, CodeRabbit thread
+    /// 3895107555): `BOARD_DEIXIS` used to match anywhere in the message, so
+    /// a deliverable whose title merely *contains* board vocabulary — as a
+    /// compound noun, or as the topic of a different object — got misread as
+    /// the object of a board operation and demoted to `Chatter`, opening no
+    /// card. The predicate must require the deixis phrase to actually be the
+    /// object of the request, the same way [`field_noun_in_board_context`]
+    /// already requires for field nouns.
+    #[test]
+    fn board_deixis_must_be_the_objects_head_not_a_modifier_or_topic() {
+        // "the board"/"the ticket" heads a longer noun ("board presentation",
+        // "ticket booking flow") — real work, not a board operation.
+        assert!(!refers_to_board_entity("build the board presentation"));
+        assert!(!refers_to_board_entity("update the ticket booking flow"));
+        // "about"/"regarding" make the deixis phrase the *topic* of a
+        // different object ("a report"), not the object itself.
+        assert!(!refers_to_board_entity("create a report about the board"));
+        assert!(!refers_to_board_entity("write a memo regarding the board"));
+        // Genuine deixis-as-object still fires — the verb's own complement
+        // preposition ("at", "to") is not a topic marker.
+        assert!(refers_to_board_entity("look at the board"));
+        assert!(refers_to_board_entity("move this card to done"));
+    }
+
+    /// PR #1949 review (CodeRabbit thread 3895107555): `field_noun_in_board_
+    /// context` treated a trailing `of` exactly like `on`/`to`/`for`/`and`,
+    /// but `of` introduces the noun a field *belongs to* ("the status **of**
+    /// the landing page" = the landing page's status), not a board
+    /// operation's target value the way "change the assignee **to** nova"
+    /// does. Demoting real deliverable work phrased with `of` closed no card.
+    #[test]
+    fn field_noun_followed_by_of_is_not_board_context() {
+        assert!(!refers_to_board_entity(
+            "update the status of the landing page"
+        ));
+        // The other connectives are unaffected.
+        assert!(refers_to_board_entity("update the status on the board"));
+        assert!(refers_to_board_entity("change the assignee to nova"));
     }
 
     /// A board operation phrased as an instruction is a *decision* to touch the
