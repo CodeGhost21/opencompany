@@ -229,6 +229,7 @@ function ChatPane({
       <AssistantRuntimeProvider runtime={runtime}>
         <Transcript
           contact={thread.contact}
+          readOnly={thread.readOnly}
           onAddToBoard={(m) => void addToBoard(m)}
           addingId={addingId}
           onDismissCard={(id) => void dismissCard(id)}

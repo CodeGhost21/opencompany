@@ -734,6 +734,23 @@ async fn remove_member(
         )));
     }
 
+    // Tombstone the operator-feed divert before it can be lost (issue #1781
+    // review, Codex P2 follow-up to the desk-deletion fix): a manifest
+    // teammate at the literal id `operator` is already covered below —
+    // `retire_agent` tombstones it under the same key
+    // `operator_feed_channel`'s own `is_retired` check reads — but an
+    // *overlay* teammate is deleted outright with no tombstone at all. If
+    // this removal is what's currently holding the divert (id or, via
+    // `is_roster_agent`, nothing else does for a teammate — desks are the
+    // only case matched by display name), the fallback address must stay
+    // fixed after the removal exactly as `delete_desk` already keeps it
+    // fixed after a colliding desk's removal — see
+    // `CompanyRecord::divert_operator_feed_permanently`'s doc.
+    if record.operator_feed_channel()
+        == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+    {
+        record.divert_operator_feed_permanently();
+    }
     let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
     if is_manifest {
         // A tombstone, not a manifest rewrite: `company.toml` and the global
@@ -1908,6 +1925,77 @@ mod tests {
         assert_eq!(
             again["id"], "dana_designer",
             "the freed slug comes back rather than suffixing past a ghost: {again}"
+        );
+    }
+
+    /// Issue #1781 review, Codex P2 follow-up: the sibling of the desk-side
+    /// fix — a legacy **overlay** teammate at the literal id `operator`
+    /// (grandfathered; `POST .../team` reserves this id going forward, the
+    /// same way `create_desk` reserves it for desks) diverts
+    /// `operator_feed_channel()` to the fallback address via `is_roster_agent`.
+    /// Unlike a manifest teammate, `remove_member`'s overlay branch deletes
+    /// outright with no `retire_agent` tombstone — so without this fix the
+    /// live `is_roster_agent`/`is_retired` checks would both go false the
+    /// moment the delete lands, reverting the feed to `OPERATOR_CHANNEL` and
+    /// orphaning every report already journaled under the fallback.
+    ///
+    /// Seeded directly on the stored record rather than through `POST
+    /// .../team`, for the same reason the desk-side test seeds its collision
+    /// directly: the creation route has refused this id since before this fix
+    /// existed, so this shape can only be reached by data that predates it.
+    #[tokio::test]
+    async fn removing_an_overlay_teammate_at_the_operator_id_keeps_the_feed_diverted() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut record = runtime.store().load(&id).await.unwrap().unwrap();
+        record
+            .overlay_agents
+            .push(crate::ports::types::OverlayAgent {
+                id: "operator".to_string(),
+                name: "Legacy Operator".to_string(),
+                role: "Chief of Staff".to_string(),
+                description: None,
+                tools: None,
+                model: None,
+                harness: None,
+            });
+        runtime.store().save(&record).await.unwrap();
+
+        let reloaded = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "fixture must start in the collision state this test exercises"
+        );
+
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/team/operator",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let after = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            !after.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL),
+            "the colliding teammate must actually be gone, or this is not \
+             exercising the live-check-flips-back failure mode at all"
+        );
+        assert_eq!(
+            after.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the feed address must stay on the fallback once the overlay \
+             teammate that caused the collision is deleted — flipping back to \
+             OPERATOR_CHANNEL would orphan every report already journaled \
+             under the fallback and let the deleted teammate's own historical \
+             DM history (chat_id == \"operator\") resurface as system-feed \
+             content"
         );
     }
 

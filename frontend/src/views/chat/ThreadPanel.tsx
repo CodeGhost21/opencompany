@@ -40,6 +40,16 @@ interface Props {
    */
   channelMemberIds?: string[];
   /**
+   * Whether the channel this thread belongs to is read-only (issue #1757's
+   * Operator channel, `Boolean(channel?.system)` in `ChatView`). The main
+   * composer already disables on this, but a thread has its own composer —
+   * so without this a durable Operator report could still be opened as a
+   * thread and replied to there, only for the server's read-only guard to
+   * reject it after the text was written. Absent means "no such channel is
+   * open", the same as the main composer's default.
+   */
+  readOnly?: boolean;
+  /**
    * Your own avatar reference, so your lines in this thread wear your face
    * (issue #1729).
    *
@@ -124,6 +134,7 @@ export function ThreadPanel({
   sending,
   mentionables,
   channelMemberIds,
+  readOnly,
   youAvatar,
   resolveAttachmentUrl,
   onSend,
@@ -184,16 +195,23 @@ export function ThreadPanel({
       <TypingLine names={typingNames} />
       <MessageComposer
         compact
-        placeholder="Reply…"
-        disabled={sending}
+        placeholder={readOnly ? "This channel is read-only" : "Reply…"}
+        disabled={sending || readOnly}
         mentionables={mentionables}
         channelMemberIds={channelMemberIds}
-        onSend={onSend}
+        // Belt to the composer's brace: `disabled` already keeps the UI from
+        // calling this, but a read-only thread never reaches the real
+        // `onSend` — and therefore never calls `client.chat` — even if
+        // something upstream bypasses the disabled input (issue #1757).
+        onSend={readOnly ? noopSend : onSend}
         onTyping={onTyping}
       />
     </aside>
   );
 }
+
+/** The no-op `onSend` a read-only [`ThreadPanel`] wires its composer to. */
+function noopSend() {}
 
 function Line({
   channel,

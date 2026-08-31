@@ -305,6 +305,19 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
     // operator `/chat` route (issue #983). `run_journaled_cycle` then runs the
     // turn on the already-recorded message instead of appending it again.
     let chat = session.chat.clone();
+    // Issue #1781 review (Codex P1): this route journals straight to
+    // `runtime.events()` below rather than going through the REST `/chat`
+    // route's `chat_and_emit`, so it never ran that function's read-only
+    // Operator-channel guard — an authenticated caller could open a session
+    // with `_meta.opencompany.chat = "operator"` (or the collision-fallback
+    // id) and post into the durable system feed. `ensure_desk_writable` is
+    // that same guard, now shared by both write ingresses; running it here,
+    // immediately before the append, is the ACP mirror of `chat_and_emit`
+    // checking it before its own append.
+    runtime
+        .ensure_desk_writable(&chat)
+        .await
+        .map_err(|e| e.to_string())?;
     let event = CompanyEvent::OperatorMessage {
         text,
         by: by.clone(),
@@ -699,6 +712,79 @@ mode = "full"
         assert!(result.is_err(), "a quiesced runtime must refuse the prompt");
 
         // And nothing was journaled: the refusal happened before the append.
+        let events = runtime
+            .events()
+            .read_from(&company, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        assert!(
+            events
+                .iter()
+                .all(|stored| !matches!(&stored.event, CompanyEvent::OperatorMessage { .. })),
+            "a refused prompt must not leave a message in the journal: {events:?}"
+        );
+    }
+
+    /// Issue #1781 review (Codex P1): `prompt` used to journal straight to
+    /// `runtime.events()`, never through the REST `/chat` route's
+    /// `chat_and_emit`, so a session opened with `_meta.opencompany.chat =
+    /// "operator"` could post into the durable, supposedly read-only Operator
+    /// system feed. `acme` (from `acp_state`) has no real `operator` desk or
+    /// teammate, so this is the ordinary, non-grandfathered case REST already
+    /// refuses — the ACP surface must refuse it identically.
+    #[tokio::test]
+    async fn an_acp_prompt_addressed_to_the_operator_channel_is_refused() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-operator-guard-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).expect("company");
+        let admin = seed_user(&state, &company, "u-admin", "Admin Person").await;
+        let auth = GqlAuth::User(UserPrincipal {
+            company: company.clone(),
+            user_id: admin,
+            email: "admin@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: crate::ports::SessionKind::Browser,
+        });
+
+        // Mirrors what `open_session` stores for an unpinned session whose
+        // client requested `_meta.opencompany.chat = "operator"`
+        // (`AcpSession::thread_key` passes an unpinned request through
+        // verbatim).
+        state.acp_sessions().insert(
+            "conn-1",
+            crate::server::acp::AcpSession {
+                id: "s-1".to_string(),
+                company: company.clone(),
+                chat: "operator".to_string(),
+                agent_id: None,
+            },
+        );
+
+        let result = prompt(
+            &state,
+            &auth,
+            &json!({
+                "sessionId": "s-1",
+                "prompt": [
+                    { "type": "text", "text": "hello from a session pinned to the feed" },
+                ],
+                "_meta": { "opencompany/connectionId": "conn-1" },
+            }),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a prompt addressed to the read-only Operator channel must be refused"
+        );
+
+        // And nothing was journaled: the refusal happened before the append,
+        // same ordering the quiesced-runtime test above proves.
         let events = runtime
             .events()
             .read_from(&company, EventSeq::new(0), usize::MAX)

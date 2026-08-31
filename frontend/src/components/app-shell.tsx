@@ -137,8 +137,9 @@ import { writeLastChannel } from "@/lib/last-channel";
 import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
-import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
+import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
+import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
@@ -150,6 +151,7 @@ import {
   dmChannelId,
   dmThreadId,
   HISTORY_UNSTARTED,
+  isOperatorChannelDto,
   type DecidedApproval,
   type HistoryHydration,
   type HistoryStatus,
@@ -524,16 +526,14 @@ function connectErrorMessage(code: string, provider: string | null): string {
  */
 function channelMap(desks: Desk[], members: TeamMember[]): Record<string, string> {
   const map: Record<string, string> = {};
-  // The company's main line has a channel of its own now — the built-in
-  // `#general` (issue #1743) — so it maps to itself, under every spelling the
-  // host journals it under (`""`, `main`, `General`, `general`).
+  // Every spelling the host folds the company-wide line under (issue #1743).
   //
   // The main line used to be seeded with the first desk's id instead: with no
   // `#general` channel to land in, it was parked on whichever desk sorted
   // first, so it would still be somewhere the operator could find it. That is
   // now actively wrong — an unaddressed message and its reply were rendered in
   // `#engineering`, complete with an unread badge, while the host's own
-  // history for that desk was empty. Verified in a browser before and after.
+  // history for that desk was empty.
   //
   // Resolved through `channelIdForThread` rather than answered here, so there
   // is one rule and not two: a blueprint desk grandfathered under a General id
@@ -1351,9 +1351,7 @@ export function AppShell({
         else channelsByThread.set(threadId, [{ channelId }]);
       }
       // Every resolved thread gets its own fetch, even when nothing renders as
-      // a channel — a workflow run is a thread with no Chat channel. (The main
-      // line used to be the example here; since issue #1743 it has `#general`.)
-      // And every
+      // a channel — the main line is a thread with no Chat channel. And every
       // channel's backing thread is in `threadIds`, so the union is the full
       // set, each exactly once (issue #1690).
       [...new Set([...threadIds, ...channelsByThread.keys()])].forEach((threadId) =>
@@ -1361,22 +1359,50 @@ export function AppShell({
       );
     };
 
-    client
-      .listDesks(company)
-      .then(async (desks) => {
+    Promise.all([
+      client.listDesks(company).catch(() => null),
+      // The always-present Operator feed's identity (issue #1757 rework) —
+      // fetched alongside desks, not derived from them, since it is its own
+      // surface now. `null` on any failure (offline, or a host that predates
+      // the route) rather than sinking the whole pass: a company can still
+      // rehydrate its real desks/DMs without the pinned Operator row.
+      //
+      // One retry (issue #1781 review, Codex P2): `ChatView` fetches this
+      // same identity independently for rendering the pinned row, so a
+      // single dropped request here — while `ChatView`'s own, later call
+      // succeeds — used to render the row but permanently omit its id from
+      // this pass's rehydration targets and five-second polling, since this
+      // pass had already given up. A bounded retry closes the common
+      // transient case without turning the fetch into an open-ended one; see
+      // `fetchWithOneRetry`'s doc for why it is extracted rather than inline.
+      fetchWithOneRetry(() => client.getOperatorChannel(company)),
+    ])
+      .then(async ([desks, operatorChannelRaw]) => {
+        // See `isOperatorChannelDto`'s doc comment — a client stub that
+        // resolves every unlisted method to `[]` would otherwise satisfy the
+        // `Promise.all` type and reach the field reads below.
+        const operatorChannel = isOperatorChannelDto(operatorChannelRaw)
+          ? operatorChannelRaw
+          : null;
         if (cancelled || requestCompany !== company) return;
         // Issue #151 §3.3: desks first, then one DM thread per roster teammate.
         // The roster is fetched separately and tolerated as optional — a host
         // that 404s `/team` keeps its desks rather than losing the whole list.
         const team = await client.listTeam(company).catch(() => []);
         if (cancelled) return;
-        const deskThreads = threadsFromDesks(desks);
+        const deskThreads = desks === null ? defaultThreads() : threadsFromDesks(desks);
         const resolved = [
           ...deskThreads,
           ...agentDmThreads(
             team,
             deskThreads.map((t) => t.id),
           ),
+          // The legacy `#/conversation` route's own copy of the pinned
+          // Operator row — Chat's channel model gets it through
+          // `operatorSection`, but `Conversation` reads this thread list
+          // directly and never received one, so its `readOnly` plumbing had
+          // nothing to gate (issue #1781 review, Codex P2).
+          ...(operatorChannel ? [operatorThread(operatorChannel)] : []),
         ];
         setThreads((prev) => {
           const byId = new Map(prev.map((t) => [t.id, t]));
@@ -1386,13 +1412,28 @@ export function AppShell({
           });
         });
         // The host answered, so this is the company's desk list — empty
-        // included. `defaultDesks()` stands in only on the `.catch` leg below,
-        // where nothing was answered at all; a company that simply declares no
-        // `[[group_chat]]` used to be given three fabricated ones here.
-        const chatDesks = desks.map(deskFromDto);
+        // included. `defaultDesks()` stands in only when `listDesks` itself
+        // failed (`desks === null`, from the `.catch(() => null)` above); a
+        // company that simply declares no `[[group_chat]]` used to be given
+        // three fabricated ones here.
+        const chatDesks = desks === null ? defaultDesks() : desks.map(deskFromDto);
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
-        setChatChannelByThread(channelMap(chatDesks, roster));
+        //
+        // The Operator feed's id is folded in here too (issue #1781 review,
+        // Codex P2): `channelMap` only knows desks and roster teammates, so
+        // without this the map a **live** SSE frame is resolved through
+        // (`channelForThread(chatChannelByThread, event.chatId)`, a few
+        // hundred lines below) missed the Operator channel entirely and
+        // dropped the frame — `renderAgentReply` returns on the very next
+        // line when the lookup misses. The five-second history poll still
+        // recovered it eventually, because the `channels` rehydration-target
+        // list a little further down already carries this same id→id pair;
+        // this closes the live-event gap the poll was quietly papering over.
+        setChatChannelByThread({
+          ...channelMap(chatDesks, roster),
+          ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
+        });
         // The channel `ChatView` lands on when the hash names none, which since
         // issue #1743 is the built-in `#general` rather than the first desk —
         // the two must agree, or a line with nowhere else to go lands in a
@@ -1401,7 +1442,17 @@ export function AppShell({
         // blueprint desk owns the line in its own company, and `main` is then
         // not a channel at all.
         setFirstDeskChannelId(channelIdForThread(MAIN_THREAD_ID, chatDesks, roster));
-        const threadIds = resolved.map((t) => t.id);
+        // Fold the Operator feed's id into the same rehydration pass, keyed on
+        // its own id both as channel and thread (its channel id *is* its
+        // thread id — `chat/history?desk=<id>` reads it through the ordinary
+        // path). Without this, `ChatView`'s pinned row would sit on a channel
+        // id `historyReady` never sees a status for until `discovered` alone
+        // resolves it, and `transcripts[operatorChannel.id]` would never fill
+        // in — the spinner-forever failure mode this pass exists to avoid.
+        const threadIds = [
+          ...resolved.map((t) => t.id),
+          ...(operatorChannel ? [operatorChannel.id] : []),
+        ];
         const channels = [
           // `#general` is not in the desk list (it is not a desk), so its
           // history has to be named here or nothing would rehydrate it on
@@ -1420,8 +1471,7 @@ export function AppShell({
           // `is_general_chat` has folded `""`, `main`, `General` and `general`
           // into one conversation since issue #65. Naming `dm:<id>` as its
           // channel therefore poured the company-wide line into that DM on
-          // every reload, and — before the resolver below was reordered — left
-          // `#general` itself with no hydration target at all.
+          // every reload.
           //
           // Resolved through `channelIdForThread` so the one rule that decides
           // where a thread renders decides it here too (issue #1743). For every
@@ -1434,6 +1484,9 @@ export function AppShell({
             // reload (issue #1743).
             threadId: dmThreadId(m),
           })),
+          ...(operatorChannel
+            ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
+            : []),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         // SSE remains the fast path. This catches a persisted channel message
@@ -1446,24 +1499,27 @@ export function AppShell({
         setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
-        // Host without `/desks`, or offline — keep the static default
-        // threads, but the operator/General line still deserves a
-        // rehydration attempt (it's the one every deployment has).
+        // Last-resort safety net: `listDesks`/`getOperatorChannel` already
+        // degrade to `null` on their own failure above, so this only fires on
+        // something unexpected inside the `.then` (e.g. a state setter
+        // throwing) — keep the static default threads so the console still
+        // renders something rather than getting stuck.
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
         setChatChannelByThread(channelMap(fallbackDesks, []));
-        // Exactly what the success path above does, and for the same reason:
-        // the landing channel is `#general`, always. This used to read
-        // `fallbackDesks[0]?.id`, which agreed only by accident — the fallback
-        // set's first row happened to be a fabricated `main` desk. That row is
-        // gone (it made a console-invented desk indistinguishable from a
-        // blueprint one), so the rule is named here rather than inferred from
-        // whichever desk sorts first.
+        // `MAIN_THREAD_ID`, not `fallbackDesks[0]?.id`: `defaultDesks()` no
+        // longer carries a fabricated `main` row (issue #1743), so the first
+        // fallback desk is just whichever one sorts first — landing the
+        // console on an arbitrary desk on an unexpected error instead of the
+        // company-wide line every other path opens on (issue #1781 review,
+        // Codex P2/medium).
         setFirstDeskChannelId(MAIN_THREAD_ID);
         const threadIds = defaultThreads().map((t) => t.id);
         const channels = [
-          // `#general` is in no desk list, here as above — without naming it,
-          // the one channel every company has would not rehydrate on reload.
+          // `#general` is not a desk here either — same reason the success
+          // path above names it explicitly. Without this entry `mainThread()`
+          // is still in `threadIds` (via `defaultThreads()`) but has no
+          // channel to rehydrate history through.
           { channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID },
           ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
         ];
@@ -2248,6 +2304,7 @@ export function AppShell({
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op, the
       // same as the thread store above: better silent than in the wrong place.
+      //
       // `channelForThread`, for the reason `noteInChannel` gives: the map holds
       // four literal General spellings and the host echoes whatever casing the
       // caller addressed, so a bare index drops the live reply and it appears
@@ -3572,7 +3629,9 @@ export function AppShell({
             />
           )}
           {view === "workspace" && (
-            <Suspense fallback={<RouteLoading title="Workspace" label="Loading workspace…" />}>
+            <Suspense
+              fallback={<RouteLoading title="Workspace" label="Loading workspace…" />}
+            >
               <WorkspaceView
                 client={client}
                 company={company}
@@ -3619,16 +3678,11 @@ export function AppShell({
           {view === "observatory" && (
           <Suspense
             fallback={
-              <RouteLoading
-                // `ObservatoryView` titles itself `runId ? "Run" : "Observatory"`,
-                // and on a cold direct visit to `#/observatory/<runId>` this
-                // boundary is the whole page — so announcing "Observatory" told
-                // someone who had bookmarked a run they were on the index, and
-                // corrected itself only once the chunk landed. Same rule, same
-                // `sub`, as the finance boundary above.
-                title={sub ? "Run" : "Observatory"}
-                label={sub ? "Loading run…" : "Loading observatory…"}
-              />
+              // Matches `ObservatoryView`'s own rule for the same reason
+              // `RouteLoading`'s doc gives: the loading state has to settle on
+              // the name the loaded header will actually show, or the title
+              // flips the moment the chunk lands.
+              <RouteLoading title={sub ? "Run" : "Observatory"} label="Loading observatory…" />
             }
           >
             <ObservatoryView
@@ -3646,7 +3700,16 @@ export function AppShell({
           </Suspense>
         )}
         {view === "workflows" && (
-            <Suspense fallback={<RouteLoading title="Workflows" label="Loading canvas…" />}>
+            <Suspense
+              fallback={
+                // Static, not sub-aware: the loaded header's "Workflows" /
+                // "Runs" split reads `indexTab`, a tab this boundary cannot
+                // see (persisted client-side, not carried by the route) — see
+                // `RouteLoading`'s own doc for why a guess here would be worse
+                // than no bar.
+                <RouteLoading title="Workflows" label="Loading canvas…" />
+              }
+            >
               <WorkflowsView
                 client={client}
                 company={company}
@@ -3693,6 +3756,10 @@ export function AppShell({
           {view === "finances" && (
             <Suspense
               fallback={
+                // Names the section itself while its own lazy chunk is still
+                // in flight — before `FinanceSection` has even mounted to run
+                // its own per-subpage Suspense (which already uses
+                // `RouteLoading` with this same static title, one level in).
                 <RouteLoading
                   title={financeFallbackTitle(sub)}
                   label={`Loading ${financeFallbackTitle(sub).toLowerCase()}…`}

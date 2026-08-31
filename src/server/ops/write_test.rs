@@ -9326,6 +9326,7 @@ async fn the_export_document_is_built_from_the_redacted_detail() {
             runtime: runtime.clone(),
             actor: None,
             may_read_contents: false,
+            is_admin: false,
         },
         &id,
     )
@@ -9348,6 +9349,7 @@ async fn the_export_document_is_built_from_the_redacted_detail() {
             runtime: runtime.clone(),
             actor: None,
             may_read_contents: true,
+            is_admin: true,
         },
         &id,
     )

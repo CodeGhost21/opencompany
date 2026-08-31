@@ -396,13 +396,20 @@ fn company_source_dir(path: &std::path::Path) -> std::path::PathBuf {
 
 /// Loads the manifest under `dir`, builds a runtime over `home`, and registers
 /// it in `state`. Returns the derived company id and display name.
+///
+/// Uses [`CompanyManifest::from_path_for_reload`], not `from_path`: this runs
+/// on every `serve` boot for every company directory, hosted-tenant restarts
+/// included, so it must not refuse an already-running company over a
+/// validation rule (e.g. `RESERVED_AGENT_IDS`) that tightened after that
+/// company's `company.toml` was written — see that method's doc comment
+/// (issue #1781 review, Codex P1).
 async fn register_company(
     state: &AppState,
     home: &std::path::Path,
     dir: &std::path::Path,
     discoverable: bool,
 ) -> Result<(String, String, Vec<Schedule>)> {
-    let mut manifest = CompanyManifest::from_path(dir)?;
+    let mut manifest = CompanyManifest::from_path_for_reload(dir)?;
     // `serve --discoverable` opts this company into going public regardless of
     // its manifest: mark it discoverable and synthesize a @handle when absent so
     // Agent Card generation and validation succeed.

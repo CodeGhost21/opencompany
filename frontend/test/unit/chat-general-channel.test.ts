@@ -356,6 +356,25 @@ describe("resolving a host thread to the general channel", () => {
   });
 
   /**
+   * A second, independent lookup in the same file as the one above: resolving
+   * the *channel* an approval's thread renders in (`ApprovalMeta`'s "Asked in"
+   * link), not resolving the *member* a DM thread addresses (`originOf`). Both
+   * have to fold General spellings the same way `channelForThread` does — a
+   * bare `chatChannelByThread[a.thread]` index misses any casing other than
+   * the map's own literal keys, which is exactly the gap `channelForThread`
+   * exists to close for every other thread-to-channel lookup in the shell
+   * (issue #1781 review, Codex P2).
+   */
+  it("resolves the approval-meta channel link through channelForThread, not a bare index", () => {
+    const card = readFileSync(
+      new URL("../../src/components/approval-card.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(card).toContain("channelForThread(chatChannelByThread, a.thread)");
+    expect(card).not.toContain("chatChannelByThread?.[a.thread]");
+  });
+
+  /**
    * The rule itself, rather than the call sites that apply it.
    */
   it("addresses only the General-spelling teammate prefixed", () => {
@@ -540,6 +559,29 @@ describe("the shell maps the main line to #general, not to the first desk", () =
     );
   });
 
+  /**
+   * The last-resort `.catch` handler is a second, independent path to the
+   * same landing/rehydration decision the two tests above pin for the success
+   * path — and `defaultDesks()` dropping its fabricated `main` row regressed
+   * it the same way, one call further down: `fallbackDesks[0]?.id` used to
+   * agree with the company-wide line only by accident (the first fallback
+   * desk happened to be that fabricated row), and the explicit
+   * `{ channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID }` rehydration
+   * entry it also carried was dropped with it — so `mainThread()` stayed in
+   * `threadIds` (via `defaultThreads()`) with no channel to rehydrate
+   * through (issue #1781 review, Codex P2/medium).
+   */
+  it("lands the unexpected-error fallback on #general too, not the first fallback desk", () => {
+    expect(shell).toContain("setFirstDeskChannelId(MAIN_THREAD_ID);");
+    expect(shell).not.toContain("setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);");
+  });
+
+  it("names #general as a rehydration target on the unexpected-error fallback too", () => {
+    expect(shell).toContain(
+      "{ channelId: MAIN_THREAD_ID, threadId: MAIN_THREAD_ID }, ...fallbackDesks.map((d) => ({ channelId: d.id, threadId: d.id })),",
+    );
+  });
+
   it("hydrates a DM from a thread id that actually belongs to that DM", () => {
     // A DM's history is fetched under the address it is written on. For a
     // teammate whose id is a General spelling the bare id is *not* that
@@ -588,5 +630,58 @@ describe("resolving a live frame's thread id against the shell's map", () => {
 
   it("answers null for a thread the map does not know", () => {
     expect(channelForThread(MAP, "workflows")).toBeNull();
+  });
+});
+
+/**
+ * The shell actually calling `channelForThread` at every thread-to-channel
+ * lookup, not just the two the earlier General-channel restoration touched
+ * (`channelMap`'s own construction, and `firstDeskChannelId`).
+ *
+ * PR #1781 review: these four call sites were bare `map[key]` indexes on
+ * `chatChannelByThread`/`chatChannelByThreadRef.current`, which the tests
+ * above prove misses any casing other than the map's own literal keys and
+ * (for the live-reply lookup) drops the frame until polling recovers the
+ * durable history. Pinned by source-text, the same idiom
+ * `chat-rail-focus.test.ts` established, since a full `AppShell` render needs
+ * the whole client and every hook.
+ */
+describe("the shell resolves every thread-to-channel lookup through channelForThread", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const shell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
+
+  it("resolves a live reply's channel through the fold, not a bare index", () => {
+    expect(shell).toContain("channelForThread(chatChannelByThread, event.chatId)");
+    expect(shell).not.toContain("chatChannelByThread[event.chatId]");
+  });
+
+  it("resolves the addressed-notice target through the fold", () => {
+    expect(shell).toContain("channelForThread(chatChannelByThread, threadId)");
+  });
+
+  it("resolves both `chatChannelByThreadRef.current` lookups through the fold", () => {
+    const matches = shell.match(/channelForThread\(chatChannelByThreadRef\.current, threadId\)/g);
+    expect(matches?.length ?? 0).toBe(2);
+    expect(shell).not.toContain("chatChannelByThreadRef.current[threadId]");
+  });
+
+  /**
+   * PR #1781 review (Codex P2, comment 3878664647): `channelMap` only knows
+   * desks and roster teammates, so `setChatChannelByThread(channelMap(...))`
+   * alone never taught `chatChannelByThread` the Operator channel's own
+   * id → id pair. `channelForThread(chatChannelByThread, event.chatId)`
+   * (pinned above) then missed on `event.chatId === operatorChannel.id` and
+   * `renderAgentReply` returned without rendering the live SSE frame — the
+   * Operator transcript and its unread state only caught up on the
+   * five-second history poll, whose own `channels` rehydration-target list
+   * (a few lines further down) already carried this id and was masking the
+   * gap. Folding the id into the state map itself, not just the poll
+   * targets, is what closes it for the live path too.
+   */
+  it("folds the Operator channel's id into chatChannelByThread, not just the poll targets", () => {
+    expect(shell).toContain(
+      "...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {})",
+    );
+    expect(shell).not.toContain("setChatChannelByThread(channelMap(chatDesks, roster));");
   });
 });
