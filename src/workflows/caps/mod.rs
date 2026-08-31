@@ -2130,24 +2130,36 @@ impl HarnessAgentRunner {
         // their ordinary "missing"/"not a list" gap message rather than
         // crashing or silently passing.
         //
-        // Computed once, unconditionally (not only when a postcondition is
-        // declared), because the SAME parsed value is also merged into this
-        // node's emitted output below — Codex #3893330383 on #1937: the
-        // original fix parsed the reply only for the gate's evaluation
-        // envelope, then discarded it, so the gate could certify
-        // `field_present`/`non_empty_list` while the node's own emitted
-        // `json` still carried none of it and a downstream `=item.json.<field>`
-        // binding resolved to null even though the postcondition just passed
-        // — a gate that certifies a shape the next node cannot read is worse
-        // than one that fails loudly.
-        let parsed_reply =
-            serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null);
+        // Codex #3893330383 on #1937: the gate's evaluation envelope needs
+        // this parse, but the node's own emitted output must see the SAME
+        // parsed value too, or the gate can certify `field_present`/
+        // `non_empty_list` while a downstream `=item.json.<field>` binding
+        // still resolves to null.
+        //
+        // CodeRabbit #3893565788 review: gated on `postcondition_declared`,
+        // computed only when a postcondition is actually declared — this
+        // parse (and the merge it feeds, below) must not run for the vast
+        // majority of agent nodes that never opted into structured-output
+        // evaluation. Before this gate, ANY agent node whose reply happened
+        // to parse as a JSON object had that object's keys merged into its
+        // emitted output, changing the output contract for every existing
+        // workflow whether or not it ever declared a postcondition — a
+        // `=item.json.<field>` binding that reliably resolved to null for
+        // every past run could start resolving to model-controlled content
+        // depending on what the agent happened to reply this run, for a node
+        // that never asked for structured output at all.
+        let postcondition_declared = request.get("postcondition").is_some();
+        let parsed_reply = if postcondition_declared {
+            serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
 
         if let Some(spec) = request.get("postcondition") {
             let envelope = json!({
                 "text": outcome.reply,
                 "agent_ref": agent_ref,
-                "json": parsed_reply,
+                "json": parsed_reply.clone(),
             });
             if let Err(gap) = postcondition::evaluate_postcondition(spec, &envelope) {
                 let message = format!(
@@ -2229,29 +2241,56 @@ impl HarnessAgentRunner {
         // the engine's item envelope `json` (tinyflows' `finish_agent_run` —
         // `Value::Object`/`Value::Array` pass through unchanged, anything else
         // becomes `Null`) — i.e. this literal object IS what a downstream
-        // `=item.json.<field>` binding reads. Merging `parsed_reply`'s own
-        // fields in (Codex #3893330383 on #1937) makes that binding resolve to
-        // the SAME value the postcondition gate above just certified, instead
-        // of a wrapper that never carried it.
+        // `=item.json.<field>` binding reads. Reflecting `parsed_reply` here
+        // (Codex #3893330383 on #1937) makes that binding resolve to the SAME
+        // value the postcondition gate above just certified, instead of a
+        // wrapper that never carried it.
         //
-        // `text`/`agent_ref` are inserted into the base map FIRST and merged
-        // with `or_insert` (base wins on any key collision) rather than the
-        // other way around: `delivery.rs::report_text` reads a delivered
-        // report's body via `item.json.text` (falling back to a nested
-        // `item.json.json.text`, its own doc names this exact double-wrap), so
-        // `value["text"]` must always stay the raw reply string — a reply that
-        // happens to parse as JSON must not make the delivered report lose its
-        // prose to the parsed object's own (irrelevant) `text` key.
-        //
-        // Only merges when the reply parses to an `Object` — a bare JSON array
-        // reply (the no-`field` `non_empty_list` case) is not merged in here,
-        // to avoid colliding with the `text`/`agent_ref` object shape; the raw
-        // reply (including a stringified list) is still fully available via
-        // `value["text"]` for a downstream consumer that wants to re-parse it.
+        // Scoped to `postcondition_declared` (CodeRabbit #3893565788): every
+        // agent node without a declared postcondition keeps the exact
+        // `{text, agent_ref}` shape it always had, unaffected by whatever the
+        // model happened to reply — the behavior change is confined to the
+        // population that opted into structured-output evaluation.
         let mut value = json!({ "text": outcome.reply, "agent_ref": agent_ref });
-        if let (Value::Object(parsed_map), Value::Object(out_map)) = (&parsed_reply, &mut value) {
-            for (k, v) in parsed_map {
-                out_map.entry(k.clone()).or_insert_with(|| v.clone());
+        if postcondition_declared {
+            match &parsed_reply {
+                // `text`/`agent_ref` are already in `value` and merged with
+                // `or_insert` (base wins on any key collision) rather than the
+                // other way around: `delivery.rs::report_text` reads a
+                // delivered report's body via `item.json.text` (falling back
+                // to a nested `item.json.json.text`, its own doc names this
+                // exact double-wrap), so `value["text"]` must always stay the
+                // raw reply string — a reply that happens to parse as JSON
+                // must not make the delivered report lose its prose to the
+                // parsed object's own (irrelevant) `text` key.
+                Value::Object(parsed_map) => {
+                    if let Value::Object(out_map) = &mut value {
+                        for (k, v) in parsed_map {
+                            out_map.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+                // Codex #3893541856 review: a bare JSON array (the no-`field`
+                // `non_empty_list` case) can't merge into the `{text,
+                // agent_ref}` object shape — so replace `value` wholesale
+                // with the array itself rather than dropping it, the same
+                // "downstream must see what the gate certified" reasoning as
+                // the object case. `=item.json` (the whole value) then
+                // resolves to the exact array `non_empty_list` validated.
+                // `item.text` (a separate, top-level field on the emitted
+                // outcome, not nested under `json`) still independently
+                // carries the raw reply string, so nothing that reads the
+                // prose loses it — only `item.json.text` specifically stops
+                // resolving for this one node, and only because this node
+                // declared it wants list-shaped output, not prose.
+                Value::Array(_) => {
+                    value = parsed_reply.clone();
+                }
+                // Not valid JSON (the common case, even among nodes that
+                // declared a postcondition — e.g. `non_empty` needs only
+                // prose) — leave `value` as the ordinary `{text, agent_ref}`
+                // shape.
+                _ => {}
             }
         }
         Ok((value, outcome))
@@ -3456,6 +3495,12 @@ mod tests {
     /// is exactly what this test sends. On the code as it stood before this
     /// fix, this assertion fails: `run_turn` returns `Err` here because the
     /// envelope's `json` never carried the agent's parsed reply.
+    ///
+    /// Updated for Codex #3893541856 (bare-array emission): the emitted
+    /// `value` is now the array itself, not an object with a `text` key — see
+    /// `a_bare_array_reply_replaces_the_emitted_value_wholesale` below for the
+    /// dedicated coverage of that shape. `outcome.reply` (a separate field,
+    /// untouched by any of this) still carries the raw string regardless.
     #[tokio::test]
     async fn a_reply_that_is_a_json_list_satisfies_non_empty_list_with_no_field() {
         let dir = tempfile::Builder::new()
@@ -3513,7 +3558,7 @@ mod tests {
                  never be seen as a `Value::Array`",
             );
         assert_eq!(outcome.reply, "[\"x\", \"y\"]");
-        assert_eq!(value["text"], "[\"x\", \"y\"]");
+        assert_eq!(value, json!(["x", "y"]));
     }
 
     /// Companion: a plain-prose reply (the common case — agent nodes are not
@@ -3727,6 +3772,150 @@ mod tests {
         // above must also be readable off the emitted value a downstream
         // binding sees.
         assert_eq!(value["items"], json!([1, 2, 3]));
+    }
+
+    /// CodeRabbit #3893565788 on #1937 — the "blast radius" proof. A node
+    /// with NO declared postcondition, whose reply happens to be valid JSON,
+    /// must emit the exact `{text, agent_ref}` shape it always has — the
+    /// merge must never run for a node that did not opt into structured
+    /// output evaluation. On the code as it stood right after the
+    /// #3893330383 fix (before this scoping), this assertion fails:
+    /// `revenue` would appear as a top-level key in `value`, changing the
+    /// output contract for every agent node in every existing workflow that
+    /// happens to reply with a JSON object, whether or not it ever declared
+    /// a postcondition.
+    #[tokio::test]
+    async fn a_reply_that_parses_as_json_is_not_merged_without_a_declared_postcondition() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-no-postcondition-json-reply-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"revenue\": 12000, \"text\": \"ignored\"}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937e"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937e"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937e".to_string(),
+            "run-1937e".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        // No `postcondition` key at all — the ordinary, overwhelmingly common
+        // case: an agent node nobody ever asked to declare a run-safety gate.
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({ "node_id": "analyst", "prompt": "give me the numbers" }),
+            )
+            .await
+            .expect("a node with no postcondition must not be gated at all");
+
+        assert_eq!(outcome.reply, "{\"revenue\": 12000, \"text\": \"ignored\"}");
+        assert_eq!(
+            value,
+            json!({
+                "text": "{\"revenue\": 12000, \"text\": \"ignored\"}",
+                "agent_ref": "researcher",
+            }),
+            "a node with no declared postcondition must emit exactly {{text, agent_ref}} \
+             regardless of what the reply parses as — no `revenue` key, and `text` must \
+             stay the raw reply string, not the parsed object's own `text` value: {value}"
+        );
+    }
+
+    /// Codex #3893541856 on #1937 — the bare-array companion to the object
+    /// merge above. A node whose declared `non_empty_list` (no `field`)
+    /// passes against a bare JSON-array reply must emit that array itself as
+    /// `value`, not the `{text, agent_ref}` wrapper the gate never validated
+    /// — otherwise a downstream `=item.json` binding (reading the whole
+    /// value, not a dotted field into it) resolves to the wrapper instead of
+    /// the array the gate certified, reproducing the exact defect
+    /// #3893330383 fixed for the object case.
+    #[tokio::test]
+    async fn a_bare_array_reply_replaces_the_emitted_value_wholesale() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-bare-array-emission-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "[\"x\", \"y\"]".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937f"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937f"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937f".to_string(),
+            "run-1937f".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "list two things",
+                    "postcondition": { "require": "non_empty_list" }
+                }),
+            )
+            .await
+            .expect("a reply that IS a non-empty JSON array must satisfy non_empty_list");
+
+        // The gate certified the array; the emitted value must literally BE
+        // that array — not an object wrapping it, and not the old
+        // `{text, agent_ref}` shape.
+        assert_eq!(value, json!(["x", "y"]));
+        // The raw reply string is still available independently: `outcome`
+        // (a distinct field from `value`) and `AgentRunOutcome.text` (built
+        // from `outcome.reply` directly, not from `value`) both still carry
+        // it — nothing that reads the prose loses it.
+        assert_eq!(outcome.reply, "[\"x\", \"y\"]");
     }
 
     /// Issue #638: a node that gates more calls than the cap allows leaves the
