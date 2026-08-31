@@ -519,7 +519,14 @@ fn seed_draft(file: &crate::company::WorkflowFile) -> RawWorkflow {
                 // agent reading the workflow.
                 repeatable: n.repeatable,
                 destination: n.destination.clone(),
-                postcondition: None,
+                // Carried, not dropped, for the same reason as `repeatable`
+                // above (issue #1866 review): this is a round trip of a
+                // stored graph, so silently clearing an existing
+                // `postcondition` here would both discard the run-safety
+                // gate AND make `project_workflow_spec`'s `unexpressible`
+                // residue falsely report no postcondition policy, even
+                // though the runtime still enforces one.
+                postcondition: n.postcondition.clone(),
             })
             .collect(),
         edges: file
