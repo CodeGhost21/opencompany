@@ -39,6 +39,19 @@ export interface CompanyStatus {
   emergency_paused?: boolean;
 }
 
+/**
+ * `GET /api/v1/companies/provisioning` — the sign-in mode a company provisioned
+ * on this host right now would land in, so the create/reset dialog can collect
+ * the right identity field before it builds a manifest. Mirrors
+ * `ProvisioningInfoDto` in `src/server/provision.rs`.
+ */
+export interface ProvisioningInfo {
+  /** The effective sign-in mode: `wallet`, `email`, or `none`. */
+  auth_mode: "wallet" | "email" | "none";
+  /** Whether provisioning requires at least one `[users].wallets` address. */
+  wallets_required: boolean;
+}
+
 /** What kind of processing step this is (drives the timeline icon). */
 export type TurnStepKind = "tool_call" | "thinking" | "note";
 

@@ -25,9 +25,9 @@ use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::AppState;
@@ -47,6 +47,7 @@ use crate::store::FsCompanyStore;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/companies", post(provision))
+        .route("/api/v1/companies/provisioning", get(provisioning_info))
         .route("/api/v1/companies/{id}/pause", post(pause))
         .route("/api/v1/companies/{id}/resume", post(resume))
         .route(
@@ -80,6 +81,40 @@ fn not_found(id: &str) -> Response {
 // ---------------------------------------------------------------------------
 // Provisioning
 // ---------------------------------------------------------------------------
+
+/// What `GET /api/v1/companies/provisioning` reports: the sign-in mode a
+/// company provisioned on this host right now would land in, and whether that
+/// mode requires the create/reset dialog to collect wallet addresses.
+///
+/// Reachable by a console platform bearer, unlike `GET /api/v1/setup` (loopback
+/// / peer-gated), so the create/reset dialog can render mode-appropriate fields
+/// before it provisions rather than discovering the host's `wallet` override
+/// only when the manifest is refused (`auth_mode_wallet_no_wallets`).
+#[derive(Debug, Serialize)]
+struct ProvisioningInfoDto {
+    /// The effective sign-in mode: `wallet`, `email`, or `none`.
+    auth_mode: &'static str,
+    /// Whether provisioning requires at least one `[users].wallets` address.
+    wallets_required: bool,
+}
+
+/// `GET /api/v1/companies/provisioning` — the auth-mode preflight the create /
+/// reset dialog reads before building a manifest.
+async fn provisioning_info(
+    PlatformScope(_claims): PlatformScope,
+    State(state): State<AppState>,
+) -> Response {
+    // When no host-wide override is set, each company's own `[users].mode`
+    // decides — and the console builds an `email` manifest by default, so the
+    // default report is `email`. A `wallet` override is the case that forces
+    // the dialog to collect addresses.
+    let mode = state.auth_mode_override().unwrap_or_default();
+    let dto = ProvisioningInfoDto {
+        auth_mode: mode.as_str(),
+        wallets_required: mode == AuthMode::Wallet,
+    };
+    (StatusCode::OK, Json(dto)).into_response()
+}
 
 /// The JSON provisioning body: a manifest string plus an optional explicit id.
 #[derive(Debug, Deserialize)]
@@ -930,27 +965,130 @@ async fn archive(
     // reset done and never calls `archive` again — permanently skipping
     // cleanup a single-shot blip on this read would otherwise have caused
     // (issue #1828 comment 3875297944).
-    let archived = if response.status() == StatusCode::OK {
-        true
-    } else {
-        match state.registry().get(&id) {
-            Some(runtime) => archive_reconcile_status(&runtime)
-                .await
-                .map(|status| status.lifecycle == "archived")
-                .unwrap_or(false),
-            None => false,
-        }
-    };
-    if archived {
-        state.registry().remove(&id);
-        state.remove_owner(&id);
-        if let Some(ownership) = state.stores().and_then(|s| s.ownership.clone())
-            && let Err(err) = ownership.remove_owner(&id).await
-        {
-            tracing::warn!(company = %id, error = %err, "failed to remove persisted ownership");
-        }
+    // The runtime confirmed archived, not just the id — `evict_archived_company`
+    // needs the specific instance so it can refuse to remove a replacement that
+    // has since taken this id over (a rebuild swap; see that function's comment).
+    let archived_runtime: Option<Arc<crate::runtime::CompanyRuntime>> =
+        if response.status() == StatusCode::OK {
+            state.registry().get(&id)
+        } else {
+            match state.registry().get(&id) {
+                Some(runtime) => {
+                    let confirmed = archive_reconcile_status(&runtime)
+                        .await
+                        .map(|status| status.lifecycle == "archived")
+                        .unwrap_or(false);
+                    confirmed.then_some(runtime)
+                }
+                None => None,
+            }
+        };
+    if let Some(runtime) = archived_runtime {
+        evict_archived_company(&state, &id, &runtime).await;
     }
     response
+}
+
+/// Removes an archived company from the live registry and drops both its
+/// in-memory and persisted ownership rows.
+///
+/// The single implementation of archive's post-transition cleanup, shared by
+/// [`archive`] and [`RegistryEvictor`] (the maintenance-loop hook) so
+/// the inline path and the stranded-cleanup retry cannot drift.
+///
+/// Two orderings matter here, each guarding a different way this call could
+/// destroy something it never actually confirmed (codex review on #1943, PR
+/// comments 3894439351 and 3894439358):
+///
+/// - **The persisted ownership row is removed BEFORE the registry entry and
+///   the in-memory owner, not after.** `MaintenanceTicker::tick` only
+///   retries a company it can still see in [`CompanyRegistry::list`]
+///   (`src/runtime/maintenance.rs`) — so a company de-registered here with
+///   its persisted-ownership deletion still failed can never be revisited.
+///   Failing closed (leaving the company registered) instead lets the next
+///   tick retry the whole eviction; failing the old way (registry gone,
+///   ownership row still failed to delete) orphans that row forever with
+///   nothing left in the registry to trigger a retry against it.
+/// - **The registry removal is conditional on `expected`, not "whatever is
+///   at `id`".** [`CompanyRegistry::insert`] is the one choke point every
+///   registration goes through, and it replaces an already-occupied slot
+///   unconditionally — a rebuild swap (`runtime::rebuild::rebuild_company`)
+///   is the production caller that can land a fresh runtime under this same
+///   id in the window between a caller observing `"archived"` and this call
+///   actually running. Removing by id alone would deregister that live
+///   replacement instead of doing nothing. The ownership rows above stay
+///   unconditional by id regardless: `POST /api/v1/companies` refuses
+///   `company_exists` for any id still registered (`provision`, this file),
+///   so the only thing that can ever replace an already-registered id is a
+///   rebuild of the SAME company — same owner, same durable lifecycle
+///   (`CompanyRuntime::status` reads it from the handed-over store, so a
+///   rebuild successor of an archived company reports `"archived"` too) —
+///   never a different company's row.
+pub(crate) async fn evict_archived_company(
+    state: &AppState,
+    id: &CompanyId,
+    expected: &Arc<crate::runtime::CompanyRuntime>,
+) {
+    let ownership = state.stores().and_then(|s| s.ownership.clone());
+    if evict_registry_and_ownership(state.registry(), &ownership, id, expected).await {
+        state.remove_owner(id);
+    }
+}
+
+/// The sequencing `evict_archived_company`'s doc comment above describes,
+/// pulled out of `AppState` so the ordering is unit-testable against a
+/// lightweight [`OwnershipStore`](crate::store::select::OwnershipStore) fake
+/// and a bare [`CompanyRegistry`] instead of a full `StorageHandles`.
+///
+/// Returns whether the persisted ownership row was successfully removed (or
+/// there was none configured) — the caller's cue to also clear the
+/// AppState-level in-memory owner cache, which stays unconditional by id
+/// regardless of the registry outcome below (see the "same company" argument
+/// in `evict_archived_company`'s doc comment).
+async fn evict_registry_and_ownership(
+    registry: &crate::runtime::CompanyRegistry,
+    ownership: &Option<Arc<dyn crate::store::select::OwnershipStore>>,
+    id: &CompanyId,
+    expected: &Arc<crate::runtime::CompanyRuntime>,
+) -> bool {
+    if let Some(ownership) = ownership
+        && let Err(err) = ownership.remove_owner(id).await
+    {
+        tracing::warn!(
+            company = %id,
+            error = %err,
+            "failed to remove persisted ownership; leaving the company registered for a later maintenance retry"
+        );
+        return false;
+    }
+    if registry.remove_if(id, expected).is_none() {
+        tracing::info!(
+            company = %id,
+            "kept the registered runtime — it was replaced since being observed archived"
+        );
+    }
+    true
+}
+
+/// The production [`CompanyEvictor`](crate::runtime::maintenance::CompanyEvictor):
+/// runs archive's cleanup against `AppState` for a company the maintenance loop
+/// found archived but still registered.
+pub struct RegistryEvictor {
+    state: AppState,
+}
+
+impl RegistryEvictor {
+    /// Builds an evictor over `state`.
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::maintenance::CompanyEvictor for RegistryEvictor {
+    async fn evict(&self, company: &CompanyId, expected: &Arc<crate::runtime::CompanyRuntime>) {
+        evict_archived_company(&self.state, company, expected).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
