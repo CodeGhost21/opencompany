@@ -297,12 +297,29 @@ impl LifecycleScheduler {
         {
             return Ok(false);
         }
+        // codex review finding (comment 3892534913): `now` is `tick`'s
+        // single process-wide instant, captured once at the top and shared
+        // across every company and user this loop walks — deliberately so
+        // for `elapsed`'s day-7 boundary math and this notification's own
+        // `created_at` (see `8912e48d8`, which fixed the SAME staleness for
+        // `created_at` specifically). But `EventLog::append` always stamps a
+        // journaled event with the real wall clock (`crate::ports::now_millis`,
+        // never `self.clock` — see this test module's own `real_now` doc), so
+        // a workflow saved by this user after `now` was captured but before
+        // this iteration reaches them journals with a timestamp LATER than
+        // the frozen `now`, and the completeness check below would reject an
+        // event that, by the actual instant this code runs, has already
+        // happened. A freshly-read real clock — not `now`, not `self.clock`,
+        // which in tests is a `FakeClock` decoupled from the journal's real
+        // timestamps entirely — is what this specific comparison needs: it is
+        // checking against journal timestamps that are always real time,
+        // regardless of what clock the scheduler itself is running on.
         if user_saved_workflow_in_week1(
             company,
             runtime.events(),
             &user.id,
             user.created_at_millis,
-            now,
+            crate::ports::now_millis(),
         )
         .await?
         {
@@ -762,6 +779,50 @@ mod test {
         assert!(
             feed.is_empty(),
             "no ledger row for a user who never needed one"
+        );
+    }
+
+    /// codex review finding (comment 3892534913): `tick` captures its single
+    /// process-wide `now` ONCE, at the very top, and threads that SAME value
+    /// into `maybe_nudge` -> `user_saved_workflow_in_week1`'s
+    /// `evaluated_at_millis` for every company and every user it walks. A
+    /// workflow saved for THIS user after `now` was captured but before this
+    /// user's own turn in the loop is journaled with a REAL wall-clock
+    /// timestamp (`EventLog::append` always stamps `crate::ports::now_millis`
+    /// — see `real_now`'s own doc) that lands AFTER the frozen `now`, so the
+    /// completeness check (`entry.at_millis <= evaluated_at_millis`) rejects
+    /// an event that, by the time this tick actually reaches the user, has
+    /// already happened. This test pins the injected clock to the exact
+    /// instant `create_workflow_for` is about to journal past — the fake
+    /// clock never advances on its own, so anything appended afterward reads
+    /// as "too late" under the frozen value, reproducing the tick-wide-`now`
+    /// staleness `8912e48d8` already fixed for `created_at` but not for this
+    /// eligibility check.
+    #[tokio::test]
+    async fn a_workflow_saved_during_the_tick_still_counts() {
+        let home = tmp_home();
+        let mail = RecordingMail::new();
+        let anchor = real_now();
+        let signup = anchor - SEVEN_DAYS - 5_000;
+        let (mut scheduler, rt, id) =
+            scheduler_with_mail(home.path(), manifest(), mail.clone(), 0, anchor).await;
+        seed_user(&rt, &id, "user-1", signup).await;
+        // Journaled AFTER `anchor` was captured — `EventLog::append` stamps
+        // the real wall clock, which has moved on by the time this line
+        // runs, so its `at_millis` is strictly greater than `anchor` (the
+        // scheduler's frozen `now`).
+        create_workflow_for(&rt, &id, "user-1").await;
+
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "the user saved a workflow before this tick actually reached them; \
+             must not be nudged just because the save landed after the tick's \
+             own frozen `now` was captured"
+        );
+        assert!(
+            mail.sent.lock().unwrap().is_empty(),
+            "must not have emailed a user who already saved a workflow"
         );
     }
 
