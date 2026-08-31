@@ -256,6 +256,17 @@ as JSON, must have a top-level `items` key" (so a reply of
 [What an agent node receives from upstream](#what-an-agent-node-receives-from-upstream-and-its-bound)
 — it does not name a real top-level `json` key on the reply itself.
 
+**A `field` must be rooted at `json`, `text`, or `agent_ref` — nothing else
+ever resolves.** The evaluator checks `field` against the exact `{ text,
+agent_ref, json }` envelope shown above, not the parsed reply directly, so a
+bare structured field like `field = "items"` (missing the `json.` prefix)
+can never resolve — `resolve_path` looks for a top-level `items` key on the
+envelope, which is never there regardless of what the agent replies.
+`parse_workflow` refuses this at author time (issue #1937 boundary sweep)
+with a message pointing at the `json.`-prefixed form, the same way it refuses
+`field_present` with no `field` at all above — a gate that can never pass is
+as much an authoring bug as one that is missing entirely.
+
 **`json.text` and `json.agent_ref` are reserved and refused at save.** The
 emitted output always carries the raw reply string under `text` and the real
 roster id under `agent_ref` — that is what lets `delivery.rs::report_text`
@@ -299,12 +310,15 @@ When (and only when) a postcondition is declared, the node's output — what a
 downstream `=item.json.<field>` binding reads — is enriched with the parsed
 reply: an object reply's own keys are merged in (so `json.items` above also
 resolves downstream, not only inside the gate's own check), and a bare-array
-reply replaces the emitted value with the array itself (so `=item.json`
-resolves to the exact array `non_empty_list` validated). A node with **no**
-declared postcondition is entirely unaffected by any of this — its output
-stays the plain `{text, agent_ref}` shape it always had, regardless of what
-the agent happens to reply, so this feature changes nothing for a workflow
-that never opted into it.
+or bare-scalar reply (`["a","b"]`, `42`, `true`, `"ok"`) replaces the emitted
+value with that array or scalar itself (so `=item.json` resolves to the exact
+value `field_present`/`non_empty_list` validated — this is what lets
+`field_present` on the bare `field = "json"` root check "did the agent reply
+with any JSON at all", scalars included, and have the answer downstream match
+what the gate saw). A node with **no** declared postcondition is entirely
+unaffected by any of this — its output stays the plain `{text, agent_ref}`
+shape it always had, regardless of what the agent happens to reply, so this
+feature changes nothing for a workflow that never opted into it.
 
 ## The engine-only kinds OpenCompany rejects
 
