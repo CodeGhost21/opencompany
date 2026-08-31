@@ -726,20 +726,6 @@ impl ApprovalRequestQueue {
             .map_or(0, Vec::len)
     }
 
-    /// Stamps `run_id` onto every request queued at or after `from`, returning
-    /// how many were stamped (issue #242).
-    ///
-    /// This is where an approval learns which task attempt is waiting on it. It
-    /// happens at the **dispatch** boundary rather than in
-    /// [`ApprovalPolicy::effect_for`] because that is the only place the run is
-    /// unambiguous: the policy is per-agent and outlives every run, whereas a
-    /// dispatched card knows exactly which of the queue's entries its own turns
-    /// added. Requests below `from` belong to a chat turn earlier in the same
-    /// cycle and are deliberately left `None`.
-    ///
-    /// Scoped to the current bucket since #439, so "the entries its own turns
-    /// added" is now true by construction rather than by a boundary that a
-    /// concurrent run could invalidate.
     /// How many requests queued **since** `from` are blockers (issue #1861).
     ///
     /// Counted the same way [`stamp_run`](Self::stamp_run) stamps — over this
@@ -772,6 +758,20 @@ impl ApprovalRequestQueue {
             .count()
     }
 
+    /// Stamps `run_id` onto every request queued at or after `from`, returning
+    /// how many were stamped (issue #242).
+    ///
+    /// This is where an approval learns which task attempt is waiting on it. It
+    /// happens at the **dispatch** boundary rather than in
+    /// [`ApprovalPolicy::effect_for`] because that is the only place the run is
+    /// unambiguous: the policy is per-agent and outlives every run, whereas a
+    /// dispatched card knows exactly which of the queue's entries its own turns
+    /// added. Requests below `from` belong to a chat turn earlier in the same
+    /// cycle and are deliberately left `None`.
+    ///
+    /// Scoped to the current bucket since #439, so "the entries its own turns
+    /// added" is now true by construction rather than by a boundary that a
+    /// concurrent run could invalidate.
     pub fn stamp_run(&self, from: usize, run_id: &str) -> usize {
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
