@@ -320,6 +320,30 @@ fn system_notice(text: String) -> OutboundMessage {
     }
 }
 
+/// Who a dispatch relay should be authored by when it answers in the `origin`
+/// thread.
+///
+/// A card whose origin is a teammate's **private DM** must be answered by that
+/// teammate, never by the orchestrator — an orchestrator bubble in a private DM
+/// intrudes a second voice into a one-to-one thread. The origin key is resolved
+/// against the roster the same way an assignee is (the `dm:` prefix unwrapped as
+/// a fallback), and only a resolved [`AssigneeResolution::Agent`] that is not the
+/// orchestrator claims the voice. A desk, the General line, an empty/unknown key
+/// — every shared surface — keeps the orchestrator as the single point of
+/// contact.
+pub(crate) fn relay_speaker(record: &CompanyRecord, origin: &str, orchestrator: &str) -> String {
+    let mut resolution = assignee::resolve(record, origin);
+    if matches!(resolution, assignee::AssigneeResolution::Unknown(_))
+        && let Some(key) = assignee::dm_key(origin)
+    {
+        resolution = assignee::resolve(record, key);
+    }
+    match resolution {
+        assignee::AssigneeResolution::Agent(agent) if agent != orchestrator => agent,
+        _ => orchestrator.to_string(),
+    }
+}
+
 /// The single bubble a workflow-copilot turn returns (issues #416, #966).
 ///
 /// Named rather than inlined because its **author** is the load-bearing field
@@ -1696,7 +1720,9 @@ impl HarnessBrain {
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
-        let relay = lifecycle::relay_reply(&card, &responder, &self.orchestrator(), origin);
+        let orchestrator = self.orchestrator();
+        let speaker = relay_speaker(&self.record(), &origin, &orchestrator);
+        let relay = lifecycle::relay_reply(&card, &responder, &speaker, origin);
         Ok(Some(relay))
     }
 
@@ -1756,7 +1782,8 @@ impl HarnessBrain {
                 .await;
             return Ok(None);
         };
-        let relay = lifecycle::relay_reply(&card, &orchestrator, &orchestrator, origin);
+        let speaker = relay_speaker(&self.record(), &origin, &orchestrator);
+        let relay = lifecycle::relay_reply(&card, &orchestrator, &speaker, origin);
         self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
             .await;
         Ok(Some(relay))
@@ -7104,6 +7131,25 @@ members = ["engineer"]
             activation_completed_at: None,
             created_at_millis: None,
         }
+    }
+
+    /// A dispatch relay into a teammate's private DM is authored by that
+    /// teammate; every shared surface keeps the orchestrator's voice.
+    #[test]
+    fn relay_speaker_claims_a_private_dm_for_its_own_agent() {
+        let record = record_with_desk();
+        // A teammate DM: the origin is that teammate, so they speak.
+        assert_eq!(relay_speaker(&record, "engineer", "chief"), "engineer");
+        // The console's `dm:<id>` channel key resolves the same teammate.
+        assert_eq!(relay_speaker(&record, "dm:engineer", "chief"), "engineer");
+        // A desk is a shared surface — the orchestrator stays the one voice.
+        assert_eq!(relay_speaker(&record, "eng_desk", "chief"), "chief");
+        // The orchestrator's own DM is answered by the orchestrator, not doubled.
+        assert_eq!(relay_speaker(&record, "chief", "chief"), "chief");
+        // General / empty / unknown origins all keep the orchestrator.
+        assert_eq!(relay_speaker(&record, "General", "chief"), "chief");
+        assert_eq!(relay_speaker(&record, "", "chief"), "chief");
+        assert_eq!(relay_speaker(&record, "nobody-here", "chief"), "chief");
     }
 
     /// A brain over `record`, wired to a real task store.
