@@ -235,6 +235,35 @@ describe("a card parked on an approval, with no run in flight", () => {
     expect(button("Retry")!.disabled).toBe(true);
   });
 
+  /**
+   * The other direction, and it is **deliberate** (#1953 review).
+   *
+   * A queue row this card owns, with the card's own `approvals` read not yet
+   * carrying it, still takes Retry down. Intersecting the queue with
+   * `detail.approvals` here — the rule `AwaitingApprovalRow` applies to its
+   * *rows* — would collapse this union into `awaitingApproval` alone and hand
+   * the operator a live Retry beside a genuinely parked approval.
+   *
+   * The two are not the same claim. Over-claiming a **row** offers a resolve
+   * button for a request this card may not own; over-claiming the **block**
+   * only greys a button for a poll. The host ranks them the same way in
+   * `pending_approvals_resolved`: when it cannot resolve an approval's owning
+   * attempt it keeps the parked link rather than dropping it, because "a
+   * dropped blocker is a card that lies about being free".
+   *
+   * The stale-attribution worry that motivates intersecting was fixed at the
+   * source by #1891: `ApprovalSummary.task` is the host's `approval_owner`
+   * answer, not the park's stamp, so a queue row reaching here already belongs
+   * to this card.
+   */
+  it("disables it on the queue's word alone, before the card's own read carries it", async () => {
+    await render(client([async () => detail({ approvals: [] })]), {
+      parked: [QUEUED],
+    });
+    expect(button("Retry")!.disabled).toBe(true);
+    expect(button("Retry")!.title).toBe(RESUME_BLOCKED_REASON);
+  });
+
   it("leaves it live on a card with nothing parked", async () => {
     await render(client([async () => detail()]));
     expect(button("Retry")!.disabled).toBe(false);
