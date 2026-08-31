@@ -7458,6 +7458,14 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
 /// proposal graph, straight through the task store (the builder pass that would
 /// normally mint it is behind the `openhuman` feature). Returns the card id.
 async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
+    seed_proposal_card_assigned(state, ops, "ceo").await
+}
+
+/// [`seed_proposal_card`], with the assignee set to whatever the caller
+/// passes rather than the hardcoded `"ceo"` — for proving the owning-desk
+/// default against a card assigned directly to a desk (issue #1882 review),
+/// where `assignee` is the desk's own canonical id rather than a teammate's.
+async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &str) -> String {
     let runtime = state
         .registry()
         .get(&CompanyId::new("acme"))
@@ -7469,7 +7477,7 @@ async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
         note: None,
         column: "in_review".to_string(),
         priority: "medium".to_string(),
-        assignee: "ceo".to_string(),
+        assignee: assignee.to_string(),
         updated_at_millis: 1,
         origin_chat_id: None,
         parent_task_id: None,
@@ -7555,6 +7563,176 @@ async fn applying_a_proposal_creates_the_workflow_and_finishes_the_card() {
         .find(|w| w["id"] == "weekly-digest")
         .expect("the created workflow is listed");
     assert_eq!(created["enabled"], true, "a manual trigger is not disarmed");
+}
+
+/// Issue #1862 prerequisite: a proposal that names no `ownerDesk` defaults to
+/// the proposing card's assignee's desk. `seed_proposal_card` assigns the
+/// card to `ceo`, and `desk_manifest` seats `ceo` on the `engineering` desk —
+/// so the created workflow must come out owned by `engineering` even though
+/// `digest_ops` never mentions it.
+///
+/// This reads the default back off the persisted overlay TOML directly,
+/// rather than the `GET …/workflows/{id}` response (which now also projects
+/// `ownerDesk`, see `WorkflowGraph::owner_desk`) — pinning the actual stored
+/// effect of the defaulting logic, independent of the read projection.
+#[tokio::test]
+async fn applying_a_proposal_defaults_the_owner_desk_from_the_assignees_desk() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "the assignee's desk fills the omitted owner_desk"
+    );
+}
+
+/// **Regression, issue #1882 review — blank must default the same as absent.**
+/// A stored proposal that names `ownerDesk` as a blank/whitespace string (a
+/// builder pass that emits the key but leaves it empty, rather than omitting
+/// it) must still fall through to the assignee-desk default. Before the fix,
+/// `Some("   ")` passed the `is_none()` gate in `apply_workflow_proposal`, so
+/// the default never ran and the blank string was persisted as the "owner"
+/// instead.
+#[tokio::test]
+async fn applying_a_proposal_with_a_blank_owner_desk_still_defaults_it() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let mut ops = digest_ops(None);
+    ops["ownerDesk"] = json!("   ");
+    let id = seed_proposal_card(&state, ops).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "a blank ownerDesk must default the same as an omitted one: {file:?}"
+    );
+}
+
+/// **Regression, issue #1882 review — a desk-assigned card must default to
+/// its own desk.** `runtime::assignee::AssigneeResolution::canonical` stores
+/// a desk assignment as the desk's own canonical id, not a teammate id — so
+/// `record.assignee` can BE `"engineering"` directly. Before the fix, the
+/// defaulting fallback only checked desk MEMBERSHIP (`desk_of_member`), which
+/// a desk id is never a member of, so a card already naming its owning desk
+/// still produced an ownerless workflow.
+#[tokio::test]
+async fn applying_a_proposal_for_a_desk_assigned_card_defaults_to_that_desk() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let id = seed_proposal_card_assigned(&state, digest_ops(None), "engineering").await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk.as_deref(),
+        Some("engineering"),
+        "a card assigned straight to a desk must default owner_desk to that desk: {file:?}"
+    );
+}
+
+/// **Regression, issue #1882 review — a multi-desk teammate must not default
+/// an arbitrary owner.** `desk_of_member` returns the first desk in
+/// `desk_ids` declaration order, which is fine for the informational message
+/// it was written for (`unknown_desk_message`) but wrong for a value that
+/// gets persisted: a proposal naming no `ownerDesk`, assigned to a teammate
+/// who sits on two desks, has no basis for picking either one. Before the
+/// fix, `apply_workflow_proposal`'s fallback used `desk_of_member` directly
+/// and silently persisted `"engineering"` — the desk declared first in the
+/// manifest — even though `ceo` sits on `legal` too. The fix must leave
+/// `owner_desk` `None` rather than guess.
+#[tokio::test]
+async fn applying_a_proposal_for_a_multi_desk_assignee_leaves_owner_desk_unset() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+         [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n\
+         [[group_chat]]\nid = \"legal\"\nname = \"Legal\"\nmembers = [\"ceo\"]\n\
+         [policy]\nmode = \"full\"\n",
+    )
+    .unwrap();
+    let state = state_with_manifest(&home, manifest).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.clone());
+    let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    let overlay = record
+        .overlay_workflows
+        .iter()
+        .find(|w| w.id == "weekly-digest")
+        .expect("the created workflow is saved as an overlay");
+    let file = crate::company::parse_workflow(&overlay.toml).expect("saved TOML parses");
+    assert_eq!(
+        file.owner_desk, None,
+        "a teammate on two desks gives no basis for picking either one: {file:?}"
+    );
 }
 
 /// #276: applying a proposal whose trigger carries a schedule creates the
@@ -9226,6 +9404,7 @@ async fn the_run_history_carries_a_runs_board_rows() {
             workflow_id: "digest".into(),
             run_id: "run-1".into(),
             scheduled: true,
+            started_by: None,
         },
         CompanyEvent::WorkflowRunFinished {
             workflow_id: "digest".into(),

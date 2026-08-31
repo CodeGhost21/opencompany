@@ -281,6 +281,13 @@ export type CompanyStreamEvent =
       workflowId: string;
       runId: string;
       scheduled: boolean;
+      // Optional, not just possibly-absent-looking: the server only sets
+      // this key `if let Some(started_by)` (`project_event_for_viewer` in
+      // `src/server/operator.rs`). A run journaled before issue #1862's
+      // prerequisite landed, or any producer with genuinely no sender,
+      // projects with the key absent — never `null` — so a consumer must
+      // handle `undefined` rather than trust it as always present.
+      startedBy?: "operator" | "schedule" | { agent: string };
     }
   // Issue #382: a non-trigger node began executing. Structural ids only — the
   // node has not run, so there is no status or duration, and never any input.
@@ -375,6 +382,15 @@ export type CompanyStreamEvent =
       toolCallId?: string;
       label?: string;
       detail?: string;
+      /**
+       * What came back — a success's shape summary or a failure's cause,
+       * scrubbed at the source like `detail`. The wire has always carried it
+       * (`TurnStreamEvent.result`); it was simply not declared here while the
+       * only publisher was the built-in harness, whose rows lean on `detail`.
+       * An ACP tool call has no arguments to derive a detail from and reports
+       * only this.
+       */
+      result?: string;
       status?: string;
       elapsedMs?: number;
     }
@@ -442,6 +458,44 @@ export const BUDGET_PAUSE_NOTICE_PREFIX = "⏸ Paused — out of credits:";
  */
 export function isBudgetPauseNotice(text: string): boolean {
   return text.startsWith(BUDGET_PAUSE_NOTICE_PREFIX);
+}
+
+/**
+ * The host's NON-redeemable sibling prefix, mirrored from
+ * `BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX` in `src/harness/built_in/brain.rs`
+ * (issue #1906). Kept in sync by hand, exactly like
+ * {@link BUDGET_PAUSE_NOTICE_PREFIX}.
+ *
+ * Deliberately NOT matched by {@link isBudgetPauseNotice} — see that
+ * function's doc for why the near-miss is the mechanism. It is exported so
+ * the supersession scan can see these notices, which is a different question
+ * from whether to draw a button on one.
+ */
+export const BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX =
+  "⏸ Paused — out of credits (add credits, then start this again):";
+
+/**
+ * Whether a chat message is a budget-pause notice of EITHER kind — redeemable
+ * or no-resend (issue #1906).
+ *
+ * The distinction {@link isBudgetPauseNotice} draws is "does this notice get a
+ * button". This one answers a different question: "did a pause happen for this
+ * agent, parking a marker that overwrote the last one". The backend keeps at
+ * most one marker per agent and a no-resend pause parks one too — an approval
+ * continuation parks `background: true` — so a supersession scan that only
+ * counts redeemable notices concludes an older, now-overwritten notice is
+ * still the latest, and leaves its CTA enabled on a marker that can only
+ * answer `Stale` → 409.
+ *
+ * Use this for supersession ({@link isBudgetPauseNoticeSuperseded}'s map) and
+ * `isBudgetPauseNotice` for rendering. Never the other way round: widening the
+ * render check is what puts an unusable button back on a no-resend notice.
+ */
+export function isAnyBudgetPauseNotice(text: string): boolean {
+  return (
+    text.startsWith(BUDGET_PAUSE_NOTICE_PREFIX) ||
+    text.startsWith(BUDGET_PAUSE_NOTICE_NO_RESEND_PREFIX)
+  );
 }
 
 /**

@@ -9,6 +9,15 @@
 //! `always_approve` effect kinds and the per-agent `budget_usd_daily` /
 //! `auto_approve_under_usd` thresholds.
 //!
+//! ## Current production mode: policy HITL disabled
+//!
+//! Roster construction applies [`ApprovalPolicy::with_policy_hitl_disabled`].
+//! In that mode this policy preserves the `readonly` hard denial and redeems
+//! grants for approvals already in flight, but returns `Allow` instead of
+//! manufacturing a new `RequireApproval`. Agents create new approvals only by
+//! calling [`request_approval`](crate::harness::approval_tool). The machinery
+//! below is retained for migration compatibility and focused policy tests.
+//!
 //! ## Where approvals actually park (issue #172)
 //!
 //! openhuman's [`ToolPolicy`] returns
@@ -121,6 +130,7 @@
 //! which un-declares it. Only this last arm reads the path; every arm above
 //! decides identically on both.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -463,6 +473,10 @@ tokio::task_local! {
     /// not a new dependency — `with_stop_hooks` is itself a task-local scope on
     /// this exact path.
     static CURRENT_SCOPE: ApprovalScope;
+    /// Whether this one actual agent turn has already executed
+    /// `request_approval`. Unlike `CURRENT_SCOPE`, this resets for every model
+    /// turn inside a shared cycle/workflow bucket.
+    static EXPLICIT_REQUEST_PENDING: Cell<bool>;
 }
 
 /// A turn's exclusive claim on one [`ApprovalScope`]'s bucket (issue #439).
@@ -531,11 +545,19 @@ impl ApprovalRequestQueue {
     /// separate: two different turns asking for the same tool are two requests,
     /// and collapsing them would hide one turn's ask behind another's.
     pub fn push(&self, request: ApprovalRequest) {
+        let explicit = request.tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL;
+        if explicit {
+            // The turn boundary is established by making the request, even if
+            // its card is a duplicate of one already queued in this scope.
+            let _ = EXPLICIT_REQUEST_PENDING.try_with(|pending| pending.set(true));
+        }
         let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
         let bucket = guard.entry(scope).or_default();
         if bucket.iter().any(|q| {
-            q.effect.kind == request.effect.kind && q.effect.payload == request.effect.payload
+            q.effect.kind == request.effect.kind
+                && q.effect.payload == request.effect.payload
+                && q.effect.agent == request.effect.agent
         }) {
             return;
         }
@@ -552,6 +574,24 @@ impl ApprovalRequestQueue {
         CURRENT_SCOPE
             .try_with(ApprovalScope::clone)
             .unwrap_or_default()
+    }
+
+    /// Whether the current turn has already made an explicit approval request.
+    /// Tool execution is serial whenever OpenHuman's tool middleware is wired;
+    /// this lets the policy refuse every later sibling call in a provider
+    /// response after `request_approval` has established the turn boundary.
+    fn explicit_request_pending(&self) -> bool {
+        EXPLICIT_REQUEST_PENDING
+            .try_with(Cell::get)
+            .unwrap_or(false)
+    }
+
+    /// Runs one real agent turn with a fresh explicit-approval boundary.
+    pub async fn turn_scoped<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        EXPLICIT_REQUEST_PENDING.scope(Cell::new(false), fut).await
     }
 
     /// Takes exclusive ownership of `scope`'s bucket for the life of the
@@ -750,6 +790,8 @@ impl ApprovalRequestQueue {
 /// openhuman [`ToolPolicy`] derived from a company's manifest `[policy]` and a
 /// single agent's per-agent budget.
 pub struct ApprovalPolicy {
+    /// Whether policy may manufacture HITL requests from ordinary tool calls.
+    policy_hitl_enabled: bool,
     mode: PolicyMode,
     always_approve: Vec<String>,
     auto_approve_under_usd: Option<f64>,
@@ -882,6 +924,7 @@ impl ApprovalPolicy {
     /// the same way it already chains [`with_requests`](Self::with_requests).
     pub fn new(policy: &Policy, budget_usd_daily: Option<f64>) -> Self {
         Self {
+            policy_hitl_enabled: true,
             mode: PolicyMode::parse(&policy.mode),
             always_approve: policy.always_approve.clone(),
             auto_approve_under_usd: policy.auto_approve_under_usd,
@@ -901,6 +944,13 @@ impl ApprovalPolicy {
             // inert — see `with_connected_composio_toolkits`.
             connected_composio_toolkits: Vec::new(),
         }
+    }
+
+    /// Disables policy-generated approvals while preserving hard denials and
+    /// redemption of approvals that were already in flight during migration.
+    pub fn with_policy_hitl_disabled(mut self) -> Self {
+        self.policy_hitl_enabled = false;
+        self
     }
 
     /// Installs the shared queue every `RequireApproval` decision is recorded on,
@@ -1016,6 +1066,17 @@ impl ApprovalPolicy {
     /// The resolved tier.
     pub fn mode(&self) -> PolicyMode {
         self.mode
+    }
+
+    /// The mode handed to OpenHuman's built-in tool security. With policy HITL
+    /// disabled, non-readonly tiers use `Full` there too; otherwise an advisory
+    /// medium-risk check could recreate an approval prompt below this policy.
+    pub fn toolbelt_mode(&self) -> PolicyMode {
+        if !self.policy_hitl_enabled && self.mode != PolicyMode::Readonly {
+            PolicyMode::Full
+        } else {
+            self.mode
+        }
     }
 
     /// The per-agent daily budget, if any.
@@ -1472,6 +1533,25 @@ impl ToolPolicy for ApprovalPolicy {
     async fn check(&self, request: &ToolPolicyRequest) -> ToolPolicyDecision {
         let tool = request.tool_name.as_str();
 
+        // `request_approval` is a real turn boundary, not advice in a tool
+        // result. The hosted profile requests one call per assistant message;
+        // this is the fail-closed second layer for a provider that nevertheless
+        // returns several calls. Once the explicit request tool has queued its
+        // card, every later call in the serial tool fold is refused.
+        if self.requests.explicit_request_pending() {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' was not run because this turn already asked the operator for approval; \
+                 stop and wait for the decision"
+            ));
+        }
+
+        // Asking the operator is never itself an effect to approve or deny.
+        // The first call queues a question; a second call in the same turn was
+        // refused by the boundary above.
+        if tool == crate::harness::approval_tool::REQUEST_APPROVAL_TOOL {
+            return ToolPolicyDecision::Allow;
+        }
+
         // 0. `never_do` hard-deny — RESERVED SLOT, deliberately empty.
         //
         // The manifest's `never_do` list is compiled by the delegation-rule
@@ -1599,6 +1679,26 @@ impl ToolPolicy for ApprovalPolicy {
         // `composio_execute` call whose action is a send, so a grant minted on
         // a repository read cannot admit an outgoing email (issue #441).
         if self.standing_grant_allows(tool, &request.arguments) {
+            return ToolPolicyDecision::Allow;
+        }
+
+        // Paid media tools are explicitly approval-producing tool calls: their
+        // own invocation stages the concrete generation request before the
+        // backend can bill it. This is tool behavior, not risk-classifier HITL.
+        // An exact one-shot grant was consumed above on the approved re-issue.
+        if matches!(tool, "media_generate_image" | "media_generate_video") {
+            return self.require_approval(
+                tool,
+                &request.arguments,
+                format!("'{tool}' explicitly stages a paid media generation for approval"),
+            );
+        }
+
+        // General approvals come only from `request_approval`; specialized
+        // approval-producing tools such as paid media stage themselves above.
+        // Keep the readonly brake and old-grant redemption above this point,
+        // but bypass every arm below that would turn classification into HITL.
+        if !self.policy_hitl_enabled {
             return ToolPolicyDecision::Allow;
         }
 
@@ -1833,6 +1933,147 @@ mod tests {
         ToolPolicyRequest::new(tool, args, ctx)
     }
 
+    #[tokio::test]
+    async fn an_explicit_request_refuses_later_calls_in_the_same_turn() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+
+        let (second_request, later_call) = claim
+            .scoped(queue.turn_scoped(async {
+                queue.push(ApprovalRequest {
+                    tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                    reason: "May I send this?".to_string(),
+                    effect: Effect {
+                        kind: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                        group: EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: serde_json::json!({
+                            "title": "Send update",
+                            "question": "May I send it?"
+                        }),
+                        agent: Some("ceo".to_string()),
+                        run_id: None,
+                    },
+                });
+                let second_request = policy
+                    .check(&request(
+                        crate::harness::approval_tool::REQUEST_APPROVAL_TOOL,
+                        serde_json::json!({
+                            "title": "Ask twice",
+                            "question": "May I ask again?"
+                        }),
+                    ))
+                    .await;
+                let later_call = policy
+                    .check(&request("composio_execute", composio_send_args()))
+                    .await;
+                (second_request, later_call)
+            }))
+            .await;
+
+        assert!(
+            matches!(second_request, ToolPolicyDecision::Deny { .. }),
+            "a second explicit request must hit the same turn boundary"
+        );
+        let ToolPolicyDecision::Deny { reason } = later_call else {
+            panic!("later sibling call must be refused");
+        };
+        assert!(reason.contains("already asked the operator"));
+
+        let unrelated_turn = queue
+            .turn_scoped(policy.check(&request("composio_execute", composio_send_args())))
+            .await;
+        assert_eq!(
+            unrelated_turn,
+            ToolPolicyDecision::Allow,
+            "a later agent turn in the same cycle/run scope gets a fresh boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_explicit_request_still_establishes_a_fresh_turn_boundary() {
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+        let claim = queue.claim(ApprovalScope::Cycle);
+        let approval_request = ApprovalRequest {
+            tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+            reason: "May I send this?".to_string(),
+            effect: Effect {
+                kind: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({
+                    "title": "Send update",
+                    "question": "May I send it?"
+                }),
+                agent: Some("ceo".to_string()),
+                run_id: None,
+            },
+        };
+
+        claim
+            .scoped(async { queue.push(approval_request.clone()) })
+            .await;
+        let later_call = claim
+            .scoped(queue.turn_scoped(async {
+                queue.push(approval_request);
+                policy
+                    .check(&request("composio_execute", composio_send_args()))
+                    .await
+            }))
+            .await;
+
+        assert!(matches!(later_call, ToolPolicyDecision::Deny { .. }));
+        assert_eq!(
+            claim.scoped(async { queue.drain(8).requests.len() }).await,
+            1,
+            "the duplicate card is suppressed without suppressing the boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_explicit_requests_from_different_agents_are_not_deduplicated() {
+        let queue = ApprovalRequestQueue::default();
+        let claim = queue.claim(ApprovalScope::Cycle);
+        claim
+            .scoped(async {
+                for agent in ["finance", "legal"] {
+                    queue.push(ApprovalRequest {
+                        tool: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                        reason: "Proceed?".to_string(),
+                        effect: Effect {
+                            kind: crate::harness::approval_tool::REQUEST_APPROVAL_TOOL.to_string(),
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: serde_json::json!({
+                                "title": "Proceed",
+                                "question": "Proceed?"
+                            }),
+                            agent: Some(agent.to_string()),
+                            run_id: None,
+                        },
+                    });
+                }
+            })
+            .await;
+
+        assert_eq!(
+            claim.scoped(async { queue.drain(8).requests.len() }).await,
+            2
+        );
+    }
+
     /// May this call be granted standing? The rule as the mint path asks it,
     /// so a test here and the enforcement in the default build cannot answer
     /// differently.
@@ -1840,6 +2081,52 @@ mod tests {
         crate::policy::consequence_of(tool, args)
             .standing
             .is_grantable()
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_hitl_allows_calls_that_supervised_would_park() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("supervised", &["payment"], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+
+        assert_eq!(
+            p.check(&request(
+                "payment.send",
+                serde_json::json!({ "amount_usd": 500.0 })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
+        assert!(
+            queue
+                .drain(MAX_APPROVAL_REQUESTS_PER_TURN)
+                .requests
+                .is_empty()
+        );
+        assert_eq!(p.toolbelt_mode(), PolicyMode::Full);
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_hitl_keeps_readonly_as_a_hard_denial() {
+        let p = policy("readonly", &[], None).with_policy_hitl_disabled();
+
+        assert!(matches!(
+            p.check(&request(
+                "payment.send",
+                serde_json::json!({ "amount_usd": 5.0 })
+            ))
+            .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        assert_eq!(
+            p.check(&request(
+                crate::harness::approval_tool::REQUEST_APPROVAL_TOOL,
+                serde_json::json!({ "title": "Ask", "question": "Proceed?" })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
     }
 
     /// Every tier is reachable from a manifest, parses to its own variant, and
@@ -2402,6 +2689,13 @@ mod tests {
                 "{tool} must park under supervised"
             );
         }
+        let explicit_staging = policy("full", &[], None).with_policy_hitl_disabled();
+        assert!(matches!(
+            explicit_staging
+                .check(&request("media_generate_image", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
         // The catalog GET is read-only — allowed even under supervised.
         assert_eq!(
             supervised

@@ -42,6 +42,19 @@ test("the skip link reaches main content and the sidebar is the primary navigati
   const navigation = page.getByRole("navigation", { name: "Main navigation", exact: true });
   await expect(navigation).toBeVisible();
   await expect(navigation.getByRole("button", { name: "Overview", exact: true })).toBeVisible();
-  await expect(navigation.getByRole("button", { name: "Feedback", exact: true })).toBeVisible();
-  await expect(navigation.getByRole("link", { name: "Join our Discord", exact: true })).toBeVisible();
+
+  // Settings, Feedback, Discord and Collapse are utilities, not destinations an
+  // operator works out of, so they sit on their own named bar in the sidebar's
+  // header rather than as four rows inside this landmark. Each is icon-only in
+  // both sidebar states, which makes the accessible name the only name it has
+  // — exactly the thing a styling pass drops without breaking a render.
+  const utilities = page.getByRole("group", { name: "Console utilities", exact: true });
+  await expect(utilities).toBeVisible();
+  for (const name of ["Settings", "Feedback", "Join our Discord", "Collapse sidebar"]) {
+    await expect(utilities.getByRole(name === "Join our Discord" ? "link" : "button", { name, exact: true })).toBeVisible();
+  }
+  // And they are NOT in the navigation landmark, which is the point of moving
+  // them: it lists the places you go, and these four are not places.
+  await expect(navigation.getByRole("button", { name: "Settings", exact: true })).toHaveCount(0);
+  await expect(navigation.getByRole("button", { name: "Feedback", exact: true })).toHaveCount(0);
 });

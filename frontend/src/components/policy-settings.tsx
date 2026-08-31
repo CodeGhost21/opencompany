@@ -823,8 +823,7 @@ export function PolicySettings({ client, company }: Props) {
           Approvals
         </CardTitle>
         <CardDescription>
-          How much the teammates do on their own, and what they always ask about
-          first.
+          Execution autonomy and the deadline for explicit approval requests.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
@@ -852,6 +851,11 @@ export function PolicySettings({ client, company }: Props) {
           </div>
         ) : (
           <>
+            <div className="rounded-md border border-status-blocked/30 bg-status-blocked-soft p-3 text-xs text-muted-foreground">
+              Policy-based approval prompts are disabled. Teammates ask through{" "}
+              <code>request_approval</code>; read-only mode and the emergency stop still
+              hard-deny applicable calls.
+            </div>
             <div
               className="space-y-2"
               role="radiogroup"
@@ -910,10 +914,10 @@ export function PolicySettings({ client, company }: Props) {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="spend-cap">Spend without asking, under</Label>
+              <Label htmlFor="spend-cap">Spend approval threshold (inactive)</Label>
               <p className="text-xs text-muted-foreground">
-                Spend under this passes without asking — always-ask entries and
-                the daily budget still stop it.
+                Stored for a future policy-HITL mode. It does not create approval
+                prompts while policy HITL is disabled.
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <Input
@@ -923,7 +927,7 @@ export function PolicySettings({ client, company }: Props) {
                   step="0.01"
                   inputMode="decimal"
                   value={draftSpend}
-                  disabled={saving || noSpendCap}
+                  disabled
                   placeholder="No cap"
                   onChange={(event) => setDraftSpend(event.target.value)}
                   className="max-w-40"
@@ -933,7 +937,7 @@ export function PolicySettings({ client, company }: Props) {
                   size="sm"
                   type="button"
                   variant={noSpendCap ? "secondary" : "outline"}
-                  disabled={saving}
+                  disabled
                   onClick={() => {
                     setNoSpendCap((current) => !current);
                     if (noSpendCap) setDraftSpend("");
@@ -941,7 +945,7 @@ export function PolicySettings({ client, company }: Props) {
                 >
                   {noSpendCap ? "No cap" : "Set no cap"}
                 </Button>
-                <Button size="sm" disabled={saving} onClick={() => void saveSpendCap()}>
+                <Button size="sm" disabled onClick={() => void saveSpendCap()}>
                   Save cap
                 </Button>
               </div>
@@ -972,7 +976,7 @@ export function PolicySettings({ client, company }: Props) {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="always-approve">Always ask first</Label>
+              <Label htmlFor="always-approve">Always ask first (inactive)</Label>
               {/* Issue #1226: what an entry IS, said here rather than left to
                   the placeholder. `payment.send, filing.submit,
                   external.publish` used to be the only worked example this
@@ -989,17 +993,13 @@ export function PolicySettings({ client, company }: Props) {
                   what `always_approve::matches` implements and nothing in the
                   console said it. */}
               <p className="text-xs text-muted-foreground">
-                What the teammates always park for approval, whatever the tier —
-                these win even on Full. Comma-separated. An entry is a tool name
-                (<code>shell</code>, <code>http_request</code>), or a dotted
-                effect kind a hosted brain emits; a leading segment matches the
-                rest, so <code>invoice</code> covers{" "}
-                <code>invoice.send</code>.
+                Stored for a future policy-HITL mode. These entries do not create
+                prompts now; teammates use <code>request_approval</code> explicitly.
               </p>
               <Input
                 id="always-approve"
                 value={draftAlways}
-                disabled={saving}
+                disabled
                 list={wiredTools.length > 0 ? "always-approve-tools" : undefined}
                 placeholder={alwaysAskPlaceholder(wiredTools)}
                 onChange={(event) => {
@@ -1025,7 +1025,7 @@ export function PolicySettings({ client, company }: Props) {
               {dirty && (
                 <Button
                   size="sm"
-                  disabled={saving}
+                  disabled
                   onClick={() => void saveAlways()}
                 >
                   Save list
@@ -1171,12 +1171,10 @@ export function PolicySettings({ client, company }: Props) {
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
                     {pendingCapRaise !== null
-                      ? "Your saved always-ask list still wins, even under the raised cap."
+                      ? "This threshold remains inactive while policy HITL is disabled."
                       : resetAwaitingConfirmation
-                        ? "Reset replaces the whole policy override, including the always-ask list."
-                        : dirty
-                          ? "Your saved always-ask list still wins, even on Full — save the list to enforce new gates."
-                          : "Your always-ask list still wins, even on Full."}
+                        ? "Reset restores the stored policy fields; approval prompts remain explicit."
+                        : "Approval prompts remain explicit through request_approval."}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>

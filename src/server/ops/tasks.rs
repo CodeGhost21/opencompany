@@ -674,7 +674,43 @@ async fn apply_workflow_proposal(
             "the stored workflow proposal could not be read as a graph: {err}"
         ))
     })?;
-    let draft = raw_workflow_from_spec(&spec)?;
+    let mut draft = raw_workflow_from_spec(&spec)?;
+
+    // Issue #1862 prerequisite: a proposal that names no owning desk defaults
+    // to the proposing card's assignee's desk — the same "somebody is
+    // responsible for this" fallback the sender-resolution chain leans on
+    // when a run has no triggering agent. Best-effort: an assignee with no
+    // desk (or a company record that fails to load) leaves `owner_desk`
+    // `None` rather than blocking the apply — the same permissive stance
+    // `resolve_assignee` above takes toward an unloadable record.
+    if draft
+        .owner_desk
+        .as_deref()
+        .is_none_or(|desk| desk.trim().is_empty())
+        && let Ok(Some(company_record)) = company.runtime.store().load(company.id()).await
+    {
+        // Issue #1882 review: a card assigned directly to a desk stores the
+        // canonical desk id as its `assignee` (`runtime::assignee`,
+        // `AssigneeResolution::canonical` — including an `EmptyDesk` with no
+        // roster member yet), not a teammate id. `desk_of_member` searches
+        // desk MEMBERSHIP, so a desk-id assignee — nobody's member — resolved
+        // to nothing even though the card already names its owning desk.
+        // Resolve as a desk first; only fall back to the teammate's desk when
+        // the assignee is not itself a desk.
+        //
+        // Issue #1882 review: the teammate fallback uses `sole_desk_of_member`,
+        // not `desk_of_member` — a teammate who sits on two or more desks gives
+        // no basis for picking either one, and `desk_of_member` would silently
+        // persist whichever desk happens to be declared first in the manifest.
+        draft.owner_desk = company_record
+            .resolve_desk_id(&record.assignee)
+            .or_else(|| {
+                crate::runtime::delegation_tools::sole_desk_of_member(
+                    &company_record,
+                    &record.assignee,
+                )
+            });
+    }
 
     // Issue #1191: the deliverable channel set, read off the SAME runtime the
     // console's destination picker is served from. Apply is a save, and it used

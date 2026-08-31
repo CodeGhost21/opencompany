@@ -24,7 +24,12 @@ export const REWRITE_RETIRED = (
   // board for an address that meant something else. Leave it to fall through
   // to the same not-found handling any other unrecognized head gets.
   if (head === "work" && !sub) return ["ledgers", BOARD_LEDGER];
-  if (head === "memory") return ["settings", "brain"];
+  // Both of the brain's old addresses. `#/memory` was the surface's first name;
+  // `#/settings/brain` is where it lived while it was a settings sub-page. It
+  // has its own nav row now, so both are rewritten onto it rather than left to
+  // render a settings rail around a page that is no longer in one.
+  if (head === "memory") return ["brain", null];
+  if (head === "settings" && sub === "brain") return ["brain", null];
   // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
   // Team and Workspace. Do not render General under an address that names no
   // page: a bookmark or shared link must say where it actually lands.

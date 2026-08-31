@@ -1,15 +1,13 @@
 # Policy Module
 
-The policy module is the default `ApprovalGate`: it evaluates an `Effect`
-against the **effective** policy — the manifest `[policy]` block as overridden
-by a persisted operator overlay — into `Allow`, `RequireApproval`, or `Deny`,
-and owns the approval queue (`park` / `resolve`). Semantics follow
-[`docs/spec/company-brain/approvals.md`](../../spec/company-brain/approvals.md):
-`readonly`/`supervised`/`full` modes, `always_approve` effect kinds, and
-`auto_approve_under_usd`.
+The policy module owns the default `ApprovalGate` and durable approval queue.
+Policy-generated HITL is currently disabled: production evaluation allows
+effects that the historical taxonomy would park, while `readonly` and the
+emergency stop remain hard denials.
 
-The gate is consulted by the `CycleRunner` before any effect crosses the trust
-boundary; parked effects surface in the operator's approvals inbox.
+Approval cards come from explicit `park_effect` calls, including the intrinsic
+`request_approval` tool and specialized tools that openly stage a concrete
+approval. Ordinary tool calls are not silently converted into prompts.
 
 ## The operator overlay and the live gate
 
@@ -36,8 +34,8 @@ policy/TTL on purpose.
 There are two ways onto that queue, both landing in `CycleHostImpl::park` (so a
 parked effect is journaled one way and survives a restart with its original id):
 
-- `CycleHost::emit_effect` — an effect the brain submits for a **decision**. The
-  gate evaluates it and parks only on `RequireApproval`.
+- `CycleHost::emit_effect` still evaluates an effect, but production policy no
+  longer returns `RequireApproval`.
 - `CycleHost::park_effect` — an effect whose verdict the brain **already**
   reached, parked as-is. This is the harness brain's path: its openhuman
   `ApprovalPolicy` blocks a gated tool call inside the agent turn, and the
@@ -46,8 +44,8 @@ parked effect is journaled one way and survives a restart with its original id):
   no-op — anything in the `Other` group, which is most gated tool calls. See
   [the OpenHuman module](../openhuman/README.md#approval-parking).
 
-Effects are classified into the checkpoint groups (Spend / Send / Sign /
-Publish / Hire / Identity) with per-group supervised defaults. Parked approvals
+The historical checkpoint classification remains for audit and future policy
+modes, but no longer creates HITL. Explicitly parked approvals
 **default-deny on silence**: they expire to `deny` after a configurable window
 (`[policy].approval_ttl_hours`, default 24 hours) measured against an
 injectable clock. The window is enforced at resolution time by the gate itself;

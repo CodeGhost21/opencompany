@@ -494,7 +494,15 @@ impl Tool for OcMcpCallTool {
                     )
                     .await;
                 }
-                let mut result: ToolResult = result.rendered.into();
+                // A free function, not `.into()`. `ToolResult` moved into the
+                // shared `tinytools` vocabulary, and `McpToolResult` belongs to
+                // `tinymcp-bus` — two foreign types, so the orphan rule forbids
+                // the `From` impl this used to call. OpenHuman spells the
+                // conversion once, in `skills::types`, rather than at each call
+                // site, because written out by hand it is three chances to get
+                // the error flag the wrong way round.
+                let mut result: ToolResult =
+                    oh::skills::types::tool_result_from_mcp(result.rendered);
                 if options.prefer_markdown && result.markdown_formatted.is_none() {
                     result.markdown_formatted = Some(result.output());
                 }
@@ -519,7 +527,19 @@ fn required_string_arg(args: &Value, key: &str) -> anyhow::Result<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("missing required `{key}`"))?;
-    Ok(value.to_string())
+    // Models routinely wrap identifiers in markdown emphasis when they answer
+    // in prose style (`server: \`werkplaats\``). A trailing backtick is part of
+    // the markdown, not the name: strip wrapping / trailing fence characters
+    // so the registry lookup matches the configured server name. Only *leading
+    // and trailing* occurrences are removed — a legitimate name never starts
+    // or ends with one of these, so stripping cannot mangle a real id.
+    let cleaned = value
+        .trim_start_matches(['`', '*', '_'])
+        .trim_end_matches(['`', '*', '_', '.', ',', ';', ':', '!']);
+    if cleaned.is_empty() {
+        return Err(anyhow::anyhow!("missing required `{key}`"));
+    }
+    Ok(cleaned.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -868,6 +888,22 @@ mod tests {
     #[test]
     fn empty_decls_yield_no_registry() {
         assert!(registry_for_agent(&[], &grants(&["mcp:*"])).is_none());
+    }
+
+    #[test]
+    fn server_name_strips_markdown_fences() {
+        // Models wrap identifiers in markdown when answering in prose style;
+        // the fence characters belong to the answer, not the server name
+        // (seen live: server="werkplaats`" -> "unknown mcp server `werkplaats``").
+        let mk = |v: &str| serde_json::json!({ "server": v });
+        let parsed = |v: &str| required_string_arg(&mk(v), "server").unwrap();
+        assert_eq!(parsed("werkplaats"), "werkplaats");
+        assert_eq!(parsed("werkplaats`"), "werkplaats");
+        assert_eq!(parsed("`werkplaats`"), "werkplaats");
+        assert_eq!(parsed("*werkplaats*"), "werkplaats");
+        assert_eq!(parsed("werkplaats."), "werkplaats");
+        assert_eq!(parsed("werk"), "werk");
+        assert!(required_string_arg(&mk("```"), "server").is_err());
     }
 
     #[test]

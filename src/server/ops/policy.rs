@@ -127,21 +127,20 @@ const TIER_TEXT: &[TierDto] = &[
     TierDto {
         value: "supervised",
         label: "Supervised",
-        description: "The agents ask before every change, except payments under the configured \
-                      spend cap — the always-ask list and daily budget still stop them.",
+        description: "Conservative execution restrictions. Approval prompts are explicit through \
+                      request_approval while policy HITL is disabled.",
     },
     TierDto {
         value: "auto",
         label: "Auto",
-        description: "The agents work on their own and stop before anything that leaves the \
-                      company or spends money, except payments under the configured spend cap — \
-                      the always-ask list and daily budget still stop them.",
+        description: "Balanced execution autonomy. Approval prompts are explicit through \
+                      request_approval while policy HITL is disabled.",
     },
     TierDto {
         value: "full",
         label: "Full",
-        description: "The agents act without asking, except for the few things on the \
-                      always-ask list.",
+        description: "Broadest execution autonomy. Approval prompts are explicit through \
+                      request_approval while policy HITL is disabled.",
     },
 ];
 
@@ -673,8 +672,7 @@ mod tests {
     /// with.
     #[tokio::test]
     async fn a_policy_put_applies_the_deadline_immediately_and_the_cap_next_turn() {
-        use crate::ports::approvals::ApprovalGate;
-        use crate::ports::types::{CompanyEvent, Effect, EffectGroup, PolicyDecision};
+        use crate::ports::types::CompanyEvent;
 
         let dir = home();
         let state = state(dir.path()).await;
@@ -691,23 +689,15 @@ mod tests {
         // Cap PUT: the snapshot must NOT move mid-turn...
         let (status, _) = call(&state, "PUT", Some(json!({ "autoApproveUnderUsd": 50 }))).await;
         assert_eq!(status, StatusCode::OK);
-        let spend = Effect {
-            kind: "x402.spend".to_string(),
-            group: EffectGroup::Spend,
-            amount_usd: Some(30.0),
-            established_thread: false,
-            first_time_counterparty: false,
-            payload: serde_json::Value::Null,
-            agent: None,
-            run_id: None,
-        };
-        // ...a $30 spend still parks under the manifest cap of $5...
-        assert!(matches!(
-            runtime.approval_gate.evaluate(&id, &spend).await.unwrap(),
-            PolicyDecision::RequireApproval
-        ));
+        assert_eq!(
+            runtime.approval_gate.policy().auto_approve_under_usd,
+            Some(5.0),
+            "the evaluation snapshot must not move mid-turn"
+        );
 
-        // ...and the next turn applies the effective policy, so it allows.
+        // ...and the next turn applies the effective policy snapshot. Policy
+        // HITL is disabled, but the stored cap still moves on its documented
+        // schedule for reporting and any future opt-in policy mode.
         runtime
             .run_cycle(vec![CompanyEvent::ScheduleFired {
                 cron: "* * * * *".to_string(),
@@ -715,10 +705,10 @@ mod tests {
             }])
             .await
             .expect("the next turn runs");
-        assert!(matches!(
-            runtime.approval_gate.evaluate(&id, &spend).await.unwrap(),
-            PolicyDecision::Allow
-        ));
+        assert_eq!(
+            runtime.approval_gate.policy().auto_approve_under_usd,
+            Some(50.0)
+        );
     }
 
     /// A deadline `null` releases that one override while preserving the cap,

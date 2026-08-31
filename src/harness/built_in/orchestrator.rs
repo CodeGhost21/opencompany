@@ -4536,6 +4536,8 @@ pub(crate) struct CreateWorkflowArgs {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    owner_desk: Option<String>,
+    #[serde(default)]
     nodes: Vec<CreateWorkflowArgNode>,
     #[serde(default)]
     edges: Vec<CreateWorkflowArgEdge>,
@@ -4709,6 +4711,7 @@ impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
             id: args.id,
             name: args.name,
             description: args.description,
+            owner_desk: RawWorkflow::normalize_owner_desk(args.owner_desk),
             nodes,
             edges: args
                 .edges
@@ -4908,6 +4911,10 @@ pub(crate) fn create_workflow_parameters_schema() -> Value {
                 "description": {
                     "type": "string",
                     "description": "An optional one-line description of what the workflow does."
+                },
+                "ownerDesk": {
+                    "type": ["string", "null"],
+                    "description": "Optional owning desk id. Use the stable desk id, not its display name. On update_workflow, send `null` to explicitly unassign the desk; omit the key to leave the current desk untouched."
                 },
                 "nodes": {
                     "type": "array",
@@ -8910,6 +8917,71 @@ name = "Morning"
                 .contains("slug = \"web_fetch\""),
             "the persisted graph carries the tool slug: {}",
             record.overlay_workflows[0].toml
+        );
+    }
+
+    /// Issue #1882 (tinysweeper): every other external boundary that turns a
+    /// caller-supplied `ownerDesk` into a [`RawWorkflow`] runs it through
+    /// [`RawWorkflow::normalize_owner_desk`] — the HTTP create route
+    /// (`server::ops::workflows`) and the proposal-apply path
+    /// (`workflow_create::raw_workflow_from_spec`) — so a blank/whitespace
+    /// string is stored as `None`, not `Some("   ")`. The orchestrator's
+    /// `create_workflow` tool passed `args.owner_desk` straight through
+    /// instead, so a whitespace `ownerDesk` persisted verbatim in the graph's
+    /// TOML and would defeat the `is_none()` fallback
+    /// `apply_workflow_proposal` relies on later.
+    #[tokio::test]
+    async fn create_workflow_tool_normalizes_a_blank_owner_desk() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+
+        let mut body = greeter_body();
+        body["ownerDesk"] = json!("   ");
+        let result = tool.execute(body).await.expect("execute");
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert!(
+            !record.overlay_workflows[0].toml.contains("owner_desk"),
+            "a blank owner_desk must normalize to None and be omitted from the \
+             persisted TOML, matching every other boundary that builds a \
+             RawWorkflow: {}",
+            record.overlay_workflows[0].toml
+        );
+    }
+
+    /// PR #1882 review (bot finding on `orchestrator.rs:4788`).
+    /// `UpdateWorkflowTool`'s description (built from this same schema via
+    /// `create_graph_schema`) tells the agent to send `"ownerDesk": null` to
+    /// unassign a desk, and `an_update_can_explicitly_clear_owner_desk_with_null`
+    /// proves `execute` honors that. But `execute` is called directly in that
+    /// test, bypassing the boundary a schema-constrained tool-calling client
+    /// actually enforces: before this fix `ownerDesk` was declared bare
+    /// `"type": "string"`, so such a client would reject the `null` argument
+    /// before the call ever reached `execute`'s presence check, leaving the
+    /// advertised clear operation reachable in tests but not in the field.
+    #[test]
+    fn owner_desk_schema_permits_null() {
+        let schema = create_workflow_parameters_schema();
+        let owner_desk_type = &schema["properties"]["ownerDesk"]["type"];
+        let permits_null = owner_desk_type
+            .as_array()
+            .map(|types| types.iter().any(|t| t == "null"))
+            .unwrap_or(false);
+        assert!(
+            permits_null,
+            "ownerDesk schema type must include \"null\" so a schema-constrained \
+             client can send the explicit-clear value the tool description \
+             promises; got {owner_desk_type:?}"
         );
     }
 

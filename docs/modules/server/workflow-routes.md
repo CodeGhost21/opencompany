@@ -82,6 +82,23 @@ without a client migration.
 `400`. The id keys the union read path, the scheduler and every journalled run,
 so a rename would silently orphan all three. A rename is a create plus a delete.
 
+**The `ownerDesk` field (issue #1862).** `GET` returns `ownerDesk` (camelCase)
+alongside `version`; on disk it is `owner_desk` in the workflow's TOML. `POST`
+and `PUT` accept the same field in the body. There is no console control to set
+or change it today — the create/edit dialog only carries forward whatever a
+previous read hydrated it with — so an API caller is currently the only way to
+assign or move one. Because `PUT` replaces the graph wholesale, **`ownerDesk`
+must be echoed back exactly like `version`**; omitting it on an edit clears the
+desk assignment rather than leaving it untouched.
+
+A stored `ownerDesk` can stop resolving after the desk it names is renamed or
+removed. The `GET` path already tolerates that — a saved graph must still load
+— and `PUT` now grandfathers it too: a desk that is both unresolvable *and*
+unchanged from what was already stored does not block the save, so editing
+some other field is never refused by desk drift the console gave the operator
+no way to fix. A **newly typed or selected** desk that fails to resolve is
+still a validation error.
+
 **Past runs are orphaned, not reaped.** A deleted workflow's
 `WorkflowRunFinished` entries stay in the company journal and keep coming back
 from `GET …/workflows/runs`. The journal is append-only and shared with chat and
@@ -100,14 +117,18 @@ job is re-syncing cron rows that live in a second durable store.
 # Read the graph and its concurrency token.
 curl -s "$HOST/api/v1/company/workflows/weekly_digest" \
      -H "Authorization: Bearer $TOKEN"
-# → { "id": "weekly_digest", …, "editable": true, "version": "73e8ccc6…" }
+# → { "id": "weekly_digest", …, "ownerDesk": "engineering", "editable": true,
+#     "version": "73e8ccc6…" }
 
 # Correct the schedule, conditional on nothing having changed since that read.
+# `ownerDesk` is echoed back verbatim from the read above — a PUT that drops
+# it clears the desk assignment instead of leaving it alone.
 curl -X PUT "$HOST/api/v1/company/workflows/weekly_digest" \
      -H "Authorization: Bearer $TOKEN" \
      -H 'content-type: application/json' -d '{
   "id": "weekly_digest",
   "name": "Weekly digest",
+  "ownerDesk": "engineering",
   "nodes": [ { "id": "start", "kind": "trigger", "name": "Monday 10:00",
                "schedule": "0 10 * * MON" },
              { "id": "done", "kind": "output", "name": "Owner summary",

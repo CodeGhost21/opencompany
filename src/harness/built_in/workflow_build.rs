@@ -551,6 +551,10 @@ pub async fn run_workflow_build_pass(
         &evidence.record,
         evidence.source_dir.as_deref(),
         Some(&evidence.wired_channels),
+        // A builder pass proposes a NEW workflow — there is no saved
+        // counterpart whose owning desk could be grandfathered (issue #1882
+        // review), so any desk on this draft is a new assignment.
+        None,
     ) {
         settle_to_todo(
             &runtime,
@@ -1948,7 +1952,13 @@ pub(crate) enum CopilotSeed {
     /// Correct `spec` — the saved graph of a workflow whose run failed — grounded
     /// on the precise `failure` (issue #840, PR-3).
     FromFailure {
-        spec: WorkflowGraphSpec,
+        // Boxed (issue #1862 prerequisite): `WorkflowGraphSpec` grew an
+        // `owner_desk` field, which pushed this variant's size far enough
+        // past `FromDescription(String)`'s to trip
+        // `clippy::large_enum_variant`. Boxing is pure indirection here —
+        // every read site already goes through `&spec` or a field clone, both
+        // of which auto-deref through the `Box` unchanged.
+        spec: Box<WorkflowGraphSpec>,
         failure: RunFailureContext,
     },
 }
@@ -1982,7 +1992,7 @@ pub(crate) struct RunFailureContext {
 /// fresh OpenHuman [`Agent`](oh::agent::Agent) is built over the roster's own
 /// inference engine ([`build_copilot_agent`](agent::build_copilot_agent)) with the
 /// three OC-native tools (`list_effective_tools`, `check_workflow`,
-/// `propose_workflow`, see [`tools`]).
+/// `propose_company_workflow`, see [`tools`]).
 ///
 /// **The host authority is unchanged.** The propose tool runs the SAME
 /// post-processing the old inline path did — a safe/unique id (or, on the fix
@@ -2043,6 +2053,11 @@ async fn run_copilot(
             let fixing = Some(tools::FixTarget {
                 id: spec.id.clone(),
                 name: spec.name.clone(),
+                // Carried, not re-derived: the seed spec IS the saved graph
+                // (`workflow_spec_from_graph`), so this is the desk the edit
+                // route will compare the correction against (issue #1882
+                // review).
+                owner_desk: spec.owner_desk.clone(),
             });
             (user, description, fixing)
         }
@@ -2162,7 +2177,7 @@ pub(crate) async fn fix_workflow_from_failure(
     run_copilot(
         runtime,
         CopilotSeed::FromFailure {
-            spec: failing.clone(),
+            spec: Box::new(failing.clone()),
             failure: failure.clone(),
         },
     )

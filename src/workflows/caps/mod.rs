@@ -128,6 +128,14 @@ pub struct RunContext<'a> {
     /// only after the engine settles, which is what let an approval decided in
     /// that window be consumed with nothing to release.
     pub trigger_input: &'a Value,
+    /// This run's own attribution (issue #1862 prerequisite), threaded to
+    /// [`HarnessAgentRunner`] so [`park_gated_calls`](HarnessAgentRunner::park_gated_calls)
+    /// arms a blocked node's continuation stash with the run's real
+    /// `started_by` at park time — `arm` is first-write-wins, and park time
+    /// runs before the runner's block-settle pass, so this call is the one
+    /// that actually sticks; leaving it defaulted here would silently pin
+    /// every blocked node to `Operator` regardless of who triggered the run.
+    pub started_by: crate::ports::types::StartedBy,
     /// Issue #542: stub every effectful slot and journal nothing.
     pub dry_run: bool,
     /// Where an agent node leaves an operator-facing notice (issue #638).
@@ -209,6 +217,7 @@ pub async fn build_capabilities(
         run_id,
         run_request,
         trigger_input,
+        started_by,
         dry_run,
         notices,
         board,
@@ -241,6 +250,7 @@ pub async fn build_capabilities(
     // it can mark those graphs before tinyflows runs them. `None` for a dry run
     // because every effect slot is inert there.
     let gates = (!dry_run).then(|| self::resolver::ChildPolicyGates {
+        policy_hitl_enabled: false,
         policy: record.effective_policy(),
         run_id: run_id.to_string(),
         grants: deps.approval_requests.grants(),
@@ -402,6 +412,7 @@ pub async fn build_capabilities(
                 run_id.to_string(),
                 run_request,
                 trigger_input.clone(),
+                started_by,
                 notices,
                 board,
                 blocks,
@@ -583,6 +594,12 @@ pub struct HarnessAgentRunner {
     /// of leaving that to the runner's block-settle pass — see that method's
     /// doc for the window this closes.
     trigger_input: Value,
+    /// This run's own attribution (issue #1862 prerequisite), carried so
+    /// [`park_gated_calls`](Self::park_gated_calls) can arm a blocked node's
+    /// continuation stash with it at park time — see that method's doc for
+    /// why the value stamped here, not the settle-time call, is the one that
+    /// survives `arm`'s first-write-wins semantics.
+    started_by: crate::ports::types::StartedBy,
     /// Where this node leaves an operator-facing notice (issue #638).
     notices: RunNotices,
     /// Where this node's board writes are recorded (issue #661 / M5).
@@ -913,6 +930,7 @@ impl HarnessAgentRunner {
         run_id: String,
         run_request: Option<String>,
         trigger_input: Value,
+        started_by: crate::ports::types::StartedBy,
         notices: RunNotices,
         board: RunBoard,
         blocks: RunBlocks,
@@ -934,6 +952,7 @@ impl HarnessAgentRunner {
             run_id,
             run_request,
             trigger_input,
+            started_by,
             notices,
             board,
             blocks,
@@ -1696,9 +1715,12 @@ impl HarnessAgentRunner {
         // of narrowing it. `arm` is first-write-wins and cheap (one HashMap
         // insert under a `Mutex`), so a redundant call from the settle pass
         // below is a harmless no-op, not a second source of truth.
-        parking
-            .blocked_nodes
-            .arm(node_turn, &self.workflow_id, &self.trigger_input);
+        parking.blocked_nodes.arm(
+            node_turn,
+            &self.workflow_id,
+            &self.trigger_input,
+            &self.started_by,
+        );
 
         // Issue #1825 (P1, second follow-up — found by chatgpt-codex-connector):
         // the in-memory arm above only helps the no-restart case. The durable
@@ -1719,7 +1741,12 @@ impl HarnessAgentRunner {
         // over an approvals-queue write would be the wrong trade.
         if let Err(error) = parking
             .journal
-            .record_blocked_node_stashed(node_turn, &self.workflow_id, &self.trigger_input)
+            .record_blocked_node_stashed(
+                node_turn,
+                &self.workflow_id,
+                &self.trigger_input,
+                &self.started_by,
+            )
             .await
         {
             tracing::warn!(
@@ -2913,6 +2940,7 @@ mod tests {
             "run-1702".to_string(),
             None,
             Value::Null,
+            crate::ports::types::StartedBy::Operator,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -3199,6 +3227,7 @@ mod tests {
             "run-1880".to_string(),
             None,
             Value::Null,
+            crate::ports::types::StartedBy::Operator,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -3338,6 +3367,7 @@ mod tests {
             "run-1825-p1".to_string(),
             None,
             trigger_input.clone(),
+            crate::ports::types::StartedBy::Operator,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -3444,6 +3474,7 @@ mod tests {
             "run-1825-p1b".to_string(),
             None,
             trigger_input.clone(),
+            crate::ports::types::StartedBy::Operator,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -3560,6 +3591,7 @@ mod tests {
             "run-1825-p2c".to_string(),
             None,
             trigger_input.clone(),
+            crate::ports::types::StartedBy::Operator,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -3774,6 +3806,7 @@ mod tests {
             "run-1825-p1-4".to_string(),
             None,
             trigger_input.clone(),
+            crate::ports::types::StartedBy::Operator,
             RunNotices::default(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -3857,6 +3890,7 @@ mod tests {
             "run-1".to_string(),
             None,
             Value::Null,
+            crate::ports::types::StartedBy::Operator,
             notices.clone(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -3925,6 +3959,7 @@ mod tests {
             "run-1775".to_string(),
             None,
             Value::Null,
+            crate::ports::types::StartedBy::Operator,
             notices.clone(),
             RunBoard::default(),
             RunBlocks::default(),
@@ -4477,6 +4512,7 @@ mod tests {
                 run_id: "run:1",
                 run_request: None,
                 trigger_input: &Value::Null,
+                started_by: crate::ports::types::StartedBy::Operator,
                 dry_run: false,
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
@@ -4530,6 +4566,7 @@ mod tests {
                 run_id: "run:1",
                 run_request: None,
                 trigger_input: &Value::Null,
+                started_by: crate::ports::types::StartedBy::Operator,
                 dry_run: true,
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
@@ -4700,6 +4737,7 @@ mod tests {
                 run_id: "run:1",
                 run_request: None,
                 trigger_input: &Value::Null,
+                started_by: crate::ports::types::StartedBy::Operator,
                 dry_run: false, // live: the workspace mkdir runs
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
@@ -4760,6 +4798,7 @@ mod tests {
                 run_id: "run:1",
                 run_request: None,
                 trigger_input: &Value::Null,
+                started_by: crate::ports::types::StartedBy::Operator,
                 dry_run: true, // dry: no workspace mkdir at all
                 notices: RunNotices::default(),
                 board: RunBoard::default(),

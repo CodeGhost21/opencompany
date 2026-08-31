@@ -572,6 +572,51 @@ pub enum OnboardingStep {
     WorkflowRunSucceeded,
 }
 
+/// Who or what started a workflow run (issue #1862 prerequisite).
+///
+/// A static fact stamped at **trigger time**, not a judgment made at failure —
+/// the run that hits a blocker later needs to know who to hand it back to, and
+/// that is whoever's errand the run was, not whoever happened to be watching
+/// when it stalled. `WorkflowRunStarted` carries it; every entry point already
+/// has the identity in hand when it starts a run, so this only ever writes
+/// down a fact that already existed.
+///
+/// `Schedule` and `Operator` are fieldless because there is exactly one cron
+/// scheduler and, on that boundary, exactly one operator concept; `Agent`
+/// carries the triggering agent's id because there can be many.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartedBy {
+    /// An operator pressed Run (or the run route otherwise fired manually).
+    Operator,
+    /// An agent triggered the run — `run_workflow` from a turn, or a
+    /// dispatched card. The id is that agent's roster id.
+    Agent(String),
+    /// A cron schedule fired the run with nobody watching.
+    Schedule,
+}
+
+impl StartedBy {
+    /// The default reading of the run route's `scheduled: bool` flag, for
+    /// entry points that have not been taught to name a triggering agent yet.
+    ///
+    /// `true` is unambiguous (only the scheduler sets it) — `false` defaults to
+    /// [`Operator`](Self::Operator) even though not every manual run is
+    /// literally an operator's Run click (`run_workflow` also fires with
+    /// `scheduled: false`, see the site named on
+    /// [`WorkflowRunContext::new`](crate::ports::workflow_runner::WorkflowRunContext::new)).
+    /// That is deliberately the coarser, unwired default: a caller that knows
+    /// the real agent should build a [`StartedBy::Agent`] directly instead of
+    /// going through this conversion.
+    pub fn from_scheduled(scheduled: bool) -> Self {
+        if scheduled {
+            Self::Schedule
+        } else {
+            Self::Operator
+        }
+    }
+}
+
 /// An external stimulus fed into a company's cycle loop.
 ///
 /// Serialized internally-tagged under `kind` so each JSONL line is
@@ -1673,6 +1718,18 @@ pub enum CompanyEvent {
         run_id: String,
         /// Whether a cron schedule started this run rather than an operator.
         scheduled: bool,
+        /// Who or what started the run (issue #1862 prerequisite) — the fact a
+        /// parked blocker later attributes its DM to.
+        ///
+        /// `Option` and `#[serde(default)]`, unlike `scheduled`: every current
+        /// entry point already knows this at trigger time, but a journal line
+        /// written before this field existed carries none, and `None` is also
+        /// the honest reading for any future entry point that genuinely has no
+        /// identity to give. `skip_serializing_if` keeps a line with no
+        /// attribution serializing byte-identically to before this field
+        /// existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_by: Option<StartedBy>,
     },
     /// One non-trigger node of a workflow run began executing (issue #382),
     /// reported by the engine's `RunObserver` immediately before the node's
@@ -2205,6 +2262,9 @@ impl EffectGroup {
         matches!(self, Self::Other)
     }
 }
+
+/// The effect kind reserved for an agent's explicit operator question.
+pub const REQUEST_APPROVAL_EFFECT_KIND: &str = "request_approval";
 
 /// A side effect the brain wants to perform, submitted to the approval gate.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -4447,6 +4507,30 @@ impl CompanyRecord {
     /// blueprint that authored the company's General desk keeps it, which is
     /// the grandfathering this host has always honoured.
     pub fn resolve_desk_id(&self, key: &str) -> Option<String> {
+        // **Exact ids win over display-name aliases, everywhere** (issue #1862
+        // review). Desk creation enforces id uniqueness but not name
+        // uniqueness, so `{id: "ops", name: "sales"}` is a valid desk that can
+        // sit ahead of `{id: "sales", …}` in either list. A single pass whose
+        // predicate is `id == key || name == key` returns whichever comes
+        // first, so asking for the id `sales` could answer `ops` — an
+        // ownership write silently targeting a different desk. Resolve the
+        // unambiguous thing first: a key that *is* an id always means that
+        // desk. Only when no desk owns the key as an id does a display-name
+        // alias get a say, and the alias pass below keeps the manifest-first
+        // order and the General guards exactly as they were.
+        if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
+            return Some(exact.id.clone());
+        }
+        if !crate::server::chat_history::is_general_chat(Some(key))
+            && let Some(exact) = self
+                .overlay_desks
+                .iter()
+                .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                .find(|d| d.id == key)
+        {
+            return Some(exact.id.clone());
+        }
+
         self.manifest
             .group_chats
             .iter()
@@ -4470,6 +4554,54 @@ impl CompanyRecord {
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
+    }
+
+    /// Whether `key` would resolve to more than one desk if [`resolve_desk_id`](Self::resolve_desk_id)
+    /// fell through to its display-name alias pass (issue #1882 review, PR
+    /// #1882 bot finding, comment 3878620688). Desk creation enforces id
+    /// uniqueness but not name uniqueness, so `{id: "sales_us", name:
+    /// "Sales"}` and `{id: "sales_eu", name: "Sales"}` can coexist right now
+    /// — no delete-and-recreate needed. `resolve_desk_id` is a read-mostly
+    /// routing lookup and is content to answer with whichever desk its alias
+    /// pass iterates to first in that case; a caller that PERSISTS the
+    /// resolved id (`validate_draft_against_record`) cannot make the same
+    /// call silently, because doing so commits a workflow's future blocker
+    /// DMs to a team the caller never actually named.
+    ///
+    /// An exact id match is never ambiguous — ids are unique by construction
+    /// — so this only inspects the alias pass, mirroring its manifest-before-
+    /// overlay priority and General-desk exclusions: a name that resolves
+    /// through the manifest is judged solely against other manifest desks
+    /// (the manifest tier always wins over overlay, so an overlay desk of the
+    /// same name is not a competing candidate), falling through to the
+    /// overlay tier only when the manifest has no match at all.
+    pub fn desk_alias_is_ambiguous(&self, key: &str) -> bool {
+        if self.manifest.group_chats.iter().any(|c| c.id == key)
+            || (!crate::server::chat_history::is_general_chat(Some(key))
+                && self.overlay_desks.iter().any(|d| {
+                    d.id == key && !crate::server::chat_history::is_general_chat(Some(&d.id))
+                }))
+        {
+            return false;
+        }
+        let manifest_matches = self
+            .manifest
+            .group_chats
+            .iter()
+            .filter(|c| c.name.eq_ignore_ascii_case(key))
+            .count();
+        if manifest_matches > 0 {
+            return manifest_matches > 1;
+        }
+        if crate::server::chat_history::is_general_chat(Some(key)) {
+            return false;
+        }
+        self.overlay_desks
+            .iter()
+            .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+            .filter(|d| d.name.eq_ignore_ascii_case(key))
+            .count()
+            > 1
     }
 
     /// Whether a desk with `desk_id` exists in either the manifest or the
@@ -6927,6 +7059,68 @@ mod test {
         assert_eq!(record.mint_agent_id("Dana Designer"), "dana_designer_2");
     }
 
+    /// **Issue #1862 review**: an exact desk id must win over another desk's
+    /// display name.
+    ///
+    /// Desk creation enforces id uniqueness but not name uniqueness, so
+    /// `{id: "ops", name: "sales"}` is a valid desk that can sit ahead of
+    /// `{id: "sales", …}`. A single pass whose predicate is
+    /// `id == key || name == key` returns whichever comes first, so asking for
+    /// the id `sales` answered `ops` — an ownership write silently targeting a
+    /// different desk than the caller named.
+    #[test]
+    fn an_exact_desk_id_beats_another_desks_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        // Deliberately in the order that loses under a first-match search: the
+        // desk merely *named* "sales" is created first.
+        record.overlay_desks.push(OverlayDesk {
+            id: "ops".into(),
+            name: "sales".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+        record.overlay_desks.push(OverlayDesk {
+            id: "sales".into(),
+            name: "Revenue".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+
+        assert_eq!(
+            record.resolve_desk_id("sales").as_deref(),
+            Some("sales"),
+            "an exact id must resolve to itself, not to a desk that merely \
+             carries it as a display name"
+        );
+        // The alias still resolves for a key no desk owns as an id.
+        assert_eq!(record.resolve_desk_id("Revenue").as_deref(), Some("sales"));
+        assert_eq!(record.resolve_desk_id("ops").as_deref(), Some("ops"));
+    }
+
+    /// A manifest desk's id also beats an overlay desk's display name — the
+    /// exact-id pass spans both lists, so ordering between them cannot decide
+    /// an ownership write either.
+    #[test]
+    fn a_manifest_desk_id_beats_an_overlay_desks_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"growth\"\nname = \"Content\"\nmembers = [\"ceo\"]\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_desks.push(OverlayDesk {
+            id: "studio".into(),
+            name: "growth".into(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+
+        assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
+    }
+
     /// Desks resolve *before* teammates in `assignee::resolve`, by id and by
     /// case-insensitive display name — so a minted id equal to either would be
     /// unreachable, and both are stepped past.
@@ -8405,8 +8599,54 @@ mod test {
             workflow_id: "digest".to_string(),
             run_id: "run-1".to_string(),
             scheduled: true,
+            started_by: Some(StartedBy::Operator),
         };
         assert_eq!(round_trip(&event), event);
+    }
+
+    /// Every [`StartedBy`] arm round-trips, including the fielded `Agent` one —
+    /// the shape a parked blocker's sender resolution reads back.
+    #[test]
+    fn started_by_round_trips_all_arms() {
+        for started_by in [
+            StartedBy::Operator,
+            StartedBy::Agent("ceo".to_string()),
+            StartedBy::Schedule,
+        ] {
+            let event = CompanyEvent::WorkflowRunStarted {
+                workflow_id: "digest".to_string(),
+                run_id: "run-1".to_string(),
+                scheduled: matches!(started_by, StartedBy::Schedule),
+                started_by: Some(started_by.clone()),
+            };
+            assert_eq!(
+                round_trip(&event),
+                event,
+                "{started_by:?} did not round-trip"
+            );
+        }
+    }
+
+    /// A `WorkflowRunStarted` line written before this field existed (issue
+    /// #1862 prerequisite) still replays, with `started_by` reading back
+    /// `None` rather than failing to parse. Pinned against a hand-written
+    /// legacy payload rather than a round-trip, for the same reason
+    /// `a_pre_881_run_finished_line_still_replays` is: a round-trip can only
+    /// ever prove the new shape agrees with itself.
+    #[test]
+    fn a_pre_1862_run_started_line_still_replays_with_no_sender() {
+        let legacy = serde_json::json!({
+            "kind": "WorkflowRunStarted",
+            "workflow_id": "digest",
+            "run_id": "run-1",
+            "scheduled": false
+        });
+        let event: CompanyEvent =
+            serde_json::from_value(legacy).expect("a pre-#1862 journal line must still parse");
+        let CompanyEvent::WorkflowRunStarted { started_by, .. } = &event else {
+            panic!("expected a WorkflowRunStarted, got {event:?}");
+        };
+        assert_eq!(started_by, &None, "a legacy line names no sender");
     }
 
     /// Both node outcomes round-trip, including the elapsed reading — the field
@@ -8494,14 +8734,17 @@ mod test {
 
     /// Every field on both #371 variants is required, and that is the point:
     /// the correlation id is what groups a run's nodes with its outcome, so a
-    /// line without one would be unfoldable. Nothing is `skip_serializing_if`,
-    /// so the wire form is fully self-describing.
+    /// line without one would be unfoldable. Nothing is `skip_serializing_if`
+    /// — except `WorkflowRunStarted::started_by` (issue #1862 prerequisite),
+    /// which is additive and `None` here on purpose, so the wire form stays
+    /// self-describing for every field that predates it.
     #[test]
     fn workflow_progress_variants_serialize_every_field() {
         let started = serde_json::to_string(&CompanyEvent::WorkflowRunStarted {
             workflow_id: "digest".to_string(),
             run_id: "run-1".to_string(),
             scheduled: false,
+            started_by: None,
         })
         .expect("serialize");
         assert_eq!(

@@ -477,12 +477,19 @@ fn attach_tools(
     body: &mut serde_json::Value,
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
+    supports_parallel_control: bool,
 ) {
     if tools.is_empty() {
         return;
     }
     body["tool_choice"] = wire_tool_choice(tool_choice);
     body["tools"] = serde_json::Value::Array(tools);
+    // Profile metadata is local; put the turn-boundary promise on the actual
+    // OpenAI-compatible request so the remote model cannot validly emit an
+    // effectful sibling beside `request_approval`.
+    if supports_parallel_control {
+        body["parallel_tool_calls"] = serde_json::Value::Bool(false);
+    }
 }
 
 // ## Guarding intra-turn history growth
@@ -616,7 +623,12 @@ static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
         ..Modalities::default()
     },
     tool_calling: true,
-    parallel_tool_calls: true,
+    // An explicit approval request is a turn boundary. Asking the provider for
+    // at most one native tool call prevents a sibling effect from being emitted
+    // in the same assistant message and running before the operator sees the
+    // request. The policy queue adds a second serial-execution barrier for a
+    // provider that violates this capability contract.
+    parallel_tool_calls: false,
     // This field activates both `ContextCompressionMiddleware` and
     // `ImageAwareMessageTrimMiddleware`. `TurnModels::effective_context_window`
     // reads `direct.profile().and_then(|p| p.max_input_tokens)`, and the turn
@@ -826,6 +838,17 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
     let content_is_null = raw_content.is_some_and(serde_json::Value::is_null);
     let mut content = extract_content_text(raw_content);
     let tool_calls = parse_tool_calls(&payload);
+    if tool_calls.len() > 1
+        && tool_calls
+            .iter()
+            .any(|call| call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+    {
+        return Err(TinyAgentsError::Model(
+            "inference returned request_approval with sibling tool calls; the whole batch was \
+             refused so the approval boundary cannot be crossed"
+                .to_string(),
+        ));
+    }
     let finish_reason = payload
         .pointer("/choices/0/finish_reason")
         .and_then(|v| v.as_str())
@@ -1222,7 +1245,12 @@ impl ChatModel<()> for HostedProvider {
         }
         // Native tool calling: expose the turn's tools so the model emits
         // structured `tool_calls` instead of hand-written `<tool_call>` XML.
-        attach_tools(&mut body, wire_tools(&request.tools), &request.tool_choice);
+        attach_tools(
+            &mut body,
+            wire_tools(&request.tools),
+            &request.tool_choice,
+            self.product_identity,
+        );
 
         let base_url = self.config.base_url.trim_end_matches('/');
         let url = format!("{base_url}/chat/completions");
@@ -1388,7 +1416,9 @@ pub async fn request_plan(
     if let Some(cap) = max_tokens {
         body["max_tokens"] = serde_json::json!(cap);
     }
-    attach_tools(&mut body, tools, tool_choice);
+    let supports_parallel_control =
+        decl.is_proxied() || inference::normalize_provider(&decl.provider) == "openrouter";
+    attach_tools(&mut body, tools, tool_choice, supports_parallel_control);
     Ok(RequestPlan {
         url,
         model,
@@ -3132,6 +3162,26 @@ mod tests {
         assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
     }
 
+    #[test]
+    fn request_approval_with_siblings_refuses_the_whole_model_response() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {"id":"c1","type":"function","function":{"name":"shell","arguments":"{}"}},
+                        {"id":"c2","type":"function","function":{"name":"request_approval","arguments":"{\"title\":\"Run\",\"question\":\"Proceed?\"}"}}
+                    ]
+                }
+            }]
+        });
+        let error = model_response_from_payload(payload)
+            .expect_err("an approval boundary cannot share one tool-call batch");
+        assert!(error.to_string().contains("sibling tool calls"));
+    }
+
     /// A missing/empty tool-call `id` is back-filled with a stable `tool-{index}`
     /// slot id so the tool result can still correlate, and unparseable arguments
     /// are preserved + flagged `invalid` rather than dropping the call.
@@ -3176,10 +3226,24 @@ mod tests {
             format: tinyagents::harness::tool::ToolFormat::default(),
         }]);
         let mut body = serde_json::json!({ "model": "chat-v1" });
-        attach_tools(&mut body, tools, &ToolChoice::Required);
+        attach_tools(&mut body, tools, &ToolChoice::Required, true);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "check_inventory");
         assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["parallel_tool_calls"], false);
+        let mut unsupported = serde_json::json!({ "model": "local" });
+        attach_tools(
+            &mut unsupported,
+            wire_tools(&[ToolSchema {
+                name: "check_inventory".to_string(),
+                description: "look up stock".to_string(),
+                parameters: serde_json::json!({ "type": "object" }),
+                format: tinyagents::harness::tool::ToolFormat::default(),
+            }]),
+            &ToolChoice::Required,
+            false,
+        );
+        assert!(unsupported.get("parallel_tool_calls").is_none());
 
         // An assistant tool-call turn → null content + wire tool_calls; the tool
         // result → a `tool` role message carrying its `tool_call_id`.
@@ -3226,6 +3290,10 @@ mod tests {
         assert!(
             profile.tool_calling,
             "native tool calling must be advertised"
+        );
+        assert!(
+            !profile.parallel_tool_calls,
+            "one native call per assistant message keeps request_approval a turn boundary"
         );
     }
 
@@ -3543,6 +3611,10 @@ mod tests {
         assert!(
             plan.body.get("tool_choice").is_none(),
             "no tool_choice without tools"
+        );
+        assert!(
+            plan.body.get("parallel_tool_calls").is_none(),
+            "no parallel-tool setting without tools"
         );
         assert_eq!(plan.bearer.as_deref(), Some("or-key"));
         assert!(plan.url.ends_with("/chat/completions"), "{}", plan.url);

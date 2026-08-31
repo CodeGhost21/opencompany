@@ -179,6 +179,12 @@ pub(crate) struct NativeCopilotModel {
     /// assert whether a later turn's first invoke replayed an earlier turn's
     /// transcript (issue #1042).
     seen_messages: StdMutex<Vec<Vec<Message>>>,
+    /// The `request.tools` names seen on each `invoke`, in call order — so a test
+    /// can assert the model actually got offered a given tool (issue #1931
+    /// regression: `propose_company_workflow` was silently withheld by the
+    /// vendored toolpacks registry, and the model dutifully called a tool it was
+    /// never advertised).
+    seen_tool_names: StdMutex<Vec<Vec<String>>>,
 }
 
 impl NativeCopilotModel {
@@ -206,6 +212,7 @@ impl NativeCopilotModel {
                 ..ModelProfile::default()
             },
             seen_messages: StdMutex::new(Vec::new()),
+            seen_tool_names: StdMutex::new(Vec::new()),
         })
     }
 
@@ -232,6 +239,11 @@ impl NativeCopilotModel {
         self.seen_messages.lock().unwrap().clone()
     }
 
+    /// The `request.tools` names recorded for each invoke so far, in call order.
+    fn seen_tool_names(&self) -> Vec<Vec<String>> {
+        self.seen_tool_names.lock().unwrap().clone()
+    }
+
     fn next_step(&self) -> NativeStep {
         let mut steps = self.steps.lock().unwrap();
         if let Some(step) = steps.pop_front() {
@@ -254,6 +266,13 @@ impl ChatModel<()> for NativeCopilotModel {
 
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen_tool_names.lock().unwrap().push(
+            request
+                .tools
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>(),
+        );
         self.seen_messages.lock().unwrap().push(request.messages);
         let step = self.next_step();
         let tool_calls: Vec<ToolCall> = step
@@ -1654,11 +1673,11 @@ async fn check_workflow_flags_gate_failures_and_passes_a_clean_graph() {
 // (envelope-null bindings, prose-as-expression prompts) prove `check_workflow`
 // runs `gates::failures` and surfaces its findings.
 
-/// `propose_workflow` accepts a good spec — running the SAME host authority the
+/// `propose_company_workflow` accepts a good spec — running the SAME host authority the
 /// old inline path did (a host-minted id, name dedup, stripped approval gating) —
 /// and stashes `(summary, spec, notes)` in the shared cell.
 #[tokio::test]
-async fn propose_workflow_accepts_a_good_spec_under_host_authority() {
+async fn propose_company_workflow_accepts_a_good_spec_under_host_authority() {
     let (_home, runtime) = evidence_runtime().await;
     seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
     let ctx = copilot_ctx(&runtime, "email the weekly digest every Monday", &[], &[]).await;
@@ -1705,12 +1724,12 @@ async fn propose_workflow_accepts_a_good_spec_under_host_authority() {
     assert!(diag.lock().unwrap().is_empty());
 }
 
-/// `propose_workflow` rejects via each of the three host gates — the node-kind
+/// `propose_company_workflow` rejects via each of the three host gates — the node-kind
 /// refusal, `ground_and_validate` (an unknown agent), and `courtesy_validate_draft`
 /// (an ungranted `tool_call`) — never stashing a proposal, and recording the
 /// sentence for the caller's fallback.
 #[tokio::test]
-async fn propose_workflow_rejects_via_each_host_gate() {
+async fn propose_company_workflow_rejects_via_each_host_gate() {
     let (_home, runtime) = evidence_runtime().await;
 
     async fn propose(runtime: &Arc<CompanyRuntime>, description: &str, workflow: Value) -> String {
@@ -1802,7 +1821,7 @@ async fn propose_workflow_rejects_via_each_host_gate() {
 /// script.
 pub(crate) fn propose_step(summary: &str, workflow: Value) -> NativeStep {
     NativeStep::call(
-        "propose_workflow",
+        "propose_company_workflow",
         json!({ "summary": summary, "workflow": workflow }),
     )
 }
@@ -1846,6 +1865,46 @@ async fn a_description_drafts_a_graph_via_the_agent() {
     assert!(spec.nodes.iter().all(|n| n.requires_approval.is_none()));
     assert_eq!(spec.nodes[0].schedule.as_deref(), Some("0 9 * * 1"));
     assert!(model.calls() >= 1, "the model ran at least once");
+}
+
+/// Issue #1931 regression: the vendored `openhuman` runtime compiles in a
+/// `workflows` toolpack that claims the bare name `propose_workflow`, owned only
+/// by openhuman's OWN `workflow_builder`/`flow_discovery` agents — and withholds
+/// any tool sharing that name from every OTHER agent's advertised belt,
+/// regardless of who actually registered it (`strip_packed_from_visible` matches
+/// by name alone). That silently dropped this copilot's propose tool from the
+/// model's very first request: the model still called it (from the system
+/// prompt), got back `unknown tool`, and gave up narrating prose instead of
+/// drafting a graph — so every downstream assertion about the drafted graph
+/// failed, none of them naming the real cause.
+///
+/// This pins the invariant that would have caught it directly: the FIRST model
+/// request of a turn must advertise all three of the copilot's own tools,
+/// including the propose tool, by name — not a downstream side effect of it
+/// being missing.
+#[tokio::test]
+async fn the_first_model_request_advertises_all_three_copilot_tools() {
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("email the weekly digest", good_workflow()),
+        NativeStep::done("Proposed the weekly digest workflow for your review."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model.clone(), None).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    let _ = draft_workflow_from_description(&runtime, "email the weekly digest every Monday").await;
+
+    let seen = model.seen_tool_names();
+    let first_request_tools = seen.first().expect("the model was invoked at least once");
+    for tool in [
+        "list_effective_tools",
+        "check_workflow",
+        "propose_company_workflow",
+    ] {
+        assert!(
+            first_request_tools.iter().any(|name| name == tool),
+            "the first model request must advertise `{tool}`; got {first_request_tools:?}"
+        );
+    }
 }
 
 /// Issue #1042 regression: drafting the SAME description twice must draft a graph
@@ -2194,7 +2253,7 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
     assert!(
         system.contains("list_effective_tools")
             && system.contains("check_workflow")
-            && system.contains("propose_workflow"),
+            && system.contains("propose_company_workflow"),
         "the persona names its three tools: {system}"
     );
     assert!(
@@ -2637,6 +2696,103 @@ async fn a_failure_fix_corrects_the_graph_and_preserves_identity() {
                 "the unwired tool step is gone from the correction"
             );
         }
+        DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
+    }
+}
+
+/// **Regression, issue #1882 review (PR #1882 bot finding, comment 3879878907).**
+/// A workflow whose owning desk has since been deleted is still correctable: the
+/// stale desk rides through the correction as an UNCHANGED value, so the
+/// courtesy pre-flight grandfathers it exactly as the edit route would, instead
+/// of refusing the whole correction over a field the operator never touched.
+///
+/// RED-FIRST: pre-fix `courtesy_validate_draft` always validated the corrected
+/// graph as a fresh create, so the echoed `ghost-desk` was a hard refusal and
+/// the fixer folded to not-automatable — an unrelated stale owner blocked the
+/// repair of the actual run failure.
+#[tokio::test]
+async fn a_failure_fix_survives_an_owning_desk_that_no_longer_exists() {
+    // The model does what the prompt asks and echoes back the fields it did not
+    // change — including the `ownerDesk` it saw on the failing graph.
+    let corrected = json!({
+        "name": "Weekly digest",
+        "ownerDesk": "ghost-desk",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Every Monday", "schedule": "0 9 * * 1" },
+            { "id": "draft", "kind": "agent", "name": "Draft", "agent": "maya" }
+        ],
+        "edges": [{ "from": "t", "to": "draft" }]
+    });
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("dropped the unwired search step", corrected),
+        NativeStep::done("Corrected the workflow."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model, None).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    let mut failing = failing_spec();
+    // No such desk on this company — the owning desk was deleted after the
+    // workflow was saved.
+    failing.owner_desk = Some("ghost-desk".to_string());
+
+    let outcome = fix_workflow_from_failure(&runtime, &failing, &failure_ctx())
+        .await
+        .expect("the fixer runs");
+    match outcome {
+        DescriptionDraftOutcome::Graph { spec, .. } => {
+            assert_eq!(
+                spec.owner_desk.as_deref(),
+                Some("ghost-desk"),
+                "the stale owner is carried through the correction, not silently rewritten"
+            );
+            assert!(
+                spec.nodes.iter().all(|n| n.kind != "tool_call"),
+                "and the actual run failure is still corrected"
+            );
+        }
+        DescriptionDraftOutcome::NotAutomatable(reason) => {
+            panic!("a stale owning desk must not block the correction: {reason}")
+        }
+    }
+}
+
+/// The other half of host authority over `ownerDesk` on the fix path (issue
+/// #1882 review): neither copilot tool advertises the field, so a model that
+/// simply omits it from its correction — the common case — must not silently
+/// UNASSIGN the workflow. The host pins the saved desk back on, the same way it
+/// pins the saved id and name.
+///
+/// RED-FIRST: pre-fix `FixTarget` carried no desk and nothing re-applied it, so
+/// the corrected spec came back with `owner_desk: None`.
+#[tokio::test]
+async fn a_failure_fix_keeps_the_saved_owner_desk_when_the_model_drops_it() {
+    let corrected = json!({
+        "name": "Weekly digest",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Every Monday", "schedule": "0 9 * * 1" },
+            { "id": "draft", "kind": "agent", "name": "Draft", "agent": "maya" }
+        ],
+        "edges": [{ "from": "t", "to": "draft" }]
+    });
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("dropped the unwired search step", corrected),
+        NativeStep::done("Corrected the workflow."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model, None).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    let mut failing = failing_spec();
+    failing.owner_desk = Some("ghost-desk".to_string());
+
+    let outcome = fix_workflow_from_failure(&runtime, &failing, &failure_ctx())
+        .await
+        .expect("the fixer runs");
+    match outcome {
+        DescriptionDraftOutcome::Graph { spec, .. } => assert_eq!(
+            spec.owner_desk.as_deref(),
+            Some("ghost-desk"),
+            "an omitted ownerDesk restores the saved one rather than unassigning it"
+        ),
         DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
     }
 }

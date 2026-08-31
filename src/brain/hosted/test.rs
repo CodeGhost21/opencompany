@@ -15,7 +15,7 @@ use crate::brain::medulla::wire::{
 };
 use crate::ports::types::{
     ApprovalId, ChunkAddr, ChunkHit, CompanyEvent, ContextOp, ContextOpResult, Effect,
-    EffectDisposition, ToolResult, Verdict,
+    EffectDisposition, ToolResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -245,6 +245,40 @@ async fn duplicate_effect_frame_is_handled_once() {
     assert_eq!(result.channel_responses.len(), 1);
 }
 
+#[tokio::test]
+async fn request_approval_refuses_later_effect_and_tool_frames() {
+    let transport = Arc::new(MockTransport::new());
+    transport.script_cycle(
+        cid(),
+        vec![
+            tool_call_frame(
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                0,
+                json!({ "title": "Send the message", "question": "May I send it?" }),
+            ),
+            effect_frame(
+                "send_dm",
+                1,
+                json!({ "to": "operator", "body": "too early" }),
+            ),
+            tool_call_frame("noop", 2, json!({ "too": "late" })),
+        ],
+    );
+    let brain = brain(transport.clone());
+    let host = RecordingHost::executing();
+
+    let result = brain.run_cycle(operator_request(), &host).await.unwrap();
+
+    assert!(result.channel_responses.is_empty());
+    assert!(host.effects.lock().unwrap().is_empty());
+    assert_eq!(host.tool_calls.lock().unwrap().len(), 1);
+    assert_eq!(transport.acks().len(), 1);
+    assert!(!transport.acks()[0].ok);
+    assert_eq!(transport.tool_answers().len(), 2);
+    assert!(transport.tool_answers()[0].ok);
+    assert!(!transport.tool_answers()[1].ok);
+}
+
 // ── Issue #174: usage frames make the hosted path meterable ─────────────────
 
 /// Without this the hosted path is structurally unmetered: the model runs
@@ -465,7 +499,6 @@ fn debug_redacts_the_credential() {
 
 use crate::app::config::BrainMode;
 use crate::company::CompanyManifest;
-use crate::ports::types::{Actor, ActorKind};
 use crate::runtime::RuntimeBuilder;
 
 fn tmp_home() -> tempfile::TempDir {
@@ -566,13 +599,13 @@ async fn e2e_operator_message_drives_tool_call_and_gated_send_dm() {
 }
 
 #[tokio::test]
-async fn e2e_supervised_effect_parks_and_acks_not_ok() {
+async fn e2e_supervised_effect_runs_without_policy_hitl() {
     let home_dir = tmp_home();
     let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockTransport::new());
     transport.script_cycle(
         runtime_cid(),
-        // A Sign-group effect always parks under supervised policy.
+        // Policy HITL is disabled even for a formerly-gated Sign effect.
         vec![effect_frame("filing.submit", 0, Value::Null)],
     );
 
@@ -599,36 +632,15 @@ async fn e2e_supervised_effect_parks_and_acks_not_ok() {
         .await
         .unwrap();
 
-    // The effect parked: an approval is queued and no channel response emitted.
-    assert_eq!(report.parked.len(), 1);
-    assert_eq!(rt.pending_approvals().len(), 1);
+    assert!(report.parked.is_empty());
+    assert!(rt.pending_approvals().is_empty());
     assert!(report.responses.is_empty());
 
-    // Medulla was told the effect is pending, not that it succeeded.
+    // Medulla is told the effect completed instead of waiting on policy HITL.
     let acks = transport.acks();
     assert_eq!(acks.len(), 1);
-    assert!(!acks[0].ok);
-    assert!(
-        acks[0]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("pending approval")
-    );
-
-    // Resolving the approval executes the parked effect and drains the queue.
-    let approval_id = report.parked[0].clone();
-    rt.resolve_approval(
-        &approval_id,
-        Verdict::Approve,
-        Actor {
-            kind: ActorKind::Operator,
-            id: "owner".into(),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(rt.pending_approvals().is_empty());
+    assert!(acks[0].ok);
+    assert!(acks[0].error.is_none());
 }
 
 /// Issue #174 end to end: a real runtime on the hosted brain records the tokens

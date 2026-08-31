@@ -951,6 +951,7 @@ pub async fn assert_event_retention(events: Arc<dyn EventLog>) {
         workflow_id: "wf".to_string(),
         run_id: format!("run-{n}"),
         scheduled: false,
+        started_by: None,
     };
     let audit = |n: u64| CompanyEvent::LifecycleChanged {
         from: "running".to_string(),
@@ -3465,6 +3466,137 @@ pub async fn assert_delete_label_survives_a_concurrent_identical_put(
         // Leave nothing behind for the next round.
         context.delete(&company, &addr).await.unwrap();
     }
+}
+
+/// Demands one search semantics under [`ContextStore::search`] from *every*
+/// backend.
+///
+/// This assertion exists because `fs`, `sqlite` and `mongodb` each carried their
+/// own copy of the search function, and all three copies were identically wrong:
+/// a `body.find(query)` substring test scored 1.0, and truncation to `limit`
+/// happened before any sorting. Three copies that agree by accident are three
+/// copies that drift apart again — so the semantics is pinned here rather than
+/// reviewed per backend.
+///
+/// What a store must do:
+///
+/// 1. **partial overlap counts**, because the memory loop searches with the
+///    whole incoming message as its query and that never comes back verbatim;
+/// 2. **the score ranks**, and rare words weigh more than words that appear
+///    everywhere;
+/// 3. **`limit` cuts *after* ranking**, not in read order;
+/// 4. **no overlap is no hit**, so an empty result still means "there is nothing
+///    here";
+/// 5. the score stays inside `[0, 1]`, as [`ChunkHit`] promises.
+pub async fn assert_context_search_ranking(context: Arc<dyn ContextStore>) {
+    let alpha = CompanyId::new("alpha");
+    let put = |label: &'static str, body: String| {
+        let context = context.clone();
+        let alpha = alpha.clone();
+        async move {
+            context
+                .put(
+                    &alpha,
+                    ContextChunk {
+                        label: label.to_string(),
+                        body,
+                    },
+                )
+                .await
+                .unwrap()
+        }
+    };
+
+    // Four older memories that share only the everyday words, and one that is
+    // really about the subject. In read order the right one is last — exactly
+    // the arrangement in which the old code returned the four oldest.
+    let mut noise = Vec::new();
+    for (label, body) in [
+        (
+            "task-outcome/a",
+            "Task: put the minutes of the meeting in the folder\nOutcome: done",
+        ),
+        (
+            "task-outcome/b",
+            "Task: send the agenda for the week to the team\nOutcome: done",
+        ),
+        (
+            "task-outcome/c",
+            "Task: check the addresses in the list of customers\nOutcome: done",
+        ),
+        (
+            "task-outcome/d",
+            "Task: put Monday's review in the agenda\nOutcome: done",
+        ),
+    ] {
+        noise.push(put(label, body.to_string()).await);
+    }
+    let target = put(
+        "task-outcome/e",
+        "Task: produce the quarterly overview of revenue for the north region\nOutcome: in the folder"
+            .to_string(),
+    )
+    .await;
+
+    // Today's question: same substance, different words. Under a substring test
+    // this yields zero hits.
+    let question =
+        "produce the quarterly overview of revenue for the north region again for the customer";
+
+    let all = context.search(&alpha, question, usize::MAX).await.unwrap();
+    assert!(
+        !all.is_empty(),
+        "partial overlap must hit; a substring test returned nothing here"
+    );
+    assert_eq!(
+        all[0].addr, target,
+        "the memory sharing the rare words belongs on top"
+    );
+    for hit in &all {
+        assert!(
+            (0.0..=1.0).contains(&hit.score),
+            "score outside the port contract [0,1]: {}",
+            hit.score
+        );
+    }
+    for hit in all.iter().skip(1) {
+        assert!(
+            hit.score < all[0].score,
+            "a hit on everyday words alone must not tie with the real one"
+        );
+    }
+
+    // `limit` must not cut in read order: with one slot the best must survive,
+    // not the oldest.
+    let one = context.search(&alpha, question, 1).await.unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(
+        one[0].addr, target,
+        "limit belongs after ranking, not before it"
+    );
+
+    // The snippet shows where the hit is, not the start of the chunk.
+    assert!(
+        one[0].snippet.contains("quarterly"),
+        "the snippet must wrap the hit; got: {}",
+        one[0].snippet
+    );
+
+    // No overlap stays no hit.
+    assert!(
+        context
+            .search(&alpha, "shipbuilding", usize::MAX)
+            .await
+            .unwrap()
+            .is_empty(),
+        "without overlap nothing should come back"
+    );
+
+    // And the noise was not thrown away: it is still there, it just scores lower.
+    assert_eq!(
+        context.list(&alpha, "").await.unwrap().len(),
+        noise.len() + 1
+    );
 }
 
 /// Asserts the [`UsageMeter`] contract: isolation, record, and windowed query.
