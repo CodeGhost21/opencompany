@@ -116,7 +116,13 @@ describe("no surface fabricates desks over an answered read", () => {
   it("AppShell keeps the host's list on the answered leg", () => {
     const src = read("components/app-shell.tsx");
 
-    expect(src).toContain("const chatDesks = desks.map(deskFromDto);");
+    // `desks` is `null`, not merely absent, when this leg runs: the Operator
+    // feed fetch (issue #1757) is read in parallel via `Promise.all`, each
+    // leg's own `.catch(() => null)` so one failing does not sink the other.
+    // A per-item failure therefore cannot reach the whole-chain `.catch`
+    // below, so the null check is what stands in for it — an answered-but-
+    // empty array must still flow to `desks.map(deskFromDto)` untouched.
+    expect(src).toContain("const chatDesks = desks === null ? defaultDesks() : desks.map(deskFromDto);");
     expect(src).not.toContain("desks.length ? desks.map(deskFromDto) : defaultDesks()");
     // Its `.catch` leg is the one place the static set is still right: nothing
     // was answered there at all.

@@ -556,9 +556,17 @@ impl ChatGql {
         before: Option<String>,
     ) -> async_graphql::Result<Page<MessageGql>> {
         let before_seq = before.as_deref().and_then(|c| c.parse::<u64>().ok());
-        let viewer = match ctx.data::<GqlAuth>() {
-            Ok(GqlAuth::User(user)) => Viewer::User(user.user_id.clone()),
-            _ => Viewer::Operator,
+        // `GqlAuth::Platform` (no person behind the credential) gets
+        // `is_admin: true`, matching `Viewer::Operator`'s existing, already
+        // unrestricted access to the rest of a company's history — an
+        // admin-only row (issue #1781 review, Codex P1) is not a narrower case
+        // than that.
+        let (viewer, is_admin) = match ctx.data::<GqlAuth>() {
+            Ok(GqlAuth::User(user)) => (
+                Viewer::User(user.user_id.clone()),
+                user.role.may_administer(),
+            ),
+            _ => (Viewer::Operator, true),
         };
         let first = first.clamp(0, chat_history::CHAT_HISTORY_PAGE_LIMIT as i32) as usize;
         let messages = chat_history::history_for_desk(
@@ -568,6 +576,7 @@ impl ChatGql {
             &viewer,
             before_seq,
             first,
+            is_admin,
         )
         .await?;
         let total = chat_history::history_total_for_desk(
@@ -575,6 +584,7 @@ impl ChatGql {
             &self.desk.id,
             &self.desk.name,
             before_seq,
+            is_admin,
         )
         .await?;
         Ok(Page {

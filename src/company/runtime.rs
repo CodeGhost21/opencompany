@@ -917,31 +917,41 @@ impl CompanyRuntime {
 
     /// The ids of this running company's channels a workflow may actually
     /// deliver to — exactly what an `output` node's `channel` destination may
-    /// target (issues #813, #981). Desk channels (one per `[[group_chat]]` and
-    /// per operator-created desk) and enabled OpenHuman-provider manifest
-    /// channels; **never `operator`**, whose adapter is an in-memory response
-    /// spy with no durable reader
-    /// ([`is_deliverable_channel`](crate::runtime::is_deliverable_channel)).
+    /// target (issues #813, #981, #1757). Desk channels (one per `[[group_chat]]`
+    /// and per operator-created desk), enabled OpenHuman-provider manifest
+    /// channels, **and** the always-present `operator` channel — which is now a
+    /// durable, journal-backed surface (issue #1757), so it is a real target the
+    /// console offers like any other.
     ///
     /// The console reads this to offer a picker of real targets, and the
     /// workflow write routes reject a channel destination outside it, instead
     /// of a free-text box that only fails at delivery time with
     /// `ChannelNotWired`.
     ///
-    /// The set is empty when a company has no desks and no provider channels.
-    /// That is a legitimate state, not a degraded one: it means there is
-    /// nowhere to deliver, and the honest answer is to say so rather than to
-    /// name a target that would be discarded.
+    /// The set is empty only when a company somehow wires no channels at all —
+    /// normally it holds at least `operator`, which every company has.
     ///
-    /// This was `wired_channel_ids`, which returned every adapter and claimed
-    /// in its own doc comment that `operator` was always a valid target. The
-    /// rename is deliberate: it is what made the mistake plausible, and every
-    /// call site is worth re-reading against the delivery rule.
+    /// This was `wired_channel_ids`; the rename survives because every call site
+    /// is still worth re-reading against the delivery rule — but the rule no
+    /// longer excludes `operator`, whose report now lands durably.
+    ///
+    /// Deduplicated, first-occurrence order preserved (issue #1781 review,
+    /// Codex P2 follow-up). A grandfathered manifest desk at the literal id
+    /// `operator` predates the "operator is reserved" manifest validation
+    /// (`company/manifest.rs`, checked only at upload/create time, never at
+    /// boot) and still wires **both** the built-in `OperatorChannel` and a
+    /// `DeskChannel("operator")` into `self.channels` — the desk-wiring loop in
+    /// `RuntimeBuilder::build` dedupes desk ids against each other but has no
+    /// way to know the built-in channel already claimed the same id. Left
+    /// unfiltered, `operator` would surface twice in `/workflows/wired-channels`
+    /// and `WorkflowCreateDialog` would render two `SelectItem`s with the same
+    /// key and value.
     pub fn deliverable_channel_ids(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
         self.channels
             .iter()
             .map(|channel| channel.channel_id().to_string())
-            .filter(|id| crate::runtime::channel::is_deliverable_channel(id))
+            .filter(|id| seen.insert(id.clone()))
             .collect()
     }
 
@@ -1761,6 +1771,112 @@ impl CompanyRuntime {
     pub(crate) fn ensure_accepting(&self) -> Result<()> {
         if self.is_quiesced() {
             return Err(OpenCompanyError::Quiescing(self.id.as_ref().to_string()));
+        }
+        Ok(())
+    }
+
+    /// Refuses a write addressed to the read-only Operator system channel,
+    /// unless a real desk or roster teammate already owns that literal id
+    /// (the migration carve-out below).
+    ///
+    /// Issue #1757: the Operator channel is a **read-only** aggregation
+    /// surface — a "what happened" feed of workflow reports, not a
+    /// conversation. Every ingress that journals an `OperatorMessage` under a
+    /// caller-chosen chat id has to run this same check before appending
+    /// anything, or "read-only" is only true for whichever ingress remembered
+    /// to ask. Per the PR #1781 review (Codex P1): the ACP `session/prompt`
+    /// route used to journal straight past the REST route's inline version of
+    /// this guard, because it never called `chat_and_emit` at all — it
+    /// appends to `self.events()` directly. `ensure_accepting` above is the
+    /// model this follows: a check the write route runs on *itself*,
+    /// immediately before it appends, so a second ingress into the same
+    /// journal cannot forget it either.
+    ///
+    /// Migration carve-out: `operator` was not reserved before issue #1757,
+    /// so a company provisioned earlier can already have a real manifest or
+    /// overlay desk (`from_stored_toml` deliberately never re-validates a
+    /// stored manifest) or roster teammate (`ChatView` addresses a DM by bare
+    /// id, issue #364) already using that id. A literal `desk_exists` check
+    /// alone would miss two shapes: the teammate case — it only walks
+    /// `group_chats` and `overlay_desks`, never the roster, so
+    /// `is_roster_agent` is checked alongside it, the same carve-out applied
+    /// to the other namespace `RESERVED_AGENT_IDS` reserves — and a desk
+    /// grandfathered by **name** rather than id (issue #1781 review, Codex
+    /// P1 follow-up): `{ id = "legacy_ops", name = "Operator" }` is exactly
+    /// the collision `operator_feed_channel` diverts the system feed off of,
+    /// but `desk_exists("operator")` only ever matches on id, so a chat or
+    /// ACP send addressed through the desk's own supported case-insensitive
+    /// `Operator` alias — which every *read* already resolves via
+    /// `resolve_desk_id` — was refused here as if it named the fake system
+    /// channel. Resolving `desk` (the actual selector, alias and all)
+    /// through `resolve_desk_id` first is what makes this guard agree with
+    /// the read path on which desk a caller meant.
+    ///
+    /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` is the id `list_desks` hands the
+    /// synthetic system desk when a roster teammate is the one grandfathered
+    /// onto `operator` (see `CompanyRecord::operator_feed_channel`), and its
+    /// **id** is unmintable by any real desk or agent (see the constant's
+    /// doc). Its display **name** is not id-validated at all, though (issue
+    /// #1781 review, Codex P2 follow-up): a pre-#1757 manifest desk such as
+    /// `{ id = "ops", name = "operator-feed" }` predates every id-charset
+    /// rule this reasoning leans on, `from_path_for_reload` never
+    /// re-validates a stored manifest, and this can be true even without a
+    /// *primary* `operator` collision at all. So this branch resolves the
+    /// alias first too, the same as the literal `operator` case below — only
+    /// refusing once nothing real actually claims it.
+    ///
+    /// The store load's `?` propagates a real store failure as itself, rather
+    /// than collapsing it into "no real desk" — that would misreport a
+    /// transient store error as the ordinary read-only refusal, for every
+    /// company, and journal the failure nowhere.
+    pub(crate) async fn ensure_desk_writable(&self, desk: &str) -> Result<()> {
+        if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
+            // `resolve_desk_id(desk)` — not an unconditional refusal — for the
+            // identical reason the `OPERATOR_CHANNEL` branch below resolves
+            // its alias first (issue #1781 review, Codex P2 follow-up):
+            // `OPERATOR_CHANNEL_COLLISION_FALLBACK`'s id is unmintable by any
+            // *new* desk (`is_valid_desk_id` rejects the hyphen), but its
+            // display **name** is not id-validated at all, and
+            // `from_path_for_reload` deliberately never re-validates a stored
+            // manifest — so a pre-#1757 desk such as
+            // `{ id = "ops", name = "operator-feed" }` can already exist,
+            // stay listed and readable, and (unlike the id case) be true even
+            // when there is no *primary* `operator` collision at all. Without
+            // this, a send addressed through that desk's own supported
+            // case-insensitive alias — the one every read already resolves
+            // via `resolve_desk_id` — was refused here as if it named the
+            // synthetic read-only system desk instead.
+            let has_real_recipient = self
+                .store()
+                .load(&self.id)
+                .await?
+                .is_some_and(|record| record.resolve_desk_id(desk).is_some());
+            if !has_real_recipient {
+                return Err(OpenCompanyError::InvalidRequest(
+                    "the Operator channel is a read-only feed of workflow reports and \
+                     notifications — it cannot be posted to"
+                        .to_string(),
+                ));
+            }
+        }
+        if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
+            let has_real_operator_recipient =
+                self.store().load(&self.id).await?.is_some_and(|record| {
+                    // `resolve_desk_id(desk)` — not `desk_exists(OPERATOR_CHANNEL)`
+                    // — so a grandfathered desk claiming this alias only by
+                    // **name** (`{ id: "legacy_ops", name: "Operator" }`) is
+                    // recognised the same way the read path already resolves
+                    // it, not just one claiming the literal id.
+                    record.resolve_desk_id(desk).is_some()
+                        || record.is_roster_agent(crate::runtime::OPERATOR_CHANNEL)
+                });
+            if !has_real_operator_recipient {
+                return Err(OpenCompanyError::InvalidRequest(
+                    "the Operator channel is a read-only feed of workflow reports and \
+                     notifications — it cannot be posted to"
+                        .to_string(),
+                ));
+            }
         }
         Ok(())
     }

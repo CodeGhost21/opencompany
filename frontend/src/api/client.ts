@@ -48,6 +48,7 @@ import {
   type BudgetPauseMarker,
   type InboxDto,
   type InboxMessageDto,
+  type OperatorChannelDto,
   type PageManifestDto,
   type ResolveReceipt,
   type SetBudgetInput,
@@ -569,6 +570,11 @@ export class OpenCompanyClient {
     return this.request<DeskDto[]>("GET", `${this.scope(company)}/desks`);
   }
 
+  /** The identity of the company's durable, read-only Operator feed. */
+  getOperatorChannel(company?: string | null): Promise<OperatorChannelDto> {
+    return this.request<OperatorChannelDto>("GET", `${this.scope(company)}/operator-channel`);
+  }
+
   /**
    * Add a teammate to a desk through the operator overlay (issue #72). The
    * teammate must be on the company roster; the desk must exist. Adding one
@@ -671,18 +677,24 @@ export class OpenCompanyClient {
   }
 
   /**
-   * This person's notification feed — today, their mentions.
+   * This person's notification feed, filtered to one `kind` — mentions by
+   * default.
    *
    * The durable half of a mention: the live feed only reaches an open browser,
-   * so a mention that landed overnight is here and nowhere else.
+   * so a mention that landed overnight is here and nowhere else. Issue #1845's
+   * week-1 nudge banner is the second consumer, passing `kind:
+   * "workflow_nudge"` — see the route's own docs
+   * (`src/server/ops/notifications.rs`) for why this is a query parameter
+   * rather than a second route.
    *
    * A host that predates this route answers 404; callers treat that as an empty
-   * feed and simply show no mention badges, rather than throwing on load.
+   * feed and simply show no badge/banner, rather than throwing on load.
    */
-  notifications(company?: string | null): Promise<NotificationFeedResponse> {
+  notifications(company?: string | null, kind?: string): Promise<NotificationFeedResponse> {
+    const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
     return this.request<NotificationFeedResponse>(
       "GET",
-      `${this.scope(company)}/notifications`,
+      `${this.scope(company)}/notifications${query}`,
     );
   }
 

@@ -1,5 +1,7 @@
 import type { NotificationDto } from "@/api/types";
 
+import { WEEK1_NUDGE_KIND } from "@/lib/week1-nudge";
+
 /**
  * The non-mention rows the honest-verdicts work (issue #1865) started
  * writing through the same durable store `GET /notifications` returns:
@@ -15,9 +17,22 @@ import type { NotificationDto } from "@/api/types";
  * being returned on every poll (Codex #1883 P1). This module is the minimal
  * surface that closes the loop — a one-shot toast per row, immediately
  * eligible to be marked read the same way a viewed mention is.
+ *
+ * [`WEEK1_NUDGE_KIND`] is excluded even though it is, mechanically, just
+ * another non-mention row on this same feed (PR #1878 review, comment
+ * 3893066248). `notifications()` on the host has no server-side kind
+ * allowlist — every caller gets every unread row and filters client-side,
+ * which is exactly the design this module itself relies on. That means an
+ * unfiltered poll here would classify a week-1 nudge as operational too:
+ * toast it as a generic warning, then mark it read the instant the tab is
+ * visible (`scheduleAcknowledgement` below), before
+ * `pickActiveNudge`/`WorkflowsView` ever gets a chance to show its own
+ * purpose-built banner. The nudge has its own dedicated UI and its own
+ * dismiss path (`week1-nudge-banner.tsx`); this module's job is the rows
+ * that have no other consumer, and the nudge is not one of them.
  */
 export function isOperationalNotification(notification: NotificationDto): boolean {
-  return notification.kind !== "mention";
+  return notification.kind !== "mention" && notification.kind !== WEEK1_NUDGE_KIND;
 }
 
 /**

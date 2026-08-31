@@ -95,6 +95,7 @@ async fn state_from(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -887,6 +888,7 @@ async fn a_https_deployment_marks_the_cookie_secure() {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
