@@ -123,6 +123,34 @@ pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(),
                 );
             };
             match resolve_path(output, path) {
+                // Codex #3894162757 on #1937 — a bare scalar under the exact
+                // `json` root is the one shape `field_present` must refuse
+                // to certify even though it genuinely resolves. `path ==
+                // "json"` means the author is checking the WHOLE parsed
+                // reply, which is exactly what a downstream `=item.json`
+                // binding reads too — but tinyflows' own envelope
+                // construction (`finish_agent_run`/`envelope::structured_of`
+                // in the vendored engine) normalizes anything that is not an
+                // `Object`/`Array` to `Value::Null` on the way to that
+                // binding. Certifying a scalar here would pass a gate whose
+                // value the workflow can never actually read — the same
+                // "gate certifies X, item never gets X" defect this whole
+                // module exists to close, just reached through a shape that
+                // resolves cleanly rather than one that resolves to null.
+                // A dotted path UNDER `json` (`json.count`) is unaffected:
+                // reaching a scalar there means the reply was already an
+                // object, which merges into the emitted value intact (see
+                // `HarnessAgentRunner::run_turn`'s `Value::Object` arm), so
+                // `item.json.count` really does resolve downstream.
+                Some(value) if path == "json" && is_bare_scalar(value) => Err(format!(
+                    "the node's output under `json` is a bare scalar ({value}) — a \
+                     downstream `=item.json` binding can never see it (tinyflows only \
+                     carries an object or array through `json`; anything else \
+                     normalizes to null), so this postcondition can never certify a \
+                     value the workflow can actually read. Have the agent reply with \
+                     an object instead naming it (e.g. `{{\"value\": ...}}`) and target \
+                     the dotted path (`field = \"json.value\"`)."
+                )),
                 Some(value) if !value.is_null() => Ok(()),
                 _ => Err(format!(
                     "the node's output is missing `{path}` — the expected field never landed."
@@ -174,6 +202,16 @@ pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(),
 /// all the two field-aware predicates above need.
 fn resolve_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(value, |acc, key| acc.get(key))
+}
+
+/// True for a JSON value with no structure of its own — a bool, number, or
+/// string. Used by the `field_present`-on-bare-`json` check: these are the
+/// shapes tinyflows' own envelope construction discards (normalizes to
+/// `Value::Null`) rather than carries through to a downstream `=item.json`
+/// binding. `Null` is deliberately excluded — it is handled by the ordinary
+/// "missing" branch above this call, not this one.
+fn is_bare_scalar(value: &Value) -> bool {
+    matches!(value, Value::Bool(_) | Value::Number(_) | Value::String(_))
 }
 
 #[cfg(test)]
@@ -253,6 +291,60 @@ mod tests {
                 &output
             )
             .is_err()
+        );
+    }
+
+    /// Codex #3894162757 on #1937 — `field_present` on the bare `json` root
+    /// resolves for ANY present, non-null value there, including a bare
+    /// scalar the best-effort JSON parse produces just as readily as an
+    /// object or array. Unlike an object/array, a scalar can never reach a
+    /// downstream `=item.json` binding (tinyflows' own envelope construction
+    /// normalizes anything but `Object`/`Array` to `Value::Null`), so
+    /// certifying it here would pass a gate whose value the workflow can
+    /// never actually read — refused instead. See
+    /// `workflows::runner::tests::a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
+    /// for the full-engine proof of the delivery gap this closes.
+    #[test]
+    fn field_present_on_the_bare_json_root_rejects_a_scalar() {
+        for scalar in [json!(42), json!(true), json!("ok")] {
+            let output = json!({ "text": "irrelevant", "agent_ref": "a", "json": scalar });
+            assert!(
+                evaluate_postcondition(&spec_with_field("field_present", "json"), &output).is_err(),
+                "a bare scalar under `json` must not satisfy field_present on the bare \
+                 `json` root: {output}"
+            );
+        }
+    }
+
+    /// Companion GREEN: the rejection above is scoped to the exact `json`
+    /// root, not to scalars in general. A dotted path UNDER `json`
+    /// (`json.count`) reaching a scalar is fine — getting there at all means
+    /// the reply was already an object, which merges into the emitted value
+    /// intact (`HarnessAgentRunner::run_turn`'s `Value::Object` arm), so
+    /// `item.json.count` really does resolve downstream.
+    #[test]
+    fn field_present_on_a_dotted_path_under_json_still_accepts_a_scalar() {
+        let output = json!({ "json": { "count": 42 } });
+        assert_eq!(
+            evaluate_postcondition(&spec_with_field("field_present", "json.count"), &output),
+            Ok(())
+        );
+    }
+
+    /// Companion GREEN: the bare `text`/`agent_ref` roots are unaffected —
+    /// they are always strings in the envelope tinyflows exposes directly as
+    /// `item.text` (never nulled), so a scalar there is the ordinary,
+    /// deliverable case, not the `json`-root delivery gap.
+    #[test]
+    fn field_present_on_bare_text_or_agent_ref_still_accepts_their_string_value() {
+        let output = json!({ "text": "hello", "agent_ref": "researcher", "json": null });
+        assert_eq!(
+            evaluate_postcondition(&spec_with_field("field_present", "text"), &output),
+            Ok(())
+        );
+        assert_eq!(
+            evaluate_postcondition(&spec_with_field("field_present", "agent_ref"), &output),
+            Ok(())
         );
     }
 
