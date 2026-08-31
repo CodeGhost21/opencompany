@@ -3545,6 +3545,72 @@ mod tests {
         );
     }
 
+    /// CodeRabbit review on #1937 (issue #1866) — confirms the fix covers
+    /// `field_present` with the documented `json.items` dotted path, not just
+    /// `non_empty_list`'s no-field form (the two are fixed by the same
+    /// envelope change: the reply is best-effort JSON-parsed into a `json`
+    /// key, and `field_present`'s existing dotted-path resolution reaches it
+    /// like any other nested object). On the code as it stood before the fix,
+    /// this assertion fails: the envelope carried no `json` key at all, so
+    /// `json.items` could never resolve.
+    #[tokio::test]
+    async fn a_reply_that_is_json_satisfies_field_present_on_a_json_dotted_path() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-postcondition-field-present-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"items\": [1, 2, 3]}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937c"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937c"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937c".to_string(),
+            "run-1937c".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "reply with a JSON object naming items",
+                    "postcondition": { "require": "field_present", "field": "json.items" }
+                }),
+            )
+            .await
+            .expect(
+                "a reply that IS a JSON object carrying `items` must satisfy \
+                 `field_present` on the documented `json.items` path",
+            );
+        assert_eq!(outcome.reply, "{\"items\": [1, 2, 3]}");
+        assert_eq!(value["text"], "{\"items\": [1, 2, 3]}");
+    }
+
     /// Issue #638: a node that gates more calls than the cap allows leaves the
     /// operator a **notice**, not only a log line.
     ///
