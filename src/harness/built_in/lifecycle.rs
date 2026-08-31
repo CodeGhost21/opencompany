@@ -434,24 +434,48 @@ pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> Str
     };
     let headline = format!("\"{}\" {status}{credit}.", card.title);
     match card.note.as_deref().filter(|n| !n.trim().is_empty()) {
-        Some(note) => format!("{headline}\n\n{}", strip_note_attribution(note)),
+        Some(note) => {
+            // The only labels a block can legitimately carry are the ones
+            // this card's own lifecycle generates: the runtime's own voice,
+            // the operator (a cancel), or whoever this relay already knows
+            // about — the responder it is crediting and the orchestrator
+            // speaking. An operator's own note text is never on this list, no
+            // matter how it happens to be bracketed (issue #1949 review,
+            // Codex thread 3895066483).
+            let known_labels = [
+                crate::runtime::advance::SYSTEM_ATTRIBUTION,
+                OPERATOR_ATTRIBUTION,
+                responder,
+                orchestrator,
+            ];
+            format!(
+                "{headline}\n\n{}",
+                strip_note_attribution(note, &known_labels)
+            )
+        }
         None => headline,
     }
 }
 
-/// Strips the `[<who>] ` attribution prefix from each block of a card note, so
-/// the relayed bubble carries the prose without the board's internal
-/// `[system]`/`[writer]` chrome. The headline already credits the doer.
+/// Strips a leading `[<label>] ` prefix from each block of a card note, so the
+/// relayed bubble carries the prose without the board's internal
+/// `[system]`/`[writer]` chrome — but only when `label` is one this card's own
+/// lifecycle actually generates (`known_labels`). The headline already
+/// credits the doer.
 ///
-/// A block is a `\n\n`-separated span. Only a leading `[word] ` prefix is
-/// removed; a block that opens with `[` but has no closing `] ` is left
-/// verbatim, and brackets later in the block are untouched.
-fn strip_note_attribution(note: &str) -> String {
+/// A block is a `\n\n`-separated span. A leading `[word] ` prefix is removed
+/// only when `word` is in `known_labels`; any other bracketed opener —
+/// including operator-authored content that happens to start with a bracket,
+/// like `[Important] Keep the legacy API` — is left verbatim. A block that
+/// opens with `[` but has no closing `] ` is also left verbatim, and brackets
+/// later in the block are untouched.
+fn strip_note_attribution(note: &str, known_labels: &[&str]) -> String {
     note.split("\n\n")
         .map(|block| {
             block
                 .strip_prefix('[')
                 .and_then(|rest| rest.split_once("] "))
+                .filter(|(label, _)| known_labels.contains(label))
                 .map_or(block, |(_, body)| body)
         })
         .collect::<Vec<_>>()
@@ -908,13 +932,31 @@ mod test {
 
         // A block that opens with `[` but never closes it stays verbatim.
         assert_eq!(
-            strip_note_attribution("[unterminated note"),
+            strip_note_attribution("[unterminated note", &["writer"]),
             "[unterminated note"
         );
         // Brackets after the leading prefix are left alone.
         assert_eq!(
-            strip_note_attribution("[writer] see [ref] below"),
+            strip_note_attribution("[writer] see [ref] below", &["writer"]),
             "see [ref] below"
+        );
+    }
+
+    /// PR #1949 review (Codex thread 3895066483): the strip used to treat ANY
+    /// leading `[label] ` span as generated attribution chrome, so an
+    /// operator-authored note that itself opens with a bracket — a heading, a
+    /// tag, a callout like "[Important] Keep the legacy API" — got silently
+    /// mangled by the relay, dropping content the operator wrote through the
+    /// task create/patch APIs. Only a label the caller actually generated
+    /// (`OPERATOR_ATTRIBUTION`, `SYSTEM_ATTRIBUTION`, the responder, or the
+    /// orchestrator) may be stripped.
+    #[test]
+    fn operator_authored_bracket_survives_the_relay() {
+        let noted = card(COLUMN_IN_REVIEW, Some("[Important] Keep the legacy API"));
+        let text = relay_text(&noted, "writer", "ceo");
+        assert!(
+            text.contains("[Important] Keep the legacy API"),
+            "an operator's own bracketed note must not be read as generated attribution: {text}"
         );
     }
 
