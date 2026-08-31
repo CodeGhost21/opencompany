@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::ports::artifacts::ArtifactKind;
 use crate::ports::runs::RunStatus;
-use crate::ports::types::CompanyId;
+use crate::ports::types::{CompanyId, EventSeq};
 
 // ---------------------------------------------------------------------------
 // The board's column vocabulary (issue #205)
@@ -964,6 +964,36 @@ pub struct TaskRecord {
     /// both simply get no post-back, exactly as today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_chat_id: Option<String>,
+    /// The thread within [`origin_chat_id`](Self::origin_chat_id) the card was
+    /// raised in (issue #1890 B) — the root message the raising turn hung off,
+    /// or `None` for the channel-level conversation.
+    ///
+    /// `origin_chat_id` names the *channel*, which is all a card recorded until
+    /// now, so a card raised inside a thread settled its `DeskTaskCompleted`
+    /// marker flat in the channel and the thread that asked for the work never
+    /// showed it finishing. This is the missing half of that origin: the two
+    /// fields are read as one pair, here and on the terminal.
+    ///
+    /// **`None` is the channel, not a gap.** The channel-level conversation is
+    /// where every unparented line hangs — which is every line in a company
+    /// that has never opened a thread — so a card raised straight into a
+    /// channel carries `None` and settles exactly where it settled before this
+    /// field existed. It is also `None` for a board-created card, but there
+    /// `origin_chat_id` is `None` too and the pair belongs to no conversation
+    /// at all; a reader asking "which conversation?" must check that field, not
+    /// this one.
+    ///
+    /// **One level deep**, like every thread here: an operator message's own
+    /// `parent` *is* its root (a reply is parented to its question's parent,
+    /// never to the question), so the raising turn's root is what gets stamped
+    /// and there is no chain to walk.
+    ///
+    /// Additive on the wire on exactly the terms
+    /// [`origin_chat_id`](Self::origin_chat_id) and
+    /// [`parent_task_id`](Self::parent_task_id) took, so no stored board needs
+    /// migrating on any backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_parent: Option<EventSeq>,
     /// The task whose dispatch turn spawned this card (issue #185) — the
     /// parent half of the Task Detail screen's lineage.
     ///
@@ -1524,6 +1554,7 @@ mod test {
             assignee: "maya".to_string(),
             updated_at_millis: 7,
             origin_chat_id: None,
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             // #339's baseline fixture stays baseline: it exists to prove the

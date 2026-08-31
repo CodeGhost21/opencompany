@@ -520,10 +520,21 @@ impl MessageView {
             // shared with the GraphQL `Message` projection, and the reuse is
             // what keeps #377 additive on both wire surfaces at once.
             //
-            // No `steps` and no `parent_id`: a marker is not a turn and is
-            // never threaded, so `ThreadPanel` needs nothing from it.
+            // No `steps`: a marker is not a turn, so there is no timeline on it.
+            //
+            // `parent_id` **is** carried, since issue #1890 B. A marker was
+            // never threaded because a card recorded no thread to thread it
+            // into — not because a marker cannot be threaded — so a card raised
+            // inside a thread settled flat in the channel and the thread that
+            // asked for the work never showed it finishing. The card carries
+            // its root now, the terminal captures it, and this is where it
+            // reaches the reader. `None` is still the overwhelmingly common
+            // case: it is every card raised straight into a channel.
             CompanyEvent::DeskTaskCompleted {
-                task_id, column, ..
+                task_id,
+                column,
+                origin_parent,
+                ..
             } => MessageView {
                 id,
                 channel: crate::ports::SYSTEM_AUTHOR.to_string(),
@@ -534,7 +545,10 @@ impl MessageView {
                 by_person: false,
                 steps: Vec::new(),
                 task_id: Some(task_id),
-                parent_id: None,
+                // Rendered the same way an `OperatorMessage`'s parent is, a few
+                // arms up — the console keys a thread off this string and does
+                // not care which event minted it.
+                parent_id: origin_parent.map(|seq| seq.value().to_string()),
                 reactions: Vec::new(),
                 mentions: Vec::new(),
                 attachments: Vec::new(),
@@ -1549,6 +1563,15 @@ mod test {
     /// an agent id (`engineer`) and never a channel id (`engineering`) — that
     /// difference is the whole reason the origin has to be carried.
     fn desk_task_completed(origin: Option<&str>, column: &str) -> CompanyEvent {
+        threaded_desk_task_completed(origin, None, column)
+    }
+
+    /// The same settle, for a card raised inside a thread (#1890 B).
+    fn threaded_desk_task_completed(
+        origin: Option<&str>,
+        origin_parent: Option<u64>,
+        column: &str,
+    ) -> CompanyEvent {
         CompanyEvent::DeskTaskCompleted {
             task_id: "t-1".to_string(),
             desk: "engineer".to_string(),
@@ -1556,6 +1579,7 @@ mod test {
             column: column.to_string(),
             artifact_ids: Vec::new(),
             origin_chat_id: origin.map(str::to_string),
+            origin_parent: origin_parent.map(EventSeq::new),
         }
     }
 
@@ -1677,8 +1701,43 @@ mod test {
         );
         assert!(!view.mine);
         assert!(view.steps.is_empty(), "a marker is not a turn");
-        assert!(view.parent_id.is_none(), "a marker is never threaded");
+        assert!(
+            view.parent_id.is_none(),
+            "a card raised at channel level settles flat in the channel",
+        );
         assert_eq!(view.id, "21", "the host id the console dedupes a reload on");
+    }
+
+    /// Issue #1890 B — the whole of what this sub-issue repairs.
+    ///
+    /// A card raised inside a thread used to settle flat in the channel, so the
+    /// thread that asked for the work never showed it finishing. The marker
+    /// carries the root now, in the same field and the same rendering an
+    /// operator message's parent takes, so the console files it into the thread
+    /// with no renderer change at all.
+    #[test]
+    fn a_terminal_raised_in_a_thread_projects_into_that_thread() {
+        let view = MessageView::project(
+            at(
+                50,
+                threaded_desk_task_completed(Some("engineering"), Some(41), COLUMN_IN_REVIEW),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(
+            view.parent_id.as_deref(),
+            Some("41"),
+            "the marker hangs off the root the card recorded",
+        );
+        // The channel half is unchanged: routing still runs through `owns` on
+        // the origin channel, and the thread only narrows within it. A marker
+        // that threaded but stopped belonging to its channel would vanish.
+        assert!(owns(
+            "engineering",
+            "Engineering desk",
+            &threaded_desk_task_completed(Some("engineering"), Some(41), COLUMN_IN_REVIEW),
+        ));
     }
 
     /// The run's prose stays out of the marker. It already reaches this same
@@ -1954,6 +2013,7 @@ mod dead_card_test {
             assignee: String::new(),
             updated_at_millis: 1,
             origin_chat_id: None,
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,

@@ -6,6 +6,7 @@ import {
   dispatchMarkerPlacement,
   dispatchMarkerText,
   fromHistory,
+  hostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
 import { handleEvent, type CompanyStreamEvent } from "@/hooks/use-events";
@@ -134,6 +135,38 @@ describe("where a settled dispatch's marker goes", () => {
    * conversation's settle into another is the failure this shape exists to make
    * impossible.
    */
+  /**
+   * Issue #1890 B — the thread inside the channel.
+   *
+   * A card raised in a thread used to settle flat in the channel, so the thread
+   * that asked for the work never showed it finishing. The host names the root
+   * by its own sequence, in the same namespace `seq` lives in, so the console
+   * has to give it the same `h` prefix — an unprefixed value would point at a
+   * line no console id matches.
+   */
+  it("into the thread inside that channel, under the host's own id namespace", () => {
+    const placement = dispatchMarkerPlacement(terminal({ parentId: "41" }), CHANNELS);
+
+    expect(placement).not.toBeNull();
+    expect(placement!.channelId).toBe("engineering");
+    expect(placement!.message.parentId).toBe(hostMessageId("41"));
+    // And it matches what a reload mints for the same root, which is the whole
+    // point: a marker that threaded live and flattened on reload would be the
+    // live-vs-history split the identity dedupe exists to close.
+    const [rehydrated] = fromHistory([historyEntry({ parentId: "41" })]);
+    expect(placement!.message.parentId).toBe(rehydrated.parentId);
+  });
+
+  /**
+   * A card raised straight into a channel carries no root, and its marker stays
+   * flat — which is where every marker sat before B, and still the common case.
+   */
+  it("flat in the channel for a card raised at channel level", () => {
+    const placement = dispatchMarkerPlacement(terminal(), CHANNELS);
+
+    expect(placement!.message.parentId).toBeUndefined();
+  });
+
   it("into no channel at all when the thread matches none — never a fallback", () => {
     const placement = dispatchMarkerPlacement(terminal({ chatId: "a-desk-that-left" }), CHANNELS);
 

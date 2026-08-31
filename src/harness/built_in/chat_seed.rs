@@ -186,16 +186,28 @@ pub async fn resolve_seed_desk(
 ///   `AgentReply::parent` can express: a reply is parented to *its question's*
 ///   parent, never to the question, precisely so a thread cannot nest.
 ///
-/// Anything that is not a chat message answers `false`. The only such event
-/// `owns` admits is a `DeskTaskCompleted` terminal, which the mapper drops
-/// anyway for want of a conversational body — but it is dropped here first,
-/// and deliberately: a card records `origin_chat_id` and no thread root, so
-/// there is currently no honest answer to which thread it belongs to. See the
-/// `origin_parent` sub-issue on #1890.
+/// The one non-message event `owns` admits is a `DeskTaskCompleted` terminal,
+/// and since issue #1890 B it answers here like everything else: the card
+/// records the thread it was raised in, so `origin_parent` is that honest
+/// answer where before there was none. It is still dropped downstream by the
+/// mapper for want of a conversational body — seeding it as briefing context is
+/// sub-issue C — so admitting it here changes no seed today and is what lets C
+/// be a change to the mapper alone rather than to the filter as well.
+///
+/// A terminal is matched on the same **one level** the messages are: a card is
+/// raised in a thread, never in a reply to one.
+///
+/// Anything else answers `false`.
 fn in_thread(stored: &StoredEvent, thread_root: Option<EventSeq>) -> bool {
     let parent = match &stored.event {
         CompanyEvent::OperatorMessage { parent, .. } => *parent,
         CompanyEvent::AgentReply { parent, .. } => *parent,
+        // Not `stored.seq`-comparable the way a message is: the terminal is a
+        // separate event from the root it hangs off, so it can only ever be a
+        // *member* of a thread and never the root of one. The `stored.seq ==
+        // root` arm below is therefore unreachable for it, which is correct
+        // rather than an oversight.
+        CompanyEvent::DeskTaskCompleted { origin_parent, .. } => *origin_parent,
         _ => return false,
     };
     match thread_root {
@@ -608,6 +620,15 @@ mod tests {
     }
 
     fn desk_completed(seq: u64, origin_chat_id: Option<&str>) -> StoredEvent {
+        threaded_desk_completed(seq, origin_chat_id, None)
+    }
+
+    /// A settle whose card recorded the thread it was raised in (#1890 B).
+    fn threaded_desk_completed(
+        seq: u64,
+        origin_chat_id: Option<&str>,
+        origin_parent: Option<u64>,
+    ) -> StoredEvent {
         StoredEvent {
             seq: EventSeq::new(seq),
             company: CompanyId::new("acme"),
@@ -618,6 +639,7 @@ mod tests {
                 column: "done".to_string(),
                 artifact_ids: Vec::new(),
                 origin_chat_id: origin_chat_id.map(str::to_string),
+                origin_parent: origin_parent.map(EventSeq::new),
             },
             at_millis: seq,
         }
@@ -1073,9 +1095,15 @@ mod tests {
         );
     }
 
-    /// A dispatch terminal is skipped whatever thread is asked for. It carries
-    /// no conversational body, and a card records `origin_chat_id` with no
-    /// thread root — so there is no honest thread to attribute it to yet.
+    /// A dispatch terminal is skipped whatever thread is asked for: it carries
+    /// no conversational body, so the mapper drops it.
+    ///
+    /// **Why this still passes after #1890 B**, which taught [`in_thread`] to
+    /// admit a terminal: the two rejections were always independent, and only
+    /// one of them has moved. The card now records the thread it was raised in,
+    /// so the filter has an honest answer where it had none — but a settle is
+    /// still not a turn, and seeding it as briefing context is sub-issue C.
+    /// That C is a change to the mapper *alone* is the property this pins.
     #[tokio::test]
     async fn a_dispatch_terminal_is_in_no_thread() {
         let log = FixedLog(vec![
@@ -1090,6 +1118,27 @@ mod tests {
                 ("user".to_string(), "root".to_string()),
                 ("user".to_string(), "follow-up".to_string()),
             ]
+        );
+    }
+
+    /// And the same for a terminal the filter now *does* admit — a card raised
+    /// inside the very thread being seeded. #1890 B changes no projection; it
+    /// only makes the filter answer correctly for when C arrives.
+    #[tokio::test]
+    async fn a_terminal_inside_this_thread_is_still_not_seeded_as_a_turn() {
+        let log = FixedLog(vec![
+            operator(1, Some("growth"), "root"),
+            threaded_desk_completed(2, Some("growth"), Some(1)),
+            operator_in(3, Some("growth"), "follow-up", 1),
+        ]);
+        let seed = seed_of_thread(log, "growth", Some(1), "follow-up").await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "root".to_string()),
+                ("user".to_string(), "follow-up".to_string()),
+            ],
+            "a settle is not a turn, whatever thread it belongs to: {seed:?}"
         );
     }
 
@@ -1277,5 +1326,55 @@ name = "{name}"
             resolve(store, Some("ad-hoc-thread")).await,
             ("ad-hoc-thread".to_string(), "ad-hoc-thread".to_string())
         );
+    }
+
+    /// Issue #1890 B. Before the card recorded a root there was no honest
+    /// answer to which thread a settle belonged to, so [`in_thread`] rejected
+    /// every terminal outright. It answers now, on the same parent-pointer rule
+    /// a message does.
+    ///
+    /// The seed mapper still drops the event for want of a conversational body
+    /// — seeding it as briefing context is sub-issue C — so this changes no
+    /// projection today. That is the point: C becomes a change to the mapper
+    /// alone, and this predicate is already right when it gets there.
+    #[test]
+    fn a_settle_belongs_to_the_thread_that_raised_its_card() {
+        let root = EventSeq::new(41);
+        assert!(in_thread(
+            &threaded_desk_completed(50, Some("growth"), Some(41)),
+            Some(root)
+        ));
+    }
+
+    #[test]
+    fn a_settle_raised_in_a_sibling_thread_is_not_in_this_one() {
+        // The leak this epic exists to close, in its terminal form: two live
+        // threads in one channel, and the settle belongs to exactly one.
+        assert!(!in_thread(
+            &threaded_desk_completed(50, Some("growth"), Some(43)),
+            Some(EventSeq::new(41))
+        ));
+    }
+
+    #[test]
+    fn an_unthreaded_settle_belongs_to_the_channel_and_not_to_a_thread() {
+        // `None` is the channel-level conversation on both sides — a positive
+        // answer in each direction, not an absence. A card raised straight into
+        // a channel settles where it always did…
+        assert!(in_thread(&desk_completed(50, Some("growth")), None));
+        // …and emphatically not inside somebody's open thread, which is the
+        // regression a laxer rule would ship.
+        assert!(!in_thread(
+            &desk_completed(50, Some("growth")),
+            Some(EventSeq::new(41))
+        ));
+    }
+
+    #[test]
+    fn a_threaded_settle_is_not_in_the_channel_level_conversation() {
+        assert!(!in_thread(
+            &threaded_desk_completed(50, Some("growth"), Some(41)),
+            None
+        ));
     }
 }

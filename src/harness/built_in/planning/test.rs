@@ -1001,6 +1001,7 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         assignee: assignee.to_string(),
         updated_at_millis: 7,
         origin_chat_id: None,
+        origin_parent: None,
         parent_task_id: None,
         plan: None,
         planning_attempts: Vec::new(),

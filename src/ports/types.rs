@@ -1440,6 +1440,29 @@ pub enum CompanyEvent {
         /// board-created card adds nothing to the log.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin_chat_id: Option<String>,
+        /// The thread within [`origin_chat_id`](Self::DeskTaskCompleted::origin_chat_id)
+        /// the card was raised in (issue #1890 B) —
+        /// [`TaskRecord::origin_parent`](crate::ports::tasks::TaskRecord::origin_parent),
+        /// stamped here at the moment the run settles.
+        ///
+        /// **Captured, never derived**, for the same reason its channel half is:
+        /// nothing else on this event knows which thread asked for the work, and
+        /// a second place deciding "which conversation is this?" is the drift
+        /// issue #435 exists to have removed. The card has recorded it since
+        /// #1890 B on every conversational path that opens one, so the terminal
+        /// carries what the card already knows.
+        ///
+        /// **Read as a pair with the channel, never alone.** `None` here means
+        /// the channel-level conversation *when a channel is named*, and means
+        /// nothing at all when it is not — a board-created card has both absent.
+        /// So a marker is filed by `origin_chat_id` first and only then narrowed
+        /// by this.
+        ///
+        /// Additive: `#[serde(default)]` so every journal line written before
+        /// this field existed still replays, and skipped when absent so an
+        /// unthreaded settle adds nothing to the log.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_parent: Option<EventSeq>,
     },
     /// A human posted to a task's discussion thread (issue #335).
     ///
@@ -6019,6 +6042,7 @@ mod test {
             column: "in_review".to_string(),
             artifact_ids: Vec::new(),
             origin_chat_id: None,
+            origin_parent: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(json.contains(r#""kind":"DeskTaskCompleted""#));
@@ -6052,6 +6076,7 @@ mod test {
             column: "in_review".to_string(),
             artifact_ids: Vec::new(),
             origin_chat_id: Some("engineering".to_string()),
+            origin_parent: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(json.contains(r#""origin_chat_id":"engineering""#), "{json}");
@@ -6078,8 +6103,54 @@ mod test {
                 column: "in_review".to_string(),
                 artifact_ids: Vec::new(),
                 origin_chat_id: None,
+                origin_parent: None,
             },
             "a pre-#377 journal line must replay with no origin, not fail"
+        );
+    }
+
+    /// Issue #1890 B: the thread half of that origin round-trips, is skipped
+    /// when absent, and a line written before it existed replays as
+    /// channel-level — which is the truth about such a line, not a default
+    /// standing in for one.
+    #[test]
+    fn the_terminal_carries_the_thread_its_card_was_raised_in() {
+        let threaded = CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "ceo".to_string(),
+            output: "shipped".to_string(),
+            column: "in_review".to_string(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("growth".to_string()),
+            origin_parent: Some(EventSeq::new(41)),
+        };
+        let json = serde_json::to_string(&threaded).unwrap();
+        assert!(json.contains(r#""origin_parent":41"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(&json).unwrap(),
+            threaded,
+            "the root must survive the round trip"
+        );
+
+        // Skipped when absent, so an unthreaded settle is byte-identical to a
+        // pre-B one and adds nothing to the log.
+        let flat = CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "ceo".to_string(),
+            output: "shipped".to_string(),
+            column: "in_review".to_string(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("growth".to_string()),
+            origin_parent: None,
+        };
+        let json = serde_json::to_string(&flat).unwrap();
+        assert!(!json.contains("origin_parent"), "{json}");
+
+        let legacy = r#"{"kind":"DeskTaskCompleted","task_id":"t-1","desk":"ceo","output":"shipped","column":"in_review","origin_chat_id":"growth"}"#;
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(legacy).unwrap(),
+            flat,
+            "a pre-#1890-B line must replay as channel-level, not fail"
         );
     }
 
@@ -6098,6 +6169,7 @@ mod test {
             column: "in_review".to_string(),
             artifact_ids: vec!["art-1".to_string(), "art-2".to_string()],
             origin_chat_id: None,
+            origin_parent: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(
@@ -6120,6 +6192,7 @@ mod test {
                 column: "in_review".to_string(),
                 artifact_ids: Vec::new(),
                 origin_chat_id: None,
+                origin_parent: None,
             },
             "a pre-#244 journal line must replay with no artifacts, not fail"
         );

@@ -1557,6 +1557,7 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         assignee: "Strategy desk".to_string(),
         updated_at_millis: at,
         origin_chat_id: None,
+        origin_parent: None,
         parent_task_id: None,
         output: None,
         plan: None,
@@ -1602,6 +1603,7 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
     let populated = TaskRecord {
         note: Some("retry after the transport failed".to_string()),
         origin_chat_id: Some("chat-1".to_string()),
+        origin_parent: Some(crate::ports::EventSeq::new(41)),
         parent_task_id: Some("parent-1".to_string()),
         output: Some(crate::ports::tasks::TaskOutput {
             source: crate::ports::tasks::TaskOutputSource::Run {
