@@ -934,7 +934,8 @@ impl Drop for SseStreamGuard {
 const LABEL_REFRESH_EVERY: Duration = Duration::from_secs(60);
 
 /// Re-derives whether `actor` (the human behind an open SSE connection) still
-/// holds admin access, for [`company_events`]'s periodic refresh.
+/// holds admin access, for [`company_events`]'s periodic refresh AND its
+/// per-item revalidation of an owner-fallback report.
 ///
 /// Fixes issue #1781 review (Codex P1): the `is_admin` this feeds used to be
 /// captured once at stream-open time and never reconsidered, so a mid-stream
@@ -945,12 +946,22 @@ const LABEL_REFRESH_EVERY: Duration = Duration::from_secs(60);
 /// `update_user`), and an already-open SSE response performs no further
 /// authentication of its own.
 ///
-/// Returns `previous` unchanged — rather than defaulting either direction —
-/// for the machine principal (`actor: None`, unrestricted by construction per
-/// [`ScopedCompany::is_admin`]'s own doc), on a store error, or when the user
-/// record is missing. This matches the label refresh's own fail-quiet error
-/// handling just above its call site: a transient read failure should not
-/// flip a live connection's access either way.
+/// Returns `previous` unchanged only for the machine principal (`actor:
+/// None`, unrestricted by construction per [`ScopedCompany::is_admin`]'s own
+/// doc) — every other outcome (`Ok(None)`, the user record has gone missing,
+/// or `Err`, the store read itself failed) returns `false` (issue #1781
+/// review, Codex P1 follow-up to this fix). Fail-open on a lookup failure was
+/// the original shape, on the reasoning that "a transient read failure
+/// should not flip a live connection's access either way" — true for the
+/// periodic refresh alone, which only ever *feeds* a decision, but
+/// [`is_admin_for_item`] also calls this synchronously, per item, as the
+/// actual gate on the one admin-only content class this whole mechanism
+/// exists to protect. There, `previous` is exactly the stale cached value a
+/// demotion may have already invalidated — failing open on top of a store
+/// hiccup would hand a demoted, now-unconfirmable actor the benefit of the
+/// doubt on the read that was supposed to catch the demotion. A human
+/// principal whose current role cannot be confirmed is treated as not admin;
+/// only the always-safe machine principal keeps its unconditional pass.
 async fn refreshed_is_admin(
     runtime: &CompanyRuntime,
     actor: Option<&Actor>,
@@ -963,7 +974,7 @@ async fn refreshed_is_admin(
         Ok(Some(user)) => {
             user.role.may_administer() && user.status == crate::ports::users::UserStatus::Active
         }
-        _ => previous,
+        _ => false,
     }
 }
 
@@ -12804,6 +12815,42 @@ mode = "full"
         assert!(
             !refreshed_is_admin(&runtime, Some(&actor), true).await,
             "a suspended admin must not keep admin-only visibility either"
+        );
+    }
+
+    /// Issue #1781 review, Codex P1 second follow-up: a human actor whose
+    /// current role cannot be confirmed — `Ok(None)` because the user record
+    /// has gone missing, folded in here with a genuine store error since both
+    /// hit the same match arm — must resolve to `false`, not `previous`.
+    ///
+    /// `previous: true` here stands in for exactly the dangerous case: a
+    /// cached "was admin" value from before whatever made this actor
+    /// unconfirmable, revalidated at the one call site
+    /// (`is_admin_for_item`) that gates the admin-only owner-fallback report
+    /// on this result directly. Before this fix, an actor deleted out from
+    /// under an open SSE stream — or a transient read failure landing at the
+    /// exact moment a report needed gating — fell back to `previous` and kept
+    /// leaking the report, silently, for as long as the failure (or the
+    /// missing record) persisted.
+    #[tokio::test]
+    async fn refreshed_is_admin_fails_closed_when_the_user_record_cannot_be_found() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        // Never upserted — `get_user` answers `Ok(None)`, the "record has
+        // gone missing" half of the case this proves.
+        let actor = Actor {
+            kind: ActorKind::User,
+            id: "ghost".to_string(),
+        };
+
+        assert!(
+            !refreshed_is_admin(&runtime, Some(&actor), true).await,
+            "a human actor with no resolvable user record must read as not-admin \
+             even when the cached value being revalidated was `true` — trusting \
+             `previous` here is exactly the fail-open gap this fix closes"
         );
     }
 
