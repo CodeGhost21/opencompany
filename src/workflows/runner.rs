@@ -2469,6 +2469,7 @@ mod tests {
             agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(company, agent_id).await
@@ -2660,6 +2661,7 @@ to = "done"
             agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(agent_id).await
@@ -2847,6 +2849,7 @@ to = "done"
             agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.execute(agent_id).await
@@ -3003,6 +3006,7 @@ to = "done"
             agent_id: &str,
             message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::TurnOutcome> {
             self.run(

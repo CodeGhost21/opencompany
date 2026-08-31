@@ -2710,6 +2710,7 @@ mod tests {
             _agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> crate::Result<crate::harness::TurnOutcome> {
             Ok(ok_outcome())
@@ -2854,6 +2855,7 @@ mod tests {
             _agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> crate::Result<crate::harness::TurnOutcome> {
             unreachable!("workflow agent nodes route through run_background_workflow")
@@ -3092,6 +3094,7 @@ mod tests {
             _agent_id: &str,
             _message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> crate::Result<crate::harness::TurnOutcome> {
             Ok(self.0.clone())

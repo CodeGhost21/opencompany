@@ -749,6 +749,14 @@ impl HarnessBrain {
                 &grant.agent,
                 &instruction,
                 &control,
+                // Issue #1890 I. Un-streamed, but **not** unaddressed: this
+                // call was raised in a conversation, and the grant has recorded
+                // which one — channel and thread — since #435. Without it the
+                // re-issued call bound to nothing, so it ran against whatever
+                // history the agent happened to be holding and then published
+                // its answer into the origin thread regardless. The same pair
+                // the delegation drain below is bound to.
+                ChatTarget::in_thread(grant.origin_thread.as_deref(), grant.origin_parent),
                 None,
             )
             .await;
@@ -1098,6 +1106,11 @@ impl HarnessBrain {
                     &responder,
                     &instruction,
                     &control,
+                    // No conversation to bind to: a dispatched card's turn
+                    // answers the board, not a thread (#1890 I). Unchanged
+                    // behaviour — including that it does not clear history,
+                    // since one task can span several turns.
+                    ChatTarget::default(),
                     // Issue #242: un-streamed does not mean unrecorded. The
                     // trace this turn produces is written to the attempt row as
                     // it happens, which is what a redirect re-run appends to
@@ -1879,7 +1892,16 @@ impl HarnessBrain {
     ) -> Option<String> {
         let instruction = publish::nudge_instruction(brief, reply, unpublished, scan_partial);
         let outcome = run_turn
-            .run_steered_background(&self.record().id, responder, &instruction, control, sink)
+            .run_steered_background(
+                &self.record().id,
+                responder,
+                &instruction,
+                control,
+                // A hand-off inside a dispatched card: the board is the
+                // conversation, not a thread (#1890 I).
+                ChatTarget::default(),
+                sink,
+            )
             .await;
         // A steer that landed during the nudge is consumed here so it cannot
         // leak into a later `control.take()` and be mistaken for a steer of the
@@ -9364,10 +9386,21 @@ members = ["eng1", "eng2"]
             .and_then(|roster| roster.iter().find(|agent| agent.agent_id == "ceo"))
             .cloned()
             .expect("the approved turn keeps the agent resident");
+        // Issue #1890 I reverses this. It asserted `None` — that an approval's
+        // continuation binds to nothing, because it runs unstreamed and "binding
+        // is covered by the delegated target".
+        //
+        // The delegated target does cover the *drain*, which was already bound
+        // by `in_thread(grant.origin_parent)`. It never covered the re-issued
+        // call itself: that turn ran against whatever history the agent
+        // happened to be holding and then published its answer into the origin
+        // thread regardless — grounded in one conversation, answering into
+        // another. Identity is no longer inferred from the absent stream, so
+        // the turn now binds to the conversation the grant recorded.
         assert_eq!(
             *agent.bound_chat.lock().await,
-            None,
-            "approval continuation runs unstreamed; binding is covered by the delegated target"
+            Some(("general".to_string(), Some(root))),
+            "the re-issued call binds to the conversation the approval was raised in"
         );
     }
 
@@ -10056,6 +10089,7 @@ members = ["eng1", "eng2"]
             agent_id: &str,
             message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
             self.run(
@@ -11551,6 +11585,7 @@ members = ["eng1", "eng2"]
             a: &str,
             m: &str,
             _: &crate::company::steer::SteerControl,
+            _: crate::runtime::delegation::ChatTarget<'_>,
             _: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> Result<crate::harness::built_in::TurnOutcome> {
             self.run(c, a, m, crate::runtime::delegation::ChatTarget::default())

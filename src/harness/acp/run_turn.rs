@@ -276,12 +276,59 @@ impl AcpRunTurn {
         )
     }
 
-    /// The session an agent's turns share.
+    /// The session an agent's turns share, **per conversation** (issue #1890 H).
     ///
-    /// Per (company, agent) so two desks do not share a conversation, and
-    /// stable across turns so the second question in a thread does not arrive
-    /// with no memory of the first.
-    fn session_key(company: &CompanyId, agent_id: &str) -> String {
+    /// Stable across turns, so the second question in a thread does not arrive
+    /// with no memory of the first — and scoped to the channel, so two desks do
+    /// not share one. The doc here used to claim that second property while the
+    /// key did not have it: `{company}::{agent}` put every desk, every DM and
+    /// every thread an ACP teammate answered in into a single durable
+    /// conversation owned by an external process.
+    ///
+    /// # Why the channel and not the thread
+    ///
+    /// The rest of #1890 makes the *thread* the context boundary, and for the
+    /// built-in harness it is: that binding is in-memory, so a new one costs
+    /// nothing and a stale one is dropped by the process that owns it.
+    ///
+    /// An ACP session is neither. It is durable state inside another program,
+    /// reached through a port that has no lifecycle at all — [`AcpAgent`] can
+    /// `prompt` and `cancel`, and there is no create, close or reap on it
+    /// anywhere. Keying per thread would therefore mint an unbounded number of
+    /// external sessions on a busy channel with nothing able to collect them,
+    /// and giving them a lifetime means designing one across a port whose
+    /// implementation lives in the desktop shell rather than in this crate.
+    ///
+    /// A channel is bounded by the roster and the desk list and changes rarely,
+    /// so this is the isolation that can be had without inventing that
+    /// lifecycle. Thread-level scoping stays open on #1890 H, with this as the
+    /// reason it is not closed here.
+    fn session_key(company: &CompanyId, agent_id: &str, chat_id: Option<&str>) -> String {
+        match chat_id {
+            // Folded through the same rule every other reader of a chat id
+            // uses, so the four spellings of the General desk are one
+            // conversation here too rather than four sessions.
+            Some(chat) if !crate::server::chat_history::is_general_chat(Some(chat)) => {
+                format!("{}::{agent_id}::{chat}", company.as_ref())
+            }
+            // The General desk, and every turn that names no conversation at
+            // all — a dispatched card, a workflow node. Both keep the key this
+            // function has always returned, so an existing session is still
+            // found by the turns that were already sharing it.
+            _ => format!("{}::{agent_id}", company.as_ref()),
+        }
+    }
+
+    /// The slot that serialises one agent's turns.
+    ///
+    /// Deliberately **not** the session key (issue #1890 H). The two answer
+    /// different questions: the session key says which conversation a turn
+    /// belongs to, and this says which turns may not run at once. Widening this
+    /// alongside the session would let one agent's desks prompt an external
+    /// process concurrently — a change to how that process is driven, made as a
+    /// side effect of a change about conversation scope, and not one this issue
+    /// has any evidence for.
+    fn lock_key(company: &CompanyId, agent_id: &str) -> String {
         format!("{}::{agent_id}", company.as_ref())
     }
 
@@ -308,10 +355,11 @@ impl AcpRunTurn {
         company: &CompanyId,
         agent_id: &str,
         message: &str,
+        chat_id: Option<&str>,
         stream: Option<TurnStreamCtx>,
     ) -> Result<TurnOutcome> {
-        let key = Self::session_key(company, agent_id);
-        let slot = self.turn_lock(&key);
+        let key = Self::session_key(company, agent_id, chat_id);
+        let slot = self.turn_lock(&Self::lock_key(company, agent_id));
         // An unsteerable turn simply waits its turn; there is no cancel to
         // race, so nothing more is needed here.
         let _slot = slot.lock().await;
@@ -601,7 +649,8 @@ impl RunTurn for AcpRunTurn {
         // conversation inside it* the durable reply hangs from — a dimension
         // the transient timeline does not carry.
         let ctx = Self::chat_ctx(company, agent_id, chat.chat_id);
-        self.run_once(company, agent_id, message, Some(ctx)).await
+        self.run_once(company, agent_id, message, chat.chat_id, Some(ctx))
+            .await
     }
 
     async fn run_steered(
@@ -614,7 +663,7 @@ impl RunTurn for AcpRunTurn {
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         let ctx = Self::chat_ctx(company, agent_id, chat.chat_id);
-        self.steered(company, agent_id, message, control, Some(ctx))
+        self.steered(company, agent_id, message, control, chat.chat_id, Some(ctx))
             .await
     }
 
@@ -631,12 +680,19 @@ impl RunTurn for AcpRunTurn {
         // row — its timeline lives only in the card's note. Closing that needs
         // a `TurnStep`-shaped entry point on the sink, which means owning step
         // ordinals and the running→finalized rewrite from a second producer.
+        chat: ChatTarget<'_>,
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         // No live context on purpose: a dispatched card's turn shows no chat
         // bubble, and its rows must not appear on whatever thread most
         // recently sent. Same rule as `built_in`'s `LiveStream::Off`.
-        self.steered(company, agent_id, message, control, None)
+        //
+        // The **session** still follows the conversation when there is one
+        // (#1890 H + I): an approval's re-issued call belongs to the thread it
+        // was raised in, and answering it on whichever session was last used
+        // would be the leak H closes, arriving through the one entry point that
+        // streams nothing.
+        self.steered(company, agent_id, message, control, chat.chat_id, None)
             .await
     }
 
@@ -655,7 +711,7 @@ impl RunTurn for AcpRunTurn {
         message: &str,
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
-        self.run_once(company, agent_id, message, None).await
+        self.run_once(company, agent_id, message, None, None).await
     }
 
     /// A workflow agent node, streaming onto the run-trace sheet.
@@ -680,7 +736,8 @@ impl RunTurn for AcpRunTurn {
                 node_id: node_id.to_string(),
             },
         };
-        self.run_once(company, agent_id, message, Some(ctx)).await
+        self.run_once(company, agent_id, message, None, Some(ctx))
+            .await
     }
 }
 
@@ -733,6 +790,7 @@ impl AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
+        chat_id: Option<&str>,
         stream: Option<TurnStreamCtx>,
     ) -> Result<TurnOutcome> {
         self.steered_with_grace(
@@ -740,6 +798,7 @@ impl AcpRunTurn {
             agent_id,
             message,
             control,
+            chat_id,
             stream,
             CancelBounds::DEFAULT,
         )
@@ -755,6 +814,7 @@ impl AcpRunTurn {
         agent_id: &str,
         message: &str,
         control: &crate::company::steer::SteerControl,
+        chat_id: Option<&str>,
         stream: Option<TurnStreamCtx>,
         bounds: CancelBounds,
     ) -> Result<TurnOutcome> {
@@ -762,14 +822,22 @@ impl AcpRunTurn {
             grace,
             rpc: cancel_rpc,
         } = bounds;
-        let key = Self::session_key(company, agent_id);
+        let key = Self::session_key(company, agent_id, chat_id);
 
         // Wait for this teammate's turn slot **steerably**. A turn cancelled
         // while it is still queued must never reach the adapter: its cancel
-        // would name the session, which at that moment belongs to whichever
+        // would name a session that, at that moment, may belong to whichever
         // turn is actually running, and would stop that one instead. So a
         // cancel here ends this turn where it stands — nothing was started, so
         // there is nothing to stop.
+        //
+        // Since issue #1890 H the slot is keyed per teammate while the session
+        // is keyed per conversation, so that misfire is now only reachable
+        // between two turns in the SAME channel — which share both. Two
+        // channels' turns still queue on one slot, and a cancel from the queued
+        // one names its own session rather than the running one's. The guard
+        // stays: it is exactly right for the same-channel case, and refusing a
+        // turn that was cancelled before it started is correct regardless.
         //
         // `SteerControl` is poll-shaped rather than awaitable, so this polls
         // on the same cadence the running turn does below.
@@ -783,11 +851,12 @@ impl AcpRunTurn {
         // meaning — start, forward the cancel, let the agent wind down and
         // report (`stopReason: "cancelled"`), which is an `Ok` outcome the
         // caller settles as cancelled rather than failed.
-        let slot = self.turn_lock(&key);
+        let slot = self.turn_lock(&Self::lock_key(company, agent_id));
         let _slot = match Arc::clone(&slot).try_lock_owned() {
             Ok(slot) => slot,
             Err(_) => {
-                // Contended: somebody else is mid-turn on this session.
+                // Contended: this teammate is mid-turn — on this conversation
+                // or on another of theirs, since the slot is per teammate.
                 let queued = loop {
                     tokio::select! {
                         slot = Arc::clone(&slot).lock_owned() => break slot,
@@ -1472,6 +1541,7 @@ mod test {
                 "go",
                 &control,
                 None,
+                None,
                 CancelBounds {
                     grace: Duration::from_millis(20),
                     rpc: Duration::from_millis(50),
@@ -1515,6 +1585,7 @@ mod test {
                 "ceo",
                 "go",
                 &control,
+                None,
                 None,
                 CancelBounds {
                     grace: Duration::from_millis(20),
@@ -1711,23 +1782,90 @@ mod test {
 
     #[test]
     fn a_session_key_separates_agents_and_companies() {
-        // Two desks sharing a session would share a conversation, and one
-        // company's turn would carry another's context.
         let acme = CompanyId::new("acme");
         let globex = CompanyId::new("globex");
         assert_ne!(
-            AcpRunTurn::session_key(&acme, "ceo"),
-            AcpRunTurn::session_key(&acme, "cto")
+            AcpRunTurn::session_key(&acme, "ceo", None),
+            AcpRunTurn::session_key(&acme, "cto", None)
         );
         assert_ne!(
-            AcpRunTurn::session_key(&acme, "ceo"),
-            AcpRunTurn::session_key(&globex, "ceo")
+            AcpRunTurn::session_key(&acme, "ceo", None),
+            AcpRunTurn::session_key(&globex, "ceo", None)
         );
         // Stable across turns, or the second question in a thread arrives with
         // no memory of the first.
         assert_eq!(
-            AcpRunTurn::session_key(&acme, "ceo"),
-            AcpRunTurn::session_key(&acme, "ceo")
+            AcpRunTurn::session_key(&acme, "ceo", None),
+            AcpRunTurn::session_key(&acme, "ceo", None)
+        );
+    }
+
+    /// Issue #1890 H — the property this file's comments already claimed.
+    ///
+    /// "Two desks do not share a conversation" was written on `session_key`
+    /// while the key held no channel at all, so every desk, DM and thread an
+    /// ACP teammate answered in was one durable conversation inside another
+    /// program.
+    #[test]
+    fn a_session_key_separates_conversations() {
+        let acme = CompanyId::new("acme");
+        assert_ne!(
+            AcpRunTurn::session_key(&acme, "ceo", Some("engineering")),
+            AcpRunTurn::session_key(&acme, "ceo", Some("growth")),
+            "two desks must not share one session"
+        );
+        assert_ne!(
+            AcpRunTurn::session_key(&acme, "ceo", Some("engineering")),
+            AcpRunTurn::session_key(&acme, "ceo", Some("dm:designer")),
+            "nor a desk and a DM"
+        );
+        // Stable within a conversation, for the same reason it is stable across
+        // turns at all.
+        assert_eq!(
+            AcpRunTurn::session_key(&acme, "ceo", Some("engineering")),
+            AcpRunTurn::session_key(&acme, "ceo", Some("engineering"))
+        );
+    }
+
+    /// The General desk is **one** conversation however it is spelled, folded
+    /// through the same rule every other reader of a chat id uses — otherwise
+    /// its four spellings would mint four sessions in an external process, and
+    /// an operator's own main line would forget itself depending on which id
+    /// the caller happened to address.
+    #[test]
+    fn every_spelling_of_the_general_desk_is_one_session() {
+        let acme = CompanyId::new("acme");
+        let unaddressed = AcpRunTurn::session_key(&acme, "ceo", None);
+        for spelling in ["", "main", "General", "general", "MAIN"] {
+            assert_eq!(
+                AcpRunTurn::session_key(&acme, "ceo", Some(spelling)),
+                unaddressed,
+                "{spelling:?} is the General desk"
+            );
+        }
+    }
+
+    /// The slot that serialises turns is **not** the session key.
+    ///
+    /// Widening it alongside the session would let one teammate's desks prompt
+    /// an external process concurrently — a change to how that process is
+    /// driven, made as a side effect of a change about conversation scope.
+    #[test]
+    fn the_turn_slot_stays_per_teammate() {
+        let acme = CompanyId::new("acme");
+        assert_eq!(
+            AcpRunTurn::lock_key(&acme, "ceo"),
+            AcpRunTurn::lock_key(&acme, "ceo"),
+        );
+        assert_ne!(
+            AcpRunTurn::lock_key(&acme, "ceo"),
+            AcpRunTurn::lock_key(&acme, "cto"),
+        );
+        // The point: two conversations of one teammate share a slot while
+        // holding different sessions.
+        assert_ne!(
+            AcpRunTurn::session_key(&acme, "ceo", Some("engineering")),
+            AcpRunTurn::session_key(&acme, "ceo", Some("growth")),
         );
     }
     /// Drains the live frames a turn published, giving up once the bus goes
@@ -1869,7 +2007,7 @@ mod test {
         let run_turn = AcpRunTurn::new(Arc::new(Scripted::answering(a_working_turn())));
         let control = crate::company::steer::SteerControl::new();
         run_turn
-            .run_steered_background(&company, "ceo", "go", &control, None)
+            .run_steered_background(&company, "ceo", "go", &control, ChatTarget::default(), None)
             .await
             .expect("the turn answers");
 
