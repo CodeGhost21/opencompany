@@ -3248,6 +3248,167 @@ to = "done"
         assert!(output.contains("hello-marker"), "{output}");
     }
 
+    /// CodeRabbit review on #1937 (issue #1866) — a downstream binding of the
+    /// SAME value the postcondition gate certified.
+    ///
+    /// `agent = "ceo"` replies with the literal JSON text `{"items":[1,2,3]}`.
+    /// `field_present`/`field = "json.items"` certifies it. `reflect`'s
+    /// `=item.json.items` binding is the "downstream" this issue is about:
+    /// it reads straight off `ceo`'s emitted item exactly the way
+    /// `translate.rs`'s own doc comment says a downstream node must be able
+    /// to ("a downstream node reads `=item.text` / `=item.json.<field>`").
+    /// Before the emitted-output fix, the gate passed while this bound to
+    /// `null` — the postcondition envelope's parsed value never reached the
+    /// node's own emitted `json`, only a transient local used for the check.
+    /// This is the real engine (full graph execution, real expression
+    /// resolution), not a unit-level inspection of the returned tuple.
+    const STRUCTURED_REPLY_WF: &str = r#"
+id = "structured_wf"
+name = "Structured WF"
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+
+[node.postcondition]
+require = "field_present"
+field = "json.items"
+
+[[node]]
+id = "reflect"
+kind = "transform"
+name = "Reflect"
+
+[node.config.set]
+wrapped = "=item.json.items"
+
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+
+[[edge]]
+from = "start"
+to = "ceo"
+
+[[edge]]
+from = "ceo"
+to = "reflect"
+
+[[edge]]
+from = "reflect"
+to = "done"
+"#;
+
+    /// A [`RunTurn`](crate::runtime::delegation::RunTurn) that always answers
+    /// with the literal JSON text of `{"items":[1,2,3]}`, for any agent —
+    /// the engine's own `run_background_workflow` default chain
+    /// (`run_background_workflow` -> `run_background` -> `run`) reaches
+    /// `run` below, so overriding just the three required methods is enough
+    /// to stand in for the full workflow-node dispatch path, not only the
+    /// direct chat one.
+    struct StructuredJsonReplyTurn;
+
+    #[async_trait::async_trait]
+    impl crate::runtime::delegation::RunTurn for StructuredJsonReplyTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "{\"items\": [1, 2, 3]}".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                _company,
+                _agent_id,
+                _message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                _company,
+                _agent_id,
+                _message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_structured_agent_reply_is_readable_by_a_downstream_json_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(STRUCTURED_REPLY_WF).expect("workflow parses");
+
+        let run = run_workflow_lane_aware(
+            Arc::new(StructuredJsonReplyTurn),
+            deps(dir.path()),
+            &record(),
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs");
+
+        // The gate itself: `ceo`'s postcondition (field_present on json.items)
+        // must have let the node succeed, not halted the run.
+        assert!(
+            !run.output["nodes"]["ceo"]["items"].is_null(),
+            "the postcondition must have passed — ceo should have emitted: {}",
+            run.output
+        );
+
+        // The actual finding: `reflect`'s `=item.json.items` binding — reading
+        // `ceo`'s own emitted item downstream, the same way any real workflow
+        // node would — must resolve to the SAME [1, 2, 3] the gate certified,
+        // not null.
+        let wrapped = &run.output["nodes"]["reflect"]["items"][0]["json"]["wrapped"];
+        assert_eq!(
+            wrapped,
+            &serde_json::json!([1, 2, 3]),
+            "a downstream `=item.json.items` binding must resolve to the same \
+             structured value the postcondition gate certified, not null: {}",
+            run.output
+        );
+    }
+
     /// A GREET-shaped graph whose agent node carries a config `=`-expression
     /// pointing at a trigger field that does not exist (issue #1014). The engine
     /// resolves the expression to `null` and records a `NullResolution`, which
