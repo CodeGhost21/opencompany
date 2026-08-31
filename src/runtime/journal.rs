@@ -48,8 +48,8 @@ use crate::store::fs::FsJournalStore;
 /// any future automatic retirement are different things to have happened to
 /// someone's request, however identical the resulting queue looks.
 ///
-/// One variant today. The enum exists rather than a bool because the next
-/// reason is already known — an approval retired because a newer identical
+/// The enum exists rather than a bool because the reasons keep arriving — the
+/// next one already known is an approval retired because a newer identical
 /// request superseded it — and a `superseded: bool` beside a `reason` would be
 /// two fields describing one fact.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +58,20 @@ pub enum ExpiryReason {
     /// It sat unresolved past its `[policy].approval_ttl_hours` deadline.
     #[default]
     Ttl,
+    /// The card it was parked for could not be written, so the blocker was
+    /// withdrawn rather than left pointing at a card nobody paused
+    /// (issue #1861).
+    ///
+    /// A blocker and its card are two writes to two stores, and the planning
+    /// pass parks first so the queue can never promise a release for a column
+    /// that never changed. That leaves the mirror-image gap when the second
+    /// write fails: a live, journaled blocker against a card still sitting in
+    /// Planning — which the TTL sweep cannot repair either, because
+    /// `return_expired_blocker_card` only moves cards already in `paused`. This
+    /// is the compensating retirement, recorded under its own name because "we
+    /// could not write the card" and "the deadline passed" are different things
+    /// to have happened to an operator's queue.
+    CardUnwritable,
 }
 
 /// The pre-#1862 fallback for a [`JournalRecord::BlockedNodeStashed`] line

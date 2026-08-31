@@ -1369,6 +1369,33 @@ impl CompanyRuntime {
         Ok(approval_id)
     }
 
+    /// Withdraws a blocker this pass just parked, because the card write that
+    /// was supposed to follow it failed (issue #1861).
+    ///
+    /// [`park_blocker`](Self::park_blocker) deliberately runs **before** the
+    /// card is written, so an operator can never be shown a `paused` column
+    /// with nothing in the queue to release it. This is the other half of that
+    /// trade. Without it the failing write leaves the opposite inconsistency —
+    /// a live blocker naming a card still in Planning — and nothing repairs it:
+    /// [`return_expired_blocker_card`](crate::runtime::advance::return_expired_blocker_card)
+    /// only moves cards already in `paused`, so the TTL sweep would retire the
+    /// approval and leave the card exactly where it was stuck.
+    ///
+    /// Routed through [`retire_approval`](Self::retire_approval), the single
+    /// retirement primitive, so this leaves the same durable trail as every
+    /// other retirement: an `ApprovalExpired` line and a `Deny` with the system
+    /// named, never a grant. Only the recorded
+    /// [`ExpiryReason`] differs, and it differs on purpose — see
+    /// [`ExpiryReason::CardUnwritable`].
+    ///
+    /// Feature-gated for the reason `park_blocker` is: the planning pass is its
+    /// only caller.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn unpark_blocker(self: &Arc<Self>, id: &ApprovalId) -> Result<()> {
+        self.retire_approval(id, ExpiryReason::CardUnwritable, now_millis())
+            .await
+    }
+
     pub(crate) async fn notify_dispatch_failed(&self, task_id: &str, reason: &str) {
         let note = crate::ports::notifications::Notification {
             id: crate::ports::generate_id(),

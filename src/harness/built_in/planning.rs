@@ -727,7 +727,7 @@ async fn settle_blocked(
                     kind = payload.kind.as_str(),
                     "[planning] parked a blocker for the operator instead of returning the card"
                 );
-                true
+                Some(approval_id)
             }
             Err(err) => {
                 tracing::warn!(
@@ -737,12 +737,12 @@ async fn settle_blocked(
                     "[planning] could not park the blocker; the card returns to To-do carrying \
                      the reason, as it did before blockers existed"
                 );
-                false
+                None
             }
         },
-        None => false,
+        None => None,
     };
-    card.column = if parked {
+    card.column = if parked.is_some() {
         COLUMN_PAUSED.to_string()
     } else {
         COLUMN_TODO.to_string()
@@ -756,6 +756,24 @@ async fn settle_blocked(
             "[planning] could not settle a blocked card; it stays in Planning until the next \
              boot sweep returns it"
         );
+        // The park landed and the card write did not, so the blocker now names
+        // a card nobody paused. Withdraw it: an operator answering a blocker
+        // for a card still in Planning releases nothing, and the TTL sweep
+        // cannot repair the pair either — `return_expired_blocker_card` only
+        // moves cards already in `paused`. Better a card the boot sweep returns
+        // than a question with no card behind it.
+        if let Some(approval_id) = parked
+            && let Err(err) = runtime.unpark_blocker(&approval_id).await
+        {
+            tracing::error!(
+                company = %runtime.id(),
+                task = %task_id,
+                %approval_id,
+                error = %err,
+                "[planning] a blocker outlived the card write that failed and could not be \
+                 withdrawn; it stays in the queue against a card that is not paused"
+            );
+        }
     }
 }
 
