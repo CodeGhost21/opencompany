@@ -209,6 +209,86 @@ because the vendor wording ("the conversation is too long … please start a new
 chat") describes a chat product: a workflow step has no conversation an operator
 owns and no chat for them to start.
 
+## A node's declared postcondition halts before its output flows downstream (issue #1866)
+
+A `postcondition` is a mechanical, deterministic check on a node's OWN output,
+run before the run is allowed to advance past that node — the general form of
+the truncation check the iteration-cap signal (#1865) already applies, but
+author-declared instead of engine-derived. It is a different mechanism from
+`on_error`/`retry` (which react to the node's *call* failing) and from the
+`blocked` outcome above (which reacts to a *tool call inside the turn* being
+parked) — a postcondition reacts to the call succeeding with an output the
+author decided is not good enough to hand to the next node.
+
+**`agent` nodes only, in this slice** — `tool_call`/`http_request` are a
+follow-up (see the issue). Declared as a table on the node, evaluated by
+[`evaluate_postcondition`](../../../src/workflows/caps/postcondition.rs) inside
+[`HarnessAgentRunner::run_turn`](../../../src/workflows/caps/mod.rs):
+
+```toml
+[[node]]
+id = "research"
+kind = "agent"
+name = "Research"
+agent = "analyst"
+
+[node.postcondition]
+require = "field_present"
+field = "json.items"
+```
+
+`require` is one of three predicates, checked against the agent's reply
+best-effort parsed as JSON (`Value::Null` when it is not valid JSON — the
+common case, since agent nodes are prose by default):
+
+| `require` | Checks | `field` |
+| --- | --- | --- |
+| `non_empty` | the reply's prose (`text`) is present and non-blank after trimming | unused |
+| `field_present` | the dotted `field` path resolves to a present, non-null value inside the parsed reply | **required** |
+| `non_empty_list` | the target is a JSON array with at least one element | optional — the whole parsed reply when omitted, else the dotted path within it |
+
+`field` is a dot-separated path evaluated against the reply's structured
+content — `json.items` in the example above means "the agent's reply, parsed
+as JSON, must have a top-level `items` key" (so a reply of
+`{"items": [1, 2, 3]}` satisfies both `field_present` on `json.items` and
+`non_empty_list` on the same path). The `json.` prefix mirrors the engine's
+`{ json, text, raw }` item envelope everywhere else in this document — see
+[What an agent node receives from upstream](#what-an-agent-node-receives-from-upstream-and-its-bound)
+— it does not name a real top-level `json` key on the reply itself.
+
+**No-field `non_empty_list`** checks the parsed reply as a whole: a reply that
+IS the literal JSON text of a non-empty array (`["a", "b"]`) or object
+(`{"a": 1}`) passes; a plain-prose reply, or one that parses to a scalar,
+fails. An unrecognized `require` value is rejected at author time by
+[`validate`](../../../src/company/workflow_file.rs) — a graph naming one never
+saves — and fails OPEN (a `tracing::warn!`, the node proceeds) if it somehow
+still reaches the evaluator, the same fail-open stance
+[`HarnessAgentRunner::run_turn`](../../../src/workflows/caps/mod.rs)'s own
+module doc applies to a failed attempt-row mint: observability must never be
+able to fail the work it is observing.
+
+**On failure, the node halts — the same shape as `on_error = "stop"`.** The
+attempt settles `Failed` with a plain-English message naming the gap — e.g.
+"the node's output is missing `json.items` — the expected field never
+landed." — `run_turn` returns `Err`, and because `on_error` defaults to
+`"stop"` and `retry.max_attempts` to `1`, nothing downstream ever sees the
+insufficient output. This runs BEFORE the iteration-cap check (#1865), deliberately: a
+capped turn's partial reply is exactly the truncation class a postcondition is
+meant to catch, so a declared postcondition is checked regardless of whether
+the cap already would have failed the attempt on its own.
+
+**On success, the node's emitted output reflects what the gate certified.**
+When (and only when) a postcondition is declared, the node's output — what a
+downstream `=item.json.<field>` binding reads — is enriched with the parsed
+reply: an object reply's own keys are merged in (so `json.items` above also
+resolves downstream, not only inside the gate's own check), and a bare-array
+reply replaces the emitted value with the array itself (so `=item.json`
+resolves to the exact array `non_empty_list` validated). A node with **no**
+declared postcondition is entirely unaffected by any of this — its output
+stays the plain `{text, agent_ref}` shape it always had, regardless of what
+the agent happens to reply, so this feature changes nothing for a workflow
+that never opted into it.
+
 ## The engine-only kinds OpenCompany rejects
 
 The engine catalog carries four kinds the parser does **not** accept:
