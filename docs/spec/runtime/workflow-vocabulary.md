@@ -256,6 +256,21 @@ as JSON, must have a top-level `items` key" (so a reply of
 [What an agent node receives from upstream](#what-an-agent-node-receives-from-upstream-and-its-bound)
 — it does not name a real top-level `json` key on the reply itself.
 
+**`json.text` and `json.agent_ref` are reserved and refused at save.** The
+emitted output always carries the raw reply string under `text` and the real
+roster id under `agent_ref` — that is what lets `delivery.rs::report_text`
+keep finding prose in a delivered report for the overwhelming majority of
+nodes whose reply isn't structured at all, rather than the literal string
+`"null"`. A `field` that drills into the *parsed* reply's own `text` or
+`agent_ref` key (e.g. `json.text` when the model happens to answer with
+`{"text": [...]}`) would validate whatever shape the model put there, but a
+downstream `=item.json.text`/`=item.json.agent_ref` binding always reads the
+raw reply string / real roster id regardless — a gate that can pass on one
+value while the field it named resolves to a different one downstream.
+`parse_workflow` refuses this at author time, naming both reserved paths in
+the error, rather than let a workflow ship a gate that certifies a shape the
+emitted output can never actually hold.
+
 **No-field `non_empty_list`** checks the parsed reply as a whole: a reply that
 IS the literal JSON text of a non-empty array (`["a", "b"]`) or object
 (`{"a": 1}`) passes; a plain-prose reply, or one that parses to a scalar,
