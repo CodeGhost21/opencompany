@@ -1017,7 +1017,10 @@ function distinctSenders(
  * Returns the reply ids to render inline, so the caller can lay each out in its
  * own place and leave the remainder on the parent's chip.
  */
-function inlineFirstReplies(messages: ChatMessage[], replies: Map<string, ChatMessage[]>): Set<string> {
+function inlineFirstReplies(
+  messages: ChatMessage[],
+  replies: Map<string, ChatMessage[]>,
+): Set<string> {
   const position = new Map<string, number>();
   const roots = new Set<string>();
   messages.forEach((m, i) => {
@@ -1027,6 +1030,25 @@ function inlineFirstReplies(messages: ChatMessage[], replies: Map<string, ChatMe
 
   const inline = new Set<string>();
   for (const [rootId, bucket] of replies) {
+    // **An orphan renders flat rather than not at all** (issue #1890 D).
+    //
+    // A reply whose parent is absent from this transcript used to be dropped,
+    // which was safe while only hand-opened threads carried a `parentId`. Part
+    // 1 gives *every* answer one, so the same rule silently deletes answers —
+    // and two of them are ordinary: a reply to a message another client sent
+    // (this console deliberately does not draw an operator line it did not
+    // send), and a reply that arrives before `reconcileIds` has swapped a
+    // locally-sent message's id for the host's, which a killed POST leaves
+    // pending for good.
+    //
+    // There is no summary row to fold into, so the whole bucket renders. The
+    // cost is a reply whose root fell outside the history window reading
+    // without its question; the alternative is an answer that is simply gone,
+    // and a lost answer is the failure this whole sub-issue exists to prevent.
+    if (!position.has(rootId)) {
+      for (const orphan of bucket) inline.add(orphan.id);
+      continue;
+    }
     // **Only a root's reply is ever promoted.** A reply-to-a-reply must render
     // nowhere, and promoting one would give the console a second fold level —
     // which is not a cosmetic difference: `cycle_conversation`
@@ -1034,12 +1056,14 @@ function inlineFirstReplies(messages: ChatMessage[], replies: Map<string, ChatMe
     // *root* rather than to the message that raised it precisely because a
     // grandchild is unrenderable, and #435's routing choice would quietly stop
     // being necessary. Pinned by the one-level-deep test.
+    //
+    // A grandchild whose own parent IS present is therefore still dropped —
+    // the orphan arm above is about a root this transcript never held, not
+    // about relaxing the depth rule.
     if (!roots.has(rootId)) continue;
     const root = position.get(rootId);
     const first = bucket[0];
     const answer = first === undefined ? undefined : position.get(first.id);
-    // A reply whose parent is not in this channel folds nowhere and renders
-    // nowhere — the pre-existing rule, unchanged.
     if (root === undefined || answer === undefined) continue;
     const own = new Set(bucket.map((r) => r.id));
     let interleaved = false;
@@ -1052,6 +1076,30 @@ function inlineFirstReplies(messages: ChatMessage[], replies: Map<string, ChatMe
     if (!interleaved) inline.add(first.id);
   }
   return inline;
+}
+
+/**
+ * Which of `messages` render **inline** in the channel rather than folding into
+ * a parent's summary row (issue #1890 D).
+ *
+ * The public form of {@link inlineFirstReplies}, for the surfaces that must
+ * agree with the timeline about what is on screen. Today that is the mention
+ * badge: a summons inside a *folded* reply must stay unread until its thread is
+ * opened, and one inside an *inline* reply is visible the moment the channel
+ * is, so deferring it would leave a badge nobody can clear.
+ *
+ * Two surfaces, one definition — the discipline `owns` enforces on the host
+ * side, and the reason this is exported rather than reimplemented.
+ */
+export function inlineReplyIds(messages: ChatMessage[]): ReadonlySet<string> {
+  const replies = new Map<string, ChatMessage[]>();
+  for (const m of messages) {
+    if (!m.parentId) continue;
+    const bucket = replies.get(m.parentId);
+    if (bucket) bucket.push(m);
+    else replies.set(m.parentId, [m]);
+  }
+  return inlineFirstReplies(messages, replies);
 }
 
 /**

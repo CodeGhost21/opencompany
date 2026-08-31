@@ -95,6 +95,7 @@ import {
   clearTaskCardEverywhere,
   directMessageChannels,
   directMessageForId,
+  inlineReplyIds,
   isOperatorChannelDto,
   latestBudgetPauseMessageIdByAgent,
   mergeBudgetPauseMarkerRead,
@@ -1081,9 +1082,16 @@ export function ChatView({
    * `subjectId` on a mention notification meets through `hostMessageId`.
    */
   const replyParents = useMemo(() => {
+    // Issue #1890 D: only the **folded** replies belong here. Since part 2 a
+    // thread's first reply can render inline, and an inline reply is on screen
+    // the moment the channel is — deferring its mention would leave a badge
+    // that opening the channel cannot clear and no thread panel exists to.
+    // Asked of `buildTimeline`'s own rule rather than re-derived, so the two
+    // surfaces cannot drift about what is visible.
+    const inline = inlineReplyIds(messages);
     const map = new Map<string, string>();
     for (const m of messages) {
-      if (m.parentId) map.set(m.id, m.parentId);
+      if (m.parentId && !inline.has(m.id)) map.set(m.id, m.parentId);
     }
     return map;
   }, [messages]);

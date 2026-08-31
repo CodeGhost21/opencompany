@@ -145,12 +145,62 @@ describe("buildTimeline", () => {
     expect(rendered).not.toContain("c");
   });
 
-  it("drops a reply whose parent is not in this channel rather than promoting it", () => {
-    // A reply pointing at an id this transcript does not hold must not fall
-    // back to the channel — that is precisely the "the console lost my thread"
-    // symptom reconcileIds exists to prevent.
+  /**
+   * **Reversed by issue #1890 D, deliberately.** This asserted that a reply
+   * pointing at an id the transcript does not hold is *dropped* — safe while
+   * only hand-opened threads carried a `parentId`, because such a reply was
+   * rare and promoting it risked the "the console lost my thread" flicker
+   * `reconcileIds` exists to prevent.
+   *
+   * Part 1 gives every answer a parent, so the same rule silently deletes
+   * answers, and two of the cases are ordinary rather than exotic:
+   *
+   * - a reply to a message **another client** sent, since this console does not
+   *   draw an operator line it did not send (`chat-live-events.spec.ts`);
+   * - a reply that arrives before `reconcileIds` has swapped a locally-sent
+   *   message's id for the host's — which a killed POST leaves pending for
+   *   good (`chat-detached-post-failure.spec.ts`).
+   *
+   * Both were caught by E2E, not here. The trade is a reply whose root fell
+   * outside the history window reading without its question, against an answer
+   * that is simply gone; a lost answer is the failure this sub-issue exists to
+   * prevent.
+   */
+  it("renders a reply whose parent is not in this channel flat, rather than losing it", () => {
     const entries = buildTimeline([message({ id: "b", parentId: "missing" })], CHANNEL, []);
-    expect(entries).toHaveLength(0);
+    expect(entries.map((e) => e.message.id)).toEqual(["b"]);
+    // No chip: there is no root here to summarise anything under.
+    expect(entries[0].replies).toEqual([]);
+  });
+
+  it("renders every orphan of one absent parent, not just the first", () => {
+    // The first-reply-inline rule needs a summary row to put the rest on. With
+    // no root in the transcript there is none, so all of them render or the
+    // remainder is lost for the same reason the single case was.
+    const entries = buildTimeline(
+      [
+        message({ id: "b", parentId: "missing", at: T0 + 1 }),
+        message({ id: "c", parentId: "missing", at: T0 + 2 }),
+      ],
+      CHANNEL,
+      [],
+    );
+    expect(entries.map((e) => e.message.id)).toEqual(["b", "c"]);
+  });
+
+  it("still renders a grandchild nowhere when its own parent IS present", () => {
+    // The orphan arm is about a root the transcript never held. It must not
+    // relax the one-level-deep rule for a reply whose parent is right there.
+    const entries = buildTimeline(
+      [
+        message({ id: "a" }),
+        message({ id: "b", parentId: "a", at: T0 + 1 }),
+        message({ id: "c", parentId: "b", at: T0 + 2 }),
+      ],
+      CHANNEL,
+      [],
+    );
+    expect(entries.map((e) => e.message.id)).toEqual(["a", "b"]);
   });
 
   it("groups consecutive lines from one sender into a run", () => {
