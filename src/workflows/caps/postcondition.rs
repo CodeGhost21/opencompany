@@ -15,7 +15,7 @@
 //! gated on #1861's blocker-park plumbing landing first — this module only
 //! ever returns `Ok` or a plain-English gap sentence.
 //!
-//! # Fail-open on the unknown case
+//! # Fail-open on the unknown case, fail-closed on the broken one
 //!
 //! [`evaluate_postcondition`] is validated at author time
 //! ([`crate::company::workflow_file::validate`] rejects an unknown `require`
@@ -26,6 +26,23 @@
 //! [`super::HarnessAgentRunner::run_turn`] already applies to a failed
 //! attempt-row mint) — so the unknown case warns and lets the node through
 //! rather than halting a run over a predicate this binary cannot evaluate.
+//!
+//! That reasoning does NOT extend to `field_present` losing its own `field`.
+//! `validate` requires every `field_present` postcondition to carry a
+//! non-empty `field`, so this function is never handed one the validator
+//! approved without it — a `field_present` spec reaching here with a
+//! missing/non-string `field` means something rewrote a validated value
+//! between save and this call (issue #1937/#1866: the whole `postcondition`
+//! rides inside the engine-resolved node config, so an authored `field =
+//! "=item.missing"` — a plausible mistake, since `=`-expressions are the
+//! normal syntax everywhere else in config — gets evaluated by the SAME
+//! generic config resolution as any other value, and a miss resolves to
+//! `null` indistinguishably from "no field was ever authored"). Unlike an
+//! unrecognized `require`, this is not "a predicate this binary cannot
+//! evaluate" — `field_present` is fully understood here, it just has nothing
+//! left to check. Passing it through anyway would silently switch the whole
+//! gate off for exactly the graphs that most need it caught, so this one
+//! case fails CLOSED instead: see the `field_present` arm below.
 
 use serde_json::Value;
 
@@ -43,13 +60,18 @@ use serde_json::Value;
 ///   trimming whitespace. Catches the truncation class this issue opens
 ///   with: a capped or refused turn that still produced *some* prose.
 /// - `field_present` — the dotted `field` path resolves to a present,
-///   non-null value in `output`.
+///   non-null value in `output`. If `field` itself did not resolve to a
+///   usable name (a validated postcondition's own `field` going missing/
+///   non-string between save and this call), this fails CLOSED rather than
+///   passing the node through — see the module doc's second section.
 /// - `non_empty_list` — the target (the whole `output`, or the dotted
 ///   `field` path within it when given) is a JSON array with at least one
 ///   element.
 ///
-/// Any other `require` value fails OPEN: a `tracing::warn!` is emitted and
-/// the node is allowed to proceed. See the module doc for why.
+/// Any OTHER `require` value (one this function does not recognize at all)
+/// fails OPEN: a `tracing::warn!` is emitted and the node is allowed to
+/// proceed. See the module doc for why that case, specifically, is
+/// different from `field_present` losing its `field`.
 pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(), String> {
     let require = spec.get("require").and_then(Value::as_str).unwrap_or("");
     let field = spec
@@ -68,16 +90,37 @@ pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(),
         }
         "field_present" => {
             let Some(path) = field else {
-                // Author-time validation requires `field` on `field_present` —
-                // see `WorkflowPostconditionDef` validation. A spec reaching here
-                // without one is the same "binary disagrees with the validator
-                // that saved this graph" case the module doc describes.
+                // Codex #3894038816 on #1937 — deliberately NOT the same
+                // fail-open shape as the unknown-`require` case below. That
+                // one is genuinely ambiguous (a future/older validator this
+                // binary disagrees with — see the module doc). This one is
+                // not: `workflow_file::validate` REQUIRES a `field` on every
+                // `field_present` postcondition it ever saves, so a spec
+                // reaching here with no usable `field` cannot be a graph the
+                // validator approved as written — it means something
+                // rewrote a validated `field` into null/non-string between
+                // save and this call (an authored `=`-expression resolved
+                // away by config resolution is the concrete case that
+                // motivated this; see `workflows::caps::tests::
+                // a_field_resolved_away_by_an_authored_expression_fails_closed_at_run_turn`).
+                // `field_present`'s entire job is checking that one named
+                // field exists — evaluating it with no field to check is
+                // failing the very thing it exists to verify, not an
+                // ambiguous no-op. Fail CLOSED: an authored safety gate must
+                // never be silently switched off by a resolution quirk this
+                // binary did not foresee.
                 tracing::warn!(
                     require,
-                    "workflow postcondition: `field_present` declared with no `field` — \
-                     passing the node through unevaluated"
+                    "workflow postcondition: `field_present` declared but its `field` did \
+                     not resolve to a name to check — failing the node rather than silently \
+                     passing an unverifiable gate"
                 );
-                return Ok(());
+                return Err(
+                    "the node's postcondition declares `field_present` but its `field` did \
+                     not resolve to a name to check — refusing to advance rather than \
+                     silently pass an unverifiable gate."
+                        .to_string(),
+                );
             };
             match resolve_path(output, path) {
                 Some(value) if !value.is_null() => Ok(()),
@@ -210,6 +253,32 @@ mod tests {
                 &output
             )
             .is_err()
+        );
+    }
+
+    /// Codex #3894038816 on #1937 — the silent-disable finding. `postcondition`
+    /// rides inside the engine-resolved node config (see
+    /// `workflows::caps::tests::a_field_resolved_away_by_an_authored_expression_fails_closed_at_run_turn`
+    /// for the full authored-`"=item.missing"` → config-resolution trace), so
+    /// a `field` that resolved to anything other than a present string reaches
+    /// this function looking IDENTICAL to a `field_present` declared with no
+    /// `field` at all — a shape `workflow_file::validate` refuses to ever save
+    /// (`postcondition_field_present_without_a_field_is_rejected`). Before
+    /// this fix, that shape was fail-OPEN here: a `tracing::warn!` and
+    /// `Ok(())`, silently letting every reply through a gate the workflow file
+    /// plainly declares. `field_present`'s entire job is checking one named
+    /// field exists — evaluating it with no field to check is not an
+    /// ambiguous "maybe intended" gap the way an unrecognized `require` is
+    /// (the module doc's fail-open case), so this fails CLOSED instead.
+    #[test]
+    fn field_present_declared_with_a_field_that_resolved_away_fails_closed() {
+        let spec = json!({ "require": "field_present", "field": null });
+        let output = json!({ "text": "a reply that would satisfy nothing in particular" });
+        assert!(
+            evaluate_postcondition(&spec, &output).is_err(),
+            "a `field_present` postcondition whose own `field` did not resolve to a \
+             string must halt the node, not silently pass it — RED on the code as it \
+             stood before this fix: this returned Ok(())"
         );
     }
 
