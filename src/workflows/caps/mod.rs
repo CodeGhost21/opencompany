@@ -2286,28 +2286,40 @@ impl HarnessAgentRunner {
                 Value::Array(_) => {
                     value = parsed_reply.clone();
                 }
-                // Codex #3893851364 review: a scalar reply (`42`, `true`,
-                // `"ok"`) is the same "gate certified this, but the emitted
-                // value doesn't carry it" gap as the bare-array case just
-                // above. `field_present` on `field = "json"` passes for ANY
-                // present, non-null value under the envelope's `json` key —
-                // that includes a scalar, which the best-effort JSON parse
-                // produces just as readily as an object or array. A scalar
-                // can't merge into the `{text, agent_ref}` object shape
-                // either (there's no key to merge it under), so replace
-                // `value` wholesale here too, matching the array arm rather
-                // than falling through to the catch-all below and silently
-                // discarding the certified value. `item.text` still
-                // independently carries the raw reply string, unaffected.
-                Value::Bool(_) | Value::Number(_) | Value::String(_) => {
-                    value = parsed_reply.clone();
-                }
+                // Codex #3894162757 on #1937 — a scalar reply does NOT get
+                // the same wholesale-replace treatment as an array, despite
+                // looking like the same case. An earlier round tried exactly
+                // that (`value = parsed_reply.clone()` here too) and it was
+                // wrong: unlike an array, a bare scalar can never survive to
+                // a downstream binding regardless of what this function
+                // does. tinyflows' own envelope construction
+                // (`finish_agent_run` / `envelope::structured_of`, vendored)
+                // clamps `AgentRunOutcome.json` to `Value::Null` for
+                // anything that is not an `Object`/`Array` — "scalars carry
+                // no structure" is that crate's own stated invariant, not
+                // something this function can opt out of. Setting `value` to
+                // a bare `42` here just moves the wrong-value-downstream bug
+                // one layer out: `run_turn` would return the certified `42`,
+                // but the ENGINE would still null it before any `=item.json`
+                // binding ever saw it — proven end-to-end by
+                // `workflows::runner::tests::
+                // a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`.
+                // The gate itself now refuses to certify this shape in the
+                // first place (`postcondition::evaluate_postcondition`'s
+                // `field_present` arm rejects a scalar under the bare `json`
+                // root) — an author who wants a scalar delivered needs the
+                // agent to reply with an object naming it
+                // (`{"score": 42}`) and target the dotted path
+                // (`field = "json.score"`), which already works via the
+                // `Value::Object` merge arm above. So this arm is
+                // deliberately absent: a scalar falls to the catch-all below,
+                // same as any other reply that cannot merge cleanly.
+                //
                 // Not valid JSON (the common case, even among nodes that
                 // declared a postcondition — e.g. `non_empty` needs only
-                // prose) or a literal JSON `null` reply — leave `value` as
-                // the ordinary `{text, agent_ref}` shape. A `null` never
-                // carries anything a downstream `=item.json.*` binding could
-                // usefully read, so there's nothing to replace it with.
+                // prose), a literal JSON `null` reply, or — per the above — a
+                // bare scalar: leave `value` as the ordinary `{text,
+                // agent_ref}` shape. Nothing here can usefully replace it.
                 _ => {}
             }
         }
@@ -3936,22 +3948,21 @@ mod tests {
         assert_eq!(outcome.reply, "[\"x\", \"y\"]");
     }
 
-    /// Codex #3893851364 on #1937 — the scalar companion to the bare-array
-    /// fix above. `field_present` on `field = "json"` passes for ANY present,
-    /// non-null value under the envelope's `json` key — including a bare
-    /// scalar reply like `42`, which is valid JSON the best-effort parse
-    /// happily produces. Before this fix, the emission match had an arm for
-    /// `Value::Object` (merge) and `Value::Array` (replace wholesale) but
-    /// none for a scalar, so it fell through to the catch-all `_ => {}` and
-    /// `value` stayed the plain `{text, agent_ref}` wrapper — the gate
-    /// certified `42`, but a downstream `=item.json` binding resolved to the
-    /// wrapper, not the number. RED on the code as it stood before this fix:
-    /// the final assertion (`value, json!(42)`) failed with
-    /// `value = {"agent_ref": "researcher", "text": "42"}` instead.
+    /// Codex #3894162757 on #1937 — supersedes a prior round's
+    /// `a_bare_scalar_reply_replaces_the_emitted_value_wholesale`, which
+    /// asserted `run_turn`'s OWN return value and never noticed that
+    /// tinyflows nulls a bare scalar one layer further out (see the doc
+    /// comment on the removed `Value::Bool(_) | Value::Number(_) |
+    /// Value::String(_)` emission arm, and
+    /// `workflows::runner::tests::a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
+    /// for the full-graph proof of the delivery gap that test missed).
+    /// `field_present` on the bare `field = "json"` root can now never
+    /// pass for a scalar reply — the gate refuses to certify a shape it
+    /// knows cannot reach a downstream `=item.json` binding.
     #[tokio::test]
-    async fn a_bare_scalar_reply_replaces_the_emitted_value_wholesale() {
+    async fn a_bare_scalar_reply_fails_field_present_on_the_bare_json_root() {
         let dir = tempfile::Builder::new()
-            .prefix("oc-1937-bare-scalar-emission-")
+            .prefix("oc-1937-bare-scalar-rejected-")
             .tempdir()
             .expect("tempdir");
         let (deps, _journal) =
@@ -3988,7 +3999,7 @@ mod tests {
             publish_refusal_claim,
         );
 
-        let (value, outcome) = runner
+        let result = runner
             .run_turn(
                 "researcher",
                 json!({
@@ -3997,20 +4008,23 @@ mod tests {
                     "postcondition": { "require": "field_present", "field": "json" }
                 }),
             )
-            .await
-            .expect(
-                "a reply that IS valid JSON — even a bare scalar like `42` — satisfies \
-                 field_present on `json`: the envelope's `json` key holds a present, \
-                 non-null value",
-            );
+            .await;
 
-        // The actual finding: the SAME scalar `field = \"json\"` certified
-        // above must be exactly what the emitted value holds — not the old
-        // `{text, agent_ref}` wrapper the gate never validated.
-        assert_eq!(value, json!(42));
-        // The raw reply string is still available independently, same as the
-        // array case: nothing that reads the prose loses it.
-        assert_eq!(outcome.reply, "42");
+        let err = result.expect_err(
+            "a bare scalar reply (`42`) must NOT satisfy field_present on the bare \
+             `json` root — tinyflows can never deliver a scalar through \
+             `=item.json` (it normalizes anything but Object/Array to null), so \
+             certifying it would pass a gate whose value the workflow can never \
+             actually read",
+        );
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("json") && message.contains("scalar"),
+            "the halting message should say why a scalar under `json` cannot \
+             satisfy this gate: {message}"
+        );
     }
 
     /// Codex #3894038816 on #1937 — the silent-disable finding, traced
