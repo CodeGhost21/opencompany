@@ -59,7 +59,8 @@ stopped, not that it succeeded, `column` carries where the card landed,
 from the wire, for the many tasks that produce no file; see
 [artifacts.md](artifacts.md) — and `origin_chat_id` records the conversation the
 card was raised from, absent when none did, see
-[the settle marker below](#the-settle-a-channel-can-see-issue-377)),
+[the settle marker below](#the-settle-a-channel-can-see-issue-377), with
+`origin_parent` naming the thread inside that channel since issue #1890),
 `TaskDiscussionPosted` (a human posted to a card's discussion thread, issue
 #335 — the Discussion tab's whole store, folded back out by
 `GET …/tasks/{task_id}` beside that card's timeline), `WorkflowUpdated` /
@@ -343,6 +344,45 @@ only reword a marker across a reload; it can never double one.
 Pre-#377 journal lines carry no origin, so existing channels grow no
 retroactive markers. That is correct rather than a migration gap: the fact was
 not recorded, and inventing one would be worse than its absence.
+
+#### The thread inside that channel (issue #1890 B)
+
+A channel holds any number of live threads, so an origin naming only the channel
+files every settle flat in it — and the thread that asked for the work never
+shows it finishing. `TaskRecord` therefore gains `origin_parent:
+Option<EventSeq>` beside `origin_chat_id`, and `DeskTaskCompleted` carries it on
+exactly the terms above: **captured off the card** at the same single emission
+point, never derived, since nothing else on the event knows which thread asked.
+
+Read as a **pair**, never alone. A marker is filed by `origin_chat_id` first and
+only then narrowed by `origin_parent`, because `None` means two different things
+depending on the other field: the *channel-level conversation* when a channel is
+named, and nothing at all when it is not — a board-native card has both absent.
+
+Both wire surfaces carry it:
+
+* `GET …/chat/history` and the GraphQL `Message` projection set the marker's
+  existing `parentId`, rendered the same way an operator message's parent is —
+  the host's sequence as a decimal string. A threaded marker is therefore folded
+  into its root's replies by the console's timeline rather than rendered inline,
+  which is the whole point.
+* The `desk_task_completed` stream frame gains `parentId`, a **string**, and
+  **omits it rather than sending null** — the same presence-check shape `chatId`
+  takes, so absent means "raised at channel level" without a null check. The two
+  must agree: a marker that rendered inline live and jumped into a thread on
+  reload is the live-vs-history split the `h<seq>` identity dedupe exists to
+  close.
+
+Additive on the same contract as everything else here — `#[serde(default,
+skip_serializing_if = …)]` on both fields — so no stored board migrates on any
+backend, an unthreaded settle serializes byte-for-byte as it did before, and a
+pre-#1890-B journal line replays as channel-level. Which is the truth about such
+a line, not a default standing in for one.
+
+One creation path deliberately still writes `None`: `POST …/tasks` ("Add to
+board"), whose body carries a channel and no thread. That is unchanged from
+before, and closing it needs a body field plus a console change — the transcript
+holds a rendered message id, not an `EventSeq`.
 
 ### What a retry would repeat (issue #351)
 
