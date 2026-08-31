@@ -71,8 +71,15 @@ pub(crate) const TRACE_RETENTION_LIMIT: usize = 32;
 /// `archive` in `server::provision` and runs the same three removals.
 #[async_trait::async_trait]
 pub trait CompanyEvictor: Send + Sync {
-    /// Removes `company` from the registry and drops its ownership rows.
-    async fn evict(&self, company: &CompanyId);
+    /// Removes `company` from the registry and drops its ownership rows —
+    /// but only if the runtime still registered under `company` is the exact
+    /// instance `expected` names. `expected` is the runtime this call site
+    /// itself just read `status()` as `"archived"` from; passing it lets the
+    /// implementation refuse to remove a replacement that has since taken
+    /// the id over (a rebuild swap, the production case) instead of evicting
+    /// whatever it finds by id alone (codex review on #1943, PR comment
+    /// 3894439351).
+    async fn evict(&self, company: &CompanyId, expected: &Arc<CompanyRuntime>);
 }
 
 /// Retires expired approvals, expired grants and stale fire claims for every
@@ -150,7 +157,7 @@ impl MaintenanceTicker {
                         %company,
                         "[maintenance] evicting a company left registered after archive"
                     );
-                    evictor.evict(&company).await;
+                    evictor.evict(&company, &runtime).await;
                 }
             }
         }
@@ -681,7 +688,7 @@ mod test {
 
     #[async_trait::async_trait]
     impl super::CompanyEvictor for RecordingEvictor {
-        async fn evict(&self, company: &CompanyId) {
+        async fn evict(&self, company: &CompanyId, _expected: &Arc<CompanyRuntime>) {
             self.evicted
                 .lock()
                 .expect("evictor mutex")
