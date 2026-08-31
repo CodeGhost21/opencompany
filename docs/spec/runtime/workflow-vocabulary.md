@@ -267,6 +267,18 @@ with a message pointing at the `json.`-prefixed form, the same way it refuses
 `field_present` with no `field` at all above — a gate that can never pass is
 as much an authoring bug as one that is missing entirely.
 
+**`field` is not the place for an `=`-expression.** `postcondition` lowers
+into the same engine-resolved node config as everything else in this
+document, so it is tempting to write `field = "=item.some_key"` the way
+`args`/`input`/etc. do elsewhere. Don't: the rooted-`field` rule above
+already refuses it at author time (no `=`-expression's first dotted segment
+can ever equal `json`/`text`/`agent_ref`), and even if a graph reached
+runtime with one anyway — an older validator, a hand-edited seed file — a
+`field` that resolves away to null is refused at evaluation time too, rather
+than silently letting the reply through: `field_present`'s whole job is
+checking that one named field exists, so a resolution quirk that erases the
+name it was told to check fails the gate, not the other way around.
+
 **`json.text` and `json.agent_ref` are reserved and refused at save.** The
 emitted output always carries the raw reply string under `text` and the real
 roster id under `agent_ref` — that is what lets `delivery.rs::report_text`
