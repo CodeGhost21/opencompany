@@ -101,6 +101,22 @@ export function approvalsForTask(
   );
 }
 
+/**
+ * Why Resume/Retry is down while a card is blocked — the sentence, said once.
+ *
+ * The other half of {@link taskApprovalBlock}, and here for the same reason the
+ * derivation is one function: the `disabled` and the explanation of it are the
+ * same claim, and a button that went down while its tooltip said something else
+ * would be exactly the disagreement that doc rules out. Read by the board card
+ * (`TaskCard`) and by the task detail's control bar.
+ *
+ * `TaskCard` still carries this sentence inline. Adopting the constant there is
+ * a one-line follow-up, deliberately not bundled into the detail fix — the
+ * wording here is copied from it verbatim, so the two already read the same.
+ */
+export const RESUME_BLOCKED_REASON =
+  "Blocked — decide its approvals first; resuming re-runs the work from the start.";
+
 /** Why a card is stopped — read by its board card and by its Resume button (#883). */
 export interface TaskApprovalBlock {
   /** The still-parked approvals for this card, oldest park first. */

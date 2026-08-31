@@ -9,7 +9,8 @@
 // `Unknown`, and the save failed with a `400` about a field the operator never
 // touched. Diffing means an untouched field is never re-validated.
 
-import type { PatchTask, Task } from "@/api/tasks";
+import type { IrreversibleEffect, PatchTask, Task } from "@/api/tasks";
+import { BOARD_WORKING } from "@/lib/board-columns";
 
 /**
  * The fields the operator actually changed, and only those.
@@ -32,4 +33,56 @@ export function computeTaskPatch(draft: PatchTask, current: Task): PatchTask {
     patch.deliverable = draft.deliverable ?? "once";
   }
   return patch;
+}
+
+/**
+ * What the host's journal recorded against this card, as a caller hands it in.
+ *
+ * Both fields are optional, and "absent" is a **third** state that must not
+ * collapse into "clean": a caller that has not wired the read knows nothing
+ * about this card's effects, which is not the same claim as a read that came
+ * back empty. `dispatchNeedsConfirm` treats absent the way the host treats
+ * `historyIncomplete` — as "cannot say", which confirms.
+ */
+export interface EffectHistory {
+  /** The effects the journal recorded as executed, or absent if not read. */
+  irreversible?: IrreversibleEffect[];
+  /** Whether the journal holds executed history it cannot describe (#351). */
+  historyIncomplete?: boolean;
+}
+
+/**
+ * Whether saving this patch re-enters the run.
+ *
+ * `{ column: "working" }` is the *identical* write the Task Detail screen's
+ * Retry button makes (`patchColumn` there): the host resolves the `working`
+ * phase to `in_progress`, which dispatches. The edit dialog's Column select can
+ * emit it too, which is how a `<Select>` plus Save came to be an unguarded
+ * second route to the thing issue #351 wrapped in a confirmation.
+ *
+ * Only `working` counts. `pending` and `done` are parks, and a stage word the
+ * dialog never offers is not something to guess about.
+ */
+export function patchDispatchesRun(patch: PatchTask): boolean {
+  return patch.column === BOARD_WORKING;
+}
+
+/**
+ * Whether saving this patch must stop and say what already happened (#351).
+ *
+ * The condition is deliberately the same one `RetryButton` uses — confirm when
+ * the journal recorded an irreversible effect, or when it admits it cannot
+ * describe its own history — rather than confirming on every dispatch. A dialog
+ * that asked on a card where nothing is at stake trains the operator to click
+ * through it, which is how the confirmation stops working on the card where it
+ * matters.
+ */
+export function dispatchNeedsConfirm(patch: PatchTask, history: EffectHistory): boolean {
+  if (!patchDispatchesRun(patch)) return false;
+  // Neither half read: the dialog cannot say this card is clean, so it says so
+  // by confirming. This is what keeps the guard live for a caller that has not
+  // wired the journal read yet, instead of silently passing a gap off as an
+  // all-clear.
+  if (history.irreversible === undefined && history.historyIncomplete === undefined) return true;
+  return (history.irreversible?.length ?? 0) > 0 || history.historyIncomplete === true;
 }
