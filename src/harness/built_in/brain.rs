@@ -994,6 +994,12 @@ impl HarnessBrain {
             .working_agent()
             .unwrap_or(&self.responder)
             .to_string();
+        // Every id `responder` held before a reassignment overwrote it — a
+        // hand-off's `[<old responder>] delegated to …` block stays on the
+        // note under that old name, so `relay_text`'s `known_labels` needs it
+        // too or the strip leaves that block's chrome in the relayed bubble
+        // (issue #1949 review, CodeRabbit 3895599021).
+        let mut prior_responders: Vec<String> = Vec::new();
 
         // Link the working agent to the card, and persist it BEFORE the turn
         // runs (#205). A card the CEO picked up used to keep `assignee = ""`
@@ -1245,7 +1251,8 @@ impl HarnessBrain {
                                 // The delegate answered: they own the card, and
                                 // every downstream write credits them.
                                 Some(handoff) => {
-                                    responder = handoff.delegate;
+                                    prior_responders
+                                        .push(std::mem::replace(&mut responder, handoff.delegate));
                                     let budget_paused = handoff.budget_paused;
                                     match handoff.reply {
                                         Some(reply) => {
@@ -1354,7 +1361,7 @@ impl HarnessBrain {
                     redirects += 1;
                     card.note = Some(append_result(
                         card.note.as_deref(),
-                        "operator redirect",
+                        lifecycle::OPERATOR_REDIRECT_ATTRIBUTION,
                         &fresh,
                     ));
                     if redirects > MAX_REDIRECTS_PER_DISPATCH {
@@ -1734,7 +1741,8 @@ impl HarnessBrain {
         };
         let orchestrator = self.orchestrator();
         let speaker = relay_speaker(&self.record(), &origin, &orchestrator);
-        let relay = lifecycle::relay_reply(&card, &responder, &speaker, origin);
+        let prior: Vec<&str> = prior_responders.iter().map(String::as_str).collect();
+        let relay = lifecycle::relay_reply(&card, &responder, &speaker, origin, &prior);
         Ok(Some(relay))
     }
 
@@ -1801,7 +1809,9 @@ impl HarnessBrain {
         // #1949 review, CodeRabbit thread 3895107568). Passing `orchestrator`
         // in the responder slot instead used to fire the "ran it" credit
         // whenever `speaker` diverged from it — i.e. every private DM.
-        let relay = lifecycle::relay_reply(&card, &speaker, &speaker, origin);
+        // A refusal never ran a turn, so there is no reassignment history to
+        // carry into the strip.
+        let relay = lifecycle::relay_reply(&card, &speaker, &speaker, origin, &[]);
         self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
             .await;
         Ok(Some(relay))
@@ -6567,7 +6577,7 @@ members = ["engineer"]
         finished.column = "done".to_string();
         finished.note = None;
         assert_eq!(
-            lifecycle::relay_text(&finished, "maya", "ceo"),
+            lifecycle::relay_text(&finished, "maya", "ceo", &[]),
             "\"Ship the thing\" is done (maya ran it)."
         );
     }

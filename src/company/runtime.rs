@@ -6475,7 +6475,7 @@ mod tests {
         let relay = |c: &TaskRecord| {
             let origin = c.origin_chat_id.clone().expect("origin");
             let speaker = relay_speaker(&record, &origin, orchestrator);
-            relay_reply(c, orchestrator, &speaker, origin)
+            relay_reply(c, orchestrator, &speaker, origin, &[])
         };
         let replies = HashMap::from([
             ("t-dm".to_string(), relay(&dm_card)),
