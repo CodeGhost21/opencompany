@@ -4704,6 +4704,19 @@ impl CompanyRecord {
     /// [`operator_feed_channel_fallback_shadowed`](Self::operator_feed_channel_fallback_shadowed)
     /// for the residual double-collision this leaves and why it is logged
     /// rather than resolved here.
+    ///
+    /// The **desk** half of the collision needs the identical stay-put
+    /// treatment `is_retired` gives the agent half, for the identical reason:
+    /// `desk_exists`/`resolve_desk_id` are live checks, so `delete_desk`
+    /// removing the colliding overlay desk would otherwise flip this back to
+    /// `OPERATOR_CHANNEL` on its own, orphaning reports already journaled
+    /// under the fallback and letting the deleted desk's own transcript
+    /// resurface as system-feed content — unlike the agent-removal path,
+    /// `delete_desk` had no tombstone at all (issue #1781 review, Codex P2
+    /// follow-up). [`Self::is_operator_feed_diverted`], set from
+    /// `delete_desk` via [`Self::divert_operator_feed_permanently`], closes
+    /// this the same way: sticky once true, checked here alongside
+    /// `is_retired`.
     pub fn operator_feed_channel(&self) -> &'static str {
         if self.desk_exists(crate::runtime::OPERATOR_CHANNEL)
             || self
@@ -4711,6 +4724,7 @@ impl CompanyRecord {
                 .is_some()
             || self.is_roster_agent(crate::runtime::channel::OPERATOR_CHANNEL)
             || self.is_retired(crate::runtime::channel::OPERATOR_CHANNEL)
+            || self.is_operator_feed_diverted()
         {
             crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
         } else {
@@ -5071,6 +5085,44 @@ impl CompanyRecord {
         if !self.is_retired(agent_id) {
             self.overlay_retired_agents.push(agent_id.to_string());
         }
+    }
+
+    /// Whether [`operator_feed_channel`](Self::operator_feed_channel) has ever
+    /// diverted because a **desk** (as opposed to a roster agent — see
+    /// [`Self::is_retired`] for that half) occupied the id or display name
+    /// `operator` (issue #1781 review, Codex P2).
+    ///
+    /// Backed by [`Self::overlay_retired_agents`] — the same tombstone list
+    /// [`Self::is_retired`] reads — keyed on
+    /// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+    /// ("operator-feed") rather than on any agent id. That key can never
+    /// collide with a real manifest agent id: agent ids, like desk ids, are
+    /// restricted to lowercase ascii/digits/underscore (`into_validated`'s
+    /// id rule), and "operator-feed" fails it on the hyphen alone — the same
+    /// reasoning [`OPERATOR_CHANNEL_COLLISION_FALLBACK`]'s own doc gives for
+    /// why nothing can ever *mint* that id. Reusing the list instead of a new
+    /// field keeps this sticky-tombstone semantics free of a second field to
+    /// thread through every store backend (fs/sqlite/mongodb) and the ~100
+    /// existing `CompanyRecord` literals across the crate.
+    pub fn is_operator_feed_diverted(&self) -> bool {
+        self.is_retired(crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK)
+    }
+
+    /// Records that the operator feed has diverted because of a **desk**
+    /// collision, permanently and idempotently (issue #1781 review, Codex
+    /// P2).
+    ///
+    /// Call this before removing whatever desk is holding
+    /// [`operator_feed_channel`](Self::operator_feed_channel) on the fallback
+    /// address — `desk_exists`/`resolve_desk_id` are live checks, so once the
+    /// desk is gone the divert would otherwise revert on its own: existing
+    /// reports already journaled under the fallback would vanish from the
+    /// pinned feed, and the deleted desk's own historical transcript (stored
+    /// under `chat_id == "operator"`) would resurface as if it were system-feed
+    /// content. See [`Self::retire_agent`] for the identical reasoning on the
+    /// agent-collision half, which this mirrors.
+    pub fn divert_operator_feed_permanently(&mut self) {
+        self.retire_agent(crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK);
     }
 
     /// One manifest roster row with the operator's edits applied — who this

@@ -878,6 +878,18 @@ async fn delete_desk(
             language::MANIFEST_DESK_DELETE.to_string(),
         )));
     }
+    // Tombstone the operator-feed divert before it can be lost (issue #1781
+    // review, Codex P2): `operator_feed_channel` currently diverts only while
+    // *something* live holds the id or display name `operator`, and the desk
+    // this call is about to remove may be that something. Recorded here,
+    // before the removal, while the live check can still see it — see
+    // `CompanyRecord::divert_operator_feed_permanently`'s doc for why this
+    // has to survive the desk being gone.
+    if record.operator_feed_channel()
+        == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
+    {
+        record.divert_operator_feed_permanently();
+    }
     let before = record.overlay_desks.len();
     record.overlay_desks.retain(|d| d.id != desk_id);
     if record.overlay_desks.len() == before {
@@ -6484,6 +6496,77 @@ mode = "full"
             .await
             .unwrap();
         assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Issue #1781 review (Codex P2): deleting a legacy overlay desk that was
+    /// holding `operator_feed_channel()` on the fallback address must not let
+    /// it revert to `OPERATOR_CHANNEL`.
+    ///
+    /// `desk_exists`/`resolve_desk_id` are live checks — with no tombstone,
+    /// removing the colliding desk makes them stop matching, so the divert
+    /// would silently flip back the moment `delete_desk` succeeds. Seeded
+    /// directly on the stored record rather than through `POST .../desks`
+    /// (as `list_desks_hides_an_overlay_desk_shadowing_general` does for its
+    /// own General case): `create_desk`'s own guard has refused the id and
+    /// name `operator` since `316bc9229`, so this shape can only be reached
+    /// by an overlay desk that predates it — exactly what this proves stays
+    /// safe to delete.
+    #[tokio::test]
+    async fn delete_desk_keeps_the_operator_feed_diverted_after_the_collision_is_gone() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut record = runtime.store().load(&id).await.unwrap().unwrap();
+        record.overlay_desks.push(OverlayDesk {
+            id: "operator".to_string(),
+            name: "Legacy Ops".to_string(),
+            description: None,
+            members: vec![],
+            responder: ResponderMode::Lead,
+        });
+        runtime.store().save(&record).await.unwrap();
+
+        let reloaded = runtime.store().load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "fixture must start in the collision state this test exercises"
+        );
+
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let delete = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/operator")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+        let after = runtime.store().load(&id).await.unwrap().unwrap();
+        assert!(
+            !after.desk_exists(crate::runtime::channel::OPERATOR_CHANNEL),
+            "the colliding desk must actually be gone, or this is not \
+             exercising the live-check-flips-back failure mode at all"
+        );
+        assert_eq!(
+            after.operator_feed_channel(),
+            crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "the feed address must stay on the fallback once the desk that \
+             caused the collision is deleted — flipping back to \
+             OPERATOR_CHANNEL would orphan every report already journaled \
+             under the fallback and let the deleted desk's own historical \
+             transcript (chat_id == \"operator\") resurface as system-feed \
+             content"
+        );
     }
 
     /// Add-member validation: an unknown desk is 404, an unknown teammate is
