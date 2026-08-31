@@ -81,7 +81,9 @@ use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::notifications::NotificationStore;
 use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
-use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent};
+use crate::ports::types::{
+    CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent, WorkflowNodeStatus,
+};
 use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
@@ -4175,6 +4177,42 @@ fn summarize_run(
     }
     if blocked.is_empty() && paused.is_empty() {
         md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
+    }
+
+    // Codex (PR #1883 review comment 3892522591): a node under `on_error =
+    // "continue"`/`"route"`, or one truncated at the iteration cap, settles
+    // this run as `Degraded` — `runner.rs` already turns that into a per-node
+    // notice (`errored_node_notice`) the console reads, but nothing here ever
+    // read it. An agent-started run only checked the blocked/paused and
+    // delivery cases above, so a run that silently continued past a broken
+    // step summarized as "reached its terminal node(s)" with no hint a step
+    // was skipped over — the model then reports a clean run to whoever asked
+    // for one, exactly the silence issue #981 closed for dropped deliveries
+    // two blocks below, just for a different fact.
+    //
+    // Read `run.nodes` directly rather than `run.notices`: `notices` also
+    // carries `blocked_notice` for every row already named above, and
+    // rendering the whole vector here would print those a second time. By the
+    // time a run settles, a row is still `Error` only when it is a genuine
+    // continued/capped error — the host's own blocked-node reclassification
+    // (mirroring `WorkflowRun::cancelled`'s) always leaves a blocked row
+    // `Blocked`, never `Error`, so this filter can never double up with
+    // `blocked` above. See `WorkflowNodeStatus::Blocked`'s doc.
+    let errored: Vec<&str> = run
+        .nodes
+        .iter()
+        .filter(|n| n.status == WorkflowNodeStatus::Error)
+        .map(|n| n.node_id.as_str())
+        .collect();
+    if !errored.is_empty() {
+        md.push_str(&format!(
+            "\n**{} step(s) did not finish cleanly, and the run continued past {}:** {}. This is \
+             NOT a clean run — check each step's own output for what went wrong before treating \
+             its results as complete.\n",
+            errored.len(),
+            if errored.len() == 1 { "it" } else { "them" },
+            errored.join(", ")
+        ));
     }
 
     // Issue #981: what happened to the reports. Nothing here read `deliveries`,
@@ -9857,6 +9895,86 @@ name = "Morning"
         assert!(
             md.contains("1 report(s) did NOT reach a destination"),
             "{md}"
+        );
+    }
+
+    /// Codex (PR #1883 review comment 3892522591): a node under `on_error =
+    /// "continue"`/`"route"` settles the run `Degraded`, and `runner.rs`
+    /// already writes a per-node notice for it — but `summarize_run` never
+    /// read `run.nodes`, so an agent-started run through this exact case
+    /// summarized as "reached its terminal node(s) without pausing for
+    /// approval" with no hint anything went wrong. This pins the fix: a row
+    /// still `Error` after settle must show up in the tool result.
+    #[test]
+    fn the_summary_says_when_a_node_errored_and_the_run_continued() {
+        let file = crate::company::parse_workflow(DEMO_WF).unwrap();
+        let degraded = WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": ["partial"] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Error,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+        let md = summarize_run(&file, &degraded, "run-degraded", RunOutputStored::Stored);
+        assert!(
+            md.contains("did not finish cleanly, and the run continued past it"),
+            "{md}"
+        );
+        assert!(md.contains("worker"), "{md}");
+        assert!(
+            md.contains("NOT a clean run"),
+            "an agent skimming for the happy-path sentence must not miss this: {md}"
+        );
+
+        // A node that finished clean says nothing about it — an ordinary
+        // summary is unchanged.
+        let clean = WorkflowRun {
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Ok,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            ..degraded.clone()
+        };
+        let md = summarize_run(&file, &clean, "run-clean", RunOutputStored::Stored);
+        assert!(!md.contains("did not finish cleanly"), "{md}");
+        assert!(!md.contains("NOT a clean run"), "{md}");
+
+        // A blocked node must not ALSO print here — it is already named by the
+        // "Blocked, waiting on a person" paragraph above, sourced from
+        // `blocked_nodes`, not from a node row's own status (the host never
+        // leaves a blocked row `Error`; see `WorkflowNodeStatus::Blocked`'s doc).
+        let blocked = WorkflowRun {
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Blocked,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "worker".into(),
+                tools: vec!["send_email".into()],
+                approval_ids: vec!["appr-1".into()],
+                unparkable: 0,
+                stranded: 0,
+            }],
+            ..degraded.clone()
+        };
+        let md = summarize_run(&file, &blocked, "run-blocked", RunOutputStored::Stored);
+        assert!(md.contains("Blocked, waiting on a person"), "{md}");
+        assert!(
+            !md.contains("did not finish cleanly"),
+            "a blocked row must not double up with the degraded paragraph: {md}"
         );
     }
 
