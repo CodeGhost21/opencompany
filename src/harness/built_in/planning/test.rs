@@ -639,20 +639,82 @@ fn the_native_branch_wins_even_when_composio_is_unreachable() {
     assert_eq!(verify_composio(&e, "gmail").0, PrereqStatus::Unknown);
 }
 
-/// The set is a union over the roster: an explicit `search` grant on any one
-/// teammate marks `search` native, while `*` or `composio` alone never confers
-/// the metered search family (and `composio` is not in the native vocabulary).
+/// The set is a union over the roster (no fixed assignee): an explicit
+/// `search` grant on any one teammate marks `search` native — as long as this
+/// deployment actually has a search backend wired — while `*` or `composio`
+/// alone never confers the metered search family (and `composio` is not in
+/// the native vocabulary).
 #[test]
 fn native_capabilities_are_a_union_over_the_roster_grants() {
-    let set = native_capabilities_of(&[teammate_with_grants("maya", &["search"])]);
+    let maya = teammate_with_grants("maya", &["search"]);
+    let set = native_capabilities_of(std::slice::from_ref(&maya), None, true, true);
     assert!(set.contains("search"));
 
-    let set = native_capabilities_of(&[
-        teammate_with_grants("ann", &["*"]),
-        teammate_with_grants("bob", &["composio"]),
-    ]);
+    let ann = teammate_with_grants("ann", &["*"]);
+    let bob = teammate_with_grants("bob", &["composio"]);
+    let set = native_capabilities_of(&[ann, bob], None, true, true);
     assert!(!set.contains("search"));
     assert!(!set.contains("composio"));
+}
+
+/// PR #1946 follow-up: a grant alone is not proof of wiring. `search`/`media`
+/// additionally need a backend on this deployment's harness deps
+/// (`build_agent`'s second gate) — a granted-but-uncredentialed namespace
+/// wires no tool at all, so the evidence must not call it native either.
+/// Every other namespace (`shell` here) wires off the grant alone and is
+/// unaffected by either backend flag.
+#[test]
+fn native_capabilities_require_the_backend_not_just_the_grant() {
+    let fully_granted = teammate_with_grants("maya", &["search", "media", "shell"]);
+    let teammates = [fully_granted];
+
+    // Neither backend configured: search/media are withheld even though the
+    // grant is there; shell (no backend gate) still comes through.
+    let set = native_capabilities_of(&teammates, None, false, false);
+    assert!(!set.contains("search"), "{set:?}");
+    assert!(!set.contains("media"), "{set:?}");
+    assert!(set.contains("shell"), "{set:?}");
+
+    // Only search wired: search native, media still withheld.
+    let set = native_capabilities_of(&teammates, None, true, false);
+    assert!(set.contains("search"), "{set:?}");
+    assert!(!set.contains("media"), "{set:?}");
+
+    // Both wired: both native.
+    let set = native_capabilities_of(&teammates, None, true, true);
+    assert!(set.contains("search"), "{set:?}");
+    assert!(set.contains("media"), "{set:?}");
+}
+
+/// PR #1946 follow-up: once a card has a fixed assignee, the roster union is
+/// the wrong question — dispatch only ever invokes that one teammate, so their
+/// grants (not some other roster member's) decide whether the built-in tool is
+/// on the belt this card will actually run against. `settled_assignee`
+/// preserves an operator-chosen assignee rather than overriding it, so this is
+/// the same fixed case.
+#[test]
+fn native_capabilities_narrow_to_the_fixed_assignee() {
+    let teammates = [
+        teammate_with_grants("maya", &["search"]),
+        teammate_with_grants("bob", &["shell"]),
+    ];
+
+    // No fixed assignee: roster union — `bob` doesn't hold `search`, but
+    // `maya` does, so the company can serve it.
+    let set = native_capabilities_of(&teammates, None, true, true);
+    assert!(set.contains("search"), "{set:?}");
+
+    // Fixed to `bob`, who holds no search grant: the union answer would say
+    // `search` is native, but `bob` is who this card actually dispatches to,
+    // so it must not be.
+    let bob = teammate_with_grants("bob", &["shell"]);
+    let set = native_capabilities_of(&teammates, Some(&bob), true, true);
+    assert!(!set.contains("search"), "{set:?}");
+
+    // Fixed to `maya`, who does hold it: still native.
+    let maya = teammate_with_grants("maya", &["search"]);
+    let set = native_capabilities_of(&teammates, Some(&maya), true, true);
+    assert!(set.contains("search"), "{set:?}");
 }
 
 // ---------------------------------------------------------------------------
