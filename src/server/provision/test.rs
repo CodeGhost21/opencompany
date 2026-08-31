@@ -348,6 +348,103 @@ async fn retrying_after_a_wallet_mode_refusal_with_a_wallet_listed_succeeds() {
     assert_eq!(body["id"], "acme");
 }
 
+/// With no host-wide auth override, the preflight reports `email` — each
+/// company's own `[users].mode` decides, and the console builds an `email`
+/// manifest by default.
+#[tokio::test]
+async fn provisioning_info_reports_email_by_default() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    let response = app
+        .oneshot(get_req(
+            "/api/v1/companies/provisioning",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["auth_mode"], "email");
+    assert_eq!(body["wallets_required"], false);
+}
+
+/// A host whose override forces `wallet` reports it, so the create/reset dialog
+/// collects wallet addresses before it builds a manifest the backend would
+/// otherwise refuse with `auth_mode_wallet_no_wallets`.
+#[tokio::test]
+async fn provisioning_info_reports_wallet_when_overridden() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    state.set_auth_mode_override(Some(AuthMode::Wallet));
+    let app = router(state);
+
+    let response = app
+        .oneshot(get_req(
+            "/api/v1/companies/provisioning",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["auth_mode"], "wallet");
+    assert_eq!(body["wallets_required"], true);
+}
+
+/// The preflight is a `PlatformScope` route: a session cookie can never reach
+/// it (401), and a tenant token without the platform scope is refused (403).
+#[tokio::test]
+async fn provisioning_info_requires_platform_scope() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    let unauthorized = app
+        .clone()
+        .oneshot(get_req("/api/v1/companies/provisioning", None))
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let token = tenant_token("tenant:acme", &["operator"]);
+    let forbidden = app
+        .oneshot(get_req("/api/v1/companies/provisioning", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+}
+
+/// A wallet-mode host provisions a manifest that lists `[users].wallets` (and
+/// declares `mode = "wallet"`, which `manifest.validate()` requires before it
+/// reads the wallets) — the positive counterpart to the empty-wallets refusal.
+#[tokio::test]
+async fn provisioning_a_wallet_manifest_on_a_wallet_mode_host_succeeds() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    state.set_auth_mode_override(Some(AuthMode::Wallet));
+    let app = router(state);
+
+    let wallet_address = bs58::encode([7u8; 32]).into_string();
+    let toml = format!(
+        "[company]\nname = \"Acme\"\n[users]\nmode = \"wallet\"\nwallets = [\"{wallet_address}\"]\n"
+    );
+    let response = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), &toml))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert_eq!(body["id"], "acme");
+    assert_eq!(body["lifecycle"], "running");
+}
+
 /// Builds a JSON-envelope provision request naming an explicit id.
 fn provision_req_json(token: Option<&str>, toml: &str, id: &str) -> Request<Body> {
     let body = serde_json::json!({ "manifest_toml": toml, "id": id }).to_string();

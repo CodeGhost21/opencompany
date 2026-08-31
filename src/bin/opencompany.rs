@@ -734,7 +734,11 @@ fn spawn_maintenance_ticker(
     state: &AppState,
     shutdown: &Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
-    MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
+    MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock))
+        .with_evictor(Arc::new(
+            opencompany::server::provision::RegistryEvictor::new(state.clone()),
+        ))
+        .spawn(shutdown.clone())
 }
 
 /// Starts the process-wide week-1 nudge scheduler (issue #1845): one daily

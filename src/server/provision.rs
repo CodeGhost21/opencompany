@@ -25,9 +25,9 @@ use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::AppState;
@@ -47,6 +47,7 @@ use crate::store::FsCompanyStore;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/companies", post(provision))
+        .route("/api/v1/companies/provisioning", get(provisioning_info))
         .route("/api/v1/companies/{id}/pause", post(pause))
         .route("/api/v1/companies/{id}/resume", post(resume))
         .route(
@@ -80,6 +81,40 @@ fn not_found(id: &str) -> Response {
 // ---------------------------------------------------------------------------
 // Provisioning
 // ---------------------------------------------------------------------------
+
+/// What `GET /api/v1/companies/provisioning` reports: the sign-in mode a
+/// company provisioned on this host right now would land in, and whether that
+/// mode requires the create/reset dialog to collect wallet addresses.
+///
+/// Reachable by a console platform bearer, unlike `GET /api/v1/setup` (loopback
+/// / peer-gated), so the create/reset dialog can render mode-appropriate fields
+/// before it provisions rather than discovering the host's `wallet` override
+/// only when the manifest is refused (`auth_mode_wallet_no_wallets`).
+#[derive(Debug, Serialize)]
+struct ProvisioningInfoDto {
+    /// The effective sign-in mode: `wallet`, `email`, or `none`.
+    auth_mode: &'static str,
+    /// Whether provisioning requires at least one `[users].wallets` address.
+    wallets_required: bool,
+}
+
+/// `GET /api/v1/companies/provisioning` — the auth-mode preflight the create /
+/// reset dialog reads before building a manifest.
+async fn provisioning_info(
+    PlatformScope(_claims): PlatformScope,
+    State(state): State<AppState>,
+) -> Response {
+    // When no host-wide override is set, each company's own `[users].mode`
+    // decides — and the console builds an `email` manifest by default, so the
+    // default report is `email`. A `wallet` override is the case that forces
+    // the dialog to collect addresses.
+    let mode = state.auth_mode_override().unwrap_or_default();
+    let dto = ProvisioningInfoDto {
+        auth_mode: mode.as_str(),
+        wallets_required: mode == AuthMode::Wallet,
+    };
+    (StatusCode::OK, Json(dto)).into_response()
+}
 
 /// The JSON provisioning body: a manifest string plus an optional explicit id.
 #[derive(Debug, Deserialize)]
@@ -942,15 +977,46 @@ async fn archive(
         }
     };
     if archived {
-        state.registry().remove(&id);
-        state.remove_owner(&id);
-        if let Some(ownership) = state.stores().and_then(|s| s.ownership.clone())
-            && let Err(err) = ownership.remove_owner(&id).await
-        {
-            tracing::warn!(company = %id, error = %err, "failed to remove persisted ownership");
-        }
+        evict_archived_company(&state, &id).await;
     }
     response
+}
+
+/// Removes an archived company from the live registry and drops both its
+/// in-memory and persisted ownership rows.
+///
+/// The single implementation of archive's post-transition cleanup, shared by
+/// [`archive`] and [`RegistryEvictor`] (the maintenance-loop hook) so
+/// the inline path and the stranded-cleanup retry cannot drift.
+pub(crate) async fn evict_archived_company(state: &AppState, id: &CompanyId) {
+    state.registry().remove(id);
+    state.remove_owner(id);
+    if let Some(ownership) = state.stores().and_then(|s| s.ownership.clone())
+        && let Err(err) = ownership.remove_owner(id).await
+    {
+        tracing::warn!(company = %id, error = %err, "failed to remove persisted ownership");
+    }
+}
+
+/// The production [`CompanyEvictor`](crate::runtime::maintenance::CompanyEvictor):
+/// runs archive's cleanup against `AppState` for a company the maintenance loop
+/// found archived but still registered.
+pub struct RegistryEvictor {
+    state: AppState,
+}
+
+impl RegistryEvictor {
+    /// Builds an evictor over `state`.
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::maintenance::CompanyEvictor for RegistryEvictor {
+    async fn evict(&self, company: &CompanyId) {
+        evict_archived_company(&self.state, company).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
