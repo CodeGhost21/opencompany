@@ -1545,6 +1545,31 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                     ));
                 }
             }
+            // Codex #3894162768 on #1937 — direct extension of the bare-root
+            // check just above: it validates the FIRST segment is one of the
+            // three real envelope roots, but says nothing about what comes
+            // after. `text` and `agent_ref` are ALWAYS strings in that
+            // envelope (`run_turn` inserts `outcome.reply` / the real roster
+            // id, both raw `String`s), and `resolve_path`'s only move is an
+            // object-field `.get()` at each dot — indexing into a JSON
+            // string always yields `None`, never a panic and never a value.
+            // So a descendant like `text.foo` or `agent_ref.id` can no more
+            // resolve than a bare `items` could: it fails
+            // `field_present`/`non_empty_list` on every single run,
+            // regardless of what the agent replies — the same "gate that can
+            // never pass" defect the bare-root check above exists to close,
+            // one level deeper. Only `json` carries real structure to descend
+            // into; `text` and `agent_ref` stay valid ONLY as exact,
+            // childless roots.
+            if let Some(field) = postcondition.field.as_deref() {
+                let mut segments = field.split('.');
+                let root = segments.next().unwrap_or("");
+                if matches!(root, "text" | "agent_ref") && segments.next().is_some() {
+                    problems.push(format!(
+                        "{label} has a `postcondition.field` of `{field}` — `{root}` is always a plain string in the emitted output, so a dotted descendant like `{field}` can never resolve at runtime. Use `{root}` on its own (no further path), or target structured data under `json` instead."
+                    ));
+                }
+            }
         }
 
         // Reserved config keys: the first-class fields above are written into
@@ -2889,6 +2914,81 @@ mod tests {
                 .and_then(|p| p.field.as_deref()),
             Some("json.items")
         );
+    }
+
+    /// Codex #3894162768 on #1937 — direct extension of the bare-root check
+    /// above: `text` and `agent_ref` are always plain strings in the
+    /// emitted output, so a dotted descendant like `text.foo` or
+    /// `agent_ref.id` can never resolve at runtime (`resolve_path` indexes a
+    /// `Value::String` with `.get("foo")`, which is always `None` — never a
+    /// panic, never a value). Before this fix this assertion is RED:
+    /// `parse_workflow` returns `Ok`, so `.unwrap_err()` panics.
+    #[test]
+    fn postcondition_field_dotted_into_text_or_agent_ref_is_rejected() {
+        for field in ["text.foo", "agent_ref.id"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "field_present"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            let err = parse_workflow(&src)
+                .expect_err(&format!("field `{field}` dots into a scalar root"));
+            assert!(
+                err.to_string().contains("always a plain string"),
+                "field `{field}`: {err}"
+            );
+        }
+    }
+
+    /// Companion GREEN: the exact, childless roots `text` and `agent_ref`
+    /// stay valid on their own — the rejection above targets a dotted
+    /// DESCENDANT, not the roots themselves (already proven fine by
+    /// `postcondition_field_that_merely_resembles_a_reserved_key_still_parses`'s
+    /// bare `"text"` case; pinned again here alongside `agent_ref` for
+    /// symmetry with the failing test above).
+    #[test]
+    fn postcondition_field_of_exactly_text_or_agent_ref_still_parses() {
+        for field in ["text", "agent_ref"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "field_present"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            parse_workflow(&src)
+                .unwrap_or_else(|err| panic!("field `{field}` on its own is valid: {err}"));
+        }
     }
 
     /// Codex #3893619015 on #1937: `text`/`agent_ref` are the two top-level
