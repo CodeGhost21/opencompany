@@ -5810,6 +5810,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
 
         let run_id = runtime.open_run(&card).await;
