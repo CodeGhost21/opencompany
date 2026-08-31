@@ -322,6 +322,11 @@ export interface DispatchTerminalFrame {
   column: string;
   /** The channel the card was raised in; absent for a board-created card. */
   chatId?: string;
+  /**
+   * The thread inside that channel (issue #1890 B), as a host message id;
+   * absent for a card raised at channel level.
+   */
+  parentId?: string;
   /** The host's `StoredEvent` sequence — the marker's durable identity. */
   seq: number;
   atMillis: number;
@@ -371,6 +376,12 @@ export interface DispatchMarkerPlacement {
  *   `chat/history` mints for the same event — so {@link fromHistory}'s twin
  *   dedupes against it on the next reload. Identity, not content: #483 was a
  *   content check hydration could never satisfy.
+ * - **`parentId` takes the same prefix** (issue #1890 B). The host names the
+ *   thread root by its own sequence, in the same namespace `seq` lives in, so
+ *   an unprefixed value would point at a line no console id matches — the bug
+ *   {@link fromHistory} already carries this note for. Absent means the card
+ *   was raised at channel level and the marker stays flat, which is where every
+ *   marker sat before B.
  */
 export function dispatchMarkerPlacement(
   event: DispatchTerminalFrame,
@@ -390,6 +401,7 @@ export function dispatchMarkerPlacement(
     message: makeMessage("system", dispatchMarkerText(event.column), {
       taskId: event.taskId,
       messageId: String(event.seq),
+      parentId: event.parentId ? hostMessageId(event.parentId) : undefined,
       at: event.atMillis,
     }),
   };

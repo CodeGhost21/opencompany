@@ -59,7 +59,8 @@ stopped, not that it succeeded, `column` carries where the card landed,
 from the wire, for the many tasks that produce no file; see
 [artifacts.md](artifacts.md) — and `origin_chat_id` records the conversation the
 card was raised from, absent when none did, see
-[the settle marker below](#the-settle-a-channel-can-see-issue-377)),
+[events-settle-marker.md](events-settle-marker.md), with `origin_parent`
+naming the thread inside that channel since issue #1890),
 `TaskDiscussionPosted` (a human posted to a card's discussion thread, issue
 #335 — the Discussion tab's whole store, folded back out by
 `GET …/tasks/{task_id}` beside that card's timeline), `WorkflowUpdated` /
@@ -292,57 +293,10 @@ for.
 
 ### The settle a channel can see (issue #377)
 
-A card dispatched from a channel can park in `paused`, or bounce back to `todo`
-on a failure or a cancellation. The channel showed none of that. All it got was
-the orchestrator's relay prose (#151), which reads like an answer — so a reader,
-live or arriving fresh after a reload, reasonably concluded the work had
-finished. Two correct halves producing one wrong impression.
-
-The fix is a **card-linked system marker**, not another bubble: `finished → In
-review`, carrying the column and a link to the card, and deliberately **not** the
-run's prose. The prose is already in that channel; repeating it would put one
-run's words into one conversation twice. What was missing was never the words —
-it was the structural fact that the card settled, and where.
-
-**The origin is captured, never derived.** `DeskTaskCompleted` gains
-`origin_chat_id`, stamped at the single emission point
-(`HarnessBrain::journal_task_outcome`) off `TaskRecord.origin_chat_id`, which
-every conversational creation path has recorded since #151. It cannot be
-recovered from the fields that were already there: `desk` is the *responder*, an
-agent id like `engineer`, and a channel is a desk id like `engineering`.
-Re-deriving it at completion time would also put a second "which conversation is
-this?" rule beside `chat_history`'s, which is precisely the drift #435 exists to
-have removed.
-
-**`None` means no conversation raised this card** — a board-native card, a
-scheduler's — and is emphatically *not* folded into the General desk, even
-though every other missing chat id in `chat_history` is. Folding it would post
-markers about board-only work into the operator's main line: a new bug, not the
-one being fixed. The frame omits `chatId` rather than sending null, so
-"board-created" is a presence check on the console, the same shape
-`approval_parked` uses for a page-only approval.
-
-**`chat_history::owns` admits the terminal**, which is what makes the marker
-survive a reload; without it the live line would appear and then vanish. Because
-`MessageView` is shared with the GraphQL `Message` projection, `Chat.history`
-starts returning system marker rows on existing fields — additive on both wire
-surfaces, and named here rather than discovered in review.
-
-**The stream frame drops `output`.** Nothing read it, and removing it at the
-projection is what stops a later reader from reintroducing the duplicate. An
-out-of-tree consumer of `/events` loses that field.
-
-Dedupe is on **identity**, never content: the live line is born under the host's
-own sequence (`h<seq>`, #483/#498's mechanism), which is exactly the id
-`chat/history` mints for the same event, so hydration recognises its own twin.
-The marker sentence exists twice — `dispatch_marker_text` on the host,
-`dispatchMarkerText` in the console, because the live frame is thin and carries
-the raw column id — and tests on both sides pin the identical literals. Drift can
-only reword a marker across a reload; it can never double one.
-
-Pre-#377 journal lines carry no origin, so existing channels grow no
-retroactive markers. That is correct rather than a migration gap: the fact was
-not recorded, and inventing one would be worse than its absence.
+Moved to [events-settle-marker.md](events-settle-marker.md): the
+card-linked marker a settled dispatch leaves in the conversation that
+raised it, the captured origin — channel and thread — behind it, and why
+a card nobody raised from a conversation belongs to none.
 
 ### What a retry would repeat (issue #351)
 
