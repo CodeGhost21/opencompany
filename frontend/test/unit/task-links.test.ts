@@ -171,8 +171,20 @@ describe("readTaskFocus", () => {
     });
   });
 
-  it("drops a tab that this screen cannot render", () => {
-    expect(readTaskFocus("#/tasks/t-1?tab=plan")).toEqual({});
+  it("reads the Plan tab, which is addressable and conditional", () => {
+    // `plan` used to be the case this test held up as unaddressable, because
+    // it is the one tab a *particular* card may not have. That cost more than
+    // it bought: selecting Plan wrote nothing to the URL, so a reload or a
+    // copied link dropped the operator back on Timeline. It is addressable
+    // now; the card-shaped half — a `?tab=plan` on a card with no plan — is
+    // resolved by `TaskDetailView`, which falls back to Timeline, because
+    // whether the tab exists is a property of the card and not of the address.
+    expect(readTaskFocus("#/tasks/t-1?tab=plan")).toEqual({ tab: "plan" });
+  });
+
+  it("drops a tab that is not a tab at all", () => {
+    expect(readTaskFocus("#/tasks/t-1?tab=approvals")).toEqual({});
+    expect(readTaskFocus("#/tasks/t-1?tab=")).toEqual({});
   });
 
   it("yields an empty focus for an address that asks for nothing", () => {

@@ -66,6 +66,49 @@ interface Option {
   offRoster?: boolean;
 }
 
+/** Which halves of the roster read failed. Both false is the ordinary case. */
+export interface RosterGap {
+  desks: boolean;
+  team: boolean;
+}
+
+/** A settled read: its value, or the fact that it failed. */
+type Settled<T> = { ok: true; value: T } | { ok: false };
+
+/**
+ * Await one roster half without letting its rejection erase the fact of it.
+ *
+ * `Promise.allSettled` would do this, but its `PromiseSettledResult` carries
+ * the rejection *reason* — a host error string — and nothing here should be
+ * one field access away from rendering that into a picker.
+ */
+function settle<T>(p: Promise<T>): Promise<Settled<T>> {
+  return p
+    .then((value): Settled<T> => ({ ok: true, value }))
+    .catch((): Settled<T> => ({ ok: false }));
+}
+
+/**
+ * What to tell the operator about a roster the picker could not fully read, or
+ * `null` when both halves answered.
+ *
+ * The sentence has to survive being the *only* thing in the list. A failed read
+ * renders exactly the picker a genuinely empty company does — one row,
+ * Unassigned — and "hand it to the orchestrator" is a consequential enough
+ * write that "there is nobody else" and "we could not find out who else" must
+ * not look the same. So each line says which half is missing and that the list
+ * is short rather than complete.
+ */
+export function rosterGapNotice(failed: RosterGap): string | null {
+  if (failed.desks && failed.team)
+    return "Couldn’t load this company’s desks or teammates — this list is incomplete, not empty. Reopen it after a reload before reassigning.";
+  if (failed.desks)
+    return "Couldn’t load this company’s desks, so they’re missing from this list — it’s incomplete, not empty.";
+  if (failed.team)
+    return "Couldn’t load this company’s teammates, so they’re missing from this list — it’s incomplete, not empty.";
+  return null;
+}
+
 export function AssigneeSelect({
   client,
   company,
@@ -92,6 +135,13 @@ export function AssigneeSelect({
   // this value is not on it". Without it, every assigned card would flash as
   // off-roster on the first paint.
   const [loaded, setLoaded] = useState(false);
+  // Which halves of the roster read *failed*, kept apart from what they
+  // returned. Both reads normalize to `[]`, so a rejected `/desks` and a
+  // company with no desks produced the identical picker — one row, Unassigned —
+  // and the operator could not tell "there is nobody to pick" from "we could
+  // not find out". Reassigning to Unassigned is a real write, so that is not a
+  // distinction to leave to guesswork.
+  const [failed, setFailed] = useState<RosterGap>({ desks: false, team: false });
 
   useEffect(() => {
     let cancelled = false;
@@ -102,20 +152,27 @@ export function AssigneeSelect({
     // pick made in that window would name something that does not exist here.
     setDesks([]);
     setTeam([]);
-    // Both halves are best-effort *here*: a host that does not serve one of
+    setFailed({ desks: false, team: false });
+    // Both halves stay best-effort *here*: a host that does not serve one of
     // these surfaces still gets a usable picker rather than a dialog that
     // fails to render. The org chart is not the same rule and must not be read
     // as one — `/desks` IS its chart, so losing it there is an error state,
     // and only `/team` and `/users` are best-effort
     // (`views/company/OrgChartView.tsx`). A picker with no desks is still a
     // picker.
+    //
+    // What is *not* best-effort is saying so. Each half is settled
+    // individually rather than collapsed to `[]` by a shared `catch`, so the
+    // picker can render the gap it is missing — the same distinction the
+    // Overview draws before it claims "No desks yet" (issue #1313).
     void Promise.all([
-      client.listDesks(company).catch(() => [] as DeskDto[]),
-      client.listTeam(company).catch(() => [] as TeamMemberDto[]),
+      settle(client.listDesks(company)),
+      settle(client.listTeam(company)),
     ]).then(([desksRes, teamRes]) => {
       if (cancelled) return;
-      setDesks(desksRes);
-      setTeam(teamRes);
+      setDesks(desksRes.ok ? desksRes.value : []);
+      setTeam(teamRes.ok ? teamRes.value : []);
+      setFailed({ desks: !desksRes.ok, team: !teamRes.ok });
       setLoaded(true);
     });
     return () => {
@@ -170,9 +227,13 @@ export function AssigneeSelect({
     if (!value) return null;
     if (deskOptions.some((o) => o.value === value)) return null;
     if (teamOptions.some((o) => o.value === value)) return null;
-    // Only claim it is off-roster once a roster actually came back: a host that
-    // served neither surface tells us nothing about this value.
-    const known = loaded && (desks.length > 0 || team.length > 0);
+    // Only claim it is off-roster once a roster actually came back. This used
+    // to stand in for that with "either list is non-empty", which held for the
+    // case it was written against and broke on the mixed one: with `/desks`
+    // answering two desks and `/team` rejected, a perfectly current teammate id
+    // was flagged "not on roster" against a roster half of which never
+    // arrived. The read's own outcome is the honest signal, so ask it.
+    const known = loaded && !failed.desks && !failed.team;
     return {
       key: `stale:${value}`,
       value,
@@ -180,7 +241,7 @@ export function AssigneeSelect({
       hint: known ? "not on roster" : undefined,
       offRoster: known,
     };
-  }, [value, deskOptions, teamOptions, loaded, desks.length, team.length]);
+  }, [value, deskOptions, teamOptions, loaded, failed.desks, failed.team]);
 
   /**
    * The trigger's rendering of a wire value.
@@ -216,6 +277,11 @@ export function AssigneeSelect({
     };
   }, [deskOptions, teamOptions, stale]);
 
+  // Only once the reads have settled: a picker still loading is not a picker
+  // that failed, and flashing the warning on first paint would be the same
+  // "cannot tell these apart" problem pointed the other way.
+  const gap = loaded ? rosterGapNotice(failed) : null;
+
   return (
     <Select
       value={value === "" ? UNASSIGNED : value}
@@ -243,6 +309,20 @@ export function AssigneeSelect({
             <OptionRow label={UNASSIGNED_LABEL} hint="hand it to the orchestrator" />
           </SelectItem>
         </SelectGroup>
+
+        {/* Not a `SelectItem`: there is nothing here to pick, and a warning
+            that could be selected would submit itself as an assignee. It sits
+            directly under Unassigned because that is the row it qualifies. */}
+        {gap && (
+          <div
+            role="note"
+            data-testid="assignee-roster-gap"
+            className="flex items-start gap-2 border-t px-2 py-1.5 text-xs text-status-blocked-text"
+          >
+            <AlertCircle className="mt-px size-3.5 shrink-0" aria-hidden />
+            <span className="min-w-0">{gap}</span>
+          </div>
+        )}
 
         {stale && (
           <>
