@@ -8,6 +8,7 @@ import type { TurnStep } from "@/api/types";
 import {
   ChatLiveReceipt,
   formatElapsed,
+  shouldClearReceipt,
   RECEIPT_STALL_AFTER_MS,
   type ChatReceipt,
 } from "@/views/chat/ChatLiveReceipt";
@@ -182,5 +183,50 @@ describe("formatElapsed", () => {
 
   it("floors a negative elapsed to zero", () => {
     expect(formatElapsed(-1_000)).toBe("0s");
+  });
+});
+
+describe("shouldClearReceipt", () => {
+  it("clears an unstamped-generation request unconditionally (Conversation's calling convention)", () => {
+    expect(shouldClearReceipt({ gen: 7 }, undefined)).toBe(true);
+    expect(shouldClearReceipt(undefined, undefined)).toBe(false);
+  });
+
+  it("clears a matching generation — the ordinary same-scope resolve", () => {
+    expect(shouldClearReceipt({ gen: 3 }, 3)).toBe(true);
+  });
+
+  it("does not delete a company B receipt when company A's stale send settles late", () => {
+    // issue #1935 review — codex 3892523790 / coderabbit 3892517512. Host
+    // thread ids like `main` recur across companies, so this is not a
+    // hypothetical mismatch: the same thread id genuinely holds two
+    // different companies' receipts in sequence within one browser tab.
+    //
+    // Sequence: operator sends on company A's "main" thread (gen 1 armed).
+    // Before A's POST resolves, the operator switches to company B and
+    // sends on B's own "main" thread too — same thread id, new generation
+    // (gen 2) re-arms the slot. A's slow POST finally settles and its
+    // `onSendStale` fires with the generation IT was armed with (1), not
+    // whatever is currently on file.
+    const armedForCompanyA = 1;
+    const armedForCompanyB = 2;
+    const currentReceipt: ChatReceipt = {
+      startedAt: 2_000,
+      lastFrameAt: 2_000,
+      gen: armedForCompanyB,
+    };
+
+    // Company A's late completion must not win against company B's receipt.
+    expect(shouldClearReceipt(currentReceipt, armedForCompanyA)).toBe(false);
+
+    // Company B's own completion, naming its own generation, still may.
+    expect(shouldClearReceipt(currentReceipt, armedForCompanyB)).toBe(true);
+  });
+
+  it("is a no-op (not a throw) when nothing is armed for the thread at all", () => {
+    // A stray terminal callback for a thread whose receipt was already
+    // cleared (or never armed, e.g. a background frame) must not attempt to
+    // delete a key that is not there.
+    expect(shouldClearReceipt(undefined, 5)).toBe(false);
   });
 });

@@ -147,8 +147,15 @@ interface Props {
    * flight. Without this bracket the shell's live injection and the awaited
    * reply below both render and the bubble doubles — the exact duplicate-bubble
    * race the Conversation surface already brackets against.
+   *
+   * Returns the generation the shell stamped this send's receipt with (issue
+   * #1935 review). `send` threads it back through whichever terminal callback
+   * this POST reaches, so the shell can tell "my own armed receipt settling"
+   * apart from "a newer send already re-armed this reused thread id" — see
+   * `shouldClearReceipt`. `undefined` when the shell has nothing to say (no
+   * handler wired), which callers must treat the same as "clear unconditionally".
    */
-  onSendStart?: (threadId: string) => void;
+  onSendStart?: (threadId: string) => number | undefined;
   /**
    * Who is present right now, keyed by user id. Empty when the host has no
    * presence route, or when nobody else is connected to this replica.
@@ -172,14 +179,14 @@ interface Props {
   resolveTypingNames?: (chatId: string, parentId?: string) => string[];
   /** Called as a composer is typed in; the caller throttles. */
   onTyping?: (chatId: string, parentId?: string) => void;
-  onSendEnd?: (threadId: string) => void;
+  onSendEnd?: (threadId: string, gen?: number) => void;
   /**
    * The host accepted the turn and answered `202` instead of the reply
    * (issue #983). Distinct from `onSendEnd`, which says the turn is *over*:
    * this one says the POST is over and the turn is not, so the shell keeps the
    * working row up and stops suppressing the live reply frame.
    */
-  onSendDetached?: (threadId: string, turnId?: string) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
   /**
    * The chat POST **threw** rather than answering (issue #1000).
    *
@@ -190,9 +197,9 @@ interface Props {
    * the request that started it, so that held frame is the only copy of the
    * answer anyone is going to get.
    */
-  onSendFailed?: (threadId: string) => void;
+  onSendFailed?: (threadId: string, gen?: number) => void;
   /** Called when a delayed response belongs to a previous company scope. */
-  onSendStale?: (threadId: string) => void;
+  onSendStale?: (threadId: string, gen?: number) => void;
   /**
    * The shell's live company ref, so the stale-response check keeps observing
    * company switches after this view unmounts.
@@ -1470,7 +1477,13 @@ export function ChatView({
     // `AgentReply` for our own turn too and pushes it over SSE mid-await, so
     // without this the shell injects that echo *and* the awaited reply lands
     // below — two bubbles for one turn.
-    if (chatId) onSendStart?.(chatId);
+    //
+    // The generation the shell stamped this send's receipt with, if any
+    // (issue #1935 review). Threaded through to whichever terminal callback
+    // this POST reaches below, so a clear this send triggers can never delete
+    // a receipt a *later* send has since armed for the same (possibly
+    // cross-company-reused) thread id — see `shouldClearReceipt`.
+    const gen = chatId ? onSendStart?.(chatId) : undefined;
     // Which of the POST's three outcomes actually happened, decided here and
     // reported once in the `finally`. Only `"resolved"` means the reply is on
     // screen; the other two leave a turn running on the host and the stream as
@@ -1513,7 +1526,7 @@ export function ChatView({
           scopeAtSend.client !== latestScope.client)
       ) {
         outcome = "stale";
-        if (chatId) onSendStale?.(chatId);
+        if (chatId) onSendStale?.(chatId, gen);
         // The POST itself succeeded and journaled — this branch only
         // discards the reply because the scope moved on, so anything the
         // request carried (an attachment among them) is durably claimed.
@@ -1535,7 +1548,7 @@ export function ChatView({
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
-        if (chatId) onSendDetached?.(chatId, answer.turnId);
+        if (chatId) onSendDetached?.(chatId, answer.turnId, gen);
         return true;
       }
       const reply = answer;
@@ -1604,7 +1617,7 @@ export function ChatView({
           scopeAtSend.client !== latestScope.client)
       ) {
         outcome = "stale";
-        if (chatId) onSendStale?.(chatId);
+        if (chatId) onSendStale?.(chatId, gen);
         // Unlike the try-block's stale branch above, the request THREW here —
         // whether it journaled before failing is unknown, not "no" (see this
         // function's doc comment), so this is `undefined`, not `false`.
@@ -1632,8 +1645,8 @@ export function ChatView({
       // answer. Routing the throw here is the drop this whole change removes,
       // put back on the one path the feature exists for.
       if (chatId) {
-        if (outcome === "resolved") onSendEnd?.(chatId);
-        else if (outcome === "failed") onSendFailed?.(chatId);
+        if (outcome === "resolved") onSendEnd?.(chatId, gen);
+        else if (outcome === "failed") onSendFailed?.(chatId, gen);
       }
       setSending(false);
     }

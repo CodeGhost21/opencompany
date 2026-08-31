@@ -38,11 +38,52 @@ export const RECEIPT_STALL_AFTER_MS = 30_000;
  * and bumps on every live frame, so the stall check is "no frame for 30s"
  * rather than "no reply for 30s". `agentId` is captured off the first frame
  * that names one and never rendered raw — it is resolved to a display name.
+ *
+ * `gen` is the generation the send that armed this receipt was stamped with
+ * (issue #1935 review). Host thread ids like `main` recur across companies,
+ * so without it a slow POST from a company the operator has since left can
+ * land after a *new* send has re-armed the same thread id and delete that
+ * newer receipt out from under the company actually on screen. See
+ * {@link shouldClearReceipt}.
  */
 export interface ChatReceipt {
   startedAt: number;
   lastFrameAt: number;
   agentId?: string;
+  gen?: number;
+}
+
+/**
+ * Whether a clear request for a thread's receipt should actually delete it.
+ *
+ * The bug this guards (issue #1935 review, codex 3892523790 / coderabbit
+ * 3892517512): thread ids are reused across companies (`main` above all), and
+ * `AppShell`'s `onSendStale`/`onSendEnd`/`onSendDetached`/`onSendFailed` all
+ * clear a receipt by thread id alone. Send it from company A, switch to
+ * company B, send again on the same thread id — B's send arms a *new*
+ * receipt — and when A's slow POST finally settles, its own clear call must
+ * not delete B's receipt just because they share a thread id.
+ *
+ * Each armed receipt is stamped with the generation counter value current at
+ * arm time; each terminal callback is handed the generation its own
+ * `onSendStart` call returned. A clear only proceeds when the receipt
+ * currently on file carries that same generation — if a newer send has
+ * re-armed the slot in between, the generations differ and the clear is a
+ * no-op, leaving the newer receipt alone.
+ *
+ * `gen === undefined` clears unconditionally. That is not a loophole — it is
+ * `Conversation`/`conversation/runtime.ts`'s calling convention, which
+ * predates generation-tagging and never races a company switch the way
+ * `ChatView`'s sends do (the parked conversation view has no scope to switch
+ * out from under).
+ */
+export function shouldClearReceipt(
+  current: Pick<ChatReceipt, "gen"> | undefined,
+  gen: number | undefined,
+): boolean {
+  if (!current) return false;
+  if (gen === undefined) return true;
+  return current.gen === gen;
 }
 
 /**
