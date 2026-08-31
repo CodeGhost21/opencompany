@@ -478,8 +478,23 @@ function describeRun(run: WorkflowRunOutcome): string {
   // sitting open, waiting on an operator — a stronger, wronger claim than the
   // "finished" this arm exists to replace, on the run most likely to still be
   // actionable.
+  //
+  // PR #1883 review (codex, comment 3892522597): `pendingApprovals` is only
+  // HALF of what the host's `awaiting_count` reads — the other half is a
+  // `pending` delivery, which `fully_stranded`'s own doc calls "a *second*
+  // thing waiting on a person, on its own queue... untouched by the gate
+  // join". A cold-recipient email output node (`ParkedForApproval`) parks the
+  // REPORT for approval without ever touching `pendingApprovals` at all — that
+  // gate lives entirely on the delivery row. So a run can carry an errored
+  // continue/route node, an EMPTY `pendingApprovals`, and a `pending`
+  // delivery all at once — exactly the case the guard above does not catch.
+  // Without this second guard that run also read as `DEGRADED`, the same
+  // stronger-and-wronger claim over a run genuinely waiting on an operator to
+  // approve a report, not on a node fix.
+  const awaitingDelivery = run.deliveries.some((d) => d.status === "pending");
   const degraded =
     run.pendingApprovals.length === 0 &&
+    !awaitingDelivery &&
     (run.verdict === "degraded" || (run.verdict === undefined && erroredNodes.length > 0));
   const outcome = run.running
     ? "still running"
