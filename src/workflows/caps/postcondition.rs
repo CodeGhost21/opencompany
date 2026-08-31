@@ -395,6 +395,25 @@ mod tests {
         assert!(evaluate_postcondition(&spec("non_empty_list"), &output).is_err());
     }
 
+    /// Codex #3894277296 on #1937 — the specific unsatisfiable shape
+    /// `company::workflow_file::validate` now refuses at author time
+    /// (`postcondition_non_empty_list_on_text_or_agent_ref_is_rejected`):
+    /// even if one reached this evaluator anyway, `text`/`agent_ref` are
+    /// unconditionally strings in the envelope, so `non_empty_list` fails
+    /// them the same honest way it fails any other non-array target — this
+    /// pins that the evaluator-level behavior was ALREADY correct, and the
+    /// gap was purely that authoring one was ever allowed to save.
+    #[test]
+    fn non_empty_list_on_text_or_agent_ref_fails_honestly() {
+        let output = json!({ "text": "some prose", "agent_ref": "researcher", "json": null });
+        for field in ["text", "agent_ref"] {
+            assert!(
+                evaluate_postcondition(&spec_with_field("non_empty_list", field), &output).is_err(),
+                "field `{field}` is always a string, never an array: {output}"
+            );
+        }
+    }
+
     /// Codex review on #1937 (issue #1866): the no-`field` form must look at
     /// the standard envelope's structured `json` payload, not the envelope
     /// object itself — an agent-node envelope always carries `text`/
