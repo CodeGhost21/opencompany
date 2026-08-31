@@ -39,7 +39,9 @@ use crate::ports::tasks::{
 use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
-use crate::runtime::cycle::{BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, assignment_matches};
+use crate::runtime::cycle::{
+    BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, SETTLED_WORK_ANNOTATION, assignment_matches,
+};
 
 /// One agent turn, abstracted so delegation orchestration never touches the
 /// harness-specific [`HarnessDeps`](crate::harness::HarnessDeps).
@@ -3570,6 +3572,13 @@ fn work_words(text: &str) -> Vec<String> {
 /// work verbs, so every `workflow` message would read as substantial no matter
 /// what the operator actually typed.
 ///
+/// Issue #1890 C added a fourth: [`SETTLED_WORK_ANNOTATION`], briefing the turn
+/// on work raised in this conversation that has since finished. Missing it would
+/// be the "thanks!" bug a third time, and with a nastier loop than #176's: the
+/// settled briefing grows as cards *finish*, so every completed card would make
+/// the next message likelier to open one, which would in time finish and
+/// lengthen the briefing again.
+///
 /// Issue #1682 added a third: the attachment markers
 /// [`with_attachment_refs`](crate::brain::medulla::effects::with_attachment_refs)
 /// appends when a message carries files. The harness brain feeds the agent
@@ -3580,6 +3589,7 @@ pub(crate) fn operator_words(message: &str) -> &str {
     let cut = [
         message.find(OPEN_WORK_ANNOTATION),
         message.find(BUILDER_ANNOTATION),
+        message.find(SETTLED_WORK_ANNOTATION),
         message.find(crate::brain::medulla::effects::ATTACHMENT_MARKER_PREFIX),
     ]
     .into_iter()
@@ -4028,6 +4038,53 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
         // …and in the other order, since nothing pins which is appended first.
         let reversed = format!("ship the audit{BUILDER_ANNOTATION} …]{OPEN_WORK_ANNOTATION} …]");
         assert_eq!(operator_words(&reversed), "ship the audit");
+    }
+
+    /// Issue #1890 C: nor is the settled-work briefing.
+    ///
+    /// The same trap a third time, with the nastiest loop of the three. #176's
+    /// briefing grew as cards were *opened*; this one grows as cards **finish**,
+    /// so an unstripped message would open a card on every "thanks!" in a
+    /// productive channel, and each of those cards would in time finish and
+    /// lengthen the briefing again. Built from the shared constant, so rewording
+    /// the briefing fails this test rather than silently restoring the bug.
+    #[test]
+    fn the_cycles_settled_work_briefing_is_not_the_operators_request() {
+        let briefed = format!(
+            "thanks!{SETTLED_WORK_ANNOTATION} has finished — this is where each card stands \
+now, which may differ from the marker in the transcript):\n- Read the pricing repository and \
+write a summary of its module layout — finished → In review\n- Draft the investor update for \
+the quarter — finished → To-do (the dispatch failed: provider timeout)\n]"
+        );
+        assert_eq!(operator_words(&briefed), "thanks!");
+        assert!(
+            !is_trackable_work(operator_words(&briefed)),
+            "small talk stays small talk however much context is folded onto it"
+        );
+        assert!(
+            is_trackable_work(&briefed),
+            "the unstripped briefing really does read as work — which is why the \
+             strip has to happen, not merely why it is tidy"
+        );
+    }
+
+    /// All three briefings can land on one message — a desk-addressed
+    /// `workflow` request in a conversation that has raised work before gets
+    /// every one of them. The cut is a `min` over all four markers, so whichever
+    /// lands first ends the operator's words.
+    #[test]
+    fn operator_words_cuts_at_the_first_of_every_briefing() {
+        let all = format!(
+            "ship the audit{OPEN_WORK_ANNOTATION} …]{BUILDER_ANNOTATION} …]\
+{SETTLED_WORK_ANNOTATION} …]"
+        );
+        assert_eq!(operator_words(&all), "ship the audit");
+        // …and with the settled block first, since nothing pins the order.
+        let settled_first = format!(
+            "ship the audit{SETTLED_WORK_ANNOTATION} …]{OPEN_WORK_ANNOTATION} …]\
+{BUILDER_ANNOTATION} …]"
+        );
+        assert_eq!(operator_words(&settled_first), "ship the audit");
     }
 
     /// An attachment marker rides the same composed text the agent sees, and
