@@ -867,6 +867,16 @@ struct Evidence {
     /// Distinct from [`Self::composio_reachable`], which is "did the probe
     /// answer" — a liveness fact. This one is "do we hold a bearer at all".
     composio_credential: bool,
+    /// Native capability namespaces some plannable teammate holds a built-in
+    /// tool for — the company can serve these without any Composio connection.
+    ///
+    /// Union scope over the roster's grants
+    /// ([`grants_confer_native`](crate::company::grants_confer_native) over each
+    /// teammate), keyed to the shared native vocabulary
+    /// ([`native_capability_namespaces`](crate::company::native_capability_namespaces)).
+    /// A `connection`/`composio` prerequisite naming one of these is satisfied by
+    /// the built-in tool rather than parked on a connection it never needed.
+    native_capabilities: HashSet<String>,
 }
 
 impl Evidence {
@@ -916,6 +926,23 @@ fn settled_assignee(card_assignee: &str, proposed: Option<String>) -> Option<Str
         "" => proposed,
         existing => Some(existing.to_string()),
     }
+}
+
+/// The native capability namespaces the company can serve with a built-in tool,
+/// as a union over the roster: a namespace is included when **any** teammate's
+/// grants confer it. Union scope is deliberate — one teammate holding the tool
+/// means the company can do the work natively, so no card should park on a
+/// Composio connection for it.
+fn native_capabilities_of(teammates: &[TeammateBrief]) -> HashSet<String> {
+    crate::company::native_capability_namespaces()
+        .into_iter()
+        .filter(|ns| {
+            teammates
+                .iter()
+                .any(|t| crate::company::grants_confer_native(&t.grants, ns))
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 /// Reads the company's own state — deterministically, with no model in the
@@ -1102,6 +1129,8 @@ async fn gather_evidence(
     )
     .await;
 
+    let native_capabilities = native_capabilities_of(&teammates);
+
     Ok(Evidence {
         company_name: record.manifest.company.name.clone(),
         policy_mode: record.manifest.policy.mode.clone(),
@@ -1120,6 +1149,7 @@ async fn gather_evidence(
         skills,
         mail_configured: runtime.mail().is_some(),
         composio_credential,
+        native_capabilities,
     })
 }
 
@@ -1595,6 +1625,16 @@ fn evidence_prompt(e: &Evidence) -> String {
 /// dispatch into work it cannot do. See `verify_connection` for the arm and
 /// issues #319/#396 for when that stops being true.
 ///
+/// **One exception precedes both arms: a capability the company already serves
+/// with a built-in tool.** When the prerequisite name is a native capability
+/// namespace some plannable teammate holds a tool for
+/// ([`Evidence::native_capabilities`]), `connection` and `composio` both return
+/// `satisfied` with a note that no Composio connection is needed — a
+/// web-research card must not park on a `composio search` connection it never
+/// needed when `web_search` is wired. This is checked before the outage
+/// `unknown` guard, so a built-in capability stays satisfied even when the
+/// Composio probe is down.
+///
 /// Permissions are checked against the **manifest** only: the tool allow-list,
 /// the agent's own list, and `[policy]`. Not the live grant set
 /// (`runtime::grants`) and not the harness [`ApprovalPolicy`] — those are the
@@ -1648,6 +1688,12 @@ async fn verify_prerequisites(
 }
 
 fn verify_connection(e: &Evidence, name: &str) -> (PrereqStatus, String) {
+    if e.native_capabilities.contains(&name.to_ascii_lowercase()) {
+        return (
+            PrereqStatus::Satisfied,
+            format!("{name} is served by a built-in tool — no Composio connection is needed"),
+        );
+    }
     match e.connections.get(&name.to_ascii_lowercase()) {
         Some((_, _, true)) => (
             PrereqStatus::Unknown,
@@ -1700,6 +1746,12 @@ fn verify_connection(e: &Evidence, name: &str) -> (PrereqStatus, String) {
 }
 
 fn verify_composio(e: &Evidence, name: &str) -> (PrereqStatus, String) {
+    if e.native_capabilities.contains(&name.to_ascii_lowercase()) {
+        return (
+            PrereqStatus::Satisfied,
+            format!("{name} is served by a built-in tool — no Composio connection is needed"),
+        );
+    }
     if !e.composio_reachable {
         return (
             PrereqStatus::Unknown,
