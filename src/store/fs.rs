@@ -1652,6 +1652,10 @@ struct Meta {
     /// [`crate::ports::types::CompanyRecord::activation_completed_at`].
     #[serde(default)]
     activation_completed_at: Option<u64>,
+    /// Epoch-millis this record was first created. See
+    /// [`crate::ports::types::CompanyRecord::created_at_millis`].
+    #[serde(default)]
+    created_at_millis: Option<u64>,
     /// Whether this bundle has ever been saved by activation-aware code — the
     /// on-disk marker behind [`CompanyStore::activation_gate_seen`]
     /// (PR #1875 review finding).
@@ -1694,6 +1698,7 @@ impl Default for Meta {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
             activation_gate_seen: false,
         }
     }
@@ -1798,6 +1803,7 @@ impl FsCompanyStore {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            created_at_millis: record.created_at_millis,
             activation_gate_seen,
         };
         // Write order depends on whether the bundle already exists (issue
@@ -2095,6 +2101,7 @@ impl CompanyStore for FsCompanyStore {
             setup: meta.setup,
             name_confirmed: meta.name_confirmed,
             activation_completed_at: meta.activation_completed_at,
+            created_at_millis: meta.created_at_millis,
         }))
     }
 
@@ -3877,6 +3884,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         store.save(&record).await.unwrap();
 
@@ -3942,6 +3950,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -3999,6 +4008,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         // Publish the bundle for the first time — the create-path branch,
         // unaffected by this test's assertion.
@@ -4056,6 +4066,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         let err = store.save(&record()).await;
@@ -4138,6 +4149,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         // Publish the bundle for the first time — the create-path branch,
@@ -4241,6 +4253,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             }
         };
 
@@ -4362,6 +4375,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         store
@@ -4463,6 +4477,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         store
@@ -4533,6 +4548,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         store
@@ -4611,6 +4627,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         store
@@ -4722,6 +4739,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         store
@@ -4866,6 +4884,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         store
@@ -5012,6 +5031,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         // First publish, so the next save takes the update path.
@@ -5092,6 +5112,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         let bundle_dir = bundle.company_toml().parent().unwrap().to_path_buf();
@@ -5179,6 +5200,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         // Park the *second* stage, so the abort below lands squarely in the
@@ -5257,6 +5279,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         fn staged_tmp_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -5582,6 +5605,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         // Publish the bundle for the first time — unaffected by the fault
@@ -5654,6 +5678,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -5718,6 +5743,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();

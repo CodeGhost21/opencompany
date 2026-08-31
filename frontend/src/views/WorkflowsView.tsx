@@ -53,7 +53,15 @@ import type { CompanyStreamEvent } from "@/hooks/use-events";
 import { withHostParam } from "@/hooks/use-host-route";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import type { ApprovalSummary, GrantScope, TeamMemberDto, Verdict } from "@/api/types";
+import type {
+  ApprovalSummary,
+  GrantScope,
+  NotificationDto,
+  TeamMemberDto,
+  Verdict,
+} from "@/api/types";
+import { Week1NudgeBanner } from "@/components/week1-nudge-banner";
+import { pickActiveNudge, WEEK1_NUDGE_KIND } from "@/lib/week1-nudge";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -427,6 +435,152 @@ export function WorkflowsView({
   // fetch is keyed on) or by a list read that succeeds.
   const [listError, setListError] = useState<string | null>(null);
   const [graphError, setGraphError] = useState<string | null>(null);
+  // Issue #1845: the week-1 "save your first workflow" nudge, server-backed
+  // (`GET …/notifications?kind=workflow_nudge`) rather than the tour's
+  // `localStorage` flag — a signup earns this from `LifecycleScheduler` on the
+  // host, and dismissing/creating persists back through `markNotificationsRead`
+  // rather than a client-only flag, so it survives a reload.
+  const [nudge, setNudge] = useState<NotificationDto | null>(null);
+  // Readable from callbacks that must stay stable (`handleCreated`'s own
+  // deps), the same pattern `selectedIdRef`/`companyRef` use above.
+  const nudgeRef = useRef<NotificationDto | null>(null);
+  nudgeRef.current = nudge;
+  // Issue #1845 (review: PR #1878): set the moment `handleCreated` fires,
+  // before `refreshNudge` below has necessarily resolved. A fetch already in
+  // flight when a local create happens (the mount fetch, or a poll tick) can
+  // land AFTER `handleCreated`, carrying the row the scheduler filed before
+  // this create — `clearNudge` could not have marked it read yet, because at
+  // that moment it did not know the row's id (`nudgeRef.current` was still
+  // `null`). This nudge is a one-time, first-workflow-only ask (the
+  // scheduler's own idempotency ledger never files a second one), so once
+  // this session has created a workflow, no fetch response — stale or not —
+  // should ever put the banner back up. Reset on a company switch, since a
+  // create in one company says nothing about another.
+  const hasCreatedLocallyRef = useRef(false);
+  // codex review finding (comment 3892534919): `hasCreatedLocallyRef` only
+  // ever invalidates a stale `refreshNudge` response against a LOCAL CREATE.
+  // Dismissal (`clearNudge` below) had no equivalent — a poll already in
+  // flight when the operator clicks Dismiss can resolve afterward carrying
+  // the same row, still unread from the server's point of view at the
+  // instant that response was captured, and `setNudge(active)` would put the
+  // just-dismissed banner right back up. A monotonic generation counter,
+  // bumped by every local action that should invalidate whatever is
+  // currently in flight (dismissal, and — folded into the mount/reseat
+  // effect below — a company or client change), closes both gaps with one
+  // mechanism: a response is only applied if the request that produced it is
+  // still the most recent one this component cares about.
+  const nudgeRequestGeneration = useRef(0);
+  // codex review finding (comment 3892594021): `pickActiveNudge` picks ONE
+  // row to show — by design, per its own doc comment, since
+  // `LifecycleScheduler` explicitly permits two racing replicas to both file
+  // a nudge for the same user. Dismissal used to mark only the shown row
+  // (`current.id`) read, so a genuine duplicate landed back on the very next
+  // poll: the other, still-unread row is exactly what `pickActiveNudge`
+  // picks next. Tracked separately from `nudge` (which is deliberately the
+  // single row the banner renders) so `clearNudge` can mark every duplicate
+  // read in one write instead of only the one on screen.
+  const unreadNudgeIdsRef = useRef<string[]>([]);
+  const refreshNudge = useCallback(() => {
+    const requestCompany = company;
+    const requestGeneration = ++nudgeRequestGeneration.current;
+    client
+      .notifications(requestCompany, "workflow_nudge")
+      .then((feed) => {
+        if (requestCompany !== companyRef.current) return; // stale: company switched mid-flight
+        if (requestGeneration !== nudgeRequestGeneration.current) return; // stale: superseded by a newer request or a local action
+        const rows = Array.isArray(feed?.notifications) ? feed.notifications : [];
+        const active = pickActiveNudge(rows);
+        unreadNudgeIdsRef.current = rows
+          .filter((row) => row.kind === WEEK1_NUDGE_KIND && row.readAt === undefined)
+          .map((row) => row.id);
+        if (active && hasCreatedLocallyRef.current) {
+          // This response was already stale the moment it landed — see
+          // `hasCreatedLocallyRef`'s own doc comment. Reconcile the server
+          // row rather than display it, the same best-effort mark-read
+          // `clearNudge` performs below.
+          setNudge(null);
+          void client.markNotificationsRead([active.id], requestCompany).catch(() => {
+            // The next poll tick retries; nothing renders in the meantime
+            // either way, since `hasCreatedLocallyRef` stays set.
+          });
+          return;
+        }
+        setNudge(active);
+      })
+      .catch(() => {
+        // An older host (404) or a transient failure: no banner, and nothing
+        // else about the view changes — this is the least important thing on
+        // screen, same reasoning the mention badge's own poll follows.
+      });
+  }, [client, company]);
+  useEffect(() => {
+    setNudge(null);
+    hasCreatedLocallyRef.current = false;
+    // Also invalidates anything already in flight against the previous
+    // company or client (the "in-place host reseat that preserves the
+    // company slug" half of comment 3892534919) — `refreshNudge`'s identity
+    // already changes on either, so this effect already re-runs for both.
+    nudgeRequestGeneration.current += 1;
+    refreshNudge();
+  }, [company, refreshNudge]);
+  // Issue #1845 (review: PR #1878): the host files this nudge off a daily
+  // scheduler tick, which mounts no SSE frame — nothing else tells a tab left
+  // open across that tick that a nudge landed, so it would otherwise sit
+  // unseen until the next reload or company switch. `approvalsNow` is the
+  // same polling cadence the mention badge already piggybacks on for the
+  // identical reason (`app-shell.tsx`'s own `feed.now` — no per-viewer SSE
+  // projection either), so this re-runs the fetch on every tick rather than
+  // adding a second poller.
+  useEffect(() => {
+    if (approvalsNow === undefined) return;
+    refreshNudge();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on the poll tick only
+  }, [approvalsNow]);
+  // Marks the current nudge read (best-effort) and hides it locally at once,
+  // rather than waiting for the next poll to confirm the write. Shared by the
+  // banner's own Dismiss button and by a workflow actually getting created
+  // (below) — both are "stop asking", the same action either way.
+  const clearNudge = useCallback(() => {
+    const current = nudgeRef.current;
+    if (!current) return;
+    // Invalidate any `refreshNudge` fetch already in flight — see
+    // `nudgeRequestGeneration`'s own doc comment. Its `.then` still runs
+    // (this does not cancel the network request), it just no longer applies
+    // what it finds.
+    nudgeRequestGeneration.current += 1;
+    setNudge(null);
+    // Every unread duplicate from the last refresh, not only the one shown —
+    // see `unreadNudgeIdsRef`'s own doc comment. Falls back to just the shown
+    // row if nothing was tracked yet (dismissed before any refresh landed).
+    const ids = unreadNudgeIdsRef.current.length > 0 ? unreadNudgeIdsRef.current : [current.id];
+    unreadNudgeIdsRef.current = [];
+    void client.markNotificationsRead(ids, company).catch(() => {
+      // The optimistic clear could be wrong (offline, older host); the next
+      // poll below reconciles rather than leaving a stale local `null`.
+      refreshNudge();
+    });
+  }, [client, company, refreshNudge]);
+  // Issue #1845 (review: PR #1878): `listEventTick` bumps on every
+  // `workflow_created` frame, and the frame is deliberately thin — no actor,
+  // by design (`use-events.ts`) — so it cannot tell "this user's own create"
+  // apart from a teammate's or the orchestrator's. Calling `clearNudge` here
+  // used to persist THIS user's dismissal off of anyone's create in the
+  // company, which could silence a nudge for someone who has never saved a
+  // workflow themselves. `handleCreated` below already calls `clearNudge`
+  // directly the moment this session's own create is confirmed, so the only
+  // job left for the tick is picking up state this user changed elsewhere —
+  // a dismissal or an attributed create from another of their own sessions —
+  // which is exactly what re-asking the host's own per-user feed answers.
+  // Skip the tick this effect mounts with (there is nothing to refresh yet).
+  const nudgeListTickMounted = useRef(false);
+  useEffect(() => {
+    if (!nudgeListTickMounted.current) {
+      nudgeListTickMounted.current = true;
+      return;
+    }
+    if (nudgeRef.current) refreshNudge();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires on the tick, reads current nudge via ref
+  }, [listEventTick]);
   const [createOpen, setCreateOpen] = useState(false);
   // Issue #259: the same dialog, hydrated from the selected graph. Separate
   // state from `createOpen` rather than a mode flag, so the create path keeps
@@ -1749,7 +1903,17 @@ export function WorkflowsView({
     } else {
       toast.success("Workflow created.");
     }
-  }, [announceDisarm]);
+    // Issue #1845: this console's own create is the clearest possible signal
+    // — do not wait for the `workflow_created` SSE round trip to clear the
+    // nudge when we already know it landed. Set BEFORE `clearNudge`, and
+    // unconditionally: `clearNudge` only marks the row read when it already
+    // knows the nudge's id (`nudgeRef.current`), which a fetch still in
+    // flight at this instant has not supplied yet — see
+    // `hasCreatedLocallyRef`'s own doc comment for how `refreshNudge`
+    // reconciles that response when it lands.
+    hasCreatedLocallyRef.current = true;
+    clearNudge();
+  }, [announceDisarm, clearNudge]);
 
   // Issue #1110: leave the workflow on screen and go back to the index.
   //
@@ -2958,6 +3122,16 @@ export function WorkflowsView({
               </Button>
             </AlertDescription>
           </Alert>
+        </div>
+      )}
+
+      {/* Issue #1845: the week-1 "save your first workflow" nudge. Index only
+          (not the canvas detail) — it points at the same CTA the empty state
+          offers, which only exists there, and a nudge to create a workflow
+          while one is already open on screen would be an odd thing to say. */}
+      {nudge && !detailOpen && (
+        <div className="px-4 pt-3">
+          <Week1NudgeBanner onCreate={() => setCreateOpen(true)} onDismiss={clearNudge} />
         </div>
       )}
 

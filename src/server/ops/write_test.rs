@@ -117,6 +117,7 @@ async fn state_with(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -3330,6 +3331,7 @@ async fn state_with_manifest_and_defaults(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -3378,6 +3380,7 @@ async fn state_with_manifest_and_overlays(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -3943,6 +3946,7 @@ async fn state_with_source_dir(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -9333,6 +9337,7 @@ async fn the_export_document_is_built_from_the_redacted_detail() {
             runtime: runtime.clone(),
             actor: None,
             may_read_contents: false,
+            is_admin: false,
         },
         &id,
     )
@@ -9355,6 +9360,7 @@ async fn the_export_document_is_built_from_the_redacted_detail() {
             runtime: runtime.clone(),
             actor: None,
             may_read_contents: true,
+            is_admin: true,
         },
         &id,
     )

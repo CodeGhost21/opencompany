@@ -879,6 +879,7 @@ impl CompanyStore for MongoStore {
             setup: overlay.setup,
             name_confirmed: overlay.name_confirmed,
             activation_completed_at: overlay.activation_completed_at,
+            created_at_millis: overlay.created_at_millis,
         }))
     }
 
@@ -5530,6 +5531,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             };
             s.save(&record).await.expect("save company");
         }
@@ -5610,6 +5612,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             };
             // Same template name under two tenants: distinct namespaced ids, no
             // `companies` unique-index conflict.

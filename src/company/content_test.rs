@@ -1100,10 +1100,10 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
                 with_destination += 1;
                 assert_eq!(
                     destination.kind, "channel",
-                    "{label} uses destination kind `{}`. `owner` reports \
-                     Failed/OwnerFallbackFailed on a tenant with no mailbox — every freshly \
-                     provisioned one — and `email` would hardcode a recipient into a \
-                     shipped template.",
+                    "{label} uses destination kind `{}`. A seeded template routes to a real \
+                     desk channel: `owner` on a no-mailbox tenant now lands on the operator \
+                     channel (issue #1757) rather than the desk a template means to post in, \
+                     and `email` would hardcode a recipient into a shipped template.",
                     destination.kind
                 );
                 let target = destination.target.as_deref().unwrap_or("");

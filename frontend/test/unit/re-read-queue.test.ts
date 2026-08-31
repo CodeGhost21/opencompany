@@ -48,4 +48,20 @@ describe("drainReReadQueue (issue #1701)", () => {
     expect(reRead).toHaveBeenCalledTimes(0);
     expect(pending.size).toBe(0);
   });
+
+  /**
+   * Issue #1781 review (Codex P2): the map only ever holds the four
+   * canonical General spellings, but a settled turn can park under whichever
+   * casing the host accepted it under. A bare `channelMap[threadId]` index
+   * never matches an uncanonical id, so a thread parked as `"MAIN"` stayed
+   * parked forever even once the map was fully populated with `"main"`.
+   */
+  it("replays a parked thread whose id is an uncanonical General spelling", () => {
+    const pending = new Set(["MAIN"]);
+    const reRead = vi.fn();
+    drainReReadQueue(pending, { main: "general" }, reRead);
+    expect(reRead).toHaveBeenCalledTimes(1);
+    expect(reRead).toHaveBeenCalledWith("MAIN");
+    expect(pending.size).toBe(0);
+  });
 });

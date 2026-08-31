@@ -1266,6 +1266,7 @@ name = "{name}"
             overlay_tool_grants: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
             id: CompanyId::new("acme"),
             manifest,
             ledger: Vec::new(),

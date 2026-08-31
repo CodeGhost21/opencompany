@@ -257,6 +257,12 @@ export function ApprovalMeta({
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;
+  // Resolved through `channelForThread`, not a bare `map[key]` index: the
+  // host compares General spellings case-insensitively and echoes back
+  // whichever one it was addressed with, so an approval raised in `#general`
+  // can carry a thread id the map's own literal keys miss (issue #1781
+  // review, Codex P2). A bare index breaks the "Asked in" link for exactly
+  // that case.
   const conversationChannelId =
     a.thread && chatChannelByThread ? channelForThread(chatChannelByThread, a.thread) : null;
   const workflowId = workflowIdForApproval(a);
