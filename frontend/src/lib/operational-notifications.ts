@@ -56,3 +56,76 @@ export function operationalNotificationSeverity(
   }
   return "warning";
 }
+
+/** One toasted id still waiting for the tab to become visible before it can be marked read. */
+export interface PendingAcknowledgement {
+  company: string | null;
+  id: string;
+}
+
+/**
+ * Decide which just-toasted ids may be marked read on the server right now,
+ * versus which must wait (Codex #1883 P2, the toast+ack fix's own fallout).
+ *
+ * `app-shell` calls `toast.error`/`toast.warning` the instant a row is
+ * announced, whether or not the tab is visible — sonner still enqueues and
+ * renders it, it is only `toast-lifetime.ts`'s auto-dismiss clock that pauses
+ * for a hidden tab (`sweepToasts`'s `env.documentHidden` guard), specifically
+ * so the operator gets the toast's full life once they return. But the
+ * previous revision of this fix marked the row read at that same enqueue
+ * instant, not at the moment a person actually saw it. If the tab is closed
+ * or reloaded before it is ever brought to the foreground, sonner's
+ * in-memory toast — and the operator's only chance to see it — is gone, while
+ * the durable row is already `readAt`-stamped server-side. A `dispatch_failed`
+ * nobody ever laid eyes on reads as handled, which defeats the point of the
+ * toast consumer this whole fix exists for.
+ *
+ * While the tab is hidden, every id is parked in `pending` instead of
+ * acknowledged — see [`flushPendingAcknowledgements`] for when it finally is.
+ * This does NOT reopen the "toasts once per poll interval instead of once"
+ * bug the toast+ack fix closed: the caller's `operationalAnnouncedRef` guard
+ * (a separate, non-durable set) is updated the moment a row is toasted,
+ * hidden tab or not, so a still-unacknowledged row is never re-toasted on the
+ * next poll — it is only left unacknowledged *server-side* until the tab is
+ * actually seen.
+ */
+export function scheduleAcknowledgement(
+  ids: readonly string[],
+  company: string | null,
+  documentHidden: boolean,
+  pending: readonly PendingAcknowledgement[],
+): { ackNow: string[]; pending: PendingAcknowledgement[] } {
+  if (!documentHidden) {
+    return { ackNow: [...ids], pending: [...pending] };
+  }
+  return {
+    ackNow: [],
+    pending: [...pending, ...ids.map((id) => ({ company, id }))],
+  };
+}
+
+/**
+ * Flush every id parked by [`scheduleAcknowledgement`] for `company`, called
+ * on the hidden → visible transition — the moment the operator can actually
+ * see whatever sonner already rendered while the tab sat in the background.
+ *
+ * Scoped to `company` rather than flushing everything parked: the tab could
+ * in principle switch companies while hidden, and acknowledging an id under
+ * the wrong company's scope would mark a stranger's row read (or 404/silently
+ * no-op against a company that never held it). An id parked under a company
+ * this tab has since left stays parked — there is no visibility edge for a
+ * company nobody is looking at either, so nothing is lost, only deferred
+ * again until that company (if ever) becomes current.
+ */
+export function flushPendingAcknowledgements(
+  company: string | null,
+  pending: readonly PendingAcknowledgement[],
+): { ackNow: string[]; pending: PendingAcknowledgement[] } {
+  const ackNow: string[] = [];
+  const stillPending: PendingAcknowledgement[] = [];
+  for (const p of pending) {
+    if (p.company === company) ackNow.push(p.id);
+    else stillPending.push(p);
+  }
+  return { ackNow, pending: stillPending };
+}

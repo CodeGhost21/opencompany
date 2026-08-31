@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import type { NotificationDto } from "@/api/types";
 import {
+  flushPendingAcknowledgements,
   isOperationalNotification,
   operationalNotificationSeverity,
   operationalNotificationsToAnnounce,
+  scheduleAcknowledgement,
+  type PendingAcknowledgement,
 } from "@/lib/operational-notifications";
 
 /**
@@ -101,5 +104,98 @@ describe("operationalNotificationSeverity", () => {
     expect(operationalNotificationSeverity(note({ id: "a", kind: "something_new" }))).toBe(
       "warning",
     );
+  });
+});
+
+/**
+ * `app-shell` toasts an operational row (sonner renders it, hidden tab or
+ * not) the instant it is polled — but the previous revision of the toast+ack
+ * fix marked the row read server-side at that same instant, regardless of
+ * whether anyone could actually see the tab (Codex #1883 P2). A tab closed
+ * or reloaded before it was ever brought to the foreground lost the
+ * in-memory toast while the durable row already read as handled. These tests
+ * pin the deferred-ack replacement: nothing is acknowledged while the tab is
+ * hidden, and it flushes once — scoped to the right company — on return.
+ */
+describe("scheduleAcknowledgement", () => {
+  it("acks immediately when the tab is visible", () => {
+    const result = scheduleAcknowledgement(["a", "b"], "acme", false, []);
+    expect(result.ackNow).toEqual(["a", "b"]);
+    expect(result.pending).toEqual([]);
+  });
+
+  it("parks every id instead of acking when the tab is hidden", () => {
+    const result = scheduleAcknowledgement(["a", "b"], "acme", true, []);
+    expect(result.ackNow).toEqual([]);
+    expect(result.pending).toEqual([
+      { company: "acme", id: "a" },
+      { company: "acme", id: "b" },
+    ]);
+  });
+
+  it("accumulates onto whatever was already parked", () => {
+    const already: PendingAcknowledgement[] = [{ company: "acme", id: "z" }];
+    const result = scheduleAcknowledgement(["a"], "acme", true, already);
+    expect(result.pending).toEqual([
+      { company: "acme", id: "z" },
+      { company: "acme", id: "a" },
+    ]);
+  });
+});
+
+describe("flushPendingAcknowledgements", () => {
+  it("acks every id parked for the current company and clears them", () => {
+    const pending: PendingAcknowledgement[] = [
+      { company: "acme", id: "a" },
+      { company: "acme", id: "b" },
+    ];
+    const result = flushPendingAcknowledgements("acme", pending);
+    expect(result.ackNow.sort()).toEqual(["a", "b"]);
+    expect(result.pending).toEqual([]);
+  });
+
+  it("leaves a different company's parked ids untouched", () => {
+    const pending: PendingAcknowledgement[] = [
+      { company: "acme", id: "a" },
+      { company: "globex", id: "b" },
+    ];
+    const result = flushPendingAcknowledgements("acme", pending);
+    expect(result.ackNow).toEqual(["a"]);
+    expect(result.pending).toEqual([{ company: "globex", id: "b" }]);
+  });
+
+  it("is a no-op when nothing is parked", () => {
+    const result = flushPendingAcknowledgements("acme", []);
+    expect(result.ackNow).toEqual([]);
+    expect(result.pending).toEqual([]);
+  });
+});
+
+describe("the hidden-tab ack round trip does not reopen the once-per-poll bug", () => {
+  it("parks under hidden, then flushes exactly those ids once visible — never re-toasting via the announced guard", () => {
+    // Mirrors app-shell's actual sequence: toast (and mark `operationalAnnouncedRef`)
+    // fires unconditionally; only the server ack is deferred.
+    const announced = new Set<string>();
+    let pending: PendingAcknowledgement[] = [];
+
+    const rows = [note({ id: "a", kind: "dispatch_failed" })];
+    const toAnnounce = operationalNotificationsToAnnounce(rows, announced);
+    expect(toAnnounce.map((n) => n.id)).toEqual(["a"]);
+    toAnnounce.forEach((n) => announced.add(n.id)); // toasted — the guard updates regardless of visibility
+
+    const scheduled = scheduleAcknowledgement(["a"], "acme", /* documentHidden */ true, pending);
+    pending = scheduled.pending;
+    expect(scheduled.ackNow).toEqual([]); // not acked yet — tab is hidden
+
+    // A poll tick fires again before the tab is ever seen: the durable row is
+    // still unread server-side, so it comes back — but the announced guard
+    // must keep it from toasting a second time.
+    expect(operationalNotificationsToAnnounce(rows, announced)).toEqual([]);
+
+    // The tab becomes visible.
+    const flushed = flushPendingAcknowledgements("acme", pending);
+    pending = flushed.pending;
+    expect(flushed.ackNow).toEqual(["a"]);
+    expect(pending).toEqual([]);
   });
 });
