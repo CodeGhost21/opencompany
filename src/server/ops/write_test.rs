@@ -117,6 +117,7 @@ async fn state_with(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -3329,6 +3330,7 @@ async fn state_with_manifest_and_defaults(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -3377,6 +3379,7 @@ async fn state_with_manifest_and_overlays(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();
@@ -3942,6 +3945,7 @@ async fn state_with_source_dir(
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         })
         .await
         .unwrap();

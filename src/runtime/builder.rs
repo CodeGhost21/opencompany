@@ -2578,6 +2578,17 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.lifecycle.clone())
             .unwrap_or_else(|| "running".to_string());
+        // Stamped once, the first time this id is ever built (`existing:
+        // None`), and carried forward untouched on every later rebuild —
+        // never backdated, never refreshed. See `CompanyRecord::created_at_millis`'s
+        // own docs: it used to also feed the activation back-fill below, but
+        // that discriminator is now `CompanyStore::activation_gate_seen`
+        // (PR #1875 review finding) — this value is carried purely so the
+        // console has a creation timestamp to show.
+        let created_at_millis = existing
+            .as_ref()
+            .and_then(|r| r.created_at_millis)
+            .or_else(|| existing.is_none().then(crate::ports::now_millis));
         // Existing overlay teammates are carried across the rebuild verbatim —
         // except when the upgraded manifest newly confers a BYO real-money
         // namespace (issue #788): an empty `tools` line would silently hand it
@@ -2665,6 +2676,7 @@ impl RuntimeBuilder {
             // computed further down have nothing to feed here.
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         let mut desk_ids = Vec::new();
         let candidates = desk_record
@@ -3472,6 +3484,7 @@ impl RuntimeBuilder {
                                 setup: setup.clone(),
                                 name_confirmed,
                                 activation_completed_at,
+                                created_at_millis,
                             };
                             // The company's other declared harnesses, each on
                             // its own pool and its own provider. Empty unless
@@ -3768,6 +3781,7 @@ impl RuntimeBuilder {
                     setup,
                     name_confirmed,
                     activation_completed_at,
+                    created_at_millis,
                 },
                 gate_seen_to_persist,
             )
@@ -8467,6 +8481,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -8645,6 +8660,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -9043,6 +9059,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -9168,6 +9185,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -9315,6 +9333,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -9422,6 +9441,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();

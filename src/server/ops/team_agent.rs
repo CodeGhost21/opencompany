@@ -2056,6 +2056,7 @@ agent = "claude"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         record.overlay_agents.push(OverlayAgent {
             id: "scoped".to_string(),
@@ -2131,6 +2132,7 @@ agent = "claude"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -4571,6 +4573,7 @@ agent = "claude"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         record.overlay_agents.push(crate::ports::OverlayAgent {
             id: "growth".to_string(),
@@ -4661,6 +4664,7 @@ agent = "claude"
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 

@@ -3983,6 +3983,10 @@ pub struct OverlayBlob {
     /// [`CompanyRecord::activation_completed_at`].
     #[serde(default)]
     pub activation_completed_at: Option<u64>,
+    /// Epoch-millis this record was first created. See
+    /// [`CompanyRecord::created_at_millis`].
+    #[serde(default)]
+    pub created_at_millis: Option<u64>,
     /// Whether this bundle has ever been saved by activation-aware code — the
     /// sqlite/mongodb-backed marker behind
     /// [`CompanyStore::activation_gate_seen`] (PR #1875 review finding: the
@@ -4043,6 +4047,7 @@ impl OverlayBlob {
             setup: record.setup.clone(),
             name_confirmed: record.name_confirmed,
             activation_completed_at: record.activation_completed_at,
+            created_at_millis: record.created_at_millis,
             activation_gate_seen,
         }
     }
@@ -4082,6 +4087,11 @@ impl OverlayBlob {
                     // what supplies the right answer for an existing company.
                     name_confirmed: false,
                     activation_completed_at: None,
+                    // A legacy bare-array row predates this field by an even
+                    // longer way — `None` is exactly right, not a gap: it is
+                    // what marks the record eligible for the grandfather
+                    // back-fill above in the first place.
+                    created_at_millis: None,
                     // Same reasoning again: a legacy bare-array row predates
                     // activation tracking (and this field) entirely, so it
                     // has never been seen by activation-aware code — exactly
@@ -4335,6 +4345,28 @@ pub struct CompanyRecord {
     /// onboarding flow it has no memory of starting.
     #[serde(default)]
     pub activation_completed_at: Option<u64>,
+    /// Epoch-millis this record was first created, stamped once by
+    /// `RuntimeBuilder::build` the first time it sees a given company id
+    /// (`existing: None`) and carried forward untouched on every later
+    /// rebuild — never backdated, never refreshed. Surfaced to the console
+    /// through the GraphQL `Company.createdAtMillis` field
+    /// (`server/graphql/observability.rs`).
+    ///
+    /// `None` for every record written before this field existed. It was
+    /// briefly also the discriminator for [`Self::activation_completed_at`]'s
+    /// `running`-lifecycle back-fill, telling "predates activation tracking"
+    /// apart from "created moments ago and restarted before finishing
+    /// onboarding" — `lifecycle` is `running` from the very first save in
+    /// both cases. That role now belongs to
+    /// [`CompanyStore::activation_gate_seen`](crate::ports::store::CompanyStore::activation_gate_seen)
+    /// (PR #1875 review finding), a store-level marker that survives a
+    /// record whose `created_at_millis` is itself absent for an unrelated
+    /// reason (a legacy backend row, a partially-imported bundle). This
+    /// field remains purely informational for the activation migration; do
+    /// not gate new logic on it being `None` vs `Some`. `#[serde(default)]`
+    /// is the same backward-compat fallback the two fields above use.
+    #[serde(default)]
+    pub created_at_millis: Option<u64>,
 }
 
 /// What a teammate key an operator or a model typed resolves to on a company's
@@ -5417,6 +5449,7 @@ mod test {
             setup: Some(answers.clone()),
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
 
         let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
@@ -6698,6 +6731,7 @@ mod test {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }
     }
 

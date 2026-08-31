@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use opencompany::company::Schedule;
-use opencompany::runtime::{CompanyScheduler, MaintenanceTicker, SystemClock, WorkflowScheduler};
+use opencompany::runtime::lifecycle_scheduler::load_or_create_cutoff_millis;
+use opencompany::runtime::{
+    CompanyScheduler, LifecycleScheduler, MaintenanceTicker, SystemClock, WorkflowScheduler,
+};
 use opencompany::{
     AppConfig, AppState, CompanyId, CompanyManifest, Result,
     app::config::{ConfigFile, ProcessEnv, resolve},
@@ -725,6 +728,40 @@ fn spawn_maintenance_ticker(
     shutdown: &Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
+}
+
+/// Starts the process-wide week-1 nudge scheduler (issue #1845): one daily
+/// task that emails + files an in-app notification for a signup who hit
+/// their day-7 boundary without saving a workflow.
+///
+/// Process-wide for the same reason [`spawn_workflow_scheduler`] and
+/// [`spawn_maintenance_ticker`] are: it re-reads the registry every tick, so
+/// a company registered after boot is covered without a restart.
+///
+/// The mail sender/credentials are read from `state.connections()`, already
+/// resolved by [`connections_runtime`] before this is called — `None` in the
+/// default build (no `smtp` feature) or when `OPENCOMPANY_MAIL_*` is unset,
+/// which the scheduler treats as "degrade to in-app only", never a reason to
+/// skip spawning. `cutoff_millis` comes from
+/// [`load_or_create_cutoff_millis`] against `state.home()` — pinned the
+/// first time this ever runs on this data root, not re-stamped on every
+/// boot, so a restart does not move the "signed up after deploy" instant
+/// issue #1845 scopes the nudge to. See that function's docs for why a
+/// re-stamped cutoff would permanently disqualify eligible signups.
+fn spawn_lifecycle_scheduler(
+    state: &AppState,
+    shutdown: &Arc<Notify>,
+) -> tokio::task::JoinHandle<()> {
+    let connections = state.connections();
+    LifecycleScheduler::new(
+        state.registry().clone(),
+        Arc::new(SystemClock),
+        connections.mail.clone(),
+        connections.mail_credentials.clone(),
+        state.config().host_base_url(),
+        load_or_create_cutoff_millis(state.home()),
+    )
+    .spawn(shutdown.clone())
 }
 
 /// Starts the process-wide presence sweep (issue: "Bound client-supplied
@@ -2351,6 +2388,13 @@ async fn async_main() -> Result<()> {
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
             scheduler_handles.push(spawn_presence_sweeper(&state, &shutdown));
+
+            // Issue #1845: the week-1 nudge, process-wide and always started —
+            // same reasoning as the workflow scheduler and maintenance ticker
+            // above. `state.connections()` is already wired (line above the
+            // registration loop), so the scheduler sees a real mail sender
+            // whenever `OPENCOMPANY_MAIL_*` + `smtp` are configured.
+            scheduler_handles.push(spawn_lifecycle_scheduler(&state, &shutdown));
 
             // Stop the schedulers on a termination signal so background cycle
             // work halts with the process (lifecycle shutdown).
