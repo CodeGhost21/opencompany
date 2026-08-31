@@ -1047,16 +1047,28 @@ async fn company_events(
         cancel: Some(cancel),
         label_refresh: Some(label_refresh),
     };
+    // A second handle on the same runtime/actor the label-refresh task above
+    // captured its own clones of — needed here too, for the per-item
+    // revalidation below (issue #1781 review, Codex P1 follow-up).
+    let runtime = scope.runtime.clone();
+    let actor = scope.actor.clone();
     let durable = subscription.filter_map(move |item| {
         // Keep the teardown guard alive for the life of the stream.
         let _ = &guard;
-        let authors = authors
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let is_admin = is_admin.load(std::sync::atomic::Ordering::Relaxed);
-        let event = project_stream_item_for_viewer(&item, &authors, &viewer, is_admin)
-            .map(|value| Ok(Event::default().data(value.to_string())));
-        std::future::ready(event)
+        let authors = Arc::clone(&authors);
+        let is_admin_cell = Arc::clone(&is_admin);
+        let runtime = runtime.clone();
+        let actor = actor.clone();
+        let viewer = viewer.clone();
+        async move {
+            let cached = is_admin_cell.load(std::sync::atomic::Ordering::Relaxed);
+            let is_admin = is_admin_for_item(&item, &runtime, actor.as_ref(), cached).await;
+            let authors = authors
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            project_stream_item_for_viewer(&item, &authors, &viewer, is_admin)
+                .map(|value| Ok(Event::default().data(value.to_string())))
+        }
     });
     // Merge the transient live turn-progress bus (tool_call/tool_result frames a
     // turn emits while it runs — see [`crate::turn_stream`]) onto the same feed.
@@ -1104,6 +1116,50 @@ fn is_own_typing_frame(frame: &crate::turn_stream::LiveFrame, self_id: Option<&s
         crate::turn_stream::LiveFrame::Typing(typing)
             if self_id == Some(typing.user_id.as_str())
     )
+}
+
+/// Whether `item` is the one content class [`company_events`]'s `is_admin`
+/// gates: an owner-fallback [`AgentReply`](CompanyEvent::AgentReply) —
+/// journaled under
+/// [`OWNER_FALLBACK_REPORT_AUTHOR`](crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR)
+/// (issue #1781 review, Codex P1 follow-up).
+///
+/// A cheap, synchronous pre-check so `company_events`'s per-item revalidation
+/// only spends a store read on the one content class that needs fresher-than-
+/// `LABEL_REFRESH_EVERY` staleness — every other event (and a stream `Gap`)
+/// keeps using the cached snapshot with no store read added to its path.
+fn is_owner_fallback_report(item: &EventStreamItem) -> bool {
+    matches!(
+        item,
+        EventStreamItem::Event(StoredEvent {
+            event: CompanyEvent::AgentReply { agent_id, .. },
+            ..
+        }) if agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR
+    )
+}
+
+/// The `is_admin` value [`company_events`] projects `item` under (issue #1781
+/// review, Codex P1 follow-up).
+///
+/// `cached` is the periodic `LABEL_REFRESH_EVERY`-bounded snapshot every other
+/// event uses unchanged. An owner-fallback report is revalidated fresh
+/// instead — the P1 finding's fix: without this, a demotion landing after the
+/// last periodic refresh still let an already-open stream project an
+/// admin-only report for up to another `LABEL_REFRESH_EVERY` (60s), since
+/// `cached` alone would not see the demotion until its own next tick.
+/// Revalidating only for this one content class keeps every other event on
+/// the cheap cached read — no store lookup added to the hot path.
+async fn is_admin_for_item(
+    item: &EventStreamItem,
+    runtime: &CompanyRuntime,
+    actor: Option<&Actor>,
+    cached: bool,
+) -> bool {
+    if is_owner_fallback_report(item) {
+        refreshed_is_admin(runtime, actor, cached).await
+    } else {
+        cached
+    }
 }
 
 /// Projects a live subscription item into the operator stream's safe wire
@@ -12745,6 +12801,95 @@ mode = "full"
         assert!(
             !refreshed_is_admin(&runtime, Some(&actor), true).await,
             "a suspended admin must not keep admin-only visibility either"
+        );
+    }
+
+    /// Issue #1781 review, Codex P1 follow-up: even with the periodic refresh
+    /// the test above covers, `company_events` still only re-checked on its
+    /// own `LABEL_REFRESH_EVERY` (60s) tick — a demotion landing right after
+    /// one tick left an open SSE stream projecting an owner-fallback report
+    /// under a stale cached `true` for up to another 60s. `is_admin_for_item`
+    /// is the fix: it revalidates fresh for that one content class instead of
+    /// trusting `cached`, no matter how long ago the last periodic tick was —
+    /// proven here by feeding it a `cached: true` that is already wrong the
+    /// instant this call happens, with no `sleep` at all.
+    ///
+    /// The second half is the other side of the same fix: an *ordinary* event
+    /// must keep using `cached` untouched, or every SSE item would pay a
+    /// store read regardless of content — the whole reason the fix is scoped
+    /// to the owner-fallback content class rather than revalidating every
+    /// item.
+    #[tokio::test]
+    async fn is_admin_for_item_revalidates_only_the_owner_fallback_report() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        let mut user = crate::ports::users::UserRecord {
+            id: "u1".to_string(),
+            email: "admin@acme.test".to_string(),
+            display_name: None,
+            avatar: None,
+            role: crate::ports::users::UserRole::Admin,
+            status: crate::ports::users::UserStatus::Active,
+            password_hash: None,
+            must_change_password: false,
+            created_at_millis: crate::ports::now_millis(),
+            last_seen_at_millis: None,
+            updated_at_millis: crate::ports::now_millis(),
+        };
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+        let actor = Actor {
+            kind: ActorKind::User,
+            id: user.id.clone(),
+        };
+
+        // The demotion: no wait, no periodic tick — the very next item must
+        // already see it for the gated content class.
+        user.role = crate::ports::users::UserRole::Member;
+        runtime
+            .users()
+            .upsert_user(runtime.id(), &user)
+            .await
+            .unwrap();
+
+        let owner_fallback_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "operator".into(),
+            agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
+            text: "no admin has a mailbox".into(),
+            steps: Vec::new(),
+        }));
+        assert!(
+            !super::is_admin_for_item(&owner_fallback_item, &runtime, Some(&actor), true).await,
+            "an owner-fallback report must revalidate fresh and see the demotion \
+             immediately — a stale cached `true` must never leak this content, \
+             regardless of when the last periodic refresh ran"
+        );
+
+        let ordinary_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "ordinary reply".into(),
+            steps: Vec::new(),
+        }));
+        assert!(
+            super::is_admin_for_item(&ordinary_item, &runtime, Some(&actor), true).await,
+            "an ordinary event must keep using the cached snapshot untouched — \
+             revalidating every item, not just the gated content class, would \
+             add a store read to the hot path for no reason"
         );
     }
 
