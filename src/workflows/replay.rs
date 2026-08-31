@@ -740,6 +740,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: *repeatable,
                     destination: None,
+                    postcondition: None,
                 })
                 .collect(),
             edges: Vec::<WorkflowEdgeDef>::new(),
