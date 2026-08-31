@@ -61,17 +61,23 @@ interface Props {
    * typing indicator and cleared by the parent when the final reply lands.
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
-  /** Marks a thread's chat POST as in flight (parent suppresses the SSE echo). */
-  onSendStart?: (threadId: string) => void;
+  /**
+   * Marks a thread's chat POST as in flight (parent suppresses the SSE echo).
+   * Returns the generation the shell stamped this send's receipt with (issue
+   * #1935 review, codex 3892702774) — forwarded straight through to
+   * `ChatPane`/`useConversationRuntime`, which threads it to whichever
+   * terminal callback below the POST reaches.
+   */
+  onSendStart?: (threadId: string) => number | undefined;
   /** Clears the in-flight mark + live timeline once the POST resolves. */
-  onSendEnd?: (threadId: string) => void;
+  onSendEnd?: (threadId: string, gen?: number) => void;
   /**
    * The host accepted the turn and answered `202` rather than the reply
    * (issue #983). Unlike `onSendEnd` this does NOT end the turn — it only ends
    * the POST, so the parent keeps the working row up and stops suppressing the
    * live reply frame, which in this mode is the delivery path.
    */
-  onSendDetached?: (threadId: string, turnId?: string) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
   /**
    * The chat POST **threw** (issue #1000). The third outcome, and not
    * `onSendEnd`: that one promises the parent the reply is already on screen,
@@ -79,7 +85,7 @@ interface Props {
    * nothing and the turn usually outlives the request, so that frame is the
    * only copy of the answer.
    */
-  onSendFailed?: (threadId: string) => void;
+  onSendFailed?: (threadId: string, gen?: number) => void;
   /** Turns accepted but not settled, by thread id — survives a reload (#983). */
   openTurns?: Record<string, OpenTurn[]>;
 }
@@ -180,10 +186,10 @@ function ChatPane({
   onReply?: () => void;
   taskEventTick?: number;
   liveSteps?: TurnStep[];
-  onSendStart?: (threadId: string) => void;
-  onSendEnd?: (threadId: string) => void;
-  onSendDetached?: (threadId: string, turnId?: string) => void;
-  onSendFailed?: (threadId: string) => void;
+  onSendStart?: (threadId: string) => number | undefined;
+  onSendEnd?: (threadId: string, gen?: number) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
+  onSendFailed?: (threadId: string, gen?: number) => void;
   /** This thread's turn, when one is accepted but not settled (#983). */
   openTurn?: OpenTurn;
   onOpenList: () => void;
