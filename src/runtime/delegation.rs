@@ -3690,6 +3690,37 @@ tokio::task_local! {
     pub(crate) static CHAT_ONLY_TURN: bool;
 }
 
+tokio::task_local! {
+    /// The conversation the current turn is answering in (issue #1890 F).
+    ///
+    /// A task-local for the reason [`CHAT_ONLY_TURN`] is one: a tool's belt is
+    /// built once per agent and a turn's conversation changes every message, so
+    /// the tool cannot be handed it at construction. This is the ambient fact a
+    /// tool reads at call time.
+    ///
+    /// It carries the **channel**, which is what scopes `read_thread`: a tool
+    /// able to read any thread in any channel would reintroduce through the
+    /// back door the leak #1890 A closed at the seed.
+    static TURN_CONVERSATION: Option<String>;
+}
+
+/// Run `fut` with the current turn's channel set (issue #1890 F).
+pub(crate) async fn with_turn_conversation<F: std::future::Future>(
+    chat_id: Option<String>,
+    fut: F,
+) -> F::Output {
+    TURN_CONVERSATION.scope(chat_id, fut).await
+}
+
+/// The channel the current turn is answering in, or `None` outside one — a
+/// dispatched card, a workflow node, or any path that never set it.
+///
+/// `None` is a refusal for `read_thread` rather than a wildcard: a turn with no
+/// conversation has no threads it is entitled to read.
+pub(crate) fn turn_conversation() -> Option<String> {
+    TURN_CONVERSATION.try_with(Clone::clone).ok().flatten()
+}
+
 /// Run `fut` with the [`CHAT_ONLY_TURN`] hint set to `chat_only`.
 pub(crate) async fn with_chat_only_hint<F: std::future::Future>(
     chat_only: bool,
