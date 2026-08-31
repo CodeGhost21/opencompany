@@ -331,12 +331,24 @@ fn system_notice(text: String) -> OutboundMessage {
 /// orchestrator claims the voice. A desk, the General line, an empty/unknown key
 /// — every shared surface — keeps the orchestrator as the single point of
 /// contact.
+///
+/// The unwrapped `dm:` fallback checks the roster **by id first**, mirroring
+/// [`chat_responder`](crate::runtime::delegation_tools::chat_responder)'s own
+/// `dm:` arm (issue #1743): a desk whose id collides with a teammate's must
+/// not swallow the prefixed address, because the prefix exists precisely to
+/// reach that teammate. Falling straight into the bare, desk-first
+/// [`assignee::resolve`] here would reopen #1743 in this resolver — a card
+/// dispatched from that teammate's private DM would misattribute to the
+/// orchestrator, exactly the "second voice" this function exists to prevent.
 pub(crate) fn relay_speaker(record: &CompanyRecord, origin: &str, orchestrator: &str) -> String {
     let mut resolution = assignee::resolve(record, origin);
     if matches!(resolution, assignee::AssigneeResolution::Unknown(_))
         && let Some(key) = assignee::dm_key(origin)
     {
-        resolution = assignee::resolve(record, key);
+        resolution = match record.resolve_roster_agent_id(key) {
+            Some(agent) => assignee::AssigneeResolution::Agent(agent),
+            None => assignee::resolve(record, key),
+        };
     }
     match resolution {
         assignee::AssigneeResolution::Agent(agent) if agent != orchestrator => agent,
@@ -7192,6 +7204,86 @@ members = ["engineer"]
         assert_eq!(relay_speaker(&record, "General", "chief"), "chief");
         assert_eq!(relay_speaker(&record, "", "chief"), "chief");
         assert_eq!(relay_speaker(&record, "nobody-here", "chief"), "chief");
+    }
+
+    /// A roster with a desk whose id collides with a teammate id — the exact
+    /// shape `runtime::delegation_tools::a_prefixed_dm_reaches_the_teammate_
+    /// even_when_a_desk_shares_the_id` (issue #1743) exercises for
+    /// `chat_responder`. Manifest validation does not forbid the collision.
+    fn record_with_colliding_desk_and_teammate_id() -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+description = "Coordinates the company."
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds it."
+
+[[group_chat]]
+id = "engineer"
+name = "Engineering desk"
+members = ["chief"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+        }
+    }
+
+    /// PR #1949 review (Codex thread 3895066480): a `dm:` key names a
+    /// teammate even when a desk shares that id — the same invariant issue
+    /// #1743 established for `chat_responder`
+    /// (`runtime::delegation_tools::a_prefixed_dm_reaches_the_teammate_even_
+    /// when_a_desk_shares_the_id`). `relay_speaker` used to re-run the bare,
+    /// desk-first `assignee::resolve` on the key once the prefix was
+    /// stripped, so a card dispatched from that teammate's private DM
+    /// resolved to `Desk` and fell through to the orchestrator — reopening
+    /// #1743's bug in the relay's own resolver, and misattributing a private
+    /// DM's card as though it were answered on the shared desk.
+    #[test]
+    fn relay_speaker_reaches_the_dm_teammate_even_when_a_desk_shares_the_id() {
+        let record = record_with_colliding_desk_and_teammate_id();
+        assert_eq!(
+            relay_speaker(&record, "dm:engineer", "chief"),
+            "engineer",
+            "the prefix names the teammate, not the desk that shares its id"
+        );
+        // The bare key still belongs to the desk, exactly as it does for
+        // `chat_responder` — only the prefixed address reaches the teammate.
+        assert_eq!(
+            relay_speaker(&record, "engineer", "chief"),
+            "chief",
+            "the desk still answers its own bare id"
+        );
     }
 
     /// A brain over `record`, wired to a real task store.
