@@ -72,6 +72,7 @@ import {
 } from "./chat/mentions";
 import { echoCause } from "./chat/EchoPlaceholder";
 import { MessageTimeline } from "./chat/MessageTimeline";
+import type { ChatReceipt } from "./chat/ChatLiveReceipt";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import {
@@ -226,6 +227,20 @@ interface Props {
    * started, which is most of what issue #367 is about.
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
+  /**
+   * The live receipt for a synchronous chat turn in flight, keyed by **host
+   * thread id** (issue #1934) — resolved to this channel's thread the same way
+   * `liveStepsByThread` is. Present between the operator's send and the reply
+   * landing; absent otherwise. Drives the "Sent → Picked up → on step" row that
+   * fills the gap the composer used to leave silent.
+   */
+  receiptByThread?: Record<string, ChatReceipt>;
+  /**
+   * Roster agent id → display name, captured by the shell's desks/roster read
+   * (issue #1934). Lets the receipt name whoever picked the turn up rather than
+   * rendering a raw id; a miss falls back to the channel voice.
+   */
+  agentNames?: Record<string, string>;
   /** Channel id → unread count, for the rail's badges. Owned by the shell. */
   unread?: Record<string, number>;
   /**
@@ -357,6 +372,8 @@ export function ChatView({
   scopeRef,
   openTurns,
   liveStepsByThread,
+  receiptByThread,
+  agentNames,
   unread,
   mentions,
   mentionFeedRevision,
@@ -1316,6 +1333,10 @@ export function ChatView({
   const activeIsDesk =
     active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
+  // The live receipt for this channel's thread (issue #1934), resolved exactly
+  // as `liveSteps` above — same host thread id, same open-thread exclusion at
+  // the render site below.
+  const receipt = activeThreadId ? receiptByThread?.[activeThreadId] : undefined;
   /**
    * The turn this channel is waiting on, if any (issue #983).
    *
@@ -2088,6 +2109,10 @@ export function ChatView({
               typing={(sending || !!openTurn) && !openThreadId}
               queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
+              // Thread-panel receipts are out of v1 (issue #1934): excluded here
+              // the same way `liveSteps` is when a thread is open.
+              receipt={openThreadId ? undefined : receipt}
+              agentNames={agentNames}
               onOpenThread={setOpenThreadId}
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}

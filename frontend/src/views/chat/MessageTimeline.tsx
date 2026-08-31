@@ -7,6 +7,7 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
+import { ChatLiveReceipt, type ChatReceipt } from "./ChatLiveReceipt";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -48,6 +49,17 @@ interface Props {
    * an inbound message kicked off shows its work here too (issue #367).
    */
   liveSteps?: TurnStep[];
+  /**
+   * The live receipt for a synchronous chat turn this console just sent (issue
+   * #1934). When present it supersedes {@link TypingRow} — it says "Sent →
+   * Picked up → on step" with a ticking clock instead of bare typing dots — and
+   * folds the same {@link StepTimeline} below the line when steps exist. Absent
+   * for an inbound turn this console never started, which still falls to the
+   * `liveSteps`/`typing` rows below.
+   */
+  receipt?: ChatReceipt;
+  /** Roster agent id → display name, so the receipt never shows a raw id. */
+  agentNames?: Record<string, string>;
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, emoji: string) => void;
   /** Deletes the board card a line opened, and drops its chip (issue #984). */
@@ -148,6 +160,8 @@ export function MessageTimeline({
   typing,
   queued,
   liveSteps,
+  receipt,
+  agentNames,
   onOpenThread,
   onReact,
   onDismissCard,
@@ -364,7 +378,17 @@ export function MessageTimeline({
             />
           ),
         )}
-        {liveStepCount > 0 && !queued ? (
+        {receipt && !queued ? (
+          // The receipt for our own in-flight send (issue #1934) supersedes the
+          // typing dots and carries the live steps itself. A queued turn keeps
+          // its honest "Queued…" row instead — the receipt is a `!queued` state.
+          <ChatLiveReceipt
+            channel={channel}
+            receipt={receipt}
+            agentNames={agentNames}
+            steps={liveSteps ?? []}
+          />
+        ) : liveStepCount > 0 && !queued ? (
           <LiveTurnRow channel={channel} steps={liveSteps ?? []} />
         ) : (
           typing && <TypingRow channel={channel} queued={queued} />
