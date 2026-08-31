@@ -265,6 +265,13 @@ export interface DeliveryReport {
  * `blocked` and `awaiting-approval` because it contradicts them — both tell an
  * operator to go and decide something, and this is the state in which there is
  * nothing there.
+ *
+ * `degraded` is the newest addition (issue #1865): a node under
+ * `on_error: continue|route` errored and the graph kept going past it, or an
+ * agent node's turn truncated at the iteration cap. Checked LAST, immediately
+ * above `ok` — every reading above it describes something more actionable, so
+ * a run that is also failed, stopped, stranded, blocked, undelivered or
+ * awaiting approval reports that instead.
  */
 export type WorkflowRunVerdict =
   | "running"
@@ -274,6 +281,7 @@ export type WorkflowRunVerdict =
   | "blocked"
   | "undelivered"
   | "awaiting-approval"
+  | "degraded"
   | "ok";
 
 /** The result of a run: the engine's final state and any pending approvals. */

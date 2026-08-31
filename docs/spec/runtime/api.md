@@ -62,8 +62,10 @@ PUT    /api/v1/companies/{id}/desks/{desk}/order           reorder (hierarchy)
 Single-company (prosumer) mode aliases everything under `/api/v1/company/...`
 with no `{id}`.
 
-`GET …/notifications` returns only unread `mention` notifications addressed to the
-signed-in human, newest first. Each row includes its subject, title, creation
+`GET …/notifications` returns every unread notification addressed to the
+signed-in human, newest first — not just `mention`: `dispatch_failed`,
+`approval_expired`, and `workflow_run_*` rows are the same durable, user-facing
+feed and are not filtered by kind. Each row includes its subject, title, creation
  time, and optional chat context; `unread` is the returned count. Machine
 credentials, which have no person identity, receive `401`. `PUT` accepts an
 optional `ids` array and returns the remaining unread count. An omitted or null

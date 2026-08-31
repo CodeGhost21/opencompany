@@ -48,7 +48,8 @@ pub fn router() -> Router<AppState> {
 #[serde(rename_all = "camelCase")]
 struct NotificationDto {
     id: String,
-    /// A free-form tag — `"mention"` today.
+    /// A free-form tag — `"mention"`, `"dispatch_failed"`,
+    /// `"approval_expired"`, or `"workflow_run_*"`.
     kind: String,
     /// What it is about: `task` / `run` / `approval` / `workflow` / `message`.
     subject_kind: String,
@@ -134,14 +135,18 @@ async fn list(company: ScopedCompany) -> Result<Json<FeedDto>, crate::server::Re
         .list(company.id(), &user)
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    // This endpoint is the unread-mention badge contract. The store list is
-    // intentionally broader, so filter at the API boundary rather than making
-    // every store implementation know which notification kinds this consumer
-    // wants. Read rows are excluded here because the client only needs the
-    // actionable, unread mention set.
+    // This endpoint is the durable-notification contract for every kind the
+    // runtime appends here — `mention` and, as of the honest-verdicts work,
+    // `dispatch_failed` / `approval_expired` / `workflow_run_*`. There is no
+    // kind allowlist: `notifications()` has exactly one writer set (the
+    // runtime's own notification producers), all of them user-facing, so
+    // filtering by kind would only recreate the "was this reachable at all"
+    // bug the honest-verdicts work exists to close — a durable row written
+    // but never returned to the one client that reads this store. Read rows
+    // are still excluded: the client only needs the actionable, unread set.
     let rows: Vec<_> = rows
         .into_iter()
-        .filter(|view| view.read_at.is_none() && view.notification.kind == "mention")
+        .filter(|view| view.read_at.is_none())
         .collect();
     let unread = rows.len();
     Ok(Json(FeedDto {
@@ -315,6 +320,13 @@ mod tests {
     }
 
     async fn file(state: &AppState, id: &str, audience: Option<Vec<String>>) {
+        file_kind(state, id, audience, "mention").await;
+    }
+
+    /// Same as [`file`], but lets the caller pick the notification `kind` —
+    /// the runtime's other producers (`dispatch_failed`, `approval_expired`,
+    /// `workflow_run_*`) all go through the same store.
+    async fn file_kind(state: &AppState, id: &str, audience: Option<Vec<String>>, kind: &str) {
         state
             .registry()
             .get(&CompanyId::new("acme"))
@@ -324,13 +336,13 @@ mod tests {
                 &CompanyId::new("acme"),
                 &Notification {
                     id: id.to_string(),
-                    kind: "mention".to_string(),
+                    kind: kind.to_string(),
                     subject: Subject {
                         kind: SubjectKind::Message,
                         id: "42".to_string(),
                     },
                     created_at: 1_000,
-                    title: format!("mention {id}"),
+                    title: format!("{kind} {id}"),
                     audience,
                     context: Some("engineering".to_string()),
                 },
@@ -484,6 +496,51 @@ mod tests {
 
         let (_, marked) = call(&state, "PUT", Some(json!({"ids": []})), true).await;
         assert_eq!(marked["unread"], 1);
+    }
+
+    /// The runtime's failure/expiry producers (`dispatch_failed`,
+    /// `approval_expired`, `workflow_run_failed`, ...) append through the same
+    /// store as a mention. If this endpoint kept filtering to `kind ==
+    /// "mention"`, those durable rows would never reach the client that is the
+    /// store's only consumer — silently unbadged and unread forever.
+    #[tokio::test]
+    async fn a_dispatch_failure_reaches_the_feed_alongside_a_mention() {
+        let home = home();
+        let state = state(home.path()).await;
+        let mine = me(&state).await;
+        file_kind(
+            &state,
+            "bounced",
+            Some(vec![mine.clone()]),
+            "dispatch_failed",
+        )
+        .await;
+        file_kind(
+            &state,
+            "expired",
+            Some(vec![mine.clone()]),
+            "approval_expired",
+        )
+        .await;
+        file_kind(
+            &state,
+            "run",
+            Some(vec![mine.clone()]),
+            "workflow_run_failed",
+        )
+        .await;
+        file(&state, "mentioned", Some(vec![mine])).await;
+
+        let (status, feed) = call(&state, "GET", None, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = feed["notifications"].as_array().expect("rows");
+        let kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds.len(), 4, "{kinds:?}");
+        assert!(kinds.contains(&"dispatch_failed"), "{kinds:?}");
+        assert!(kinds.contains(&"approval_expired"), "{kinds:?}");
+        assert!(kinds.contains(&"workflow_run_failed"), "{kinds:?}");
+        assert!(kinds.contains(&"mention"), "{kinds:?}");
+        assert_eq!(feed["unread"], 4);
     }
 
     #[tokio::test]

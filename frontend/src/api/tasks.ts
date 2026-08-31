@@ -329,6 +329,16 @@ export interface Task {
    * {@link rejectWorkflowProposal}.
    */
   workflowProposal?: TaskWorkflowProposal;
+  /**
+   * Why a failed or cancelled run returned this card to `todo` (issue #1865).
+   *
+   * Absent for every card that has never bounced — a fresh card, one dragged
+   * to `todo` by an operator, or one re-dispatched since its last bounce
+   * (cleared on the `todo` → `in_progress` transition, so a retry does not go
+   * on advertising the reason its last attempt failed). This is the one field
+   * that tells a bounced card apart from a fresh one without opening it.
+   */
+  bounced?: string;
 }
 
 /** The create body; the host defaults column→`pending`, priority→`medium`. */

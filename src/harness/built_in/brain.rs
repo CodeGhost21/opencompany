@@ -1546,9 +1546,48 @@ impl HarnessBrain {
         // produces — a hand-off never breaks the loop.
         if let Some(column) = crate::ports::tasks::column_for_settled_run(settled) {
             card.column = column.to_string();
+            // Issue #1865: the board's bounce chip — same rule the system
+            // mover applies in `crate::runtime::advance::advance_settled_card`,
+            // so a card cannot read differently depending on which of the two
+            // settle paths landed it. `result_text` is this attempt's own
+            // account of what happened, the same text `settle_run` below
+            // stamps as the failure reason.
+            card.bounced = crate::runtime::advance::bounced_reason(column, settled, &result_text);
         }
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
+        // Issue #1883 (CodeRabbit review, PR #1883): the durable notification
+        // every other failed-dispatch path already files — `refuse_dispatch`
+        // below, the cycle's terminality backstop, and the workflow-builder
+        // failure path (`workflow_build.rs`) all call `notify_dispatch_failed`
+        // when a card bounces to To-do. This rich settle — the ordinary
+        // "an assigned card's turn failed" ending — stamped the bounce chip
+        // above but never filed the row, so a card with no `origin_chat_id`
+        // (nothing dispatched straight from a chat thread, so no relay to
+        // answer in) got neither a chat reply nor a durable notification: the
+        // failure was visible only to someone who happened to look at the
+        // board. The backstop cannot pick this up later either — it skips
+        // any run that is no longer active, and `settle_run` below is what
+        // terminalizes this one.
+        //
+        // `card.bounced.is_some()` is exactly `column_for_settled_run` having
+        // landed on `COLUMN_TODO` with a failure/cancellation status (the
+        // check `bounced_reason` above already made); the `settled ==
+        // RunStatus::Failed` guard narrows it to an actual failure — a card
+        // the responder or an operator deliberately cancelled is not a
+        // dispatch failure and must not page anyone.
+        if card.bounced.is_some()
+            && matches!(settled, RunStatus::Failed)
+            && let Some(notifications) = self.deps.notifications.as_deref()
+        {
+            crate::runtime::advance::notify_dispatch_failed(
+                notifications,
+                &self.record().id,
+                &card.id,
+                &result_text,
+            )
+            .await;
+        }
         // `guard` drops here → the run leaves the in-flight strip.
         drop(guard);
 
@@ -1657,8 +1696,25 @@ impl HarnessBrain {
         let orchestrator = self.orchestrator();
         let text = format!("dispatch refused: {reason}");
         settle(&mut card, TaskRunEnd::Failed, &orchestrator, &text);
+        // Issue #1865 (CodeRabbit review, PR #1883): the same bounce-chip rule
+        // `run_task`'s rich settle and `advance::advance_settled_card` already
+        // apply. Without this, a refusal — an invalid `assignee` — lands the
+        // card in `todo` exactly like any other failed dispatch but skips the
+        // amber chip that failure is supposed to carry, because this is the
+        // one settle path that never computed it.
+        card.bounced =
+            crate::runtime::advance::bounced_reason(&card.column, RunStatus::Failed, &text);
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
+        if let Some(notifications) = self.deps.notifications.as_deref() {
+            crate::runtime::advance::notify_dispatch_failed(
+                notifications,
+                &self.record().id,
+                &card.id,
+                &text,
+            )
+            .await;
+        }
         // A refusal is a real, terminal attempt — one that spent nothing. It
         // settles like any other ending (#242), so the card's run history shows
         // "this was tried and refused, and why" rather than a gap.
@@ -2546,6 +2602,7 @@ impl HarnessBrain {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
         // The card is written **first**: an artifact's `task_id` must name a
         // card that exists. If the artifact writes then fail, the failure
@@ -4115,6 +4172,7 @@ description = "Runs Acme."
     /// (and its `[[harness]]` block) without restating the whole deps literal.
     fn brain_over_mock_with(dir: &std::path::Path, record: CompanyRecord) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -4586,8 +4644,20 @@ description = "Builds it."
     /// A brain wired to a real task store (shared handle returned for seeding /
     /// asserting), over the offline mock provider.
     fn brain_with_tasks(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+        brain_with_tasks_notified(dir, false)
+    }
+
+    /// Same as [`brain_with_tasks`], but also wires the task store as the
+    /// notification store (issue #1865, PR #1883 review comment 3878668326):
+    /// [`FsOps`] implements both, so a test can seed a card, drive a cycle,
+    /// and then read back any `dispatch_failed` row a refusal filed.
+    fn brain_with_tasks_notified(
+        dir: &std::path::Path,
+        notify: bool,
+    ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: if notify { Some(tasks.clone()) } else { None },
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -4684,6 +4754,7 @@ description = "Builds it."
     ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(BudgetExhaustedProvider),
@@ -4851,6 +4922,7 @@ members = ["engineer"]
         with_workspace: bool,
     ) -> (HarnessBrain, Arc<FsOps>) {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -5529,6 +5601,7 @@ members = ["engineer"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         }
     }
 
@@ -6400,6 +6473,66 @@ members = ["engineer"]
         assert_eq!(settled.usage, TokenUsage::default());
     }
 
+    /// Issue #1865 (CodeRabbit review, PR #1883 review comment 3892338104): an
+    /// ordinary assigned board card — no `origin_chat_id`, so no relay target
+    /// — whose turn genuinely fails (not a refusal) reaches this same
+    /// rich-settle tail with a bounce chip but, before this fix, filed no
+    /// `dispatch_failed` notification. `refuse_dispatch` files this
+    /// notification for an off-roster assignee, and the cycle's terminality
+    /// backstop files it for a crash-recovered dispatch — but the backstop
+    /// explicitly skips any run no longer active, and `settle_run` just above
+    /// this test's call site already terminalizes the attempt, so the
+    /// backstop never sees it either. That left an ordinary failed dispatch
+    /// with no origin chat completely silent: no chat reply, no badge,
+    /// nothing but the board itself.
+    #[tokio::test]
+    async fn an_ordinary_failed_dispatch_with_no_origin_chat_files_a_dispatch_failed_notification()
+    {
+        use crate::ports::runs::NewRun;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks_notified(dir.path(), true);
+        let runs: Arc<dyn crate::ports::RunStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(&company, &card("t-1", "engineer"))
+            .await
+            .expect("seed");
+        runs.create_run(&company, NewRun::for_task("run-1", "t-1", "engineer"))
+            .await
+            .expect("mint");
+        let brain = brain.with_runs(Arc::clone(&runs));
+
+        brain.run_task("t-1", Some("run-1")).await.expect("run");
+
+        let settled = only_card(&tasks).await;
+        assert_eq!(settled.column, COLUMN_TODO);
+        assert!(
+            settled.bounced.is_some(),
+            "an ordinary turn failure must carry the bounce chip: {settled:?}"
+        );
+        assert!(
+            settled.origin_chat_id.is_none(),
+            "this is exactly the board-created shape with no relay target: {settled:?}"
+        );
+
+        let notes = crate::ports::notifications::NotificationStore::list(
+            tasks.as_ref(),
+            &company,
+            "anyone",
+        )
+        .await
+        .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "dispatch_failed"
+                    && n.notification.subject.id == "t-1"),
+            "an ordinary failed dispatch with no origin chat must still file a \
+             dispatch_failed notification, got {notes:?}"
+        );
+    }
+
     /// A refusal is an attempt too. It spends nothing and runs no turn, but it
     /// is a real, terminal outcome — the card's history must show "this was
     /// tried and refused, and why" rather than a gap where an attempt was.
@@ -6528,6 +6661,15 @@ members = ["engineer"]
             refused.assignee, "Shane",
             "the invalid name is left as typed for the operator to correct"
         );
+        // Issue #1865 (CodeRabbit review, PR #1883): a refusal is a failed
+        // dispatch landing on `todo` exactly like any other, so it must carry
+        // the same bounce chip `run_task`'s rich settle and the system mover
+        // apply — the board must not read this card any differently just
+        // because nobody ever ran.
+        assert!(
+            refused.bounced.is_some(),
+            "an off-roster refusal must set the bounce chip like any other failed dispatch: {refused:?}"
+        );
         let note = refused.note.expect("the refusal is written to the note");
         assert!(
             note.contains("Shane"),
@@ -6540,6 +6682,62 @@ members = ["engineer"]
         assert!(
             !note.contains("mock: "),
             "no turn may run for an assignee nobody answers to: {note:?}"
+        );
+    }
+
+    /// Issue #1865 (CodeRabbit review, PR #1883 review comment 3878668326): a
+    /// board-created card (no `origin_chat_id`, exactly [`card`]'s shape) with
+    /// an off-roster assignee bounces to `todo` and gets the bounce chip
+    /// (c6c3a3083), but before this fix filed no `dispatch_failed`
+    /// notification — the relay `refuse_dispatch` falls back to only fires
+    /// when an `origin_chat_id` exists, and `settle_run_end` makes the
+    /// attempt terminal before the cycle's own backstop notifier ever sees
+    /// it. That left the refusal visible only to someone already looking at
+    /// the board, unlike every other bounced-dispatch path
+    /// (`CompanyRuntime::abandon_run`, the cycle's terminality backstop, the
+    /// boot reaper's card sweep, and `workflow_build`'s `settle_to_todo`),
+    /// which all raise this same notification.
+    #[tokio::test]
+    async fn a_refused_dispatch_with_no_origin_chat_files_a_dispatch_failed_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks_notified(dir.path(), true);
+        tasks
+            .upsert(&CompanyId::new("acme"), &card("t1", "Shane"))
+            .await
+            .unwrap();
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t1".into(),
+                    run_id: None,
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let refused = only_card(&tasks).await;
+        assert_eq!(refused.column, COLUMN_TODO);
+        assert!(
+            refused.origin_chat_id.is_none(),
+            "this is exactly the board-created shape with no relay target: {refused:?}"
+        );
+
+        let notes = crate::ports::notifications::NotificationStore::list(
+            tasks.as_ref(),
+            &CompanyId::new("acme"),
+            "anyone",
+        )
+        .await
+        .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "dispatch_failed"
+                    && n.notification.subject.id == "t1"),
+            "a board card refused with no origin chat must still file a \
+             dispatch_failed notification, got {notes:?}"
         );
     }
 
@@ -6775,6 +6973,7 @@ members = ["engineer"]
     fn brain_over(dir: &std::path::Path, record: CompanyRecord) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8100,6 +8299,7 @@ members = ["eng1", "eng2"]
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8253,6 +8453,7 @@ members = ["eng1", "eng2"]
         let log = Arc::new(FailFirstLog::default());
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8349,6 +8550,7 @@ members = ["eng1", "eng2"]
         requests: crate::harness::policy::ApprovalRequestQueue,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8689,6 +8891,7 @@ members = ["eng1", "eng2"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -8755,6 +8958,7 @@ members = ["eng1", "eng2"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(BudgetExhaustedProvider),
@@ -9342,6 +9546,7 @@ members = ["eng1", "eng2"]
         use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(HostedProvider::new(HostedProviderConfig {
@@ -9420,6 +9625,7 @@ members = ["eng1", "eng2"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         }
     }
 
@@ -9739,6 +9945,7 @@ members = ["eng1", "eng2"]
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),
@@ -10084,6 +10291,7 @@ members = ["eng1", "eng2"]
             selector_calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),
@@ -10476,6 +10684,7 @@ members = ["eng1", "eng2"]
             steer: steer.clone(),
         });
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: provider.clone(),

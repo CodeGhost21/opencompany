@@ -59,6 +59,10 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use crate::ports::store::company_write_lock;
 
 use async_trait::async_trait;
+// Issue #1865: `.catch_unwind()` on the `run_workflow` tool's runner call —
+// see the call site in `RunWorkflowTool::execute` for why this path needs its
+// own catch rather than routing through `WorkflowSpawn`.
+use futures::future::FutureExt;
 use serde_json::{Value, json};
 
 use openhuman_core::openhuman as oh;
@@ -75,8 +79,11 @@ use crate::harness::lifecycle::ReviewDecision;
 use crate::harness::workflow_refs::WorkflowRefQueue;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
+use crate::ports::notifications::NotificationStore;
 use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
-use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent};
+use crate::ports::types::{
+    CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent, WorkflowNodeStatus,
+};
 use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
@@ -3248,6 +3255,10 @@ pub fn orchestrator_tools(
     minter: String,
     minter_tools: Option<Vec<String>>,
     minter_grants: Vec<String>,
+    // Issue #1865: where `run_workflow` files a `workflow_run_failed`
+    // notification on a run the agent itself started — see
+    // `RunWorkflowTool::notifications` for why this is optional.
+    notifications: Option<Arc<dyn NotificationStore>>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(QueryCompanyTool::new(
         company.clone(),
@@ -3266,6 +3277,7 @@ pub fn orchestrator_tools(
         events.clone(),
         workflow_refs.clone(),
         run_outputs.clone(),
+        notifications,
     )));
     // `read_run_output` (issue #418) is the run tool's companion: it reads full
     // node output out of the same bounded cache the run tool populates, so a
@@ -3565,6 +3577,19 @@ pub struct RunWorkflowTool {
     /// so the read tool built in the same `build_agent` pass sees what this one
     /// stores. A cancelled or failed run stores nothing.
     run_outputs: RunOutputCache,
+    /// Issue #1865 (PR #1883 review comment 3877185396): where a failed run
+    /// files its `workflow_run_failed` notification, on the same terms as the
+    /// console run route, the cron scheduler, and the approval-resume path —
+    /// this tool is the one run-outcome chokepoint `WorkflowSpawn` does not
+    /// cover (see [`crate::runtime::WorkflowSpawn`]'s own `notifications` doc
+    /// comment), because an agent-started run stays inside the calling turn
+    /// rather than routing through `WorkflowSpawn::spawn`.
+    ///
+    /// `None` (the default build, and most of the tool's own tests) simply
+    /// skips the notification — the run itself still journals and answers the
+    /// tool call either way, exactly as `events` degrades above; only the
+    /// company-wide alert is lost.
+    notifications: Option<Arc<dyn NotificationStore>>,
 }
 
 impl RunWorkflowTool {
@@ -3572,8 +3597,10 @@ impl RunWorkflowTool {
     /// (`companies/<name>`, whose `workflows/` subtree holds the seed graphs),
     /// the company store (holding the runtime-authored graph bodies), the
     /// shared runner handle, the company's journal, the shared queue a
-    /// dispatched card's output link is staged on (issue #339), and the run
-    /// output cache the `read_run_output` companion reads back (issue #418).
+    /// dispatched card's output link is staged on (issue #339), the run
+    /// output cache the `read_run_output` companion reads back (issue #418),
+    /// and the company's notification store a failed run alerts through
+    /// (issue #1865).
     // Each argument is a distinct wired dependency; the tool is built from
     // exactly one place (`orchestrator_tools`), so there is nothing a parameter
     // struct would deduplicate — same rationale as `orchestrator_tools` above.
@@ -3587,6 +3614,7 @@ impl RunWorkflowTool {
         events: Option<Arc<dyn EventLog>>,
         workflow_refs: WorkflowRefQueue,
         run_outputs: RunOutputCache,
+        notifications: Option<Arc<dyn NotificationStore>>,
     ) -> Self {
         Self {
             company,
@@ -3597,6 +3625,7 @@ impl RunWorkflowTool {
             events,
             workflow_refs,
             run_outputs,
+            notifications,
         }
     }
 }
@@ -3742,8 +3771,85 @@ impl Tool for RunWorkflowTool {
                 )));
             }
         };
-        match runner.run(&self.company, &file, input, &ctx).await {
-            Ok(run) => {
+        // Issue #1865: this call sits inside an agent turn (see the #383
+        // comment above — the run is deliberately NOT spawned onto its own
+        // task, because spawning would reset the task-local `WORKFLOW_DEPTH`
+        // re-entry guard mid-chain), so it cannot route through
+        // `WorkflowSpawn`'s own `catch_unwind` the way the console run route
+        // and the cron scheduler do. Left uncaught, a panic in the runner
+        // future unwound straight past both journal-write arms below, so the
+        // run's `WorkflowRunStarted` never got a matching finish and
+        // `GET …/workflows/runs` read it `running: true` until the next boot
+        // sweep — which does not run on rebuild, so a panicked agent-run could
+        // zombie for the life of the process. This is its own catch rather
+        // than a second call into `WorkflowSpawn`: that type owns a
+        // `RunGuard`/supervisor registration this call already holds via
+        // `_run_guard` above, and re-raising (as the spawned-task catch does,
+        // so its `JoinHandle` still resolves to a `JoinError`) is wrong here —
+        // there is no task boundary to preserve, only a tool call to answer,
+        // so the payload is swallowed after the finish is journaled and this
+        // returns an ordinary `ToolResult::error` instead.
+        match std::panic::AssertUnwindSafe(runner.run(&self.company, &file, input, &ctx))
+            .catch_unwind()
+            .await
+        {
+            Err(_payload) => {
+                tracing::error!(
+                    company = %self.company,
+                    workflow = %wid,
+                    run_id = %ctx.run_id,
+                    "run_workflow: the runner panicked; journaling a finish so the run does not \
+                     read as in-flight forever"
+                );
+                if let Some(events) = self.events.as_ref() {
+                    let journaled = crate::runtime::record_run_finished(
+                        events,
+                        &self.company,
+                        &wid,
+                        false,
+                        &ctx.run_id,
+                        Err(crate::runtime::PANICKED_BEFORE_FINISH.into()),
+                    )
+                    .await;
+                    if !journaled {
+                        tracing::error!(
+                            company = %self.company,
+                            workflow = %wid,
+                            run_id = %ctx.run_id,
+                            "run_workflow: a panicked run's finish could not be journaled; it \
+                             will read as in-flight until the next boot sweep settles it"
+                        );
+                    }
+                }
+                // Issue #1865 (PR #1883 review comment 3877518535): a panic is
+                // unambiguously the worst reading a run can settle with —
+                // notify without needing a verdict computation, mirroring
+                // `WorkflowSpawn::spawn_admitted`'s own panic arm. Fired
+                // unconditionally like the journal write above, not gated on
+                // it landing — the two are independent stores, and a journal
+                // miss must not also cost the alert.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    crate::runtime::file_run_unhealthy_notification(
+                        notifications.as_ref(),
+                        &self.company,
+                        &wid,
+                        &ctx.run_id,
+                        "failed",
+                        crate::runtime::PANICKED_BEFORE_FINISH,
+                    )
+                    .await;
+                }
+                // No re-raise: unlike `WorkflowSpawn`'s catch, there is no
+                // `JoinHandle` here to preserve a `JoinError` on — this call is
+                // itself the tool's execution, so the honest answer is an
+                // ordinary tool failure the agent can read and act on.
+                return Ok(ToolResult::error(format!(
+                    "Workflow `{wid}` hit an internal error while running. Its completed steps, \
+                     if any, are recorded in the run history. Don't retry it in a loop — check \
+                     the run history or ask an operator."
+                )));
+            }
+            Ok(Ok(run)) => {
                 tracing::debug!(
                     company = %self.company,
                     workflow = %wid,
@@ -3760,6 +3866,68 @@ impl Tool for RunWorkflowTool {
                         Ok(&run),
                     )
                     .await;
+                }
+                // Issue #1865 (PR #1883 review comment 3877518530): the same
+                // unhealthy-run classification `WorkflowSpawn::spawn_admitted`
+                // applies to its own settled runs — a stranded or blocked
+                // agent-started run is otherwise silent to every operator not
+                // watching this turn, especially a stranded run with no
+                // approval card to surface.
+                //
+                // Issue #1865 (PR #1883 review comment 3878430677): gated on
+                // `!run.cancelled`, matching `WorkflowSpawn::spawn_admitted`'s
+                // own `Ok(run) if run.cancelled => {}` arm (added for the same
+                // comment). The clean node-boundary cancel arm in
+                // `run_workflow_inner` carries `blocked_nodes: blocks.take()`
+                // forward, so a cancelled run reaches here with a non-empty
+                // `blocked_nodes` exactly like a genuinely blocked one — this
+                // must not tell an operator "a step is waiting on a person to
+                // decide something" about a run somebody already stopped.
+                //
+                // Stranded checked before blocked, same as `WorkflowSpawn`:
+                // `HarnessAgentRunner` pushes a `WorkflowBlockedNode` whenever
+                // a turn gated anything at all, parked or not, so a fully
+                // unparkable node lands in `blocked_nodes` exactly like one
+                // with a live card — only `stranded_approvals` equalling the
+                // full pending count, with no card still `Pending` delivery
+                // either, tells the two apart.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    if run.cancelled {
+                        // Handled below by the `run.cancelled` arm, which
+                        // returns a `ToolResult::error` — no unhealthy
+                        // notification for a deliberate stop.
+                    } else if !run.pending_approvals.is_empty()
+                        && crate::ports::workflow_runner::stranded_approvals(
+                            &run.pending_approvals,
+                            &run.approvals,
+                        ) == run.pending_approvals.len()
+                        && !run
+                            .deliveries
+                            .iter()
+                            .any(|d| matches!(d.status, crate::ports::DeliveryStatus::Pending))
+                    {
+                        crate::runtime::file_run_unhealthy_notification(
+                            notifications.as_ref(),
+                            &self.company,
+                            &wid,
+                            &ctx.run_id,
+                            "stranded",
+                            "This run tried to park an approval and could not — nothing is \
+                             waiting on it any more, and nobody was asked.",
+                        )
+                        .await;
+                    } else if !run.blocked_nodes.is_empty() {
+                        crate::runtime::file_run_unhealthy_notification(
+                            notifications.as_ref(),
+                            &self.company,
+                            &wid,
+                            &ctx.run_id,
+                            "blocked",
+                            "This run stopped because a step is waiting on a person to decide \
+                             something.",
+                        )
+                        .await;
+                    }
                 }
                 // Issue #383: a cancelled run is `Ok`, so without this arm the
                 // agent would read the empty node summary as "the workflow did
@@ -3841,7 +4009,7 @@ impl Tool for RunWorkflowTool {
                     md,
                 ))
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: run failed");
                 if let Some(events) = self.events.as_ref() {
                     let message = err.to_string();
@@ -3859,6 +4027,27 @@ impl Tool for RunWorkflowTool {
                             error: message.as_str(),
                             partial: err.partial_run(),
                         }),
+                    )
+                    .await;
+                }
+                // Issue #1865 (PR #1883 review comment 3877185396): this is
+                // the second run-outcome chokepoint alongside `WorkflowSpawn`
+                // — console, scheduled, and resumed failures already file a
+                // `workflow_run_failed` notification through that type, but
+                // an agent-started run never routed through it (see
+                // `WorkflowSpawn`'s own `notifications` doc comment) and so
+                // stayed silent to every operator not watching this turn.
+                // Fired unconditionally like the journal write above, not
+                // gated on it landing — the two are independent stores, and a
+                // journal miss must not also cost the alert.
+                if let Some(notifications) = self.notifications.as_ref() {
+                    crate::runtime::file_run_unhealthy_notification(
+                        notifications.as_ref(),
+                        &self.company,
+                        &wid,
+                        &ctx.run_id,
+                        "failed",
+                        crate::runtime::RUN_FAILED_DETAIL,
                     )
                     .await;
                 }
@@ -3988,6 +4177,42 @@ fn summarize_run(
     }
     if blocked.is_empty() && paused.is_empty() {
         md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
+    }
+
+    // Codex (PR #1883 review comment 3892522591): a node under `on_error =
+    // "continue"`/`"route"`, or one truncated at the iteration cap, settles
+    // this run as `Degraded` — `runner.rs` already turns that into a per-node
+    // notice (`errored_node_notice`) the console reads, but nothing here ever
+    // read it. An agent-started run only checked the blocked/paused and
+    // delivery cases above, so a run that silently continued past a broken
+    // step summarized as "reached its terminal node(s)" with no hint a step
+    // was skipped over — the model then reports a clean run to whoever asked
+    // for one, exactly the silence issue #981 closed for dropped deliveries
+    // two blocks below, just for a different fact.
+    //
+    // Read `run.nodes` directly rather than `run.notices`: `notices` also
+    // carries `blocked_notice` for every row already named above, and
+    // rendering the whole vector here would print those a second time. By the
+    // time a run settles, a row is still `Error` only when it is a genuine
+    // continued/capped error — the host's own blocked-node reclassification
+    // (mirroring `WorkflowRun::cancelled`'s) always leaves a blocked row
+    // `Blocked`, never `Error`, so this filter can never double up with
+    // `blocked` above. See `WorkflowNodeStatus::Blocked`'s doc.
+    let errored: Vec<&str> = run
+        .nodes
+        .iter()
+        .filter(|n| n.status == WorkflowNodeStatus::Error)
+        .map(|n| n.node_id.as_str())
+        .collect();
+    if !errored.is_empty() {
+        md.push_str(&format!(
+            "\n**{} step(s) did not finish cleanly, and the run continued past {}:** {}. This is \
+             NOT a clean run — check each step's own output for what went wrong before treating \
+             its results as complete.\n",
+            errored.len(),
+            if errored.len() == 1 { "it" } else { "them" },
+            errored.join(", ")
+        ));
     }
 
     // Issue #981: what happened to the reports. Nothing here read `deliveries`,
@@ -7810,6 +8035,29 @@ name = "Morning"
         }
     }
 
+    /// A [`WorkflowRunner`] test double whose `run` always returns `Err` — the
+    /// engine-failed shape issue #1865's review comment 3877185396 flagged as
+    /// silent: `RunWorkflowTool`'s `Ok(Err(err))` arm journaled a finish but
+    /// filed no `workflow_run_failed` notification, unlike the console run
+    /// route, the cron scheduler, and the approval-resume path, which all
+    /// file one through `WorkflowSpawn`.
+    struct FailingRunner;
+
+    #[async_trait::async_trait]
+    impl WorkflowRunner for FailingRunner {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _workflow: &WorkflowFile,
+            _input: Value,
+            _ctx: &crate::ports::WorkflowRunContext,
+        ) -> crate::Result<WorkflowRun> {
+            Err(crate::error::OpenCompanyError::Harness(
+                "the engine blew up".to_string(),
+            ))
+        }
+    }
+
     /// Writes `DEMO_WF` to `<dir>/workflows/demo.toml`.
     fn seed_demo_workflow(dir: &std::path::Path) {
         let wf = dir.join("workflows");
@@ -7863,6 +8111,7 @@ name = "Morning"
             "ceo".to_string(),
             None,
             vec!["fs:*".to_string()],
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's
@@ -7902,6 +8151,56 @@ name = "Morning"
         );
     }
 
+    /// A runner panic is converted into an agent-visible error, and the RAII
+    /// supervisor slot is gone when the tool returns. This covers both cleanup
+    /// obligations without changing the runner architecture.
+    #[tokio::test]
+    async fn panicking_run_cleans_up_its_active_attempt() {
+        struct PanickingRunner;
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for PanickingRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &WorkflowFile,
+                _input: Value,
+                _ctx: &crate::ports::WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                panic!("test runner panic")
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(PanickingRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let supervisor = crate::runtime::RunSupervisor::default();
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            supervisor.clone(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            None,
+        );
+
+        let result = tool
+            .execute(json!({"id": "demo"}))
+            .await
+            .expect("panic is converted to a tool result");
+        assert!(result.is_error, "panic must be agent-visible: {result:?}");
+        assert!(
+            result.output_for_llm(false).contains("internal error"),
+            "the result should not leak panic payload: {result:?}"
+        );
+        assert_eq!(supervisor.len(), 0, "the active attempt must be cleaned up");
+    }
+
     #[tokio::test]
     async fn run_workflow_tool_loads_and_invokes_the_runner() {
         let dir = tempfile::tempdir().unwrap();
@@ -7935,6 +8234,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo", "input": { "seed": 1 } }))
@@ -7981,6 +8281,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8017,6 +8318,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             unwired
@@ -8039,6 +8341,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             unknown
@@ -8083,6 +8386,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8120,6 +8424,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8194,6 +8499,7 @@ name = "Morning"
             None,
             refs,
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8249,6 +8555,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -8256,6 +8563,65 @@ name = "Morning"
             .expect("execute");
         assert!(result.is_error, "expected an error result");
         assert!(result.output_for_llm(false).contains("wired"), "{result:?}");
+    }
+
+    /// Issue #1865 (PR #1883 review comment 3877185396): an agent-started run
+    /// that the engine returns `Err` on is the second run-outcome chokepoint
+    /// `WorkflowSpawn` does not cover — console, scheduled, and resumed
+    /// failures all file a `workflow_run_failed` notification through that
+    /// type, but this tool's own `Ok(Err(err))` arm used to journal a finish
+    /// and stop, leaving every agent-started failure invisible to an operator
+    /// not watching this turn. Reused `crate::store::FsOps` as the
+    /// notification-store double, the same one `WorkflowSpawn`'s own
+    /// equivalent test (`a_failed_run_does_not_leak_the_raw_engine_error_into_its_notification`
+    /// in `runtime::workflow_spawn`) uses.
+    #[tokio::test]
+    async fn run_workflow_tool_files_a_notification_when_the_engine_run_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(FailingRunner);
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let company = CompanyId::new("acme");
+        let notifications: Arc<dyn NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+
+        let tool = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "the engine failed: {result:?}");
+
+        let notes = notifications
+            .list(&company, "anyone")
+            .await
+            .expect("list notifications");
+        let failed = notes
+            .iter()
+            .find(|n| n.notification.kind == "workflow_run_failed")
+            .expect(
+                "an agent-started run that fails must file the same durable notification a \
+                 console, scheduled, or resumed run does",
+            );
+        assert!(
+            failed
+                .notification
+                .title
+                .contains(crate::runtime::RUN_FAILED_DETAIL),
+            "{:?}",
+            failed.notification.title
+        );
     }
 
     #[tokio::test]
@@ -8275,6 +8641,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "nope" }))
@@ -8298,6 +8665,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool.execute(json!({})).await.expect("execute");
         assert!(result.is_error);
@@ -8321,6 +8689,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = tool
             .execute(json!({ "id": "../secrets" }))
@@ -8435,6 +8804,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = run
             .execute(json!({ "id": "greeter" }))
@@ -8504,6 +8874,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
 
         let result = run
@@ -8583,6 +8954,7 @@ name = "Morning"
             None,
             refs.clone(),
             RunOutputCache::default(),
+            None,
         );
         assert!(
             !run.execute(json!({ "id": "greeter" }))
@@ -8685,6 +9057,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
         );
         let result = run
             .execute(json!({ "id": "hosted" }))
@@ -9309,6 +9682,7 @@ name = "Morning"
             None,
             refs,
             cache,
+            None,
         );
         (tool, runner)
     }
@@ -9521,6 +9895,86 @@ name = "Morning"
         assert!(
             md.contains("1 report(s) did NOT reach a destination"),
             "{md}"
+        );
+    }
+
+    /// Codex (PR #1883 review comment 3892522591): a node under `on_error =
+    /// "continue"`/`"route"` settles the run `Degraded`, and `runner.rs`
+    /// already writes a per-node notice for it — but `summarize_run` never
+    /// read `run.nodes`, so an agent-started run through this exact case
+    /// summarized as "reached its terminal node(s) without pausing for
+    /// approval" with no hint anything went wrong. This pins the fix: a row
+    /// still `Error` after settle must show up in the tool result.
+    #[test]
+    fn the_summary_says_when_a_node_errored_and_the_run_continued() {
+        let file = crate::company::parse_workflow(DEMO_WF).unwrap();
+        let degraded = WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": ["partial"] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Error,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+        let md = summarize_run(&file, &degraded, "run-degraded", RunOutputStored::Stored);
+        assert!(
+            md.contains("did not finish cleanly, and the run continued past it"),
+            "{md}"
+        );
+        assert!(md.contains("worker"), "{md}");
+        assert!(
+            md.contains("NOT a clean run"),
+            "an agent skimming for the happy-path sentence must not miss this: {md}"
+        );
+
+        // A node that finished clean says nothing about it — an ordinary
+        // summary is unchanged.
+        let clean = WorkflowRun {
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Ok,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            ..degraded.clone()
+        };
+        let md = summarize_run(&file, &clean, "run-clean", RunOutputStored::Stored);
+        assert!(!md.contains("did not finish cleanly"), "{md}");
+        assert!(!md.contains("NOT a clean run"), "{md}");
+
+        // A blocked node must not ALSO print here — it is already named by the
+        // "Blocked, waiting on a person" paragraph above, sourced from
+        // `blocked_nodes`, not from a node row's own status (the host never
+        // leaves a blocked row `Error`; see `WorkflowNodeStatus::Blocked`'s doc).
+        let blocked = WorkflowRun {
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Blocked,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "worker".into(),
+                tools: vec!["send_email".into()],
+                approval_ids: vec!["appr-1".into()],
+                unparkable: 0,
+                stranded: 0,
+            }],
+            ..degraded.clone()
+        };
+        let md = summarize_run(&file, &blocked, "run-blocked", RunOutputStored::Stored);
+        assert!(md.contains("Blocked, waiting on a person"), "{md}");
+        assert!(
+            !md.contains("did not finish cleanly"),
+            "a blocked row must not double up with the degraded paragraph: {md}"
         );
     }
 

@@ -1085,6 +1085,25 @@ pub struct TaskRecord {
     /// whenever it is — the two are stamped together by the one call site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_workflow_id: Option<String>,
+    /// Why a failed or cancelled run returned this card to [`COLUMN_TODO`]
+    /// (issue #1865) — set the instant the settle writes that landing, cleared
+    /// the instant the card leaves `todo` any other way.
+    ///
+    /// **The gap this closes**: `todo` was both the failure state and the
+    /// fresh state, and a bounced card looked identical to one nobody had
+    /// touched yet — an operator had to open every card in the column to tell
+    /// them apart. This is the chip the board renders instead, so the
+    /// distinction is visible in the grid.
+    ///
+    /// `None` is the honest default for everything this is not: a card that
+    /// has never bounced, one that bounced and was then re-dispatched (cleared
+    /// on the `todo` → `in_progress` transition — a fresh attempt earns a
+    /// fresh reading, not a stale chip from the last one), one dragged to
+    /// `todo` by an operator rather than a run, and every card written before
+    /// this field existed. Additive on the wire like [`Self::plan`] and
+    /// [`Self::output`], so no stored board needs migrating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounced: Option<String>,
 }
 
 /// Durable per-company task board. Company A's tasks MUST be invisible to
@@ -1515,6 +1534,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         }
     }
 
