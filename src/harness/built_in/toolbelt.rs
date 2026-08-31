@@ -744,6 +744,30 @@ pub fn native_capabilities_on_belt(
         .collect()
 }
 
+/// The native capability namespaces the composio brief may credit this agent
+/// with holding — [`native_capabilities_on_belt`] narrowed by the SAME
+/// per-turn [`CapabilityFilter`] [`filter_by_capabilities`] is about to apply
+/// to the belt itself.
+///
+/// `build_agent` computes `native_caps` for the composio brief from the
+/// PRE-filter `tools` vector (`filter_by_capabilities` does not run until
+/// after every brief, including this one, is rendered) — mirroring it here
+/// against [`namespace_denied`] is what keeps the brief from crediting a
+/// namespace `filter_by_capabilities` is about to strip from the live belt.
+/// Before this existed, only the Composio side of that same brief carried the
+/// check (`composio_capability_admits`); the native side was missed, so a
+/// tier denying e.g. `search` while admitting `composio` still told the
+/// agent it held a built-in search tool it did not.
+pub fn native_caps_for_composio_brief<'a>(
+    tools: &'a [Box<dyn Tool>],
+    filter: &CapabilityFilter,
+) -> Vec<&'a str> {
+    native_capabilities_on_belt(tools)
+        .into_iter()
+        .filter(|namespace| !namespace_denied(filter, namespace))
+        .collect()
+}
+
 /// Whether a [`CapabilityFilter`] denies a given namespace — the same test
 /// [`filter_by_capabilities`] applies per tool, exposed standalone so a
 /// caller that needs the outcome without a tool vector in hand (the sandbox
@@ -1543,6 +1567,43 @@ mod tests {
         // A namespace outside `DenyNamespaces`' set is simply not denied — it
         // is never asked to special-case a name it does not recognize.
         assert!(!namespace_denied(&filter, "web"));
+    }
+
+    /// [`native_caps_for_composio_brief`] must narrow the SAME way
+    /// [`filter_by_capabilities`] narrows the live belt: a namespace the
+    /// current tier denies must not appear in the list `composio_brief` uses
+    /// to tell the agent "use your own built-in tool for this instead of
+    /// Composio" — that tool is about to be stripped from the belt below.
+    ///
+    /// Before this function existed, `build_agent` passed
+    /// `native_capabilities_on_belt(&tools)` straight through, unfiltered —
+    /// `tools` at that point is still the PRE-filter belt, so a denied
+    /// namespace's tool showed up in the brief even though the belt handed to
+    /// the model never carried it (PR #1946 follow-up finding).
+    #[test]
+    fn native_caps_for_composio_brief_withholds_a_denied_namespace() {
+        let ws = Path::new("/tmp/oc-toolbelt-composio-native-caps");
+        let security = test_security(ws, PolicyMode::Supervised);
+        let tools = shell_tools(security, native_runtime(), Some(ShellAudit::disabled()), ws);
+
+        // No tier denial: the belt's native `shell` namespace passes through.
+        let admitted = native_caps_for_composio_brief(&tools, &CapabilityFilter::AllowAll);
+        assert!(
+            admitted.contains(&"shell"),
+            "AllowAll must not withhold a namespace the belt actually has: {admitted:?}"
+        );
+
+        // Tier denies `shell` (budget exhausted / fail-closed metering, the
+        // same condition that makes `filter_by_capabilities` drop every
+        // `shell` tool from `tools` a few lines below in `build_agent`): the
+        // brief must not credit the agent with a built-in `shell` tool either.
+        let deny: HashSet<&'static str> = ["shell"].into_iter().collect();
+        let filter = CapabilityFilter::DenyNamespaces(deny);
+        let withheld = native_caps_for_composio_brief(&tools, &filter);
+        assert!(
+            !withheld.contains(&"shell"),
+            "a denied namespace must not appear in the composio brief's native caps: {withheld:?}"
+        );
     }
 
     /// The grant/credential resolving `wired = true` is not enough: a
