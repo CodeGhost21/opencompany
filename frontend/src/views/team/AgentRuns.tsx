@@ -95,7 +95,7 @@ const FILTERS: { key: string; label: string; statuses?: RunStatus[] }[] = [
   {
     key: "parked",
     label: "Waiting",
-    statuses: ["waiting_approval", "paused"],
+    statuses: ["waiting_approval", "paused", "blocked"],
   },
   { key: "failed", label: "Failed", statuses: ["failed", "cancelled"] },
 ];
@@ -129,6 +129,7 @@ function statusIcon(status: RunStatus) {
       return <Ban className="size-4" />;
     case "waiting_approval":
     case "paused":
+    case "blocked":
       return <Hourglass className="size-4" />;
     default:
       return <Loader2 className="size-4 animate-spin" />;

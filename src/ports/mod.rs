@@ -11,6 +11,7 @@ mod ids;
 pub mod acp;
 pub mod approvals;
 pub mod artifacts;
+pub mod blockers;
 pub mod brain;
 pub mod channel;
 pub mod context;
@@ -47,6 +48,9 @@ pub use approvals::ApprovalGate;
 pub use artifacts::{
     ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactStore, ArtifactVersion,
     DiffLine, DiffOp,
+};
+pub use blockers::{
+    BLOCKER_EFFECT_PREFIX, BlockerKind, BlockerPayload, BlockerSource, BlockerStep,
 };
 pub use brain::{Brain, Cognition, CycleHost, UsageMetering};
 pub use channel::ChannelAdapter;

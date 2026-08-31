@@ -29,6 +29,7 @@ export function runState(run: ObservatoryRun): SpanState {
       return "failed";
     case "waiting_approval":
     case "paused":
+    case "blocked":
       // Blocked, not failed: a person still has to decide, and nothing broke.
       // The distinction is the whole of issue #411 one surface over.
       return "blocked";

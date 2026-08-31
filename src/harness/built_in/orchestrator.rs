@@ -268,8 +268,10 @@ tool in order to influence it. Anything substantial handed to a desk is opened a
 automatically, and so is anything substantial an operator asks a desk or teammate directly — the \
 hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for the same work, \
 and never prefer one over the other to get something tracked. Reach for `spawn_task` only for work \
-that belongs on the board but must NOT start in this turn: something for later, for somebody else, \
-or waiting on a person. \
+that belongs on the board but must NOT start in this turn: something for later, or for somebody \
+else. Work that is waiting on a PERSON is not a card — a card notifies nobody and resumes \
+nothing. When you cannot proceed without something only the operator can give you, call \
+`escalate_to_human` with the question; the work parks and their answer restarts it. \
 WHEN YOU CAN DO THE WORK IN THIS TURN, DO IT — do not park it as a card for later. Asked to \
 capture a repeatable process (\"create a workflow that…\"), author it NOW with `create_workflow` — \
 a trigger plus agent / tool / condition / output steps — and say it is ready; it is enabled \
@@ -3808,7 +3810,7 @@ impl Tool for RunWorkflowTool {
                         &wid,
                         false,
                         &ctx.run_id,
-                        Err(crate::runtime::PANICKED_BEFORE_FINISH.into()),
+                        Err(crate::runtime::workflow_spawn::PANICKED_BEFORE_FINISH.into()),
                     )
                     .await;
                     if !journaled {
@@ -8395,6 +8397,163 @@ name = "Morning"
             .expect("execute");
         assert!(result.is_error, "a cancelled run reports as a stop");
         assert_eq!(refs.queued(), 0);
+    }
+
+    /// Issue #1861: an agent-initiated run that ends blocked badges the
+    /// operator, exactly as the console's and the scheduler's runs do.
+    ///
+    /// This is the one trigger nobody is watching a progress bar for, so the
+    /// badge is the only way a run that stopped waiting on a person becomes
+    /// visible without somebody thinking to open the run history.
+    #[tokio::test]
+    async fn a_blocked_agent_run_badges_the_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": {} }),
+            pending_approvals: vec!["worker".to_string()],
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::workflow_runner::WorkflowBlockedNode {
+                node_id: "worker".to_string(),
+                tools: vec!["send_email".to_string()],
+                approval_ids: vec!["ap-1".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            }],
+            approvals: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert_eq!(feed.len(), 1, "one badge for one unhealthy run: {feed:?}");
+        assert_eq!(feed[0].notification.kind, "workflow_run_blocked");
+    }
+
+    /// The same contract for the other unhealthy end: the run could not park
+    /// the approval at all, so nobody was asked and nothing is waiting.
+    #[tokio::test]
+    async fn a_stranded_agent_run_badges_the_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": {} }),
+            // Stranded is counted per pending *node* (`stranded_approvals`),
+            // not per gated call: the node is pending, and every approval row
+            // it owns failed to park, so there is nothing an operator can be
+            // asked about. A fixture with no pending node at all is not a
+            // stranded run under that reconciliation — it is an empty one.
+            pending_approvals: vec!["worker".to_string()],
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: vec![crate::ports::workflow_runner::WorkflowRunApprovalRow {
+                node_id: Some("worker".to_string()),
+                tool: Some("send_email".to_string()),
+                outcome: crate::ports::workflow_runner::WorkflowApprovalOutcome::ParkFailed,
+                approval_id: None,
+            }],
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert_eq!(feed.len(), 1, "{feed:?}");
+        assert_eq!(feed[0].notification.kind, "workflow_run_stranded");
+    }
+
+    /// A run that finished cleanly badges nobody. The badge means "this needs
+    /// you"; one per successful run would train the operator to ignore it.
+    #[tokio::test]
+    async fn a_healthy_agent_run_badges_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": [] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert!(feed.is_empty(), "{feed:?}");
     }
 
     #[tokio::test]

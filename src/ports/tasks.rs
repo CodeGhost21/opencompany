@@ -220,6 +220,19 @@ pub fn column_for_settled_run(status: RunStatus) -> Option<&'static str> {
         // re-fires dispatch. `WaitingApproval` keeps saying *who* unblocks it on
         // the run status — the column only says the work has not happened.
         RunStatus::WaitingApproval | RunStatus::Paused => Some(COLUMN_PAUSED),
+        // Issue #1861: a blocker is a question for a person, so the work has
+        // not happened and the card parks — the same answer the column gives
+        // its two neighbours, for the same reason. What is *different* lives on
+        // the run status, which says a person owes an answer rather than a
+        // decision; the column only ever says whether the work happened.
+        //
+        // Emphatically not `todo`. Epic #183 §3 sends a card that *cannot*
+        // proceed back to To-do, and a blocked card can proceed the moment it
+        // is answered — sending it to To-do would file an open question as
+        // fresh work and lose the question with it. An unanswered blocker does
+        // reach To-do eventually, but through the TTL sweep, carrying its
+        // question on the card.
+        RunStatus::Blocked => Some(COLUMN_PAUSED),
         // Not reviewable work. Epic #183 §3: a card that cannot proceed returns
         // to To-do carrying the reason, never into a stuck column of its own.
         RunStatus::Failed | RunStatus::Cancelled => Some(COLUMN_TODO),

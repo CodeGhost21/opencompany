@@ -85,6 +85,23 @@ pub enum RunStatus {
     /// dependency, a rate limit, a missing credential, a retry, an operator
     /// steer-to-pause. Neither cancelled nor failed.
     Paused,
+    /// Parked on a **question for a person** the work cannot answer itself
+    /// (issue #1861): a rejected model id, an expired credential, a missing
+    /// prerequisite, or an agent's own `escalate_to_human`.
+    ///
+    /// Distinct from both neighbours on purpose. [`Paused`](Self::Paused) is
+    /// documented as waiting on something *other than a person*, which is the
+    /// opposite of a blocker. [`WaitingApproval`](Self::WaitingApproval) is a
+    /// person deciding whether an effect may happen — there is an effect, and
+    /// approving it performs it; a blocker has no effect to approve, only an
+    /// answer to supply. Folding blockers into either would make "what is this
+    /// waiting for" unanswerable from the status, which is the whole point of
+    /// the epic.
+    ///
+    /// Parked, not terminal: the answer resumes the stopped step (#1863/#1864),
+    /// and an unanswered blocker expires through the approval TTL back to
+    /// `todo` carrying its question.
+    Blocked,
     /// Terminal: the attempt completed.
     Succeeded,
     /// Terminal: the attempt failed. [`RunRecord::error`] carries why.
@@ -112,6 +129,7 @@ impl RunStatus {
             Self::Running => "running",
             Self::WaitingApproval => "waiting_approval",
             Self::Paused => "paused",
+            Self::Blocked => "blocked",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -132,6 +150,7 @@ impl RunStatus {
             "running" => Self::Running,
             "waiting_approval" => Self::WaitingApproval,
             "paused" => Self::Paused,
+            "blocked" => Self::Blocked,
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
@@ -186,7 +205,7 @@ impl RunStatus {
 
     /// Whether the attempt is parked awaiting something outside the cycle.
     pub fn is_parked(self) -> bool {
-        matches!(self, Self::WaitingApproval | Self::Paused)
+        matches!(self, Self::WaitingApproval | Self::Paused | Self::Blocked)
     }
 
     /// Whether a run may move from `self` to `next`.
@@ -211,7 +230,7 @@ impl RunStatus {
         match self {
             Self::Pending => next == Self::Running || next.is_terminal(),
             Self::Running => next.is_parked() || next.is_terminal(),
-            Self::WaitingApproval | Self::Paused => {
+            Self::WaitingApproval | Self::Paused | Self::Blocked => {
                 next == Self::Running || next.is_parked() || next.is_terminal()
             }
             Self::Succeeded | Self::Failed | Self::Cancelled | Self::Declined => false,
@@ -865,11 +884,12 @@ mod test {
     /// Every status, so a table-driven test cannot silently miss a new variant
     /// (adding one without extending this list fails the exhaustiveness check
     /// in [`all_statuses_are_listed`]).
-    const ALL: [RunStatus; 8] = [
+    const ALL: [RunStatus; 9] = [
         RunStatus::Pending,
         RunStatus::Running,
         RunStatus::WaitingApproval,
         RunStatus::Paused,
+        RunStatus::Blocked,
         RunStatus::Succeeded,
         RunStatus::Failed,
         RunStatus::Cancelled,
@@ -886,6 +906,7 @@ mod test {
                 | RunStatus::Running
                 | RunStatus::WaitingApproval
                 | RunStatus::Paused
+                | RunStatus::Blocked
                 | RunStatus::Succeeded
                 | RunStatus::Failed
                 | RunStatus::Cancelled
@@ -896,6 +917,31 @@ mod test {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), ALL.len(), "status literals must be unique");
+    }
+
+    /// Issue #1861: a blocker waits on a person, so it is **parked** — not
+    /// terminal, and not active. A terminal blocker could never be answered;
+    /// an active one would be reclaimed by the boot reaper as an orphan while
+    /// somebody was still deciding what to say.
+    #[test]
+    fn a_blocker_is_parked_not_terminal() {
+        assert!(RunStatus::Blocked.is_parked());
+        assert!(!RunStatus::Blocked.is_terminal());
+        assert!(!RunStatus::Blocked.is_active());
+        assert_eq!(RunStatus::Blocked.phase(), "parked");
+    }
+
+    /// The answer resumes the work, and an unanswered blocker settles through
+    /// the TTL — so both edges out of `Blocked` have to exist.
+    #[test]
+    fn a_blocker_can_resume_or_settle() {
+        assert!(RunStatus::Blocked.can_transition_to(RunStatus::Running));
+        assert!(RunStatus::Blocked.can_transition_to(RunStatus::Failed));
+        assert!(RunStatus::Running.can_transition_to(RunStatus::Blocked));
+        assert!(
+            !RunStatus::Succeeded.can_transition_to(RunStatus::Blocked),
+            "a finished attempt cannot start waiting on somebody"
+        );
     }
 
     #[test]
