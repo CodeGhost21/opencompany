@@ -43,6 +43,21 @@ describe("isOperationalNotification", () => {
       expect(isOperationalNotification(note({ id: kind, kind }))).toBe(true);
     }
   });
+
+  /**
+   * PR #1878 review (comment 3893066248): `notifications()` retired its
+   * server-side kind allowlist in favour of a mixed feed with client-side
+   * filtering — the same design #1883's toast+ack consumer relies on. That
+   * makes `workflow_nudge` (issue #1845's week-1 nudge) just another
+   * non-mention row on the exact feed `app-shell` polls unfiltered, so
+   * without an explicit carve-out it reads as operational: toasted as a
+   * generic warning and marked read the moment the tab is visible, before
+   * `WorkflowsView`'s `pickActiveNudge` ever gets a chance to show the
+   * banner. The nudge must never be auto-acknowledged by this classifier.
+   */
+  it("is false for the week-1 nudge — it has its own banner, not a toast+ack", () => {
+    expect(isOperationalNotification(note({ id: "a", kind: "workflow_nudge" }))).toBe(false);
+  });
 });
 
 describe("operationalNotificationsToAnnounce", () => {
@@ -78,6 +93,24 @@ describe("operationalNotificationsToAnnounce", () => {
     // server marks it read — the guard, not the row disappearing, is what
     // stops the repeat toast.
     expect(operationalNotificationsToAnnounce(rows, announced)).toEqual([]);
+  });
+
+  /**
+   * PR #1878 review (comment 3893066248) — the actual bug shape: app-shell's
+   * poll of the unfiltered feed must never surface a `workflow_nudge` row as
+   * something to toast-and-ack. If it did, `app-shell`'s handler would mark
+   * it read server-side on the very next visible-tab poll, and
+   * `pickActiveNudge` (`WorkflowsView`) would never see it unread again — the
+   * banner this PR exists to ship would be silently defeated by a sibling
+   * consumer of the same feed.
+   */
+  it("never includes a workflow_nudge row alongside operational rows from the same poll", () => {
+    const rows = [
+      note({ id: "a", kind: "dispatch_failed" }),
+      note({ id: "b", kind: "workflow_nudge" }),
+      note({ id: "c", kind: "mention" }),
+    ];
+    expect(operationalNotificationsToAnnounce(rows, new Set()).map((n) => n.id)).toEqual(["a"]);
   });
 });
 
