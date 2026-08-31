@@ -271,10 +271,12 @@ value while the field it named resolves to a different one downstream.
 the error, rather than let a workflow ship a gate that certifies a shape the
 emitted output can never actually hold.
 
-**No-field `non_empty_list`** checks the parsed reply as a whole: a reply that
-IS the literal JSON text of a non-empty array (`["a", "b"]`) or object
-(`{"a": 1}`) passes; a plain-prose reply, or one that parses to a scalar,
-fails. An unrecognized `require` value is rejected at author time by
+**No-field `non_empty_list`** checks the parsed reply as a whole: only a reply
+that IS the literal JSON text of a non-empty array (`["a", "b"]`) passes —
+`non_empty_list` accepts arrays and nothing else, so a plain-prose reply, a
+reply that parses to a scalar, and a reply that parses to a JSON *object*
+(`{"a": 1}`) all fail with "is not a list — the shape does not match.". An
+unrecognized `require` value is rejected at author time by
 [`validate`](../../../src/company/workflow_file.rs) — a graph naming one never
 saves — and fails OPEN (a `tracing::warn!`, the node proceeds) if it somehow
 still reaches the evaluator, the same fail-open stance
