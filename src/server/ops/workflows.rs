@@ -2411,20 +2411,28 @@ async fn fix_from_run(
         &wid,
     )?
     .ok_or_else(|| OpenCompanyError::NotFound(format!("workflow {wid}")))?;
-    // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
-    // field on `WorkflowNodeSpec` (the builder never authors them — see its
-    // own doc comment), so a node that had any of the three set loses it
-    // silently once the operator saves the correction. `repeatable` is the
-    // safety declaration issue #850 exists to protect — a correction that
-    // drops it with no warning can leave a continuation free to replay a call
-    // its author explicitly marked non-repeatable. Correlating this policy
-    // across a copilot rewrite that may rename or drop nodes is the harder
-    // problem this PR does not take on; naming it in a note at least makes the
-    // loss visible instead of silent.
+    // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`/
+    // `postcondition` field on `WorkflowNodeSpec` (the builder never authors
+    // any of the four — see its own doc comment), so a node that had any of
+    // them set loses it silently once the operator saves the correction.
+    // `repeatable` is the safety declaration issue #850 exists to protect;
+    // `postcondition` (issue #1866) is the deterministic run-safety gate —
+    // a correction that drops either with no warning can leave a
+    // continuation free to replay a call its author explicitly marked
+    // non-repeatable, or let an insufficient output flow downstream past a
+    // gate the operator declared. Correlating this policy across a copilot
+    // rewrite that may rename or drop nodes is the harder problem this PR
+    // does not take on; naming it in a note at least makes the loss visible
+    // instead of silent.
     let dropped_policy_nodes: Vec<String> = file
         .nodes
         .iter()
-        .filter(|n| n.on_error.is_some() || n.retry.is_some() || n.repeatable.is_some())
+        .filter(|n| {
+            n.on_error.is_some()
+                || n.retry.is_some()
+                || n.repeatable.is_some()
+                || n.postcondition.is_some()
+        })
         .map(|n| n.name.clone())
         .collect();
     let spec = crate::company::workflow_spec_from_graph(file);
@@ -2471,9 +2479,9 @@ async fn fix_from_run(
             let (ok, advisories) = workflow_readiness(&spec);
             if !dropped_policy_nodes.is_empty() {
                 notes.push(format!(
-                    "on_error/retry/repeatable on {} — this correction does not carry these \
-                     per-node policies through; reapply them after reviewing if the node is \
-                     still there.",
+                    "on_error/retry/repeatable/postcondition on {} — this correction does not \
+                     carry these per-node policies through; reapply them after reviewing if the \
+                     node is still there.",
                     dropped_policy_nodes.join(", ")
                 ));
             }
@@ -6326,6 +6334,111 @@ mod tests {
                     .as_str()
                     .is_some_and(|s| s.contains("repeatable") && s.contains("Publish"))),
                 "notes must name the dropped repeatable declaration on `Publish`: {body}"
+            );
+        }
+
+        /// CodeRabbit review on #1937 (issue #1866): the same drop the sibling
+        /// test above pins for `repeatable` also applies to `postcondition` —
+        /// `WorkflowNodeSpec` has no field for it either, so a node's declared
+        /// run-safety gate is silently dropped by a fix-from-run correction
+        /// unless `fix_from_run` names it in `notes`. Without this, an operator
+        /// who saves a copilot correction over a workflow whose agent node
+        /// declared a `postcondition` loses that gate with no warning — the
+        /// SAME defect class as thread 1's GET -> PUT erasure, but reached
+        /// through the agent-authored correction path instead of a REST edit.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn fix_from_run_notes_a_dropped_postcondition_declaration() {
+            use crate::harness::provider::HarnessModel;
+            use crate::harness::workflow_build::WorkflowBuilder;
+            use crate::harness::workflow_build::test::{
+                NativeCopilotModel, NativeStep, agent_deps, propose_step,
+            };
+
+            let home_dir = home();
+            let id = CompanyId::new("acme");
+            let state = desk_state(home_dir.path()).await;
+
+            let model = NativeCopilotModel::scripting(vec![
+                propose_step(
+                    "dropped the unwired step",
+                    serde_json::json!({
+                        "name": "Greeter",
+                        "nodes": [
+                            { "id": "start", "kind": "trigger", "name": "Start" },
+                            { "id": "done", "kind": "output", "name": "Report" }
+                        ],
+                        "edges": [ { "from": "start", "to": "done" } ]
+                    }),
+                ),
+                NativeStep::done("Corrected the workflow."),
+            ]);
+            {
+                let mut runtime =
+                    std::sync::Arc::into_inner(state.registry().remove(&id).expect("registered"))
+                        .expect("uniquely held in this test");
+                let deps = agent_deps(&runtime, model.clone() as std::sync::Arc<dyn HarnessModel>);
+                runtime.set_builder(std::sync::Arc::new(WorkflowBuilder::new(
+                    model as std::sync::Arc<dyn HarnessModel>,
+                    "test-model",
+                )));
+                runtime.set_workflow_harness_deps(deps);
+                state
+                    .registry()
+                    .insert(id.clone(), std::sync::Arc::new(runtime));
+            }
+
+            // Seed a workflow whose middle node is an agent naming the roster
+            // teammate `desk_manifest` declares (`ceo`) and carries a
+            // `postcondition` — the exact declaration `fix_from_run`'s
+            // correction cannot carry through the builder's `WorkflowNodeSpec`.
+            let mut body = create_body();
+            body["nodes"].as_array_mut().unwrap().insert(
+                1,
+                serde_json::json!({
+                    "id": "ask",
+                    "kind": "agent",
+                    "name": "Ask",
+                    "agent": "ceo",
+                    "postcondition": { "require": "non_empty" }
+                }),
+            );
+            body["edges"] = serde_json::json!([
+                { "from": "start", "to": "ask" },
+                { "from": "ask", "to": "done" }
+            ]);
+            let created = router(state.clone())
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+
+            journal_run_with_id(
+                &state,
+                &id,
+                "greeter",
+                "run-1",
+                "the tool `web_search` is not wired on this deployment",
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/greeter/fix-from-run",
+                    Some(serde_json::json!({ "runId": "run-1" })),
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+            let notes = body["notes"].as_array().cloned().unwrap_or_default();
+            assert!(
+                notes.iter().any(|n| n
+                    .as_str()
+                    .is_some_and(|s| s.contains("postcondition") && s.contains("Ask"))),
+                "notes must name the dropped postcondition declaration on `Ask`: {body}"
             );
         }
 
