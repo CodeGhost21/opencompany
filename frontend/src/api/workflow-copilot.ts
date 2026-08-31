@@ -467,8 +467,20 @@ function describeRun(run: WorkflowRunOutcome): string {
   // `erroredNodes` fallback covers a host predating #1865 that nevertheless
   // sent the node trail, the same "prefer the host's word, fall back to the
   // signal it reads" shape {@link verdictOf} uses in `run-health.ts`.
+  //
+  // PR #1883 review (codex, comment 3886484125): gated on an empty
+  // `pendingApprovals` — both `WorkflowRunVerdict::of` and `verdictOf` check
+  // `awaiting_count`/`awaitingCount` BEFORE this legacy fallback, because a
+  // node parked on a native `requiresApproval` gate leaves no `blockedNodes`
+  // row (only a gated-call block does), so a run can carry an errored
+  // continue/route node AND a live approval card at once. Without this guard
+  // that run read as `DEGRADED: … not a clean finish` while it was actually
+  // sitting open, waiting on an operator — a stronger, wronger claim than the
+  // "finished" this arm exists to replace, on the run most likely to still be
+  // actionable.
   const degraded =
-    run.verdict === "degraded" || (run.verdict === undefined && erroredNodes.length > 0);
+    run.pendingApprovals.length === 0 &&
+    (run.verdict === "degraded" || (run.verdict === undefined && erroredNodes.length > 0));
   const outcome = run.running
     ? "still running"
     : run.error

@@ -387,4 +387,39 @@ describe("composeCopilotMessage", () => {
     expect(message).toContain("DEGRADED: collect");
     expect(message).not.toMatch(/— finished;/);
   });
+
+  /**
+   * PR #1883 review (codex, comment 3886484125). A native `requiresApproval`
+   * gate parks with no `blockedNodes` row at all — only a gated *call* inside
+   * an agent turn leaves one; `park_pending_gates` writes straight to
+   * `pendingApprovals` instead (issue #1189). So a run with an errored
+   * continue/route node AND a live approval card has `blocked.length === 0`
+   * and `erroredNodes.length > 0` at once, which before this fix fell into
+   * the `degraded` arm and told the operator the run was DONE-BUT-DEGRADED —
+   * `WorkflowRunVerdict::of` and `verdictOf` both rank `awaiting_count` ahead
+   * of `errored_nodes`/`degraded` for exactly this reason, and this run is
+   * still open, not settled.
+   */
+  it("grounds the copilot on a pending approval instead of a degraded run that is still waiting", () => {
+    const awaitingRun = {
+      seq: 1,
+      atMillis: 1_700_000_000_000,
+      workflowId: "weekly_report",
+      scheduled: false,
+      runId: "run-1",
+      deliveries: [],
+      pendingApprovals: ["gate-b"],
+      verdict: "degraded" as const,
+      nodes: [
+        { nodeId: "collect", status: "error" as const, elapsedMs: 12 },
+        { nodeId: "gate-b", status: "ok" as const, elapsedMs: 4 },
+      ],
+    };
+    const message = composeCopilotMessage(
+      { ...context, runs: [awaitingRun] },
+      "did this run finish cleanly?",
+    );
+    expect(message).not.toContain("DEGRADED");
+    expect(message).toMatch(/awaiting approval: gate-b/);
+  });
 });
