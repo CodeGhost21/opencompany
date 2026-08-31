@@ -1006,9 +1006,26 @@ impl<'a> CycleRunner<'a> {
                 // are waiting on something outside the cycle, not stranded by it.
                 continue;
             }
-            let reason = match cycle_error {
-                Some(err) => format!("{RUN_CYCLE_FAILED_ERROR}: {err}"),
-                None => RUN_UNSETTLED_ERROR.to_string(),
+            // Two readings of the same failure, because they go to two places
+            // with different audiences (CodeRabbit review on #1905).
+            //
+            // `reason` is the full one: it lands on the attempt row and the
+            // card note, both of which are already scoped to whoever can see
+            // the card, and an operator debugging a stranded dispatch needs the
+            // provider's actual words.
+            //
+            // `notice_reason` is what a **company-wide** notification title may
+            // carry, and a free-form `err` is not it — `notify_dispatch_failed`
+            // only flattens newlines, so a provider body quoting a key, a URL
+            // or a customer's name would be broadcast to every member. The
+            // cap-free arm is a fixed constant, so it passes through whole and
+            // the badge still says what happened.
+            let (reason, notice_reason) = match cycle_error {
+                Some(err) => (
+                    format!("{RUN_CYCLE_FAILED_ERROR}: {err}"),
+                    RUN_CYCLE_FAILED_ERROR,
+                ),
+                None => (RUN_UNSETTLED_ERROR.to_string(), RUN_UNSETTLED_ERROR),
             };
             let outcome = RunOutcome::new(RunStatus::Failed).with_error(reason.clone());
             if let Err(err) = self.rt.runs().finish_run(company, id, outcome).await {
@@ -1060,8 +1077,12 @@ impl<'a> CycleRunner<'a> {
                     // — a brain that never answered `TaskDispatched`, or one
                     // whose cycle errored, left silent until this backstop
                     // caught it. See `CompanyRuntime::notify_dispatch_failed`.
+                    // `notice_reason`, not `reason`: the title is company-wide
+                    // and must not carry a free-form provider error. When there
+                    // is no cycle error the two are the same constant, which is
+                    // what #1883's test asserts reaches the title.
                     if column == crate::ports::tasks::COLUMN_TODO {
-                        self.rt.notify_dispatch_failed(task_id, &reason).await;
+                        self.rt.notify_dispatch_failed(task_id, notice_reason).await;
                     }
                 }
                 Ok(None) => {}
@@ -4549,6 +4570,33 @@ members = ["writer"]
             reason.contains("the brain fell over"),
             "the row must carry the reason the caller saw: {reason}"
         );
+
+        // …and the company-wide badge must NOT (CodeRabbit review on #1905).
+        // The attempt row above is scoped to whoever can see the card; a
+        // notification title is broadcast to every member, and
+        // `advance::notify_dispatch_failed` only flattens newlines — so a
+        // provider body quoting a key, a URL or a customer's name would go out
+        // to the whole company. The badge names the class; the words stay on
+        // the row and the card note.
+        for filed in rt
+            .notifications()
+            .list(rt.id(), "owner")
+            .await
+            .expect("read notifications")
+            .iter()
+            .filter(|n| n.notification.kind == "dispatch_failed")
+        {
+            assert!(
+                !filed.notification.title.contains("the brain fell over"),
+                "the cycle error must not reach a company-wide title: {:?}",
+                filed.notification.title
+            );
+            assert!(
+                filed.notification.title.contains(RUN_CYCLE_FAILED_ERROR),
+                "it still has to say what happened: {:?}",
+                filed.notification.title
+            );
+        }
     }
 
     /// A dispatch whose run row could not be minted (`run_id: None`) — the

@@ -45,7 +45,7 @@ use crate::ports::notifications::{Notification, NotificationStore, Subject, Subj
 use crate::ports::now_millis;
 use crate::ports::runs::RunStatus;
 use crate::ports::tasks::{
-    COLUMN_IN_PROGRESS, COLUMN_PLANNING, COLUMN_TODO, column_for_settled_run,
+    COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO, column_for_settled_run,
 };
 use crate::ports::types::CompanyId;
 
@@ -132,6 +132,76 @@ pub async fn advance_settled_card(
     tasks.upsert(company, &card).await?;
     Ok(Some(column))
 }
+
+/// Returns a card whose blocker expired unanswered to [`COLUMN_TODO`],
+/// carrying the question nobody answered (issue #1861). `true` when the card
+/// moved.
+///
+/// The approval TTL's default-deny reaching the board. A blocker parks the card
+/// in `paused` and asks; if nothing answers before the deadline the question is
+/// retired, and this is what stops the card sitting in `paused` forever waiting
+/// on a decision that has already been made against it. Epic #183's rule
+/// applies again at that point: a card that cannot proceed goes back to To-do
+/// carrying its reason, never into a stuck column of its own.
+///
+/// # Why the question is preserved rather than dropped
+///
+/// The unanswered question is the single most useful thing on the card. It is
+/// what a person needs in order to unblock the work whenever they next look —
+/// the TTL expiring does not make the work possible, it only stops pretending
+/// somebody is about to answer.
+///
+/// # The guard, and why it differs from [`advance_settled_card`]'s
+///
+/// That function guards on [`COLUMN_IN_PROGRESS`] because it settles a run that
+/// was running. This one guards on [`COLUMN_PAUSED`], the column the blocker
+/// itself put the card in. Same principle either way: a card an operator has
+/// since dragged somewhere is theirs, and an expiry must not drag it back.
+///
+/// # Why the chip is set here rather than through [`bounced_reason`]
+///
+/// `bounced_reason` answers "did this *settle* bounce", from a
+/// [`RunStatus`] — and there is no run settling here. The attempt this blocker
+/// came from ended long ago; what expired is a park. The chip is still exactly
+/// right for the board's purpose (#1865): this card is not fresh, and an
+/// operator scanning To-do must be able to see that without opening it.
+pub async fn return_expired_blocker_card(
+    tasks: &dyn TaskStore,
+    company: &CompanyId,
+    task_id: &str,
+    question: &str,
+) -> Result<bool> {
+    let Some(mut card) = tasks
+        .list(company)
+        .await?
+        .into_iter()
+        .find(|t| t.id == task_id)
+    else {
+        return Ok(false);
+    };
+    if card.column != COLUMN_PAUSED {
+        return Ok(false);
+    }
+    let reason = format!("{EXPIRED_BLOCKER}: {question}");
+    card.note = Some(append_result(
+        card.note.as_deref(),
+        SYSTEM_ATTRIBUTION,
+        &reason,
+    ));
+    card.column = COLUMN_TODO.to_string();
+    card.bounced = Some(reason);
+    card.updated_at_millis = now_millis();
+    tasks.upsert(company, &card).await?;
+    Ok(true)
+}
+
+/// The lead-in on a card returned by an unanswered blocker (issue #1861).
+///
+/// Its own wording rather than the failure one: nothing failed. The work is
+/// exactly as possible as it was, and the only thing that changed is that
+/// nobody answered in time.
+pub const EXPIRED_BLOCKER: &str =
+    "nobody answered this in time, so it is back in To-do — it still needs";
 
 /// Whether a settle lands a card back on [`COLUMN_TODO`] because the attempt
 /// **failed or was cancelled**, as opposed to any other landing this function

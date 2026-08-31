@@ -3254,6 +3254,10 @@ impl RuntimeBuilder {
                                 }),
                             );
                             let mut deps = HarnessDeps {
+                                // Issue #1861: the same store the console's and
+                                // the scheduler's runs badge through, so a run
+                                // the orchestrator's `run_workflow` started
+                                // reports an unhealthy end on identical terms.
                                 notifications: Some(ops.notifications.clone()),
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
@@ -5104,6 +5108,7 @@ mod test {
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();
@@ -8822,6 +8827,7 @@ needs_reason = true
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();

@@ -1316,6 +1316,165 @@ impl CompanyRuntime {
         }
     }
 
+    /// Parks a blocker on the approval gate from **outside a cycle** (issue
+    /// #1861).
+    ///
+    /// The planning pass runs in a detached `tokio::spawn` with no cycle around
+    /// it and no attempt row of its own, so it cannot reach
+    /// `CycleRunner::park` and must not stage onto the harness's
+    /// approval-request queue: nothing would drain that until some later,
+    /// unrelated chat cycle happened to run, and the park would then be
+    /// attributed to that turn's thread rather than to this card.
+    ///
+    /// So this is `CycleRunner::park`'s journal-and-announce half, minus the
+    /// two things only a cycle can honestly supply:
+    ///
+    /// * **No continuation is armed.** There is no turn suspended on this
+    ///   answer — the pass has already finished. Arming one would leave a
+    ///   counter against a cycle that will never run again. Resuming a planning
+    ///   blocker means re-dispatching the card, which is #1863's work.
+    /// * **No grant is marked pending.** `mark_pending` protects a live
+    ///   checkout from another turn's orphan sweep; a finished pass holds none.
+    ///
+    /// Ordering matches the cycle's exactly: gate, then the journal write that
+    /// binds it, then the advisory event. A crash between the journal and the
+    /// event replays as "still parked" and the console picks it up on its next
+    /// feed refresh, which is the same trade `CycleRunner::park` documents.
+    ///
+    /// # Why this is feature-gated and its expiry half is not
+    ///
+    /// Its only caller is the planning pass, which is
+    /// `#[cfg(feature = "openhuman")]`, so on a default build this is a method
+    /// nobody can reach — and `-D dead_code` is right to say so.
+    ///
+    /// The *expiry* half of the same story — `unanswered_blocker` and the card
+    /// return it drives — stays ungated on purpose: the TTL sweep that runs it
+    /// is ungated, and a blocker parked by a gated build still has to expire
+    /// correctly on any build that later loads the same journal.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn park_blocker(
+        &self,
+        payload: &crate::ports::blockers::BlockerPayload,
+        task_id: &str,
+    ) -> Result<ApprovalId> {
+        use crate::ports::types::{Effect, EffectGroup};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let effect = Effect {
+            kind: payload.effect_kind(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+            // Not an agent's blocked tool call — see `Effect::agent`. Approving
+            // one is inert until #1863 carries the answer back.
+            agent: None,
+            // A pass mints no attempt row, so there is no run waiting on this.
+            run_id: None,
+        };
+        let approval_id = self.approvals.park(&self.id, effect.clone()).await?;
+        // The gate park is already live at this point, so a failing journal
+        // write cannot simply `?` out: the caller would read the park as failed
+        // and return the card to To-do while the gate still held a decidable
+        // approval against it — an operator shown a question for a card nobody
+        // paused, the same inconsistency `unpark_blocker` exists to prevent on
+        // the other side of this pair.
+        //
+        // Undone in memory only, and that is the whole point: the durable write
+        // is the thing that failed, so a compensating *record* would go down
+        // the same broken path. `resolve_outcome` with a `Deny` drops the
+        // parked entry and mints nothing — `GrantedCall` exists only on the
+        // `Approved` arm — and `discard_unrecorded_park` clears the projection
+        // rows `record_parked` inserted before its append. Nothing was durably
+        // parked, so nothing is durably retired; the error propagates and the
+        // caller returns the card exactly as it does for a refused park.
+        if let Err(err) = self
+            .journal
+            .record_parked(
+                &approval_id,
+                &effect,
+                now_millis(),
+                TaskLink::from_task_id(Some(task_id)),
+                // No conversation: a planning pass is not anybody's turn, so
+                // there is no thread to thread the answer back into.
+                ApprovalConversation {
+                    thread: None,
+                    parent: None,
+                },
+                None,
+            )
+            .await
+        {
+            self.approval_gate.resolve_outcome(
+                &approval_id,
+                Verdict::Deny,
+                Actor {
+                    kind: ActorKind::System,
+                    id: "park-rollback".into(),
+                },
+                now_millis(),
+            );
+            self.journal.discard_unrecorded_park(&approval_id);
+            tracing::warn!(
+                company = %self.id,
+                task = %task_id,
+                %approval_id,
+                error = %err,
+                "[blockers] a blocker could not be journaled; its gate entry was rolled back so \
+                 the card returns rather than leaving an undecidable question"
+            );
+            return Err(err);
+        }
+        if let Err(err) = self
+            .events
+            .append(
+                &self.id,
+                CompanyEvent::ApprovalParked {
+                    approval_id: approval_id.clone(),
+                    effect_kind: effect.kind.clone(),
+                    thread: None,
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                company = %self.id,
+                approval_id = %approval_id,
+                error = %err,
+                "blocker parked and journaled, but its event-log entry failed",
+            );
+        }
+        Ok(approval_id)
+    }
+
+    /// Withdraws a blocker this pass just parked, because the card write that
+    /// was supposed to follow it failed (issue #1861).
+    ///
+    /// [`park_blocker`](Self::park_blocker) deliberately runs **before** the
+    /// card is written, so an operator can never be shown a `paused` column
+    /// with nothing in the queue to release it. This is the other half of that
+    /// trade. Without it the failing write leaves the opposite inconsistency —
+    /// a live blocker naming a card still in Planning — and nothing repairs it:
+    /// [`return_expired_blocker_card`](crate::runtime::advance::return_expired_blocker_card)
+    /// only moves cards already in `paused`, so the TTL sweep would retire the
+    /// approval and leave the card exactly where it was stuck.
+    ///
+    /// Routed through [`retire_approval`](Self::retire_approval), the single
+    /// retirement primitive, so this leaves the same durable trail as every
+    /// other retirement: an `ApprovalExpired` line and a `Deny` with the system
+    /// named, never a grant. Only the recorded
+    /// [`ExpiryReason`] differs, and it differs on purpose — see
+    /// [`ExpiryReason::CardUnwritable`].
+    ///
+    /// Feature-gated for the reason `park_blocker` is: the planning pass is its
+    /// only caller.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn unpark_blocker(self: &Arc<Self>, id: &ApprovalId) -> Result<()> {
+        self.retire_approval(id, ExpiryReason::CardUnwritable, now_millis())
+            .await
+    }
+
     /// Thin `&self` wrapper around
     /// [`advance::notify_dispatch_failed`](crate::runtime::advance::notify_dispatch_failed)
     /// for the two callers that already hold a live [`CompanyRuntime`]:
@@ -1857,9 +2016,23 @@ impl CompanyRuntime {
         if !receipt.expired() {
             return Ok(());
         }
+        // Both read BEFORE the retirement, for the reason
+        // `sweep_expired_approvals` gives at its own call: retiring is what
+        // removes the approval from the journal's pending set, and after that
+        // there is no way back to what was being asked. Main's #1883 added
+        // this call site against the one-argument signature that predated
+        // #1861's blocker/approval distinction; without the two flags the
+        // notice would tell an operator a question was "denied by default"
+        // when nothing was ever decided.
+        //
+        // `finish_expiry` carries the rest, so a deadline the sweeper finds
+        // first and one a late resolve finds instead leave the same board and
+        // the same badge behind.
+        let unanswered = self.unanswered_blocker(id);
+        let is_blocker = self.is_blocker(id);
         self.retire_approval(id, ExpiryReason::Ttl, now_millis())
             .await?;
-        self.notify_approval_expired(id).await;
+        self.finish_expiry(id, is_blocker, unanswered).await;
         Ok(())
     }
 
@@ -3514,22 +3687,161 @@ impl CompanyRuntime {
             .approval_gate
             .sweep_expired_capped(now, MAX_RETIREMENTS_PER_TICK);
         for id in &expired {
+            // Issue #1861: read the blocker's question BEFORE retiring, because
+            // retiring is what removes it from the journal's pending set. After
+            // that there is no way back to what was being asked, and a card
+            // returned without its question is a card nobody can act on.
+            let unanswered = self.unanswered_blocker(id);
+            // Issue #1861: detect blockers independently of task linkage,
+            // so unlinked blockers (from workflow nodes or chat) are recognized
+            // as blockers, not ordinary approvals, even though unanswered
+            // returns None for them.
+            let is_blocker = self.is_blocker(id);
             self.retire_approval(id, ExpiryReason::Ttl, now).await?;
-            // Issue #1865: a blocker nobody answered is exactly the silent
-            // failure this notification exists for — "awaiting approval"
-            // forever with nothing telling anybody it timed out. Best-effort
-            // and after the retirement, which already propagates its own
-            // error: a notification that could not be filed must not undo a
-            // default-deny that already happened.
-            self.notify_approval_expired(id).await;
+            self.finish_expiry(id, is_blocker, unanswered).await;
         }
         Ok(expired)
+    }
+
+    /// The board write and the badge a retirement owes, shared by the two paths
+    /// that retire an expired approval: the sweeper that finds the deadline
+    /// first, and [`retire_if_expired`](Self::retire_if_expired) when a late
+    /// resolve finds it instead.
+    ///
+    /// Shared because it was not, and the two disagreed (CodeRabbit review on
+    /// #1905). The sweeper returned the card; the late-expiry path did not, so
+    /// a task-linked blocker discovered that way sat in `paused` forever with
+    /// nothing left to release it — the approval it was waiting on had just
+    /// been retired, and the next sweep will never see that id again. Both
+    /// callers now reach the identical outcome, which is the same property
+    /// `retire_approval` exists to give the retirement itself.
+    ///
+    /// **The board first, then the badge**, so the badge can tell the truth:
+    /// its "its card is back in To-do" copy is now gated on a move that
+    /// actually landed rather than on the blocker merely naming a card.
+    ///
+    /// Everything here is best-effort and everything here runs *after* the
+    /// retirement, which has already propagated its own error. A notification
+    /// that cannot be filed, or a board write that fails, must not undo a
+    /// default-deny that already happened — the card stays `paused` with the
+    /// question on it and the log line is the trace.
+    async fn finish_expiry(
+        &self,
+        id: &ApprovalId,
+        was_blocker: bool,
+        unanswered: Option<(String, String)>,
+    ) {
+        let mut card_returned = false;
+        if let Some((task_id, question)) = unanswered {
+            match crate::runtime::advance::return_expired_blocker_card(
+                self.tasks().as_ref(),
+                &self.id,
+                &task_id,
+                &question,
+            )
+            .await
+            {
+                Ok(true) => {
+                    card_returned = true;
+                    tracing::info!(
+                        company = %self.id,
+                        task = %task_id,
+                        approval = %id.as_ref(),
+                        "[approvals] an unanswered blocker returned its card to To-do"
+                    );
+                }
+                // The card moved on without us — an operator dragged it, or it
+                // was already re-dispatched. Theirs, not ours, and not a return
+                // this notification may claim.
+                Ok(false) => {}
+                Err(err) => tracing::warn!(
+                    company = %self.id,
+                    task = %task_id,
+                    error = %err,
+                    "[approvals] a blocker expired but its card could not be returned; it \
+                     stays paused with the question on it"
+                ),
+            }
+        }
+        // Issue #1865: a blocker nobody answered is exactly the silent failure
+        // this notification exists for — "awaiting approval" forever with
+        // nothing telling anybody it timed out.
+        self.notify_approval_expired(id, was_blocker, card_returned)
+            .await;
+    }
+
+    /// The card and question behind a parked **blocker**, or `None` for an
+    /// ordinary approval (issue #1861).
+    ///
+    /// Read from the journal's pending set, which is why every caller has to
+    /// call it *before* retiring: retirement is what empties that set.
+    ///
+    /// The task comes from the approval's own [`TaskLink`], not from the
+    /// payload's `step`. Both can name a card, and the link is the one the
+    /// journal has always maintained — a payload written by a future producer
+    /// that forgot the field would silently strand the card, whereas a missing
+    /// link is a case this already handles by returning `None`. A workflow
+    /// node's blocker is parked `Unlinked` and so lands here as `None`, which
+    /// is right: there is no card to return, and #1864 owns what a stalled run
+    /// does next.
+    ///
+    /// [`TaskLink`]: crate::runtime::journal::TaskLink
+    /// Whether a pending approval is a blocker (question the operator must answer).
+    /// Unlike `unanswered_blocker`, this returns true regardless of task linkage,
+    /// so unlinked blockers (from workflow nodes or chat) are recognized.
+    fn is_blocker(&self, id: &ApprovalId) -> bool {
+        let pending = match self.journal.pending().into_iter().find(|p| &p.id == id) {
+            Some(p) => p,
+            None => return false,
+        };
+        let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
+        pending.effect.kind.starts_with(&prefix)
+    }
+
+    fn unanswered_blocker(&self, id: &ApprovalId) -> Option<(String, String)> {
+        use crate::runtime::journal::TaskLink;
+
+        let pending = self.journal.pending().into_iter().find(|p| &p.id == id)?;
+        let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
+        if !pending.effect.kind.starts_with(&prefix) {
+            return None;
+        }
+        let task_id = match pending.task {
+            Some(TaskLink::Task { id }) => id,
+            _ => return None,
+        };
+        let payload: crate::ports::blockers::BlockerPayload =
+            serde_json::from_value(pending.effect.payload.clone()).ok()?;
+        // The question, then what would answer it. An operator reading this off
+        // a To-do card has neither the thread nor the approvals page in front
+        // of them any more, so both halves have to be on the card.
+        Some((task_id, format!("{} ({})", payload.reason, payload.needed)))
     }
 
     /// Files a durable notification that a parked approval expired unanswered
     /// (issue #1865) — one row, whole company, since expiry has no single
     /// decider the way a mention has a mentioned user.
-    async fn notify_approval_expired(&self, id: &ApprovalId) {
+    ///
+    /// `was_blocker` picks the copy (issue #1861). The two expiries are not the
+    /// same event: an approval that times out **is** decided — denied by
+    /// default — while a blocker that times out was never a decision at all,
+    /// and telling an operator their unanswered question was "denied" would
+    /// describe a judgement nobody made about work that is still perfectly
+    /// possible.
+    ///
+    /// `card_returned` is the **outcome of the board write**, not the presence
+    /// of a link (CodeRabbit review on #1905). It used to be
+    /// `unanswered.is_some()` — "this blocker names a card" — which claimed the
+    /// card was back in To-do before anything had tried to move it, and on the
+    /// late-expiry path where nothing moved it at all. Only
+    /// [`finish_expiry`](Self::finish_expiry) sets it, and only from a move
+    /// that actually landed.
+    async fn notify_approval_expired(
+        &self,
+        id: &ApprovalId,
+        was_blocker: bool,
+        card_returned: bool,
+    ) {
         let note = crate::ports::notifications::Notification {
             id: crate::ports::generate_id(),
             kind: "approval_expired".to_string(),
@@ -3538,7 +3850,18 @@ impl CompanyRuntime {
                 id: id.as_ref().to_string(),
             },
             created_at: now_millis(),
-            title: "An approval expired unanswered and was denied by default".to_string(),
+            // Issue #1861: a question nobody answered is not "denied by
+            // default" — there was nothing to deny. Saying so would tell an
+            // operator a decision was made against work that is simply still
+            // waiting to be explained. Only claim a card came back if the
+            // blocker was actually linked to a task (has_linked_task).
+            title: if was_blocker && card_returned {
+                "A question nobody answered timed out; its card is back in To-do".to_string()
+            } else if was_blocker {
+                "A question nobody answered timed out".to_string()
+            } else {
+                "An approval expired unanswered and was denied by default".to_string()
+            },
             audience: None,
             context: None,
         };
@@ -4742,6 +5065,67 @@ impl std::fmt::Debug for CompanyRuntime {
 
 #[cfg(test)]
 mod tests {
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
+    /// every append once armed — a full or read-only data volume, which is the
+    /// failure mode `park_blocker`'s rollback exists for.
+    ///
+    /// Armed by the test rather than from birth, so boot's own journal writes
+    /// still land and the runtime under test is an ordinary one that lost its
+    /// volume mid-life.
+    #[cfg(feature = "openhuman")]
+    #[derive(Default)]
+    struct RefusingJournalStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        armed: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "openhuman")]
+    impl RefusingJournalStore {
+        fn arm(&self) {
+            self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RefusingJournalStore {
+        async fn append_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "RefusingJournalStore: the volume is full".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            lines: Vec<String>,
+        ) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
     use super::{
         CompanyEvent, continuation_failure_notice, emergency_from_load, task_enters_in_progress,
         task_enters_planning,
@@ -6580,6 +6964,80 @@ mod tests {
         assert_eq!(
             chat_id, "desk-general",
             "it still lands in the thread it answers"
+        );
+    }
+
+    /// Issue #1861 (found by Codex on #1905): a gate park that lands and then
+    /// fails to journal must not leave the approval decidable.
+    ///
+    /// # The window
+    ///
+    /// `park_blocker` parks on the gate first and journals second. A `?` on the
+    /// journal write reported the park as failed — so `settle_blocked` returned
+    /// the card to To-do — while the gate still held a live, decidable entry
+    /// against it. The operator is then shown a question for a card nobody
+    /// paused, which is the exact inconsistency `unpark_blocker` exists to
+    /// prevent on the other side of this pair.
+    ///
+    /// `record_parked` also populates the projection *before* its append, so
+    /// the same failure left a pending approval that no journal line would ever
+    /// replay: visible until the process exits, gone after a boot.
+    ///
+    /// Both are asserted here, because clearing one without the other just
+    /// moves the disagreement.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_that_cannot_be_journaled_leaves_no_decidable_approval() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let journal = std::sync::Arc::new(RefusingJournalStore::default());
+        let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(crate::ports::types::CompanyId::new("acme"))
+            .with_journal_store(journal.clone())
+            .build()
+            .await
+            .expect("runtime");
+
+        // The volume goes away *after* boot, so this is an ordinary runtime.
+        journal.arm();
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+        };
+
+        let parked = runtime.park_blocker(&payload, "t-1").await;
+        assert!(
+            parked.is_err(),
+            "an unjournaled park is reported as a failed park, so the caller returns the card"
+        );
+
+        assert!(
+            runtime.approval_gate.parked_ids().is_empty(),
+            "the gate entry must be rolled back — otherwise the operator can decide a blocker \
+             for a card that was handed straight back to To-do"
+        );
+        assert!(
+            runtime.pending_approvals().is_empty(),
+            "and the projection row `record_parked` inserted before its append must go with it"
         );
     }
 }
