@@ -267,6 +267,7 @@ async fn harness(
         .unwrap();
 
     let deps = HarnessDeps {
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {

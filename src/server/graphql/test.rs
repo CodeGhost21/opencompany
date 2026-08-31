@@ -906,6 +906,7 @@ async fn chat_history_projects_the_card_a_reply_opened() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                bounced: None,
             },
         )
         .await
@@ -1218,6 +1219,7 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                bounced: None,
             },
         )
         .await

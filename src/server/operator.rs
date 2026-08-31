@@ -2044,6 +2044,7 @@ async fn run_chat(
             // then carries forever.
             origin_run_id: accepted.turn_id.clone(),
             origin_workflow_id: None,
+            bounced: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
@@ -5029,6 +5030,7 @@ mode = "full"
             .unwrap();
 
         let deps = HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -6740,6 +6742,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await

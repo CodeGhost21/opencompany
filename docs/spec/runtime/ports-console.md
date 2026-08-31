@@ -64,6 +64,21 @@ pass — …", the dispatch error text, `[operator] cancelled while in flight`),
 which the board renders on the card. So a task that cannot proceed goes **back
 to Pending with the reason on the card**, never into a stuck state of its own.
 
+**The note stopped being the only carrier (issue #1865).** The reason text
+above is still appended to `note` — nothing about that changed — but a settle
+that lands a card back on `todo` because its run **failed or was cancelled**
+now also stamps `TaskRecord::bounced: Option<String>` with the same reason,
+via the one rule (`bounced_reason` in `src/runtime/advance.rs`) both card-write
+sites share. That gives the board a structured signal to render a dedicated
+chip instead of parsing prose out of the note, and — unlike the note, which is
+append-only — `bounced` is cleared the instant the card leaves `todo` any other
+way: a re-dispatch, a manual drag, or any other write that takes it off `todo`
+(`task_leaves_todo` in `src/company/runtime.rs`). A card re-entering `todo`
+later earns a fresh reading, never a stale chip left over from the last bounce.
+`None` is the default for every card that has never bounced and every board
+written before this field existed — additive on the wire like the rest of
+`TaskCard`, so no stored board needs migrating.
+
 Nothing about that is silent for stored data: `backlog` is no longer a board
 column, so a card persisted under it would fail `is_board_column` and vanish
 from the board — the exact silent disappearance #205 exists to prevent.

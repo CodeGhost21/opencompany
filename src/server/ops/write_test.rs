@@ -769,6 +769,7 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                bounced: None,
             },
         )
         .await
@@ -4467,6 +4468,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        bounced: None,
     };
     for t in [
         card("t-parent", "Parent", None),
@@ -4663,6 +4665,7 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        bounced: None,
     }
 }
 
@@ -5331,6 +5334,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                bounced: None,
             },
         )
         .await
@@ -5453,6 +5457,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                bounced: None,
             },
         )
         .await
@@ -5559,6 +5564,7 @@ async fn dispatched_task(
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                bounced: None,
             },
         )
         .await
@@ -6018,6 +6024,7 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                bounced: None,
             },
         )
         .await
@@ -7490,6 +7497,7 @@ async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &st
         }),
         origin_run_id: None,
         origin_workflow_id: None,
+        bounced: None,
     };
     runtime
         .tasks()

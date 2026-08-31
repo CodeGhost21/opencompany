@@ -1963,6 +1963,7 @@ mod dead_card_test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         }
     }
 

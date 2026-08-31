@@ -297,6 +297,7 @@ fn record() -> CompanyRecord {
 fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {

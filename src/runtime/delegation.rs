@@ -2610,6 +2610,7 @@ impl<'a> DelegationRunner<'a> {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
         tasks.upsert(self.company, &card).await?;
         tracing::debug!(
@@ -2999,6 +3000,8 @@ impl<'a> DelegationRunner<'a> {
                         .workflow_run
                         .as_ref()
                         .map(|run| run.workflow_id.clone()),
+                    // Issue #1865: a card just being minted has never bounced.
+                    bounced: None,
                 };
                 tasks.upsert(self.company, &card).await?;
                 // Issue #246: report the card so the caller can surface it. The
@@ -4753,6 +4756,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
         fx.tasks
             .upsert(&fx.record.id, &card)
@@ -5610,6 +5614,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         }
     }
 
@@ -5958,6 +5963,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -6023,6 +6029,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -6079,6 +6086,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -6128,6 +6136,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -6173,6 +6182,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -6216,6 +6226,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -6263,6 +6274,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -6310,6 +6322,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -8465,6 +8478,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
         fx.tasks.upsert(&fx.record.id, &card).await.expect("seed");
 
