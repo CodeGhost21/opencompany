@@ -434,9 +434,28 @@ pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> Str
     };
     let headline = format!("\"{}\" {status}{credit}.", card.title);
     match card.note.as_deref().filter(|n| !n.trim().is_empty()) {
-        Some(note) => format!("{headline}\n\n{note}"),
+        Some(note) => format!("{headline}\n\n{}", strip_note_attribution(note)),
         None => headline,
     }
+}
+
+/// Strips the `[<who>] ` attribution prefix from each block of a card note, so
+/// the relayed bubble carries the prose without the board's internal
+/// `[system]`/`[writer]` chrome. The headline already credits the doer.
+///
+/// A block is a `\n\n`-separated span. Only a leading `[word] ` prefix is
+/// removed; a block that opens with `[` but has no closing `] ` is left
+/// verbatim, and brackets later in the block are untouched.
+fn strip_note_attribution(note: &str) -> String {
+    note.split("\n\n")
+        .map(|block| {
+            block
+                .strip_prefix('[')
+                .and_then(|rest| rest.split_once("] "))
+                .map_or(block, |(_, body)| body)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The orchestrator's relay of a finished card back into the conversation it
@@ -870,6 +889,33 @@ mod test {
         assert_eq!(note_attribution(TaskRunEnd::Completed, "maya"), "maya");
         assert_eq!(note_attribution(TaskRunEnd::Paused, "maya"), "maya");
         assert_eq!(note_attribution(TaskRunEnd::Failed, "maya"), "maya");
+    }
+
+    /// The relayed bubble drops each note block's `[<who>]` attribution — the
+    /// board's internal chrome — while keeping the prose. The headline already
+    /// says who did the work.
+    #[test]
+    fn the_relay_strips_note_attribution_but_keeps_the_prose() {
+        let noted = card(
+            COLUMN_IN_REVIEW,
+            Some("[system] moved to review\n\n[writer] drafted the intro"),
+        );
+        let text = relay_text(&noted, "writer", "ceo");
+        assert!(!text.contains("[system]"), "{text}");
+        assert!(!text.contains("[writer]"), "{text}");
+        assert!(text.contains("moved to review"), "{text}");
+        assert!(text.contains("drafted the intro"), "{text}");
+
+        // A block that opens with `[` but never closes it stays verbatim.
+        assert_eq!(
+            strip_note_attribution("[unterminated note"),
+            "[unterminated note"
+        );
+        // Brackets after the leading prefix are left alone.
+        assert_eq!(
+            strip_note_attribution("[writer] see [ref] below"),
+            "see [ref] below"
+        );
     }
 
     /// The one-voice change: the bubble is the orchestrator's, and the assignee
