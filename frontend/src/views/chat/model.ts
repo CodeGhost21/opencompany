@@ -405,6 +405,14 @@ export function isOperatorChannelDto(value: unknown): value is OperatorChannelDt
  * appended *after* every other section (issue #1757 rework) so the first
  * writable desk still wins the "open by default" pick — see `buildChannels`'s
  * `channels` section, which a caller composes ahead of this one.
+ *
+ * Callers at the network boundary MUST validate with {@link isOperatorChannelDto}
+ * before reaching here — this function does not re-check, and `operatorChannelFrom`
+ * reading `dto.description` off a shape that only satisfied the type assertion
+ * (never the runtime one) is exactly the crash `isOperatorChannelDto`'s own doc
+ * warns about. `ChatView`'s only production call site holds this invariant by
+ * construction: its `operator` state is set from `isOperatorChannelDto(dto) ?
+ * dto : null` and this function is only ever called on the non-null branch.
  */
 export function operatorSection(dto: OperatorChannelDto): ChannelSection {
   return { id: "operator", label: "Operator", channels: [operatorChannelFrom(dto)] };
