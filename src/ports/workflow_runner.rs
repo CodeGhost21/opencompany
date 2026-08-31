@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::Result;
 use crate::company::WorkflowFile;
-use crate::ports::types::{CompanyId, WorkflowNodeStatus};
+use crate::ports::types::{CompanyId, StartedBy, WorkflowNodeStatus};
 
 /// The outcome of running one workflow to completion.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -805,6 +805,25 @@ pub struct WorkflowRunContext {
     /// point (cron, resume) leaves it off — a scheduled or resumed run is always
     /// for real.
     pub dry_run: bool,
+    /// Who or what started this run (issue #1862 prerequisite). Rides the
+    /// run's [`WorkflowRunStarted`](crate::ports::types::CompanyEvent) event so
+    /// a parked blocker later has a fact — not a guess — to attribute its DM
+    /// to.
+    ///
+    /// [`new`](Self::new) derives it from `scheduled` via
+    /// [`StartedBy::from_scheduled`], which is deliberately the coarse
+    /// default: every current call through `new`/`begin` names a run
+    /// `scheduled: false` unless the cron fired it, even the ones an agent
+    /// triggered rather than an operator
+    /// ([`run_workflow`](crate::harness::built_in::orchestrator), which calls
+    /// [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) with
+    /// `scheduled: false` and so reads back as [`StartedBy::Operator`] here).
+    /// A caller that knows the real triggering agent should use
+    /// [`with_started_by`](Self::with_started_by) to override the default —
+    /// wiring that override into `run_workflow` itself is left to a follow-up
+    /// (issue #1861) precisely so this prerequisite slice does not have to
+    /// touch that call site.
+    pub started_by: StartedBy,
 }
 
 /// A one-way stop signal for one workflow run (issue #383).
@@ -909,7 +928,12 @@ impl RunCancel {
 /// [`RunCancel`] is a shared handle whose value changes under both sides, so
 /// including it would make two clones of one context compare unequal the moment
 /// one of them was cancelled. The id and the scheduled flag are what callers
-/// (and tests) actually mean by "the same run context".
+/// (and tests) actually mean by "the same run context". `started_by` (issue
+/// #1862 prerequisite) is deliberately left out of this comparison too, for
+/// the same reason: it is derived attribution riding alongside the identity,
+/// not part of it — two contexts for the same run id stay "the same context"
+/// to every existing caller of this `==` regardless of who is credited with
+/// starting it.
 impl PartialEq for WorkflowRunContext {
     fn eq(&self, other: &Self) -> bool {
         self.run_id == other.run_id && self.scheduled == other.scheduled
@@ -938,7 +962,21 @@ impl WorkflowRunContext {
             // flips it after the fact — which is exactly what `WorkflowSpawn`
             // does with the dry flag the run route hands it (issue #542).
             dry_run: false,
+            // Issue #1862 prerequisite: the coarse default, derived from
+            // `scheduled` alone. See the field doc for why callers that know
+            // the real triggering agent should override it with
+            // `with_started_by` instead of trusting this.
+            started_by: StartedBy::from_scheduled(scheduled),
         }
+    }
+
+    /// Overrides the [`started_by`](Self::started_by) this context was built
+    /// with (issue #1862 prerequisite) — for a caller that knows the real
+    /// triggering agent and wants the journal to say so, rather than settling
+    /// for [`new`](Self::new)'s `scheduled`-derived default.
+    pub fn with_started_by(mut self, started_by: StartedBy) -> Self {
+        self.started_by = started_by;
+        self
     }
 }
 
@@ -1042,5 +1080,53 @@ mod test {
         let pending = vec!["gate".to_string(), "agent-node".to_string()];
         let approvals = vec![row("agent-node", WorkflowApprovalOutcome::ParkFailed)];
         assert_eq!(stranded_approvals(&pending, &approvals), 1);
+    }
+
+    /// A manual `new(false)` reads back [`StartedBy::Operator`] — the coarse
+    /// default every call through `new`/`begin` gets unless overridden (issue
+    /// #1862 prerequisite).
+    #[test]
+    fn new_with_scheduled_false_defaults_started_by_to_operator() {
+        let ctx = WorkflowRunContext::new(false);
+        assert_eq!(ctx.started_by, StartedBy::Operator);
+        assert!(!ctx.scheduled);
+    }
+
+    /// A cron-started `new(true)` reads back [`StartedBy::Schedule`] —
+    /// unambiguous, since only the scheduler ever sets `scheduled: true`.
+    #[test]
+    fn new_with_scheduled_true_defaults_started_by_to_schedule() {
+        let ctx = WorkflowRunContext::new(true);
+        assert_eq!(ctx.started_by, StartedBy::Schedule);
+        assert!(ctx.scheduled);
+    }
+
+    /// [`WorkflowRunContext::with_started_by`] overrides the `scheduled`-derived
+    /// default — the lever a caller that knows the real triggering agent uses
+    /// instead of settling for `new`'s coarse reading.
+    #[test]
+    fn with_started_by_overrides_the_default() {
+        let ctx =
+            WorkflowRunContext::new(false).with_started_by(StartedBy::Agent("ceo".to_string()));
+        assert_eq!(ctx.started_by, StartedBy::Agent("ceo".to_string()));
+        // Overriding the sender does not retroactively flip `scheduled` — the
+        // two are independent facts about the run.
+        assert!(!ctx.scheduled);
+    }
+
+    /// `started_by` does not participate in [`WorkflowRunContext`] equality
+    /// (see the `impl PartialEq` doc) — two contexts sharing a run id and
+    /// `scheduled` flag are "the same context" regardless of who is credited
+    /// with starting it.
+    #[test]
+    fn started_by_is_excluded_from_equality() {
+        let a = WorkflowRunContext::new(false).with_started_by(StartedBy::Operator);
+        let mut b =
+            WorkflowRunContext::new(false).with_started_by(StartedBy::Agent("ceo".to_string()));
+        b.run_id = a.run_id.clone();
+        assert_eq!(
+            a, b,
+            "differing started_by must not break the identity comparison"
+        );
     }
 }

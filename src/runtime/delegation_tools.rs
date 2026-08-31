@@ -873,8 +873,34 @@ hand work to either. Do the work yourself, or say what you cannot do."
 
 /// The first desk `member` is on, so an invented teammate-as-desk target can be
 /// redirected at the desk that teammate actually sits on.
-fn desk_of_member(record: &CompanyRecord, member: &str) -> Option<String> {
+///
+/// Naming one example desk is enough for this function's informational-message
+/// callers (`unknown_desk_message`) — the caller only needs *a* desk to point
+/// at. It is the wrong call for a value that gets **persisted**: see
+/// [`sole_desk_of_member`] for that case (issue #1882 review).
+pub(crate) fn desk_of_member(record: &CompanyRecord, member: &str) -> Option<String> {
     desks_of_member(record, member).into_iter().next()
+}
+
+/// The desk `member` sits on, but only when unambiguous — `member` belongs to
+/// exactly one desk. `None` both when `member` is on no desk and when it is on
+/// two or more.
+///
+/// `pub(crate)`: the issue #1862 prerequisite's default-owner lever —
+/// `apply_workflow_proposal` (`server/ops/tasks.rs`) fills a proposal's
+/// omitted `owner_desk` from the assignee's desk. Unlike [`desk_of_member`]'s
+/// informational-message use, that default gets written to disk, so picking
+/// the first desk in manifest declaration order for a teammate who sits on
+/// several would silently misrepresent ownership (issue #1882 review) —
+/// leaving `owner_desk` unset is the same permissive "best-effort" stance the
+/// caller already takes toward an assignee with no desk at all.
+pub(crate) fn sole_desk_of_member(record: &CompanyRecord, member: &str) -> Option<String> {
+    let mut desks = desks_of_member(record, member).into_iter();
+    let first = desks.next()?;
+    if desks.next().is_some() {
+        return None;
+    }
+    Some(first)
 }
 
 /// Renders a desk-id list for a message, capped at [`LISTED_DESKS`] with the

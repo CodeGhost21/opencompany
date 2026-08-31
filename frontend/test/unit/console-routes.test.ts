@@ -134,7 +134,6 @@ describe("resolving an address", () => {
   // follows it) is what keeps a bookmark or habit written before the move alive.
   it.each([
     ["#/connections", "settings", "oauth"],
-    ["#/memory", "settings", "brain"],
     ["#/oauth", "settings", "oauth"],
     ["#/mcp", "settings", "mcp"],
     ["#/people", "settings", "people"],
@@ -146,6 +145,21 @@ describe("resolving an address", () => {
     expect(seen).toEqual([view, sub]);
     expect(window.location.hash).toBe(`#/${view}/${sub}`);
   });
+
+  // Brain's two former addresses, which rewrite onto a view with no sub-page —
+  // so the replacement hash is bare, not `#/<view>/<sub>`. `#/memory` was the
+  // surface's first name; `#/settings/brain` is where it lived for as long as
+  // it was a settings sub-page, and that is the one an operator is most likely
+  // to have bookmarked.
+  it.each(["#/memory", "#/settings/brain"])(
+    "rewrites %s onto the Brain nav row",
+    async (hash) => {
+      rewrite = REWRITE_RETIRED;
+      await visit(hash);
+      expect(seen).toEqual(["brain", null]);
+      expect(window.location.hash).toBe("#/brain");
+    },
+  );
 
   // #1867 review: `#/work` is a bare-only alias onto the ledgers board — the
   // Work surface's real sub-pages are addressed under `#/ledgers/...` (for

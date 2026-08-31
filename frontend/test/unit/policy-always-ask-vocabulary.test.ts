@@ -273,13 +273,13 @@ describe("what the always-ask field suggests", () => {
     expect(container.textContent).not.toContain("match any");
   });
 
-  it("says what an entry is, including the prefix rule the matcher implements", async () => {
+  it("marks the legacy field inactive while policy HITL is disabled", async () => {
     await mount(makeClient());
     const text = container.textContent ?? "";
-    expect(text).toContain("tool name");
-    // The prefix rule, illustrated with a kind that is not one of the retired
-    // three — explaining the rule must not double as recommending them.
-    expect(text).toContain("invoice.send");
+    expect(text).toContain("Always ask first (inactive)");
+    expect(text).toContain("do not create prompts now");
+    expect(text).toContain("request_approval");
+    expect(field()?.disabled).toBe(true);
   });
 
   it("treats a case-variant of a wired tool as wired, not a mistake", async () => {

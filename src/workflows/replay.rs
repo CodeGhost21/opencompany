@@ -724,6 +724,7 @@ mod tests {
             id: "wf".into(),
             name: "wf".into(),
             description: None,
+            owner_desk: None,
             nodes: nodes
                 .iter()
                 .map(|(id, kind, repeatable)| WorkflowNodeDef {

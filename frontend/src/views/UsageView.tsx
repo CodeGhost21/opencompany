@@ -403,8 +403,10 @@ function ComposioStatusRow({ caps }: { caps: CapabilityStatusDto }) {
       <div className="space-y-0.5">
         <span className="font-medium">Composio integrations</span>
         <p className="text-xs text-muted-foreground">
-          Gmail, Slack &amp; GitHub via Composio — opt-in, and every send/authorize is approved
-          before it runs. Runs on this company&apos;s own Composio token when one is set in
+          Gmail, Slack &amp; GitHub via Composio — opt-in. Agents can explicitly ask for
+          approval before an action with request_approval; policy does not automatically turn
+          calls into approval prompts. Read-only mode and the emergency stop still hard-deny
+          applicable calls. Runs on this company&apos;s own Composio token when one is set in
           Connections; otherwise on the company&apos;s TinyHumans key, or on the platform identity
           this instance already carries.
         </p>

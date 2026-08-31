@@ -1547,9 +1547,19 @@ impl<'a> DelegationRunner<'a> {
         // marker has no notice pointing at it (the operator only ever sees the
         // first delegate's pause), so it is unreachable, and being newer it can
         // supersede a live CTA on an older notice — disabling the one button
-        // that would have worked. Skipped entirely instead; the fold below
-        // keeps the delegate's own text on the operator bubble, so nothing the
-        // operator would have read is lost.
+        // that would have worked. Skipped entirely instead.
+        //
+        // Issue #1906: what makes the skip lossless is NOT that the delegate's
+        // text gets folded onto the bubble in the relay's place. #1886 wrote
+        // such a fold and it never reached the operator — both of
+        // `handle_operator_message`'s non-test callers (`HarnessBrain`, in the
+        // interactive and the `ScheduleFired` paths) replace the whole reply
+        // with `BUDGET_PAUSED_PLACEHOLDER_REPLY` whenever `budget_paused` is
+        // `Some`, and `desk_paused` implies exactly that. The real reason is
+        // simpler and does not depend on the caller at all: that same override
+        // already discarded the RELAY's reply on every pause, so the inference
+        // call it costs buys the operator nothing at a provider that has just
+        // run dry. The fold is gone; see the skip branch below.
         //
         // Gated on `desk_paused`, NOT on the sticky `budget_paused`: the latter
         // also carries the RESPONDER's own pause, and a responder that paused
@@ -1673,13 +1683,33 @@ impl<'a> DelegationRunner<'a> {
             }
             budget_paused = budget_paused.or(relay.budget_paused);
         } else if !desk_replies.is_empty() {
-            // The relay was skipped because a desk paused (see above). Fold the
-            // delegate's text onto the operator bubble directly, in the same
-            // shape `build_relay_prompt` would have handed the relay turn, so
-            // skipping it drops nothing — the pause itself is surfaced
-            // separately from `budget_paused` by the caller.
-            for (member, reply) in &desk_replies {
-                operator_reply.push_str(&format!("\n\n{member} replied:\n{reply}"));
+            // The relay was skipped because a desk paused (see above), so the
+            // operator bubble stays the responder's own reply — which the
+            // caller overwrites with the pause placeholder before it is ever
+            // rendered. Nothing is appended here on purpose (issue #1906): a
+            // fold cannot outlive that override, and the pause itself travels
+            // to the operator on `budget_paused`, not on this string.
+            //
+            // The one thing that IS worth doing on this path is the refusal
+            // drain the relay branch does at its tail. Issue #1906: the relay
+            // branch's copy runs only when a relay ran, so on the skip path a
+            // hand-off the responder aimed at a desk this company does not have
+            // left no trace anywhere. `DelegationClaim`'s drop clears the scope
+            // either way, so nothing leaks — what is lost without this is the
+            // log line, and that log line is the record (issue #272's reasoning,
+            // same as the relay branch's). This branch is only reached when at
+            // least one desk answered; a turn whose hand-offs were all refused,
+            // and the relay branch's own `queue.clear()`, both predate this
+            // drain — unchanged from before #1906.
+            let refused = self.queue.drain_refusals(self.max_delegations);
+            if !refused.is_empty() {
+                tracing::warn!(
+                    company = %self.company,
+                    refused = refused.len(),
+                    "[delegation] the responder attempted hand-offs to desks this company does \
+                     not have; the relay turn that would otherwise have logged them was skipped \
+                     for a budget pause, so they are recorded nowhere but here"
+                );
             }
         }
         // Drained after the relay, not before it: a relay turn carries the same
@@ -2173,7 +2203,7 @@ impl<'a> DelegationRunner<'a> {
         // MEMBER's tool refused must be attributed to the member, not
         // swept up with whatever its delegator left unread.
         let refusals_before = self.queue.refusals_queued();
-        let outcome = self
+        let outcome = match self
             .run_turn
             .run_steered(
                 self.company,
@@ -2187,7 +2217,40 @@ impl<'a> DelegationRunner<'a> {
                 // same run. `None` for a chat-path delegation.
                 self.run_sink.clone(),
             )
-            .await?;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(crate::error::OpenCompanyError::InvalidRequest(msg))
+                if control.pending().is_some() && msg.contains("cancelled") =>
+            {
+                // A queued ACP turn cancelled before it started returns
+                // InvalidRequest from AcpRunTurn (the "cancelled before it
+                // started" path). The `?` on run_steered would propagate
+                // that as a harness error, bypassing the control.take()
+                // branch below that returns cancelled: true — so the
+                // cancellation disposition is lost. Catch it here and
+                // produce the cancellation outcome directly.
+                self.queue.clear();
+                if let Some(card) = card.as_mut() {
+                    self.settle_work_card(
+                        card,
+                        &member,
+                        TaskRunEnd::Cancelled,
+                        // No approvals could have been queued: the turn
+                        // never started, so nothing asked for approval.
+                        0,
+                        "the turn was cancelled before it started",
+                    )
+                    .await?;
+                }
+                return Ok(DelegationOutcome {
+                    cancelled: true,
+                    spawned_task: card.map(|c| c.id),
+                    ..DelegationOutcome::default()
+                });
+            }
+            Err(err) => return Err(err),
+        };
         // Issue #1846 review (Codex #3864988176): `run_inner`'s own park (mod.rs)
         // parks whatever it was CALLED with as the delegate's turn message —
         // here, `&instruction`, the model-generated hand-off brief, not the
@@ -7461,10 +7524,14 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// Issue #1846 review (Codex #3870516681): the pause no longer survives a
     /// relay OVERWRITE, because there is no relay turn to overwrite it. A desk
     /// that paused has not answered, so the relay is skipped (see
-    /// [`a_delegates_budget_pause_does_not_launch_the_ceo_relay`]) and the
-    /// delegate's text is folded onto the operator bubble instead. This test
+    /// [`a_delegates_budget_pause_does_not_launch_the_ceo_relay`]). This test
     /// scripts only the three turns that actually run: a fourth would be the
     /// relay, and `ScriptedTurns` running dry is how a regression surfaces.
+    ///
+    /// Issue #1906: "reaches the operator turn" is about `budget_paused`, the
+    /// field the caller builds its notice from — not about the reply text. The
+    /// delegates' own words do NOT ride the bubble on this path and never did;
+    /// see the assertions below.
     #[tokio::test]
     async fn a_nested_delegates_budget_pause_reaches_the_operator_turn() {
         let fx = Fixture::nested();
@@ -7501,16 +7568,23 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "the notice must name the teammate that actually paused, not the one relaying it"
         );
         assert!(pause.summary.contains("add credits") || pause.summary.contains("Add credits"));
-        // The fold stands in for the relay: the delegate's own text still lands
-        // on the operator bubble, so skipping the relay drops nothing.
-        assert!(
-            out.reply.contains("engineer replied:"),
-            "the desk's answer must survive the skipped relay: {}",
+        // Issue #1906: the bubble is the RESPONDER's own text, untouched. The
+        // three assertions that used to stand here required the delegates'
+        // replies to be folded onto it — a property production never had, since
+        // `HarnessBrain::handle_operator_message` replaces the whole reply with
+        // `BUDGET_PAUSED_PLACEHOLDER_REPLY` on any pause. Pinning the absence
+        // instead is what keeps the fold from being reintroduced on the strength
+        // of a rationale that reads plausible and is not true.
+        assert_eq!(
+            out.reply, "handing it to engineering",
+            "the skipped relay leaves the responder's own reply alone: {}",
             out.reply
         );
         assert!(
-            out.reply.contains("researcher"),
-            "including the nested delegate's paused text: {}",
+            !out.reply.contains("replied:"),
+            "no fold: `build_relay_prompt`'s shape on the operator bubble is text the caller \
+             discards, and appending it only makes the code read as though the operator sees \
+             it: {}",
             out.reply
         );
     }
@@ -7912,10 +7986,106 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
              nothing else's: {calls:?}"
         );
 
-        assert!(
-            out.reply.contains("engineer"),
-            "skipping the relay must not drop the delegate's text from the bubble: {}",
+        // Issue #1906: this used to assert `out.reply.contains("engineer")`,
+        // which passes for the wrong reason — the responder's own hand-off
+        // sentence happens to name the desk — and was read as proving the fold
+        // reached the operator. It does not reach them: the caller overwrites
+        // the reply on any pause. What the skip owes the operator is the pause
+        // itself, asserted above; what it owes the reader is that the bubble is
+        // left exactly as the responder wrote it.
+        assert_eq!(
+            out.reply, "handing it to engineering",
+            "the skip must leave the responder's own reply untouched: {}",
             out.reply
+        );
+    }
+
+    /// Issue #1906: a hand-off the responder's tool REFUSED — a desk this
+    /// company does not have — must still be logged when the relay is skipped
+    /// for a budget pause.
+    ///
+    /// `drain_refusals` + its `tracing::warn!` lived only inside the relay
+    /// branch, so on the skip path the refusal was swept away by
+    /// `DelegationClaim`'s drop with nothing anywhere recording it. Nothing
+    /// leaked — the scope clears either way — but the log line IS the record on
+    /// this path: there is no card in scope to note the refusal on (see the
+    /// relay branch's own comment, issue #272).
+    ///
+    /// Captured with a thread-local subscriber rather than a global one, and
+    /// on `#[tokio::test]`'s current-thread runtime, so the whole turn runs on
+    /// the thread the sink is installed for and no sibling test in this binary
+    /// races for the process-wide slot.
+    #[tokio::test]
+    async fn a_refused_hand_off_is_still_logged_when_the_relay_is_skipped() {
+        use std::io::Write;
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+        struct Writer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("log sink").extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Writer;
+            fn make_writer(&'a self) -> Self::Writer {
+                Writer(self.0.clone())
+            }
+        }
+
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                // One hand-off that lands, and one the tool refuses outright
+                // because no such desk is on the roster.
+                Turn {
+                    reply: "handing it to engineering".to_string(),
+                    tool_pushes: vec![handoff("ship the API")],
+                    refuses: vec!["legal_desk".to_string()],
+                    ..Turn::default()
+                },
+                Turn::budget_paused(
+                    "Paused — engineer's turn ran out of inference budget/credits.",
+                    "engineer",
+                    "Paused — engineer's turn ran out of inference budget/credits, so it \
+                     stopped instead of failing silently.",
+                ),
+            ],
+        );
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+        drop(guard);
+
+        assert!(
+            out.budget_paused.is_some(),
+            "sanity: this is the relay-skip path, not the relay one"
+        );
+        let logs = String::from_utf8_lossy(&sink.0.lock().expect("log sink").clone()).to_string();
+        assert!(
+            logs.contains("hand-offs to desks this company does not have"),
+            "a refused hand-off on the skip path has no card to land on, so the log is its only \
+             record: {logs:?}"
+        );
+        assert!(
+            logs.contains("refused=1"),
+            "the count of refusals is what makes the line actionable: {logs:?}"
         );
     }
 

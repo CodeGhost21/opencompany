@@ -1325,7 +1325,7 @@ async fn lifecycle_transition_recorded_as_event() {
 // ---------------------------------------------------------------------------
 
 /// A brain that emits one supervised effect per operator message (parks under a
-/// supervised policy), so a cycle produces an `approval.requested` webhook.
+/// explicit request), so a cycle produces an `approval.requested` webhook.
 struct EffectBrain {
     effect: Effect,
 }
@@ -1340,7 +1340,7 @@ impl Brain for EffectBrain {
         let mut responses = Vec::new();
         for event in &req.events {
             if let CompanyEvent::OperatorMessage { text, .. } = event {
-                host.emit_effect(self.effect.clone()).await?;
+                host.park_effect(self.effect.clone()).await?;
                 responses.push(OutboundMessage {
                     message_id: None,
                     task_id: None,
@@ -1372,17 +1372,20 @@ async fn webhook_emitted_on_approval_requested() {
         .with_home(home.clone())
         .with_webhook(webhook);
 
-    // A supervised company whose brain parks a filing.submit effect.
+    // A company whose agent explicitly asks the operator for approval.
     let manifest: CompanyManifest =
         toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"supervised\"\n").unwrap();
     let sign_effect = Effect {
-        kind: "filing.submit".into(),
-        group: EffectGroup::Sign,
+        kind: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.into(),
+        group: EffectGroup::Other,
         amount_usd: None,
         established_thread: false,
         first_time_counterparty: false,
-        payload: serde_json::Value::Null,
-        agent: None,
+        payload: serde_json::json!({
+            "title": "Submit the filing",
+            "question": "May I submit it?"
+        }),
+        agent: Some("ceo".into()),
         run_id: None,
     };
     let runtime = RuntimeBuilder::new(home.clone(), manifest)

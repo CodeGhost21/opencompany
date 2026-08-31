@@ -296,6 +296,17 @@ struct WorkflowGraph {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// The owning desk (issue #1862 prerequisite) — see
+    /// [`WorkflowFile::owner_desk`]. Round-tripped verbatim, for the same
+    /// reason `repeatable` on [`WorkflowNode`] is: a `PUT` replaces the whole
+    /// graph, so an editor that builds its save from what this route just
+    /// returned has to have the field in order to carry it forward. Omitting
+    /// it here was the actual bug (issue #1882 review) — `ownerDesk` was
+    /// accepted on the create/update body but never appeared on a read, so
+    /// the very next edit that round-tripped a read into a write silently
+    /// cleared whatever desk an operator had set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_desk: Option<String>,
     nodes: Vec<WorkflowNode>,
     edges: Vec<WorkflowEdge>,
     /// Whether this graph can be replaced or removed through the API — see
@@ -328,6 +339,7 @@ impl WorkflowGraph {
             id: f.id,
             name: f.name,
             description: f.description,
+            owner_desk: f.owner_desk,
             nodes: f.nodes.into_iter().map(WorkflowNode::from).collect(),
             edges: f.edges.into_iter().map(WorkflowEdge::from).collect(),
             editable,
@@ -599,8 +611,8 @@ async fn get_workflow(
 }
 
 /// The create-workflow body — the same camelCase graph shape the GET routes
-/// return (`id`/`name`/`description?`/`nodes`/`edges`), so the console's
-/// creator can post exactly what it would otherwise read back.
+/// return (`id`/`name`/`description?`/`ownerDesk?`/`nodes`/`edges`), so the
+/// console's creator can post exactly what it would otherwise read back.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateWorkflowBody {
@@ -608,6 +620,12 @@ struct CreateWorkflowBody {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    /// The owning desk (issue #1862 prerequisite), so the console's creator
+    /// can post it exactly like every other field — see
+    /// [`WorkflowFile::owner_desk`] and [`WorkflowGraph::owner_desk`] (the
+    /// symmetric read-side field an edit round-trips it through).
+    #[serde(default)]
+    owner_desk: Option<String>,
     #[serde(default)]
     nodes: Vec<CreateNode>,
     #[serde(default)]
@@ -728,6 +746,11 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
             id: body.id,
             name: body.name,
             description: body.description,
+            // Blank/whitespace is treated as absent, not as a real desk name
+            // — the same rule `validate_draft_against_record` already applies
+            // at author time, applied here too so the persisted TOML never
+            // stores a blank string in the first place.
+            owner_desk: RawWorkflow::normalize_owner_desk(body.owner_desk),
             nodes,
             edges: body
                 .edges
@@ -847,6 +870,11 @@ async fn validate_workflow(
         &record,
         company.runtime.source_dir(),
         Some(&company.runtime.deliverable_channel_ids()),
+        // This route pre-flights a body, not a specific saved workflow: it is
+        // reached for a create and for an edit alike and has no stored owner to
+        // grandfather against (issue #1882 review). It keeps the documented
+        // false-negative direction described above `validate_workflow`.
+        None,
     )
     .map_err(ApiError)?;
     Ok(Json(ValidateWorkflowResponse { valid: true }))
@@ -2967,6 +2995,9 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                 workflow_id,
                 run_id,
                 scheduled,
+                // The run history fold does not surface who started a run
+                // (issue #1862 prerequisite is data-only for now).
+                started_by: _,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -3962,6 +3993,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![WorkflowNodeDef {
                 id: "call".into(),
                 kind: WorkflowNodeKind::ToolCall,
@@ -4007,6 +4039,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "publish".into(),
@@ -4215,6 +4248,7 @@ mod tests {
             id: "wf".into(),
             name: "WF".into(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 WorkflowNodeDef {
                     id: "start".into(),
@@ -6795,6 +6829,7 @@ mod tests {
                         workflow_id: "digest".to_string(),
                         run_id: ctx.run_id.clone(),
                         scheduled: false,
+                        started_by: None,
                     },
                 )
                 .await
@@ -7360,6 +7395,7 @@ mod tests {
                         workflow_id: workflow_id.to_string(),
                         run_id: run_id.to_string(),
                         scheduled,
+                        started_by: None,
                     },
                 )
                 .await
@@ -9112,6 +9148,72 @@ mod tests {
                 body["expectedVersion"] = serde_json::json!(v);
             }
             body
+        }
+
+        /// **Regression, issue #1882 review — the round-trip data-loss bug.**
+        /// An `ownerDesk` set on create must survive an edit that never
+        /// touches it. Before the fix, `ownerDesk` was accepted on the write
+        /// body but never appeared on a `GET`/`PUT` response, so a caller that
+        /// builds its edit request from what it just read (the only sane way
+        /// to satisfy `PUT`'s "send the whole graph back" contract) carried no
+        /// `ownerDesk` forward — the very next save silently cleared the desk
+        /// an operator had set. This constructs the edit body the same way a
+        /// conformant client does: by mutating the read response, not by
+        /// hand-copying the field.
+        #[tokio::test]
+        async fn owner_desk_survives_an_unrelated_edit() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let state = desk_state(&home).await;
+
+            let mut body = create_body();
+            body["ownerDesk"] = serde_json::json!("engineering");
+            let response = router(state.clone())
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let created = json_body(response).await;
+            assert_eq!(
+                created["ownerDesk"], "engineering",
+                "the create response must echo the desk the caller set: {created}"
+            );
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let mut graph = json_body(response).await;
+            assert_eq!(
+                graph["ownerDesk"], "engineering",
+                "a read must project the desk a create just set: {graph}"
+            );
+
+            // Build the edit the way a conformant client does: from the graph
+            // it just read, changing only the one field it means to change.
+            let version = graph["version"].as_str().unwrap().to_string();
+            graph["description"] = serde_json::json!("Say hi, differently.");
+            graph["expectedVersion"] = serde_json::json!(version);
+
+            let response = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(graph),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let after = json_body(response).await;
+            assert_eq!(
+                after["ownerDesk"], "engineering",
+                "an edit that never touched ownerDesk must not clear it: {after}"
+            );
         }
 
         /// **The issue, at the HTTP boundary.** A saved workflow's cron was

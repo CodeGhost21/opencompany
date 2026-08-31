@@ -414,6 +414,9 @@ pub struct CompanyRuntime {
     /// replaces it in the registry, or the rebuild failed and
     /// [`resume`](Self::resume) puts this one back to work.
     pub(crate) quiesced: Arc<AtomicBool>,
+    /// Set by a cold build when replay found explicit decision continuations;
+    /// consumed once when the runtime enters the production registry.
+    replay_continuations_on_register: AtomicBool,
     /// WS4: the embedded openhuman harness pool, when wired via
     /// [`RuntimeBuilder::with_harness`](crate::runtime::RuntimeBuilder::with_harness).
     /// Feature-gated so the default build is unaffected.
@@ -547,6 +550,7 @@ impl CompanyRuntime {
             per_agent: Arc::new(TokioMutex::new(HashMap::new())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
+            replay_continuations_on_register: AtomicBool::new(false),
             #[cfg(feature = "openhuman")]
             harness: None,
             #[cfg(feature = "openhuman")]
@@ -1184,35 +1188,48 @@ impl CompanyRuntime {
     /// backstop cannot see — see [`abandon_run`](Self::abandon_run).
     #[cfg(feature = "openhuman")]
     async fn run_dispatch_cycle(self: Arc<Self>, task_id: String, run_id: Option<String>) {
-        let Err(err) = self
+        let report = match self
             .run_cycle(vec![CompanyEvent::TaskDispatched {
                 task_id: task_id.clone(),
                 run_id: run_id.clone(),
             }])
             .await
-        else {
-            return;
-        };
-        // Issue #290 meets issue #242. `ensure_accepting` refuses *before*
-        // `CycleRunner` takes the serial lock, so a dispatch that lands in the
-        // window while this runtime is being replaced never reaches `begin_run`
-        // — and the backstop inside the cycle only settles rows that cycle
-        // started. Every other dispatch failure is already covered in there.
-        // Left alone, the row minted a moment ago would sit `Pending` for the
-        // rest of the process's life: a card reading as under way by an attempt
-        // that never began, which nothing re-drives, and which the rebuild
-        // deliberately does *not* run the boot reaper to clean up.
-        if let Some(id) = run_id.as_deref()
-            && matches!(err, OpenCompanyError::Quiescing(_))
         {
-            self.abandon_run(id, &task_id).await;
-        }
-        tracing::warn!(
-            company = %self.id,
-            task = %task_id,
-            error = %err,
-            "task dispatch cycle failed"
-        );
+            Ok(report) => report,
+            Err(err) => {
+                // Issue #290 meets issue #242. `ensure_accepting` refuses
+                // *before* `CycleRunner` takes the serial lock, so a dispatch
+                // that lands in the window while this runtime is being
+                // replaced never reaches `begin_run` — and the backstop
+                // inside the cycle only settles rows that cycle started.
+                // Every other dispatch failure is already covered in there.
+                // Left alone, the row minted a moment ago would sit `Pending`
+                // for the rest of the process's life: a card reading as under
+                // way by an attempt that never began, which nothing
+                // re-drives, and which the rebuild deliberately does *not*
+                // run the boot reaper to clean up.
+                if let Some(id) = run_id.as_deref()
+                    && matches!(err, OpenCompanyError::Quiescing(_))
+                {
+                    self.abandon_run(id, &task_id).await;
+                }
+                tracing::warn!(
+                    company = %self.id,
+                    task = %task_id,
+                    error = %err,
+                    "task dispatch cycle failed"
+                );
+                return;
+            }
+        };
+        // Issue #1852 Part 1: `run_task`/`refuse_dispatch` already build the
+        // right relay via `relay_reply` — it rides home in this report's
+        // responses — but until now nothing wrote it down. Unlike the
+        // chat-POST path (`journal_chat_replies`) and the approval path
+        // (`publish_continuation`), this dispatch path had no journaling step
+        // at all, so the answer never reached the thread it was spawned from,
+        // live or on reload.
+        self.journal_dispatch_replies(&report).await;
     }
 
     /// Settles an attempt whose cycle was refused before it could start
@@ -2219,6 +2236,26 @@ impl CompanyRuntime {
         {
             return self.resume_workflow_run(&approval_id, turn, batch).await;
         }
+        // An explicit question raised inside a workflow agent node is still a
+        // conversation continuation for that agent, not authority to replay the
+        // workflow node. The ordinary blocked-node path intentionally drops an
+        // all-denied batch; doing that here would swallow the operator's answer
+        // and leave the durable ApprovalContinuation live until expiry. The
+        // request tool is a turn boundary, so this batch is all-explicit by
+        // construction; keep the `all` guard fail-closed if a legacy mixed
+        // batch is ever replayed.
+        if let Some(turn) = turn.as_deref()
+            && crate::runtime::workflow_resume::is_node_turn(turn)
+            && batch.iter().all(|event| {
+                let CompanyEvent::ApprovalResolved { approval_id, .. } = event else {
+                    return false;
+                };
+                self.grants.peek_continuation(approval_id).is_some()
+            })
+        {
+            self.retire_blocked_stash(turn).await;
+            return self.run_continuation(&approval_id, batch).await;
+        }
         // Issue #899 (Stage 1): a blocked agent node, likewise not a brain turn.
         // Its gated calls parked under a `workflow-node:` key (disjoint from the
         // `workflow-run:` gate key above), so the same batch counting releases
@@ -2447,6 +2484,7 @@ impl CompanyRuntime {
             turn,
             &stashed.workflow_id,
             stashed.input,
+            stashed.started_by,
         )
         .await
         {
@@ -2720,7 +2758,16 @@ impl CompanyRuntime {
         approval_id: &ApprovalId,
         batch: Vec<CompanyEvent>,
     ) -> Result<CycleReport> {
-        match CycleRunner::new(self).run(batch).await {
+        let claims = batch
+            .iter()
+            .filter_map(|event| match event {
+                CompanyEvent::ApprovalResolved { approval_id, .. } => {
+                    self.grants.peek_continuation(approval_id)
+                }
+                _ => None,
+            })
+            .collect();
+        match CycleRunner::new(self).run_continuation(batch, claims).await {
             Ok(mut report) => {
                 self.publish_continuation(approval_id, &mut report).await;
                 Ok(report)
@@ -3039,6 +3086,127 @@ impl CompanyRuntime {
         }
     }
 
+    /// Journals a dispatched card's relay into the conversation it was
+    /// spawned from (issue #1852, Part 1).
+    ///
+    /// [`relay_reply`](crate::harness::built_in::lifecycle::relay_reply)
+    /// already builds the right [`OutboundMessage`] — it carries the origin
+    /// thread in `reply_to` — but `route_response`'s channel lookup finds no
+    /// adapter for an agent id and falls back to the in-memory
+    /// `OperatorChannel` (`runtime::channel`, a "response spy with no durable
+    /// reader"), and until [`run_dispatch_cycle`](Self::run_dispatch_cycle)
+    /// started calling this, nothing wrote the reply down at all. Modeled on
+    /// [`publish_continuation`](Self::publish_continuation): the one
+    /// difference is the destination comes from **each response's own**
+    /// `reply_to.chat_id` — already the origin thread, courtesy of
+    /// `relay_reply` — rather than one conversation recorded for the whole
+    /// report, because a dispatch cycle answers exactly the one card it ran.
+    ///
+    /// Gated on `reply_to` being present, not on its `chat_id` being
+    /// non-empty. That is the one field `relay_reply` sets that no other
+    /// `OutboundMessage` producer does — the synchronous chat-turn cycle that
+    /// `journal_chat_replies` (`server::operator`) journals leaves it `None`
+    /// — so this can never re-journal a bubble that path already wrote, and a
+    /// board-created card (no `origin_chat_id`, so `run_task`/
+    /// `refuse_dispatch` return no relay at all) contributes nothing here
+    /// either. An **empty** `chat_id` is still a real destination, not an
+    /// absent one: `origin_chat_id` preserves `Some("")` for a card spawned
+    /// from General, and `chat_history::same_conversation` treats `""` as an
+    /// alias for General — so it must be journaled, not discarded.
+    ///
+    /// Best-effort, like `HarnessBrain::journal_task_outcome`'s own writes: a
+    /// failure here is logged, never propagated. By the time this runs the
+    /// card is already settled and persisted — its terminal column, its
+    /// `journal_task_outcome` timeline record — so failing the cycle over
+    /// this write would abandon that anchor for a dispatch that has, in fact,
+    /// landed.
+    #[cfg(feature = "openhuman")]
+    async fn journal_dispatch_replies(&self, report: &CycleReport) {
+        for response in &report.responses {
+            let Some(chat_id) = response
+                .reply_to
+                .as_ref()
+                .map(|reply_to| reply_to.chat_id.as_str())
+            else {
+                continue;
+            };
+            // Scanned host-side from the reply text, same as
+            // `publish_continuation` and `journal_chat_replies` — the
+            // console's picker never touched this message.
+            let reply_mentions = self
+                .resolve_mentions(
+                    &response.text,
+                    None,
+                    response
+                        .agent
+                        .as_deref()
+                        .map(|id| Actor {
+                            kind: ActorKind::Agent,
+                            id: id.to_string(),
+                        })
+                        .as_ref(),
+                )
+                .await;
+            match self
+                .events
+                .append(
+                    &self.id,
+                    CompanyEvent::AgentReply {
+                        parent: None,
+                        chat_id: chat_id.to_string(),
+                        // Issue #885: the author, falling back to the
+                        // destination only when the producer named none —
+                        // `relay_reply` always names none, so this is the
+                        // orchestrator answering for its own roster.
+                        agent_id: response
+                            .agent
+                            .clone()
+                            .unwrap_or_else(|| response.channel.clone()),
+                        text: response.text.clone(),
+                        steps: response.steps.clone(),
+                        // Dropped, deliberately — unlike `publish_continuation`
+                        // and `journal_chat_replies`, which carry it through.
+                        // `response.task_id` here always names the very card
+                        // `journal_task_outcome` (`HarnessBrain`) just settled
+                        // and already marked with a `DeskTaskCompleted` pointed
+                        // at this same `chat_id` (issue #377's "finished → …"
+                        // pill, `chat_history::owns`). That pill is already the
+                        // origin thread's card link for this settle; setting
+                        // `task_id` here too would additionally render this
+                        // bubble's own "Card opened" chip (`CardChip`,
+                        // `MessageRow`) — a second link to a card that, by the
+                        // time this prose lands, is not "opened" at all. Two
+                        // links for one settle is `journal_task_outcome`'s own
+                        // "one run's words into one conversation twice" mistake
+                        // (see its doc comment), aimed at a link instead of the
+                        // text — and it is exactly what doubled the e2e
+                        // `chat-dispatch-marker` reload count.
+                        task_id: None,
+                        mentions: reply_mentions.clone(),
+                        // Zero, and stays zero: no reply's mentions reach
+                        // dispatch, so no reply is ever a mention hop.
+                        mention_depth: 0,
+                    },
+                )
+                .await
+            {
+                Ok(seq) => {
+                    if !reply_mentions.is_empty() {
+                        self.notify_mentions(&self.id, &reply_mentions, &seq, None, chat_id)
+                            .await;
+                    }
+                }
+                Err(err) => tracing::warn!(
+                    company = %self.id,
+                    chat_id = %chat_id,
+                    error = %err,
+                    "[dispatch] a card's relay reply could not be journaled; the origin \
+                     thread will not see it"
+                ),
+            }
+        }
+    }
+
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
         let conversation = self
             .journal
@@ -3317,11 +3485,44 @@ impl CompanyRuntime {
         reason: ExpiryReason,
         at_millis: u64,
     ) -> Result<()> {
+        let explicit_request = self
+            .approval_gate
+            .take_expired_effect(id)
+            .filter(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+            .and_then(|effect| effect.agent.clone().map(|agent| (agent, effect)));
         self.journal.record_expired(id, at_millis, reason).await?;
         // Issue #796: the parked approval is gone, so its work unit is no
         // longer awaiting a resume — drop the pending mark so the checkout it
         // was holding across the park becomes sweepable.
         self.grants.clear_pending(id);
+        if let Some((agent, effect)) = explicit_request {
+            let by = Actor {
+                kind: ActorKind::System,
+                id: "expiry".into(),
+            };
+            if let Err(error) = CycleRunner::new(self)
+                .mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
+                .await
+            {
+                tracing::error!(
+                    approval_id = %id,
+                    %error,
+                    "[approval] an expired explicit request could not queue its denial \
+                     continuation; continuing the retirement sweep"
+                );
+            } else {
+                // Route through the ordinary settled-verdict path so chat and
+                // workflow-node requests both reach the asking agent.
+                drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                    CompanyEvent::ApprovalResolved {
+                        approval_id: id.clone(),
+                        verdict: Verdict::Deny,
+                        by,
+                    },
+                ))));
+                return Ok(());
+            }
+        }
         // Issue #469: releasing the turn this approval was blocking, and
         // running its continuation when this expiry was the last thing it
         // waited on. Spawned rather than awaited: the continuation is a full
@@ -3446,6 +3647,20 @@ impl CompanyRuntime {
             ids.push(grant.approval_id);
         }
 
+        for continuation in self.grants.sweep_continuations(now, GRANT_TTL_MILLIS) {
+            let id = continuation.call.approval_id;
+            self.journal
+                .record_approval_continuation_expired(&id, now)
+                .await?;
+            self.announce_to_operator(&format!(
+                "The `{}` approval decision for `{}` could not be delivered within 15 minutes — \
+                 ask the agent again if the work still matters.",
+                continuation.call.tool, continuation.call.agent
+            ))
+            .await;
+            ids.push(id);
+        }
+
         // Issue #374: standing grants lapse on the same maintenance tick.
         //
         // The sweep is housekeeping and an operator notice, never the
@@ -3536,8 +3751,40 @@ impl CompanyRuntime {
 
     /// Replays the journal to rebuild the executed-key set, the approval queue,
     /// and the live single-use grants (issue #243).
-    pub async fn recover(&self) -> Result<()> {
-        CycleRunner::new(self).recover().await
+    pub async fn recover(self: &Arc<Self>) -> Result<()> {
+        CycleRunner::new(self).recover().await?;
+        self.arm_replayed_continuation_recovery();
+        self.schedule_replayed_continuations();
+        Ok(())
+    }
+
+    /// Arms cold-boot delivery when replay found an explicit decision whose
+    /// detached follow-up had not yet been dispatch-claimed.
+    pub(crate) fn arm_replayed_continuation_recovery(&self) {
+        if !self.journal.replayed_approval_continuations().is_empty() {
+            self.replay_continuations_on_register
+                .store(true, Ordering::Release);
+        }
+    }
+
+    /// Detaches replayed decision follow-ups once the runtime is addressable.
+    /// The atomic makes a duplicate registration or rebuild swap a no-op.
+    pub(crate) fn schedule_replayed_continuations(self: &Arc<Self>) {
+        if !self
+            .replay_continuations_on_register
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        for continuation in self.journal.replayed_approval_continuations() {
+            drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                CompanyEvent::ApprovalResolved {
+                    approval_id: continuation.call.approval_id,
+                    verdict: continuation.verdict,
+                    by: continuation.by,
+                },
+            ))));
+        }
     }
 
     /// What every approval ever parked was, keyed by id — including approvals
@@ -3780,7 +4027,9 @@ impl CompanyRuntime {
                 // the same `subject_of` the resolve route's 400 and the mint use,
                 // so the control the card offers and the answer a resolve gets
                 // cannot disagree.
-                broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
+                broadly_grantable: p.effect.kind
+                    != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
                 // Issue #1458: a standing **denial** is enforced only on the
                 // agent turn path (`standing_deny_applies`); the workflow gate
@@ -3789,10 +4038,12 @@ impl CompanyRuntime {
                 // deny control is offered only where the runtime will actually
                 // enforce it — an agent subject — while the grant half above
                 // still covers a workflow, which can hold a standing permission.
-                broadly_deniable: matches!(
-                    crate::runtime::grants::subject_of(&p.effect),
-                    Some(crate::runtime::grants::GrantSubject::Agent(_))
-                ),
+                broadly_deniable: p.effect.kind
+                    != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && matches!(
+                        crate::runtime::grants::subject_of(&p.effect),
+                        Some(crate::runtime::grants::GrantSubject::Agent(_))
+                    ),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction
@@ -5454,6 +5705,273 @@ mod tests {
             "it never started, so it has no start time"
         );
         assert!(abandoned.finished_at_millis.is_some());
+    }
+
+    /// Issue #1852 Part 1 — the discard bug and its fix, proven directly on
+    /// `run_dispatch_cycle` rather than on any one `Brain`'s output shape.
+    ///
+    /// `RelayBrain` answers a `TaskDispatched` event with exactly the shape
+    /// `relay_reply` (`harness::built_in::lifecycle`) produces: a bubble whose
+    /// `reply_to` names the origin thread and whose `task_id` names the card
+    /// — without standing up a real harness or LLM. Before this fix,
+    /// `run_dispatch_cycle` discarded the `CycleReport` carrying it (`let
+    /// Err(err) = self.run_cycle(...).await else { return; }`), which is the
+    /// generic bug underneath #1852, independent of which `Brain` produced
+    /// the relay: reverting `run_dispatch_cycle` to that shape reproduces the
+    /// failure this test now guards — zero `AgentReply` events land in the
+    /// origin thread, because nothing ever journals the discarded report.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_dispatched_cards_relay_is_journaled_into_its_origin_thread() {
+        use std::sync::Arc;
+
+        use crate::ports::Brain;
+        use crate::ports::TaskRecord;
+        use crate::ports::brain::CycleHost;
+        use crate::ports::tasks::COLUMN_IN_PROGRESS;
+        use crate::ports::types::{
+            CycleRequest, CycleResult, EventSeq, OutboundMessage, ReplyTo, TokenUsage,
+        };
+
+        /// Answers a `TaskDispatched { task_id: "t-1" }` with a
+        /// `relay_reply`-shaped bubble; silent on everything else, mirroring
+        /// `EchoBrain`'s silence on `TaskDispatched`.
+        struct RelayBrain;
+
+        #[async_trait::async_trait]
+        impl Brain for RelayBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                _host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                let mut channel_responses = Vec::new();
+                for event in &req.events {
+                    if let CompanyEvent::TaskDispatched { task_id, .. } = event
+                        && task_id == "t-1"
+                    {
+                        channel_responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: Some("t-1".to_string()),
+                            channel: "ceo".to_string(),
+                            agent: None,
+                            text: "\"Ship it\" is ready for review (ceo ran it).".to_string(),
+                            mentions: Vec::new(),
+                            reply_to: Some(ReplyTo {
+                                chat_id: "strategy".to_string(),
+                            }),
+                            steps: Vec::new(),
+                        });
+                    }
+                }
+                Ok(CycleResult {
+                    channel_responses,
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage::default(),
+                })
+            }
+        }
+
+        let home_dir = tempfile::Builder::new()
+            .prefix("opencompany-relay-journal-")
+            .tempdir()
+            .expect("tempdir");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        let id = crate::ports::types::CompanyId::new("acme");
+        let runtime = Arc::new(
+            crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+                .with_id(id.clone())
+                .with_brain(Arc::new(RelayBrain))
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let card = TaskRecord {
+            id: "t-1".to_string(),
+            title: "Ship it".to_string(),
+            note: None,
+            column: COLUMN_IN_PROGRESS.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 0,
+            // The field the whole bug turns on: without an origin thread,
+            // `relay_reply` is never called at all (a board-created card).
+            origin_chat_id: Some("strategy".to_string()),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        };
+
+        let run_id = runtime.open_run(&card).await;
+        Arc::clone(&runtime)
+            .run_dispatch_cycle(card.id.clone(), run_id)
+            .await;
+
+        let events = runtime
+            .events
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read journal");
+        let relays: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::AgentReply { chat_id, .. } if chat_id == "strategy" => {
+                    Some(&stored.event)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relays.len(),
+            1,
+            "exactly one relay must land in the origin thread, found {relays:?}"
+        );
+        let CompanyEvent::AgentReply {
+            agent_id, task_id, ..
+        } = relays[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            agent_id, "ceo",
+            "the orchestrator answers for its own roster (issue #885 fallback)"
+        );
+        assert_eq!(
+            task_id, &None,
+            "the settle already has its own card link — `DeskTaskCompleted`'s \
+             \"finished → …\" pill (issue #377) — so this bubble must not carry \
+             its own \"Card opened\" chip alongside it"
+        );
+        assert!(
+            crate::server::chat_history::owns("strategy", "Strategy", relays[0]),
+            "the origin desk's own history read must pick this reply up"
+        );
+    }
+
+    /// Issue #1852: the gate that stops a dispatch relay from being posted
+    /// twice.
+    ///
+    /// A response the ordinary chat-turn cycle already journals through
+    /// `journal_chat_replies` (`server::operator`) never carries `reply_to` —
+    /// [`relay_reply`](crate::harness::built_in::lifecycle::relay_reply) is
+    /// the only producer that sets it — so gating on that field structurally
+    /// cannot re-journal a bubble the inline work-card path already wrote.
+    /// The same absence covers a board-created card (no `origin_chat_id`):
+    /// `run_task`/`refuse_dispatch` return no relay for one at all, which is
+    /// this exact "no `reply_to`" shape.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn journal_dispatch_replies_only_touches_relay_shaped_responses() {
+        use crate::CycleReport;
+        use crate::ports::types::{EventSeq, OutboundMessage, ReplyTo};
+
+        let (rt, _home_dir) = runtime_with_events().await;
+
+        let report = CycleReport {
+            responses: vec![
+                // An ordinary chat-turn bubble: no `reply_to`, exactly what
+                // `journal_chat_replies` already owns. Must not be touched
+                // here, or the inline work-card path would double-post.
+                OutboundMessage {
+                    message_id: None,
+                    task_id: None,
+                    channel: "operator".to_string(),
+                    agent: Some("ceo".to_string()),
+                    text: "already handled elsewhere".to_string(),
+                    mentions: Vec::new(),
+                    reply_to: None,
+                    steps: Vec::new(),
+                },
+                // A `reply_to` naming an empty chat id — not degenerate:
+                // `origin_chat_id` preserves `Some("")` for a card spawned
+                // from General, and `chat_history::same_conversation` treats
+                // "" as an alias for General, so this must still journal.
+                OutboundMessage {
+                    message_id: None,
+                    task_id: Some("t-2".to_string()),
+                    channel: "ceo".to_string(),
+                    agent: None,
+                    text: "General-chat relay".to_string(),
+                    mentions: Vec::new(),
+                    reply_to: Some(ReplyTo {
+                        chat_id: String::new(),
+                    }),
+                    steps: Vec::new(),
+                },
+                // The one shape `relay_reply` actually produces.
+                OutboundMessage {
+                    message_id: None,
+                    task_id: Some("t-1".to_string()),
+                    channel: "ceo".to_string(),
+                    agent: None,
+                    text: "\"Ship it\" is ready for review.".to_string(),
+                    mentions: Vec::new(),
+                    reply_to: Some(ReplyTo {
+                        chat_id: "strategy".to_string(),
+                    }),
+                    steps: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        rt.journal_dispatch_replies(&report).await;
+
+        let events = rt
+            .events
+            .read_from(&rt.id, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read journal");
+        let relays: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::AgentReply { .. } => Some(&stored.event),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relays.len(),
+            2,
+            "both reply_to-shaped responses must be journaled — an empty \
+             chat_id is General, not absent — found {relays:?}"
+        );
+        let CompanyEvent::AgentReply {
+            chat_id, task_id, ..
+        } = relays
+            .iter()
+            .find(|event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id == "strategy"))
+            .expect("the named-thread relay must be present")
+        else {
+            unreachable!()
+        };
+        assert_eq!(chat_id, "strategy");
+        // Not `Some("t-1")`, even though the response itself carries it:
+        // `journal_task_outcome` already marked "t-1" settled with its own
+        // `DeskTaskCompleted` card link into this same thread, so this bubble
+        // must not add a second one. See the drop site's own comment.
+        assert_eq!(task_id, &None);
+
+        let CompanyEvent::AgentReply { chat_id, .. } = relays
+            .iter()
+            .find(|event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id.is_empty()))
+            .expect("the empty-chat_id General relay must be present")
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            chat_id, "",
+            "General's own empty chat_id must be preserved verbatim"
+        );
     }
 
     /// Issue #435: the guard that decides whether a remembered thread root is

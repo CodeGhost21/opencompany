@@ -45,7 +45,9 @@ use crate::runtime::delegation_tools::{
     DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, chat_responder, desk_lead,
     unknown_desk_message,
 };
-use crate::runtime::grants::{GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant};
+use crate::runtime::grants::{
+    ApprovalContinuation, GrantId, GrantScope, GrantSubject, GrantedCall, StandingGrant,
+};
 use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
@@ -410,6 +412,7 @@ impl<'a> CycleRunner<'a> {
         self.run_bracketed(
             events.into_iter().map(|event| (None, event)).collect(),
             None,
+            Vec::new(),
         )
         .await
     }
@@ -448,6 +451,22 @@ impl<'a> CycleRunner<'a> {
                 .map(|(seq, event)| (Some(seq), event))
                 .collect(),
             run_id,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Runs a released explicit-approval batch, claiming its continuations only
+    /// after this cycle owns the company/agent lock.
+    pub async fn run_continuation(
+        &self,
+        events: Vec<CompanyEvent>,
+        continuations: Vec<ApprovalContinuation>,
+    ) -> Result<CycleReport> {
+        self.run_bracketed(
+            events.into_iter().map(|event| (None, event)).collect(),
+            None,
+            continuations,
         )
         .await
     }
@@ -458,6 +477,7 @@ impl<'a> CycleRunner<'a> {
         &self,
         events: Vec<(Option<EventSeq>, CompanyEvent)>,
         run_id: Option<String>,
+        continuation_claims: Vec<ApprovalContinuation>,
     ) -> Result<CycleReport> {
         let cycle_id = crate::ports::generate_id();
         let trigger = cycle_trigger_of(&events);
@@ -518,6 +538,32 @@ impl<'a> CycleRunner<'a> {
             }
             None => self.rt.serial.clone().lock_owned().await,
         };
+        let mut claimed: Vec<ApprovalContinuation> = Vec::new();
+        for continuation in continuation_claims {
+            if let Err(error) = self
+                .rt
+                .journal
+                .record_approval_continuation_dispatched(
+                    &continuation.call.approval_id,
+                    now_millis(),
+                )
+                .await
+            {
+                for previous in &claimed {
+                    if let Err(requeue_error) =
+                        self.rt.journal.record_approval_continuation(previous).await
+                    {
+                        tracing::error!(
+                            approval_id = %previous.call.approval_id,
+                            %requeue_error,
+                            "[approval] a partial batch dispatch claim could not be requeued"
+                        );
+                    }
+                }
+                return Err(error);
+            }
+            claimed.push(continuation);
+        }
         let mut effects = EffectCounts::default();
         // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
         // the ambient `RedeemContext` for this cycle, read by every
@@ -534,6 +580,30 @@ impl<'a> CycleRunner<'a> {
             self.run_locked(events, cycle_id.clone(), run_id, &mut effects),
         )
         .await;
+        if outcome.is_ok() {
+            // Harness cognition consumes while redispatching and run_locked
+            // journals that buffered fact. Hosted and sidecar cognition instead
+            // receive the verdict event directly, so successful return is their
+            // delivery acknowledgement and the outer runner closes the claimed
+            // continuation here.
+            for continuation in &claimed {
+                let id = &continuation.call.approval_id;
+                if self.rt.grants.consume_continuation(id).is_some()
+                    && let Err(err) = self
+                        .rt
+                        .journal
+                        .record_approval_continuation_consumed(id)
+                        .await
+                {
+                    tracing::warn!(
+                        approval_id = %id,
+                        error = %err,
+                        "[approval] a fallback decision continuation completed but its journal \
+                         record failed; a restart may repeat the follow-up cycle"
+                    );
+                }
+            }
+        }
         // Issue #1739: the product's unit of work, reported as shape and outcome.
         //
         // Emitted here rather than inside `run_locked` for the same reason the
@@ -858,6 +928,21 @@ impl<'a> CycleRunner<'a> {
                     "[approval] a grant was redeemed but its journal record failed; \
                      a restart before it is re-written may re-arm it, and the call \
                      it admitted will not be named on a retry confirmation"
+                );
+            }
+        }
+        for id in self.rt.grants.drain_consumed_continuations() {
+            if let Err(err) = self
+                .rt
+                .journal
+                .record_approval_continuation_consumed(&id)
+                .await
+            {
+                tracing::warn!(
+                    approval_id = %id,
+                    error = %err,
+                    "[approval] an explicit decision continuation completed but its journal \
+                     record failed; a restart may repeat the follow-up turn"
                 );
             }
         }
@@ -1211,6 +1296,21 @@ approval.]"
         if let GrantScope::Tool { .. } = scope {
             self.check_broadly_scoped(id, verdict)?;
         }
+        if self
+            .rt
+            .approval_gate
+            .parked_effect(id)
+            .is_some_and(|effect| {
+                effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && effect.agent.is_none()
+            })
+        {
+            return Err(OpenCompanyError::InvalidRequest(
+                "the explicit approval request is missing its requesting agent and cannot be \
+                 resumed; the card remains pending"
+                    .to_string(),
+            ));
+        }
         let outcome = self
             .rt
             .approval_gate
@@ -1245,8 +1345,28 @@ approval.]"
         self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
         match outcome {
+            ResolveOutcome::Approved(effect)
+                if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND =>
+            {
+                let agent = effect
+                    .agent
+                    .clone()
+                    .expect("explicit request agent validated before resolution");
+                self.mint_approval_continuation(id, agent, effect, Verdict::Approve, by.clone())
+                    .await?;
+            }
             ResolveOutcome::Approved(effect) => {
                 self.settle_approved_effect(id, effect, by.clone(), scope)
+                    .await?;
+            }
+            ResolveOutcome::Denied(effect)
+                if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND =>
+            {
+                let agent = effect
+                    .agent
+                    .clone()
+                    .expect("explicit request agent validated before resolution");
+                self.mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
                     .await?;
             }
             // Issue #1458: a standing denial is minted from the effect the
@@ -1338,6 +1458,13 @@ approval.]"
         let Some(effect) = self.rt.approval_gate.parked_effect(id) else {
             return Ok(());
         };
+        if effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND {
+            return Err(OpenCompanyError::InvalidRequest(
+                "an explicit approval question can only be decided once; a standing scope would \
+                 govern the request_approval tool rather than the proposed action"
+                    .to_string(),
+            ));
+        }
         // Issue #1098: a teammate, or the authored workflow a gate belongs to.
         // Neither means the runtime itself is performing this, and there is
         // genuinely nothing to hold a permission — the refusal below is the same
@@ -1630,6 +1757,45 @@ approval.]"
         Ok(())
     }
 
+    /// Journals then arms a verdict-bearing continuation for an explicit
+    /// `request_approval` call. It is intentionally disjoint from executable
+    /// grants: both yes and no resume the conversation, and neither authorises
+    /// a tool call by itself.
+    pub(crate) async fn mint_approval_continuation(
+        &self,
+        id: &ApprovalId,
+        agent: String,
+        effect: Effect,
+        verdict: Verdict,
+        by: Actor,
+    ) -> Result<()> {
+        let conversation = self
+            .rt
+            .journal
+            .approval_conversation(id)
+            .unwrap_or_default();
+        let continuation = ApprovalContinuation {
+            call: GrantedCall {
+                approval_id: id.clone(),
+                agent,
+                tool: effect.kind,
+                args: effect.payload,
+                at_millis: now_millis(),
+                origin_thread: conversation.thread,
+                origin_parent: conversation.parent,
+                origin_task: self.approval_work_key(id),
+            },
+            verdict,
+            by,
+        };
+        self.rt
+            .journal
+            .record_approval_continuation(&continuation)
+            .await?;
+        self.rt.grants.continue_approval(continuation);
+        Ok(())
+    }
+
     /// The work unit a parked approval belongs to, for stamping a grant's
     /// `origin_task` (issue #796).
     ///
@@ -1792,6 +1958,19 @@ approval.]"
     ) -> Result<ResolveReceipt> {
         let now = now_millis();
 
+        if self
+            .rt
+            .approval_gate
+            .parked_effect(id)
+            .is_some_and(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+        {
+            return Err(OpenCompanyError::InvalidRequest(
+                "an explicit approval question has no executable payload to amend; decide the \
+                 question as written"
+                    .to_string(),
+            ));
+        }
+
         // Overlay the operator's edit onto the parked effect. A missing id (or
         // an expired one, caught by the gate below) yields no executable effect.
         let amended = self.rt.approval_gate.parked_effect(id).map(|mut original| {
@@ -1896,6 +2075,9 @@ approval.]"
     pub async fn recover(&self) -> Result<()> {
         self.rt.journal.load().await?;
         self.rt.grants.rehydrate(self.rt.journal.replayed_grants());
+        self.rt
+            .grants
+            .rehydrate_continuations(self.rt.journal.replayed_approval_continuations());
         // Issue #374: standing grants outlive a restart too — a week-long
         // permission that evaporated on every deploy would be worse than not
         // offering one. Anything already past its deadline is folded out by the
@@ -3143,6 +3325,42 @@ pub(crate) fn assignment_matches(record: &CompanyRecord, target: &str, assignee:
 #[async_trait]
 impl CycleHost for CycleHostImpl<'_> {
     async fn call_tool(&self, call: ToolCall) -> Result<ToolResult> {
+        if call.tool == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND {
+            for field in ["title", "question"] {
+                if !call
+                    .args
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return Err(OpenCompanyError::InvalidRequest(format!(
+                        "`{field}` must be a non-empty string"
+                    )));
+                }
+            }
+            let approval_id = self
+                .park_effect(Effect {
+                    kind: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.to_string(),
+                    group: EffectGroup::Other,
+                    amount_usd: None,
+                    established_thread: false,
+                    first_time_counterparty: false,
+                    payload: call.args,
+                    // Fallback cognition has no local roster identity, but the
+                    // continuation still needs a subject so approve/deny routes
+                    // back into that brain rather than native effect execution.
+                    agent: Some("fallback-brain".to_string()),
+                    run_id: None,
+                })
+                .await?;
+            return Ok(ToolResult {
+                ok: true,
+                output: serde_json::json!({
+                    "status": "pending",
+                    "approval_id": approval_id.as_ref()
+                }),
+            });
+        }
         if call.tool == SEND_EMAIL_TOOL {
             return self.send_email(call.args).await;
         }
@@ -3751,6 +3969,46 @@ members = ["writer"]
             Ok(CycleResult {
                 channel_responses: responses,
                 new_traces: vec![CompressedTrace::now(&req.cycle_id, "effect cycle")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct ExplicitExpiryBrain {
+        decisions: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Brain for ExplicitExpiryBrain {
+        async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
+            for event in &req.events {
+                match event {
+                    CompanyEvent::OperatorMessage { .. } => {
+                        host.park_effect(harness_effect(
+                            "finance",
+                            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                            serde_json::json!({
+                                "title": "Submit the filing",
+                                "question": "May I submit it?"
+                            }),
+                        ))
+                        .await?;
+                    }
+                    CompanyEvent::ApprovalResolved {
+                        verdict: Verdict::Deny,
+                        ..
+                    } => {
+                        self.decisions
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(&req.cycle_id, "explicit expiry")],
                 ledger_deltas: Vec::new(),
                 token_usage: TokenUsage::default(),
             })
@@ -4591,7 +4849,7 @@ members = ["writer"]
     }
 
     #[tokio::test]
-    async fn supervised_effect_parks_then_resolves() {
+    async fn supervised_effect_runs_without_policy_hitl() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
         let sign_effect = Effect {
@@ -4626,18 +4884,7 @@ members = ["writer"]
             }])
             .await
             .unwrap();
-        assert_eq!(report.parked.len(), 1);
-        let approval_id = report.parked[0].clone();
-        assert_eq!(rt.pending_approvals().len(), 1);
-
-        // Approving executes the effect and runs a follow-up cycle. The
-        // follow-up carries an ApprovalResolved event (not OperatorMessage), so
-        // the brain emits nothing and the queue drains.
-        let follow_up = rt
-            .resolve_approval(&approval_id, Verdict::Approve, operator())
-            .await
-            .unwrap();
-        assert!(follow_up.parked.is_empty());
+        assert!(report.parked.is_empty());
         assert!(rt.pending_approvals().is_empty());
     }
 
@@ -4672,7 +4919,7 @@ members = ["writer"]
     ) -> (Arc<CompanyRuntime>, ApprovalId) {
         let rt = Arc::new(
             RuntimeBuilder::new(home, manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain { effect }))
+                .with_brain(Arc::new(ParkingBrain { effect }))
                 .build()
                 .await
                 .unwrap(),
@@ -5035,6 +5282,310 @@ members = ["writer"]
 
         assert!(rt.grants.peek(&id).is_none());
         assert_eq!(rt.grants.live_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn denying_an_explicit_request_mints_a_durable_decision_continuation() {
+        let home_dir = tmp_home();
+        let args = serde_json::json!({
+            "title": "Submit the filing",
+            "question": "May I submit it?"
+        });
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                args.clone(),
+            ),
+        )
+        .await;
+
+        let summary = &rt.pending_approvals()[0];
+        assert!(!summary.broadly_grantable);
+        assert!(!summary.broadly_deniable);
+
+        rt.resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while rt.grants.peek_continuation(&id).is_some()
+                || !rt.journal.replayed_approval_continuations().is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("denial reaches its asker and retires the durable continuation");
+        assert!(
+            rt.journal
+                .replayed_grants()
+                .into_iter()
+                .all(|grant| grant.approval_id != id),
+            "a denied request must never replay as executable authority"
+        );
+        assert!(
+            rt.journal.replayed_approval_continuations().is_empty(),
+            "the delivered follow-up is consumed durably, so restart must not repeat its model \
+             turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_question_refuses_a_standing_scope() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ),
+        )
+        .await;
+
+        let error = rt
+            .resolve_approval_spawned(&id, Verdict::Deny, operator(), tool_scope())
+            .await
+            .expect_err("the question tool is not the proposed action");
+
+        assert!(error.to_string().contains("can only be decided once"));
+        assert_eq!(rt.pending_approvals().len(), 1);
+        assert!(rt.standing_grants().is_empty());
+        assert!(rt.grants.peek_continuation(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_question_without_an_agent_stays_pending_with_an_error() {
+        let home_dir = tmp_home();
+        let mut effect = harness_effect(
+            "finance",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({
+                "title": "Submit the filing",
+                "question": "May I submit it?"
+            }),
+        );
+        effect.agent = None;
+        let (rt, id) = park_one(home_dir.path().to_path_buf(), effect).await;
+
+        let error = rt
+            .resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .expect_err("an explicit request must name the agent to resume");
+
+        assert!(error.to_string().contains("missing its requesting agent"));
+        assert_eq!(rt.pending_approvals().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_question_refuses_approve_with_edit() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ),
+        )
+        .await;
+
+        let error = rt
+            .resolve_approval_amended(
+                &id,
+                serde_json::json!({ "question": "May I submit it tomorrow?" }),
+                operator(),
+            )
+            .await
+            .expect_err("a question carries no executable payload to edit");
+
+        assert!(error.to_string().contains("no executable payload to amend"));
+        assert_eq!(rt.pending_approvals().len(), 1);
+        assert!(rt.grants.peek_continuation(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_schedules_a_durable_explicit_decision_continuation() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one(
+            home.clone(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ),
+        )
+        .await;
+
+        CycleRunner::new(&rt)
+            .settle_approval(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        drop(rt);
+
+        let brain = Arc::new(CountingBrain::default());
+        let recovered = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let registry = crate::runtime::CompanyRegistry::new();
+        registry.insert(recovered.id().clone(), recovered.clone());
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while brain.calls() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovery dispatches the owed follow-up");
+        assert_eq!(brain.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_registration_defers_replayed_approval_work_to_next_boot() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (rt, id) = park_one(
+            home.clone(),
+            harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ),
+        )
+        .await;
+        CycleRunner::new(&rt)
+            .settle_approval(&id, Verdict::Approve, operator(), GrantScope::Once)
+            .await
+            .unwrap();
+        drop(rt);
+
+        let brain = Arc::new(CountingBrain::default());
+        let recovered = Arc::new(
+            RuntimeBuilder::new(home, manifest("supervised"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let registry = crate::runtime::CompanyRegistry::new();
+        registry.begin_shutdown();
+        registry.insert(recovered.id().clone(), recovered.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(recovered.is_quiesced());
+        assert_eq!(brain.calls(), 0);
+        assert_eq!(recovered.journal.replayed_approval_continuations().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn explicit_dispatch_claim_waits_for_every_sibling_decision() {
+        let home_dir = tmp_home();
+        let brain = Arc::new(CountingBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "explicit-batch".into(),
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+        let first = host
+            .park_effect(harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({ "title": "First", "question": "First?" }),
+            ))
+            .await
+            .unwrap();
+        let second = host
+            .park_effect(harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({ "title": "Second", "question": "Second?" }),
+            ))
+            .await
+            .unwrap();
+
+        rt.resolve_approval(&first, Verdict::Deny, operator())
+            .await
+            .unwrap();
+        assert_eq!(brain.calls(), 0, "one sibling is still pending");
+        assert_eq!(rt.journal.replayed_approval_continuations().len(), 1);
+
+        rt.resolve_approval(&second, Verdict::Deny, operator())
+            .await
+            .unwrap();
+        assert_eq!(brain.calls(), 1, "the released batch runs one follow-up");
+        assert!(rt.journal.replayed_approval_continuations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_denied_explicit_request_from_a_workflow_node_returns_to_its_agent() {
+        let home_dir = tmp_home();
+        let brain = Arc::new(CountingBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(brain.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key("run-1", "work");
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            turn,
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+        let id = host
+            .park_effect(harness_effect(
+                "finance",
+                crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                serde_json::json!({
+                    "title": "Submit the filing",
+                    "question": "May I submit it?"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        rt.resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            brain.calls(),
+            1,
+            "the workflow-node fork must deliver the denial as an agent continuation"
+        );
     }
 
     /// An approval that expired past its TTL grants nothing either, even though
@@ -5431,7 +5982,7 @@ members = ["writer"]
         };
         let rt = Arc::new(
             RuntimeBuilder::new(home.clone(), manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: sign_effect,
                 }))
                 .build()
@@ -5574,7 +6125,7 @@ members = ["writer"]
         };
         let approval_id = {
             let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: sign_effect.clone(),
                 }))
                 .build()
@@ -5599,7 +6150,7 @@ members = ["writer"]
         // can resolve it by its original id.
         let rt2 = Arc::new(
             RuntimeBuilder::new(home.clone(), manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: sign_effect,
                 }))
                 .build()
@@ -5634,7 +6185,7 @@ members = ["writer"]
         let channels: Vec<Arc<dyn ChannelAdapter>> = vec![Arc::new(operator_channel.clone())];
         let rt = Arc::new(
             RuntimeBuilder::new(home.clone(), manifest("supervised"))
-                .with_brain(Arc::new(EffectBrain {
+                .with_brain(Arc::new(ParkingBrain {
                     effect: sign_effect,
                 }))
                 .with_channels(channels)
@@ -5740,6 +6291,54 @@ members = ["writer"]
             .await
             .unwrap();
         assert!(raw.contains("ApprovalExpired"));
+    }
+
+    #[tokio::test]
+    async fn an_expired_explicit_request_returns_a_system_denial_to_its_agent() {
+        let home_dir = tmp_home();
+        let gate = Arc::new(
+            ManifestApprovalGate::new(manifest("supervised").policy.clone()).with_ttl_millis(0),
+        );
+        let brain = Arc::new(ExplicitExpiryBrain::default());
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(brain.clone())
+                .with_approvals(gate)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                parent: None,
+                text: "file it".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+                attachments: Vec::new(),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(report.parked.len(), 1);
+        assert_eq!(rt.continuations.outstanding(&report.cycle_id), 1);
+
+        rt.sweep_expired_approvals().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while brain.decisions.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the expiry denial reaches the asking agent; outstanding={}, continuation_live={}",
+                rt.continuations.outstanding(&report.cycle_id),
+                rt.grants.peek_continuation(&report.parked[0]).is_some()
+            )
+        });
+        assert_eq!(brain.decisions.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // ── Issue #174: the generic cycle seam meters inference usage ────────────
@@ -6804,7 +7403,7 @@ members = ["writer"]
     }
 
     #[tokio::test]
-    async fn send_email_parks_for_new_recipient() {
+    async fn send_email_runs_without_policy_hitl_for_a_new_recipient() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
         let sender = Arc::new(RecordingMailSender::new());
@@ -6829,8 +7428,8 @@ members = ["writer"]
             .send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
             .await
             .unwrap();
-        assert_eq!(res.output["status"], "pending_approval");
-        assert_eq!(sender.sent().len(), 0);
+        assert_eq!(res.output["status"], "sent");
+        assert_eq!(sender.sent().len(), 1);
     }
 
     /// Issue #333: an effect parked by a card's dispatch cycle is journaled
@@ -6857,10 +7456,13 @@ members = ["writer"]
             ApprovalConversation::default(),
         );
 
-        // A cold recipient parks — the same path a card's turn takes.
-        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
-            .await
-            .unwrap();
+        host.park_effect(harness_effect(
+            "ceo",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({ "title": "Send the message", "question": "May I send it?" }),
+        ))
+        .await
+        .unwrap();
 
         let pending = rt.pending_approvals();
         assert_eq!(pending.len(), 1);
@@ -6911,9 +7513,13 @@ members = ["writer"]
             ApprovalConversation::default(),
         );
 
-        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
-            .await
-            .unwrap();
+        host.park_effect(harness_effect(
+            "ceo",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({ "title": "Send the message", "question": "May I send it?" }),
+        ))
+        .await
+        .unwrap();
 
         let pending = rt.pending_approvals();
         assert_eq!(pending.len(), 1);
@@ -6952,9 +7558,13 @@ members = ["writer"]
             },
         );
 
-        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
-            .await
-            .unwrap();
+        host.park_effect(harness_effect(
+            "ceo",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({ "title": "Send the message", "question": "May I send it?" }),
+        ))
+        .await
+        .unwrap();
 
         let pending = rt.pending_approvals();
         assert_eq!(pending.len(), 1);
@@ -6982,7 +7592,10 @@ members = ["writer"]
             .collect();
         assert_eq!(parked.len(), 1, "exactly one park announcement: {logged:?}");
         assert_eq!(parked[0].0, pending[0].id);
-        assert_eq!(parked[0].1, "email.send");
+        assert_eq!(
+            parked[0].1,
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+        );
         assert_eq!(parked[0].2, Some("desk-finance".to_string()));
     }
 
@@ -7011,9 +7624,13 @@ members = ["writer"]
             ApprovalConversation::default(),
         );
 
-        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
-            .await
-            .unwrap();
+        host.park_effect(harness_effect(
+            "ceo",
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+            serde_json::json!({ "title": "Send the message", "question": "May I send it?" }),
+        ))
+        .await
+        .unwrap();
 
         let pending = rt.pending_approvals();
         assert_eq!(pending.len(), 1);
@@ -8091,6 +8708,43 @@ members = ["writer"]
             .unwrap();
         assert!(res.ok);
         assert_eq!(rt.tasks().list(rt.id()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fallback_call_tool_parks_an_explicit_approval_request() {
+        let home_dir = tmp_home();
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+            .build()
+            .await
+            .unwrap();
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "fallback-approval".into(),
+            &rt,
+            None,
+            false,
+            ApprovalConversation::default(),
+        );
+
+        let result = host
+            .call_tool(ToolCall {
+                tool: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.to_string(),
+                args: serde_json::json!({
+                    "title": "Submit filing",
+                    "question": "May I submit it?"
+                }),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.output["status"], "pending");
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].kind,
+            crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+        );
     }
 
     #[tokio::test]
