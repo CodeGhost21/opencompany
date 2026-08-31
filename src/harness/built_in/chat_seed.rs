@@ -199,6 +199,13 @@ pub async fn resolve_seed_desk(
 ///
 /// Anything else answers `false`.
 fn in_thread(stored: &StoredEvent, thread_root: Option<EventSeq>) -> bool {
+    // Whether this is a conversational turn, as opposed to the one structural
+    // event `owns` admits. The channel-level arm below treats the two
+    // differently and cannot tell them apart from `parent` alone.
+    let is_turn = matches!(
+        &stored.event,
+        CompanyEvent::OperatorMessage { .. } | CompanyEvent::AgentReply { .. }
+    );
     let parent = match &stored.event {
         CompanyEvent::OperatorMessage { parent, .. } => *parent,
         CompanyEvent::AgentReply { parent, .. } => *parent,
@@ -211,9 +218,80 @@ fn in_thread(stored: &StoredEvent, thread_root: Option<EventSeq>) -> bool {
         _ => return false,
     };
     match thread_root {
-        None => parent.is_none(),
+        // Issue #1890 D part 3. The channel-level conversation is no longer
+        // "every unparented line": part 1 threads every answer under the
+        // message that opened it, so `parent.is_none()` now selects a run of
+        // questions with no answers — the channel emptied for the model exactly
+        // as folding every reply empties it on screen.
+        //
+        // So it admits roots **plus their replies**, and the narrowing to each
+        // root's *first* reply happens in [`build_chat_seed`], where the walk
+        // order is known and this predicate's per-event view is not enough.
+        // Deliberately NOT "one level flattened": that is the pre-#1890-A leak,
+        // siblings and all, and it is what admitting every reply here without
+        // the narrowing would restore.
+        // Every conversational turn this desk owns, roots and replies alike. A
+        // reply is parented to its question's *root* by construction — one
+        // level deep, which `AgentReply::parent`'s own docs pin — so there is
+        // no grandchild to exclude here.
+        //
+        // A **terminal** is not widened with them, and keeps the answer #1890 B
+        // gave it: a settle for a card raised inside a thread belongs to that
+        // thread and not to the channel around it. Nothing about seeding the
+        // channel's own answers changes where a settle belongs.
+        None => is_turn || parent.is_none(),
         Some(root) => stored.seq == root || parent == Some(root),
     }
+}
+
+/// One accumulated turn, before the seed is narrowed and flattened to
+/// `(role, content)` pairs (issue #1890 D part 3).
+///
+/// `parent` is what the narrowing keys on and the only reason this is a struct
+/// rather than the pair it used to be: the channel-level seed admits every
+/// reply during the walk and then keeps each root's **first** one, which cannot
+/// be decided per-event — a backward walk meets a root's newest reply first and
+/// its oldest last.
+struct SeedEntry {
+    role: &'static str,
+    text: String,
+    /// The root this turn hangs off, or `None` for a root itself.
+    parent: Option<EventSeq>,
+}
+
+/// Keeps each root's **first** reply and drops the rest (issue #1890 D part 3).
+///
+/// Called on the chronological seed, so "first" is simply the first one seen
+/// per root. Roots themselves always survive.
+///
+/// # Why not "one level flattened"
+///
+/// Admitting every reply would put a channel turn back in front of every live
+/// thread's whole exchange interleaved by wall-clock — which is the pre-#1890-A
+/// leak this epic exists to close, arriving through the channel-level door
+/// instead of the thread one. One answer per question is what the channel
+/// *shows* since part 2 renders exactly that inline, so it is also what the
+/// channel should say.
+///
+/// # What this costs the window
+///
+/// The walk fills `window` with entries counted **before** this narrowing, so a
+/// channel whose recent traffic is several replies deep per question yields a
+/// seed shorter than `window`. That is the same degradation the budget guard
+/// above already accepts and for the same reason: a shorter recent window is a
+/// degradation, and re-walking the journal to top it back up is a defect.
+fn keep_first_reply_per_root(entries: Vec<SeedEntry>) -> Vec<(String, String)> {
+    let mut seen: std::collections::HashSet<EventSeq> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let Some(root) = entry.parent
+            && !seen.insert(root)
+        {
+            continue;
+        }
+        out.push((entry.role.to_string(), entry.text));
+    }
+    out
 }
 
 /// Projects the last `window` messages owned by `(desk_id, desk_name)` out of the
@@ -303,8 +381,8 @@ pub async fn build_chat_seed(
     // `pending` holds owning turns seen before the boundary above is matched;
     // `collected` holds turns at-or-before it. Exactly one of the two ends up
     // as the answer — see the boundary discussion above.
-    let mut pending: Vec<(String, String)> = Vec::new();
-    let mut collected: Vec<(String, String)> = Vec::with_capacity(window);
+    let mut pending: Vec<SeedEntry> = Vec::new();
+    let mut collected: Vec<SeedEntry> = Vec::with_capacity(window);
     let mut found_self = false;
     // Set once the requested root has been collected. Nothing older can belong
     // to the thread — a child always sequences after the message it answers —
@@ -360,20 +438,31 @@ pub async fn build_chat_seed(
             if !in_thread(&stored, thread_root) {
                 continue;
             }
+            // The parent rides along since #1890 D part 3: the channel-level
+            // narrowing keys on it, and it is gone by the time the entries are
+            // flattened to `(role, content)`.
             let mapped = match &stored.event {
                 CompanyEvent::OperatorMessage {
-                    text, attachments, ..
+                    text,
+                    attachments,
+                    parent,
+                    ..
                 } => Some((
                     "user",
                     crate::brain::medulla::effects::with_attachment_refs(text, attachments),
+                    *parent,
                 )),
-                CompanyEvent::AgentReply { text, .. } => Some(("agent", text.clone())),
+                CompanyEvent::AgentReply { text, parent, .. } => {
+                    Some(("agent", text.clone(), *parent))
+                }
                 // `owns` also admits `DeskTaskCompleted` (a structural "finished →
                 // In review" marker), but it carries no conversational body — do
                 // not seed it as a turn.
                 _ => None,
             };
-            let Some((role, text)) = mapped else { continue };
+            let Some((role, text, parent)) = mapped else {
+                continue;
+            };
             if text.trim().is_empty() {
                 continue;
             }
@@ -388,13 +477,13 @@ pub async fn build_chat_seed(
                     && current_message.starts_with(text.trim())
                 {
                     found_self = true;
-                    collected.push((role.to_string(), text));
+                    collected.push(SeedEntry { role, text, parent });
                     if is_root {
                         reached_root = true;
                         break;
                     }
                 } else {
-                    pending.push((role.to_string(), text));
+                    pending.push(SeedEntry { role, text, parent });
                     if pending.len() > window {
                         pending.truncate(window);
                     }
@@ -406,7 +495,7 @@ pub async fn build_chat_seed(
                 continue;
             }
 
-            collected.push((role.to_string(), text));
+            collected.push(SeedEntry { role, text, parent });
             if is_root {
                 reached_root = true;
                 break;
@@ -423,7 +512,20 @@ pub async fn build_chat_seed(
     }
 
     collected.reverse();
-    collected
+    // Chronological now, so the narrowing sees each root's oldest reply first —
+    // which is the one the channel keeps (issue #1890 D part 3).
+    //
+    // **Channel-level only.** Inside a thread the whole exchange is precisely
+    // what the turn needs; narrowing there would hand an agent answering a
+    // follow-up the question it is answering and one reply out of five, which
+    // is a worse seed than the pre-#1890 leak it replaced.
+    match thread_root {
+        None => keep_first_reply_per_root(collected),
+        Some(_) => collected
+            .into_iter()
+            .map(|entry| (entry.role.to_string(), entry.text))
+            .collect(),
+    }
 }
 
 /// Drops a trailing `("user", …)` entry whose text matches `current_message`.
@@ -970,25 +1072,63 @@ mod tests {
         );
     }
 
-    /// The channel-level conversation is the `None` thread: unparented lines
-    /// only. A thread's body belongs to the thread, not to the channel that
-    /// hosts it.
+    /// The channel-level conversation is **roots plus each root's first
+    /// reply** (issue #1890 D part 3), not unparented lines only.
+    ///
+    /// Part 1 threads every answer under the message that opened it, so
+    /// "unparented lines only" — what this asserted before — leaves the channel
+    /// seeding a run of questions with no answers: emptied for the model
+    /// exactly as folding every reply empties it on screen. One answer per
+    /// question is what the channel now *shows*, since part 2 renders precisely
+    /// that inline, so it is what the channel says too.
+    ///
+    /// The follow-up typed inside the thread stays out. That is the line
+    /// between "the channel can see its own answers" and the pre-#1890-A leak:
+    /// the channel gets the exchange that opened each topic, never the topic's
+    /// whole body.
     #[tokio::test]
-    async fn the_channel_sees_only_unparented_lines() {
+    async fn the_channel_sees_roots_and_their_first_replies() {
         let log = FixedLog(vec![
             operator(41, Some("growth"), "draft the launch email"),
-            reply_in(42, "growth", "THREAD-BODY", 41),
+            reply_in(42, "growth", "here is a draft", 41),
             operator_in(43, Some("growth"), "THREAD-FOLLOWUP", 41),
-            operator(44, Some("growth"), "unrelated channel line"),
+            reply_in(44, "growth", "SECOND-REPLY", 41),
+            operator(45, Some("growth"), "unrelated channel line"),
         ]);
         let seed = seed_of_thread(log, "growth", None, "").await;
         assert_eq!(
             seed,
             vec![
                 ("user".to_string(), "draft the launch email".to_string()),
+                ("agent".to_string(), "here is a draft".to_string()),
                 ("user".to_string(), "unrelated channel line".to_string()),
             ],
-            "the channel must not inherit a thread's body: {seed:?}"
+            "roots plus the FIRST reply each — never the thread's body: {seed:?}"
+        );
+    }
+
+    /// The narrowing is the channel's rule alone. A turn answering inside a
+    /// thread needs that thread's whole exchange; handing it the question and
+    /// one reply out of several would be a worse seed than the leak #1890 A
+    /// closed.
+    #[tokio::test]
+    async fn a_thread_still_sees_its_whole_exchange() {
+        let log = FixedLog(vec![
+            operator(41, Some("growth"), "draft the launch email"),
+            reply_in(42, "growth", "here is a draft", 41),
+            operator_in(43, Some("growth"), "make it shorter", 41),
+            reply_in(44, "growth", "shortened", 41),
+        ]);
+        let seed = seed_of_thread(log, "growth", Some(41), "").await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "draft the launch email".to_string()),
+                ("agent".to_string(), "here is a draft".to_string()),
+                ("user".to_string(), "make it shorter".to_string()),
+                ("agent".to_string(), "shortened".to_string()),
+            ],
+            "every turn in the thread, not just its first reply: {seed:?}"
         );
     }
 

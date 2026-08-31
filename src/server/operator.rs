@@ -3014,7 +3014,8 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 return Err(err);
             }
         };
-        journal_chat_replies(&runtime, &company, &desk, parent, &mut report).await;
+        let reply_parent = reply_thread(parent, accepted.message_seq);
+        journal_chat_replies(&runtime, &company, &desk, reply_parent, &mut report).await;
         settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
         Ok((report, feedback_note))
     })
@@ -3039,6 +3040,30 @@ async fn join_chat_turn(
 ///
 /// Runs inside the spawned turn (issue #882) so the record survives a client or
 /// proxy that gave up waiting.
+/// The thread an answer belongs in (issue #1890 D part 1).
+///
+/// `asked_in` is the root the operator's message hung off, and `message_seq` is
+/// that message's own position.
+///
+/// * **Already in a thread** — the answer takes the same root. A follow-up
+///   typed inside a thread must not open a thread of its own, or N messages
+///   would mean N threads instead of N *topics*.
+/// * **Not in one** — the answer takes the message itself as its root, so the
+///   exchange becomes a thread rather than two flat lines. This is the change:
+///   before it, an answer to an unthreaded question was unparented, and the
+///   only threads that existed were ones an operator opened by hand.
+///
+/// Never `None`, and that is the point: **uniform**. The tempting version
+/// decides here — "thread it only if another question arrived while I was
+/// working" — which makes `parent` a function of race timing, and `parent` is
+/// permanent. Two operators doing the identical thing would get permanently
+/// different transcripts on microseconds, and the console renders a reply as it
+/// streams, before the backend could know. Whether the pair *reads* as a thread
+/// is re-decided on every render instead, by the console's `buildTimeline`.
+fn reply_thread(asked_in: Option<EventSeq>, message_seq: EventSeq) -> Option<EventSeq> {
+    Some(asked_in.unwrap_or(message_seq))
+}
+
 pub(crate) async fn journal_chat_replies(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
@@ -5086,6 +5111,27 @@ mode = "full"
             tasks[0].origin_parent, None,
             "and a message typed at channel level opens a channel-level card",
         );
+    }
+
+    /// Issue #1890 D part 1: every answer threads under the message that
+    /// opened the exchange.
+    ///
+    /// The two arms are the whole rule, and the second is the change: before
+    /// it, an answer to an unthreaded question was journaled unparented, so the
+    /// only threads that existed were ones an operator opened by hand.
+    #[test]
+    fn an_answer_threads_under_the_message_that_opened_the_exchange() {
+        let message = EventSeq::new(41);
+        // Not in a thread: the exchange becomes one, rooted at the question.
+        assert_eq!(reply_thread(None, message), Some(message));
+        // Already in one: the same root, so a follow-up does not open a thread
+        // of its own — N messages in a thread is one topic, not N.
+        let root = EventSeq::new(7);
+        assert_eq!(reply_thread(Some(root), message), Some(root));
+        // Never `None`: uniform is what keeps `parent` out of the hands of race
+        // timing, since `parent` is permanent and presentation is not.
+        assert!(reply_thread(None, message).is_some());
+        assert!(reply_thread(Some(root), message).is_some());
     }
 
     /// Issue #1890 B: the card remembers **which thread** inside that channel.

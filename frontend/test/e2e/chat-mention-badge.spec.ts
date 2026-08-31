@@ -283,7 +283,7 @@ test("a mention inside a thread reply stays unread until its thread is opened", 
       id: "eng-thread-1",
       kind: "mention",
       subjectKind: "message",
-      subjectId: "21",
+      subjectId: "22",
       title: "Ada mentioned you in engineering",
       createdAt: 2,
       context: "engineering",
@@ -300,11 +300,23 @@ test("a mention inside a thread reply stays unread until its thread is opened", 
           mine: false,
         },
         {
+          // Issue #1890 D: another line between question and reply, so the
+          // reply genuinely FOLDS. Without it the first reply now renders
+          // inline, the summons is on screen the moment the channel is, and
+          // this test would be asserting the deferral of something visible.
           id: "21",
           channel: "engineering",
           author: "ceo",
-          text: "@Rae can you sanity-check?",
+          text: "meanwhile, unrelated",
           atMillis: 2,
+          mine: false,
+        },
+        {
+          id: "22",
+          channel: "engineering",
+          author: "ceo",
+          text: "@Rae can you sanity-check?",
+          atMillis: 3,
           mine: false,
           parentId: "20",
         },
@@ -325,6 +337,61 @@ test("a mention inside a thread reply stays unread until its thread is opened", 
   await page.getByRole("button", { name: /1 reply/i }).click();
   await expect
     .poll(() => marked.some((m) => m.ids?.includes("eng-thread-1")))
+    .toBe(true);
+});
+
+/**
+ * The other half of the rule, and new with issue #1890 D.
+ *
+ * A thread's first reply renders **inline** when nothing came between question
+ * and answer, so the summons is on screen the moment the channel is. Deferring
+ * it would leave a badge that opening the channel cannot clear and that has no
+ * thread panel to open — `replyParents` and `buildTimeline` therefore ask the
+ * same question (`inlineReplyIds`) about what is visible.
+ */
+test("a mention in an inline reply clears on channel open, with no thread to open", async ({
+  page,
+}) => {
+  await mockApi(page, [
+    {
+      id: "eng-inline-1",
+      kind: "mention",
+      subjectKind: "message",
+      subjectId: "21",
+      title: "Ada mentioned you in engineering",
+      createdAt: 2,
+      context: "engineering",
+    },
+  ], {
+    history: {
+      engineering: [
+        {
+          id: "20",
+          channel: "engineering",
+          author: "ceo",
+          text: "the launch plan",
+          atMillis: 1,
+          mine: false,
+        },
+        // Nothing in between, so this renders inline rather than folding.
+        {
+          id: "21",
+          channel: "engineering",
+          author: "ceo",
+          text: "@Rae can you sanity-check?",
+          atMillis: 2,
+          mine: false,
+          parentId: "20",
+        },
+      ],
+    },
+  });
+  await openChannel(page, "general");
+  await expect(mentionBadge(page, "Engineering")).toHaveText("@1");
+
+  await openChannel(page, "engineering");
+  await expect
+    .poll(() => marked.some((m) => m.ids?.includes("eng-inline-1")))
     .toBe(true);
 });
 
