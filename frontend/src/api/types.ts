@@ -1206,7 +1206,15 @@ export interface EditAgentInput {
   model?: string | null;
   /** Which declared harness this teammate runs on. */
   harness?: string | null;
-  /** The teammate's own tool-grant globs. */
+  /**
+   * The teammate's own tool-grant globs, three-state since issue #1804 (like a
+   * double-`Option` on the wire): `undefined` leaves the grant untouched,
+   * `null` resets it to the standard company-wide grant, an empty array `[]` is
+   * a deliberate deny-all (holds nothing), and a non-empty array narrows. The
+   * four are different on the wire (`JSON.stringify` keeps `null`/`[]`, drops
+   * `undefined`) and must never be collapsed, or a partial save would silently
+   * re-scope a grant the operator did not touch.
+   */
   tools?: string[] | null;
 }
 
