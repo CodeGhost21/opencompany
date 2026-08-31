@@ -3275,6 +3275,39 @@ fn select_run_page(
     (runs, has_more, next_before_seq)
 }
 
+/// Finalizes every returned run's verdict — the last thing `list_runs` does to
+/// `runs`, once every reconciliation pass ahead of it (the #1009 cross-check
+/// that flips the dead rows to `error: INTERRUPTED_BY_RESTART`, and issue
+/// #1189's stranded-approvals join) has settled every row.
+///
+/// Position is the correctness argument. Every input the verdict reads is
+/// written by the settle arm *after* its row was pushed (`running`, `error`,
+/// `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), two of them
+/// are written again by the cross-check, and `strandedApprovals` is written by
+/// the join. Deriving at construction — or, as it was until #1189, before the
+/// join — scores the row against inputs that have since moved underneath it:
+/// the exact staleness a *stored* verdict would have, reintroduced by
+/// placement.
+///
+/// `run.degraded` is deliberately read exactly as the fold produced it —
+/// never re-derived from `run.nodes` here. A node that settled `Error` is
+/// already counted once by [`WorkflowRunOutcome::derive_verdict`]'s own scan
+/// of `self.nodes` (`errored_nodes: self.nodes.iter().filter(|n| n.status ==
+/// Error).count() + usize::from(self.degraded)`); OR-ing that same fact into
+/// `degraded`, as an earlier revision of this function did, double-counts it
+/// — a run with N errored nodes read as `errored_nodes == N + 1`. The wrong
+/// count never surfaced in the verdict itself (`derive_verdict`'s only
+/// consumer gates on `errored_nodes > 0`, so N vs. N + 1 picks the same arm),
+/// but it did corrupt the serialized `degraded` field, which is documented as
+/// carrying one specific fact `run.nodes` cannot: a progress-drain failure, or
+/// a capped/budget-paused turn the journal still shows as `ok`. That fact must
+/// stay independent of the node-status scan so the two never overlap.
+fn settle_history_verdicts(runs: &mut [WorkflowRunOutcome]) {
+    for run in runs {
+        run.verdict = run.derive_verdict();
+    }
+}
+
 /// `GET …/workflows/runs?workflow=&limit=&before_seq=` — the company's
 /// finished workflow runs, **newest first** (issue #228), a page at a time
 /// (issue #1012).
@@ -3691,31 +3724,8 @@ async fn list_runs(
         }
     }
 
-    // Keep the degraded fact separate from the node rows: capped / budget-paused
-    // rows are reclassified in memory by the runner, but the journal can contain
-    // an earlier `ok` node event. A progress-drain failure still retains this
-    // fact rather than allowing history to become green.
-    // settled every open row, after the #1009 cross-check has flipped the dead
-    // ones to `error: INTERRUPTED_BY_RESTART`, and (issue #1189) after the
-    // reconciliation above.
-    //
-    // Position is the correctness argument. Every input the verdict reads is
-    // written by the settle arm *after* its row was pushed (`running`, `error`,
-    // `cancelled`, `deliveries`, `pendingApprovals`, `blockedNodes`), two of
-    // them are written again by the cross-check, and `strandedApprovals` is
-    // written by the join. Deriving at construction — or, as it was until
-    // #1189, before the join — scores the row against inputs that have since
-    // moved underneath it: the exact staleness a *stored* verdict would have,
-    // reintroduced by placement.
-    for run in &mut runs {
-        run.degraded = run.degraded
-            || (!run.nodes.is_empty()
-                && run
-                    .nodes
-                    .iter()
-                    .any(|n| n.status == WorkflowNodeStatus::Error));
-        run.verdict = run.derive_verdict();
-    }
+    // Position is the correctness argument — see `settle_history_verdicts`.
+    settle_history_verdicts(&mut runs);
 
     Ok(Json(WorkflowRunsResponse {
         runs,
@@ -4447,6 +4457,68 @@ mod tests {
 
         assert_eq!(json["verdict"], "degraded", "the HTTP contract is explicit");
         assert_eq!(json["nodes"][0]["status"], "error");
+    }
+
+    /// A settled `Error` node status is a fact `derive_verdict` already reads
+    /// off `self.nodes` on its own — `settle_history_verdicts` must not ALSO
+    /// fold that same fact into `degraded`. `degraded` is reserved for what
+    /// `self.nodes` cannot carry at all (a progress-drain failure, or a
+    /// capped/budget-paused turn the journal still shows `ok` for); an earlier
+    /// revision of `settle_history_verdicts` OR'd the node scan into it too,
+    /// which double-counted every genuinely errored node in
+    /// `derive_verdict`'s internal `errored_nodes` sum (N read as N + 1) and
+    /// corrupted the serialized `degraded` field for a run that never had a
+    /// drain failure at all.
+    #[test]
+    fn a_plain_errored_node_does_not_also_flip_the_separate_degraded_fact() {
+        fn run_with_one_errored_node() -> WorkflowRunOutcome {
+            WorkflowRunOutcome {
+                seq: 1,
+                at_millis: 1,
+                workflow_id: "wf".to_string(),
+                scheduled: false,
+                run_id: Some("run-1".to_string()),
+                deliveries: Vec::new(),
+                pending_approvals: Vec::new(),
+                error: None,
+                nodes: vec![WorkflowRunNode {
+                    node_id: "worker".into(),
+                    status: WorkflowNodeStatus::Error,
+                    elapsed_ms: 5,
+                    diagnostics: Vec::new(),
+                }],
+                started_nodes: Vec::new(),
+                started_at_millis: Some(1),
+                running: false,
+                cancelled: false,
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
+                // The fact under test: no drain failure was ever recorded for
+                // this run — only its one node settled `Error`.
+                degraded: false,
+                stranded_approvals: 0,
+                verdict: WorkflowRunVerdict::Ok,
+            }
+        }
+
+        let mut runs = vec![run_with_one_errored_node()];
+        settle_history_verdicts(&mut runs);
+        let run = &runs[0];
+
+        assert!(
+            !run.degraded,
+            "a plain node error must not flip the separate progress-drain \
+             `degraded` fact — derive_verdict's own node scan already counts \
+             it once"
+        );
+        assert_eq!(
+            run.verdict,
+            WorkflowRunVerdict::Degraded,
+            "the errored node must still read as a degraded run on its own \
+             merits, with no help from `degraded`"
+        );
     }
 
     /// rows, in the same camelCase shape the journal event and the history route
