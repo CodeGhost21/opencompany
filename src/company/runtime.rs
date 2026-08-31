@@ -1908,12 +1908,15 @@ impl CompanyRuntime {
         // #1861's blocker/approval distinction; without the two flags the
         // notice would tell an operator a question was "denied by default"
         // when nothing was ever decided.
+        //
+        // `finish_expiry` carries the rest, so a deadline the sweeper finds
+        // first and one a late resolve finds instead leave the same board and
+        // the same badge behind.
         let unanswered = self.unanswered_blocker(id);
         let is_blocker = self.is_blocker(id);
         self.retire_approval(id, ExpiryReason::Ttl, now_millis())
             .await?;
-        self.notify_approval_expired(id, is_blocker, unanswered.is_some())
-            .await;
+        self.finish_expiry(id, is_blocker, unanswered).await;
         Ok(())
     }
 
@@ -3579,60 +3582,78 @@ impl CompanyRuntime {
             // returns None for them.
             let is_blocker = self.is_blocker(id);
             self.retire_approval(id, ExpiryReason::Ttl, now).await?;
-            // Issue #1865: a blocker nobody answered is exactly the silent
-            // failure this notification exists for — "awaiting approval"
-            // forever with nothing telling anybody it timed out. Best-effort
-            // and after the retirement, which already propagates its own
-            // error: a notification that could not be filed must not undo a
-            // default-deny that already happened.
-            self.notify_approval_expired(id, is_blocker, unanswered.is_some())
-                .await;
-            // …and the board, which is the surface an operator actually
-            // watches. Best-effort for the same reason: the default-deny has
-            // already happened, and a board write that fails must not undo it —
-            // the card stays `paused` and the next sweep is not going to find
-            // this approval again, so the log line is the trace.
-            if let Some((task_id, question)) = unanswered {
-                match crate::runtime::advance::return_expired_blocker_card(
-                    self.tasks().as_ref(),
-                    &self.id,
-                    &task_id,
-                    &question,
-                )
-                .await
-                {
-                    Ok(true) => tracing::info!(
-                        company = %self.id,
-                        task = %task_id,
-                        approval = %id.as_ref(),
-                        "[approvals] an unanswered blocker returned its card to To-do"
-                    ),
-                    // The card moved on without us — an operator dragged it, or
-                    // it was already re-dispatched. Theirs, not ours.
-                    Ok(false) => {}
-                    Err(err) => tracing::warn!(
-                        company = %self.id,
-                        task = %task_id,
-                        error = %err,
-                        "[approvals] a blocker expired but its card could not be returned; it \
-                         stays paused with the question on it"
-                    ),
-                }
-            }
+            self.finish_expiry(id, is_blocker, unanswered).await;
         }
         Ok(expired)
     }
 
-    /// Files a durable notification that a parked approval expired unanswered
-    /// (issue #1865) — one row, whole company, since expiry has no single
-    /// decider the way a mention has a mentioned user.
+    /// The board write and the badge a retirement owes, shared by the two paths
+    /// that retire an expired approval: the sweeper that finds the deadline
+    /// first, and [`retire_if_expired`](Self::retire_if_expired) when a late
+    /// resolve finds it instead.
     ///
-    /// `was_blocker` picks the copy (issue #1861). The two expiries are not the
-    /// same event: an approval that times out **is** decided — denied by
-    /// default — while a blocker that times out was never a decision at all,
-    /// and telling an operator their unanswered question was "denied" would
-    /// describe a judgement nobody made about work that is still perfectly
-    /// possible.
+    /// Shared because it was not, and the two disagreed (CodeRabbit review on
+    /// #1905). The sweeper returned the card; the late-expiry path did not, so
+    /// a task-linked blocker discovered that way sat in `paused` forever with
+    /// nothing left to release it — the approval it was waiting on had just
+    /// been retired, and the next sweep will never see that id again. Both
+    /// callers now reach the identical outcome, which is the same property
+    /// `retire_approval` exists to give the retirement itself.
+    ///
+    /// **The board first, then the badge**, so the badge can tell the truth:
+    /// its "its card is back in To-do" copy is now gated on a move that
+    /// actually landed rather than on the blocker merely naming a card.
+    ///
+    /// Everything here is best-effort and everything here runs *after* the
+    /// retirement, which has already propagated its own error. A notification
+    /// that cannot be filed, or a board write that fails, must not undo a
+    /// default-deny that already happened — the card stays `paused` with the
+    /// question on it and the log line is the trace.
+    async fn finish_expiry(
+        &self,
+        id: &ApprovalId,
+        was_blocker: bool,
+        unanswered: Option<(String, String)>,
+    ) {
+        let mut card_returned = false;
+        if let Some((task_id, question)) = unanswered {
+            match crate::runtime::advance::return_expired_blocker_card(
+                self.tasks().as_ref(),
+                &self.id,
+                &task_id,
+                &question,
+            )
+            .await
+            {
+                Ok(true) => {
+                    card_returned = true;
+                    tracing::info!(
+                        company = %self.id,
+                        task = %task_id,
+                        approval = %id.as_ref(),
+                        "[approvals] an unanswered blocker returned its card to To-do"
+                    );
+                }
+                // The card moved on without us — an operator dragged it, or it
+                // was already re-dispatched. Theirs, not ours, and not a return
+                // this notification may claim.
+                Ok(false) => {}
+                Err(err) => tracing::warn!(
+                    company = %self.id,
+                    task = %task_id,
+                    error = %err,
+                    "[approvals] a blocker expired but its card could not be returned; it \
+                     stays paused with the question on it"
+                ),
+            }
+        }
+        // Issue #1865: a blocker nobody answered is exactly the silent failure
+        // this notification exists for — "awaiting approval" forever with
+        // nothing telling anybody it timed out.
+        self.notify_approval_expired(id, was_blocker, card_returned)
+            .await;
+    }
+
     /// The card and question behind a parked **blocker**, or `None` for an
     /// ordinary approval (issue #1861).
     ///
@@ -3681,11 +3702,29 @@ impl CompanyRuntime {
         Some((task_id, format!("{} ({})", payload.reason, payload.needed)))
     }
 
+    /// Files a durable notification that a parked approval expired unanswered
+    /// (issue #1865) — one row, whole company, since expiry has no single
+    /// decider the way a mention has a mentioned user.
+    ///
+    /// `was_blocker` picks the copy (issue #1861). The two expiries are not the
+    /// same event: an approval that times out **is** decided — denied by
+    /// default — while a blocker that times out was never a decision at all,
+    /// and telling an operator their unanswered question was "denied" would
+    /// describe a judgement nobody made about work that is still perfectly
+    /// possible.
+    ///
+    /// `card_returned` is the **outcome of the board write**, not the presence
+    /// of a link (CodeRabbit review on #1905). It used to be
+    /// `unanswered.is_some()` — "this blocker names a card" — which claimed the
+    /// card was back in To-do before anything had tried to move it, and on the
+    /// late-expiry path where nothing moved it at all. Only
+    /// [`finish_expiry`](Self::finish_expiry) sets it, and only from a move
+    /// that actually landed.
     async fn notify_approval_expired(
         &self,
         id: &ApprovalId,
         was_blocker: bool,
-        has_linked_task: bool,
+        card_returned: bool,
     ) {
         let note = crate::ports::notifications::Notification {
             id: crate::ports::generate_id(),
@@ -3700,7 +3739,7 @@ impl CompanyRuntime {
             // operator a decision was made against work that is simply still
             // waiting to be explained. Only claim a card came back if the
             // blocker was actually linked to a task (has_linked_task).
-            title: if was_blocker && has_linked_task {
+            title: if was_blocker && card_returned {
                 "A question nobody answered timed out; its card is back in To-do".to_string()
             } else if was_blocker {
                 "A question nobody answered timed out".to_string()

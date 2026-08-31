@@ -674,6 +674,76 @@ mod test {
             .expect("the card survives")
     }
 
+    /// The same close, reached the other way: an operator's verdict lands
+    /// *after* the deadline, so the resolve itself discovers the expiry and
+    /// `retire_if_expired` — not the sweeper — owns the rest of it.
+    ///
+    /// # The bug this reproduces (CodeRabbit review on #1905)
+    ///
+    /// That path retired the approval and filed the badge but never returned
+    /// the card, so a task-linked blocker found this way sat in `paused`
+    /// forever: the approval it was waiting on had just been retired, and no
+    /// later sweep will ever see that id again. The badge made it worse by
+    /// saying the card *was* back in To-do — it was keyed on the blocker
+    /// naming a card, not on a move that happened.
+    ///
+    /// Both paths now run the same `finish_expiry` tail, so this asserts the
+    /// identical outcome its sweeper twin above does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_verdict_that_arrives_late_returns_the_card_too() {
+        let home_dir = tmp_home();
+        let (runtime, _ticker) =
+            given_an_unscheduled_company_with_an_overdue_gate(home_dir.path()).await;
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &paused_card("t-1"))
+            .await
+            .expect("seed");
+        let approval_id = runtime
+            .park_blocker(&blocker_payload("t-1"), "t-1")
+            .await
+            .expect("parks");
+
+        // The gate's TTL is 0, so this verdict is already too late: the resolve
+        // reports `Expired` rather than settling the operator's answer.
+        runtime
+            .resolve_approval(
+                &approval_id,
+                crate::ports::types::Verdict::Approve,
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::User,
+                    id: "ceo".into(),
+                },
+            )
+            .await
+            .expect("a late resolve still reports cleanly");
+
+        let after = card_after(&runtime, "t-1").await;
+        assert_eq!(
+            after.column,
+            crate::ports::tasks::COLUMN_TODO,
+            "a card whose blocker expired must come back whichever path noticed the deadline"
+        );
+        let note = after.note.expect("the question rides back on the note");
+        assert!(note.contains("gpt-nonexistent"), "{note}");
+
+        let feed = runtime
+            .notifications()
+            .list(runtime.id(), "ceo")
+            .await
+            .expect("read notifications");
+        let badge = feed
+            .iter()
+            .find(|n| n.notification.kind == "approval_expired")
+            .expect("the expiry is badged here too");
+        assert!(
+            badge.notification.title.contains("back in To-do"),
+            "and the badge may say so, because the move actually landed: {:?}",
+            badge.notification.title
+        );
+    }
+
     /// The close of the epic's own loop: nothing waits forever, and nothing is
     /// dropped without a record. The question that went unanswered rides back
     /// to To-do on the card, because the TTL expiring does not make the work
