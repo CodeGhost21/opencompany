@@ -3251,6 +3251,10 @@ pub fn orchestrator_tools(
     workflow_revisions: Option<Arc<dyn crate::ports::WorkflowRevisionStore>>,
     workflow_refs: WorkflowRefQueue,
     run_outputs: RunOutputCache,
+    // Issue #1861: the notification store `run_workflow` badges an unhealthy
+    // run through. `None` skips the badge, which is what a default build and
+    // the tool's own tests want.
+    notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
     minter: String,
     minter_tools: Option<Vec<String>>,
     minter_grants: Vec<String>,
@@ -3272,7 +3276,7 @@ pub fn orchestrator_tools(
         events.clone(),
         workflow_refs.clone(),
         run_outputs.clone(),
-        None, // notifications not wired in orchestrator_tools context
+        notifications,
     )));
     // `read_run_output` (issue #418) is the run tool's companion: it reads full
     // node output out of the same bounded cache the run tool populates, so a
@@ -7989,6 +7993,7 @@ name = "Morning"
             None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            None,
             "ceo".to_string(),
             None,
             vec!["fs:*".to_string()],
@@ -8224,6 +8229,158 @@ name = "Morning"
             .expect("execute");
         assert!(result.is_error, "a cancelled run reports as a stop");
         assert_eq!(refs.queued(), 0);
+    }
+
+    /// Issue #1861: an agent-initiated run that ends blocked badges the
+    /// operator, exactly as the console's and the scheduler's runs do.
+    ///
+    /// This is the one trigger nobody is watching a progress bar for, so the
+    /// badge is the only way a run that stopped waiting on a person becomes
+    /// visible without somebody thinking to open the run history.
+    #[tokio::test]
+    async fn a_blocked_agent_run_badges_the_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": {} }),
+            pending_approvals: vec!["worker".to_string()],
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::workflow_runner::WorkflowBlockedNode {
+                node_id: "worker".to_string(),
+                tools: vec!["send_email".to_string()],
+                approval_ids: vec!["ap-1".to_string()],
+                unparkable: 0,
+                stranded: 0,
+            }],
+            approvals: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert_eq!(feed.len(), 1, "one badge for one unhealthy run: {feed:?}");
+        assert_eq!(feed[0].notification.kind, "workflow_run_blocked");
+    }
+
+    /// The same contract for the other unhealthy end: the run could not park
+    /// the approval at all, so nobody was asked and nothing is waiting.
+    #[tokio::test]
+    async fn a_stranded_agent_run_badges_the_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: vec![crate::ports::workflow_runner::WorkflowRunApprovalRow {
+                node_id: Some("worker".to_string()),
+                tool: Some("send_email".to_string()),
+                outcome: crate::ports::workflow_runner::WorkflowApprovalOutcome::ParkFailed,
+                approval_id: None,
+            }],
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert_eq!(feed.len(), 1, "{feed:?}");
+        assert_eq!(feed[0].notification.kind, "workflow_run_stranded");
+    }
+
+    /// A run that finished cleanly badges nobody. The badge means "this needs
+    /// you"; one per successful run would train the operator to ignore it.
+    #[tokio::test]
+    async fn a_healthy_agent_run_badges_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": [] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let notifications: Arc<dyn crate::ports::notifications::NotificationStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+            Some(notifications.clone()),
+        );
+        tool.execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+
+        let feed = notifications
+            .list(&CompanyId::new("acme"), "ceo")
+            .await
+            .expect("list");
+        assert!(feed.is_empty(), "{feed:?}");
     }
 
     #[tokio::test]
