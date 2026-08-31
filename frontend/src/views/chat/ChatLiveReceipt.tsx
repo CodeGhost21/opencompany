@@ -57,12 +57,13 @@ export interface ChatReceipt {
  * Whether a clear request for a thread's receipt should actually delete it.
  *
  * The bug this guards (issue #1935 review, codex 3892523790 / coderabbit
- * 3892517512): thread ids are reused across companies (`main` above all), and
- * `AppShell`'s `onSendStale`/`onSendEnd`/`onSendDetached`/`onSendFailed` all
- * clear a receipt by thread id alone. Send it from company A, switch to
- * company B, send again on the same thread id — B's send arms a *new*
- * receipt — and when A's slow POST finally settles, its own clear call must
- * not delete B's receipt just because they share a thread id.
+ * 3892517512, and its sibling codex 3892702774): thread ids are reused across
+ * companies (`main` above all), and `AppShell`'s
+ * `onSendStale`/`onSendEnd`/`onSendDetached`/`onSendFailed` all clear a
+ * receipt by thread id alone. Send it from company A, switch to company B,
+ * send again on the same thread id — B's send arms a *new* receipt — and when
+ * A's slow POST finally settles, its own clear call must not delete B's
+ * receipt just because they share a thread id.
  *
  * Each armed receipt is stamped with the generation counter value current at
  * arm time; each terminal callback is handed the generation its own
@@ -71,18 +72,34 @@ export interface ChatReceipt {
  * re-armed the slot in between, the generations differ and the clear is a
  * no-op, leaving the newer receipt alone.
  *
- * `gen === undefined` clears unconditionally. That is not a loophole — it is
- * `Conversation`/`conversation/runtime.ts`'s calling convention, which
- * predates generation-tagging and never races a company switch the way
- * `ChatView`'s sends do (the parked conversation view has no scope to switch
- * out from under).
+ * `gen === undefined` now REFUSES to clear (issue #1935 review, codex
+ * 3892702774 — reversing the original "clears unconditionally" reading of
+ * this branch). That original reading treated an omitted generation as
+ * `Conversation`'s calling convention, on the assumption the parked
+ * conversation view "has no scope to switch out from under" — which was
+ * wrong: `#/conversation` is a live, still-routable surface (`ROUTABLE.
+ * conversation` in `console-routes.ts`), it stays mounted across a company
+ * switch exactly like `ChatView`, and its own `useConversationRuntime` send
+ * never generation-tagged its calls — so a slow Conversation POST from
+ * company A could delete a newer `ChatView` (or Conversation) receipt on
+ * company B through the identical reused-thread-id race, just missing the
+ * `shouldClearReceipt` guard that was supposed to close it everywhere.
+ *
+ * `Conversation`'s `useConversationRuntime` is now generation-tagged too (see
+ * `runtime.ts`), so every current caller always supplies a defined `gen` and
+ * this branch is not load-bearing for them. It stays fail-closed rather than
+ * being deleted so a FUTURE send surface that forgets to capture and forward
+ * `onSendStart`'s return value cannot reintroduce this exact leak by omission
+ * — the failure mode of forgetting becomes a receipt that lingers until the
+ * next send or company switch clears it, never a live receipt deleted out
+ * from under a different company.
  */
 export function shouldClearReceipt(
   current: Pick<ChatReceipt, "gen"> | undefined,
   gen: number | undefined,
 ): boolean {
   if (!current) return false;
-  if (gen === undefined) return true;
+  if (gen === undefined) return false;
   return current.gen === gen;
 }
 

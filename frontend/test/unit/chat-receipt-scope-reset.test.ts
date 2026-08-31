@@ -99,3 +99,55 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     expect(appShell).toMatch(/return gen;\s*\n\s*\}, \[\]\);/);
   });
 });
+
+/**
+ * `Conversation`'s own send surface (issue #1935 review, codex 3892702774).
+ *
+ * `#/conversation` is a second, still-routable surface — `ROUTABLE.
+ * conversation` in `console-routes.ts` — that shares `AppShell`'s
+ * `onSendStart`/`onSendEnd`/`onSendDetached`/`onSendFailed` and therefore the
+ * same `receiptByThread` map `ChatView` writes into. Its send lives in
+ * `useConversationRuntime` (`views/conversation/runtime.ts`), which — like
+ * `AppShell` — is a hook wired into a large host component (`ChatPane`,
+ * itself inside `Conversation`), not something worth mounting whole for this.
+ *
+ * `shouldClearReceipt`'s own suite in `chat-live-receipt.test.ts` proves the
+ * *semantics* directly, including a case modelled explicitly on this
+ * Conversation → ChatView cross-surface race. What this block locks down is
+ * that `runtime.ts` actually *wires* into those semantics — captures
+ * `onSendStart`'s return value and forwards it to every terminal call —
+ * rather than the fix living only on the `ChatView` side of the same map.
+ */
+const runtimeTs = readFileSync(
+  resolve(here, "../../src/views/conversation/runtime.ts"),
+  "utf8",
+);
+
+describe("Conversation's send surface generation-tags its receipt clears too", () => {
+  it("captures onSendStart's return value instead of discarding it", () => {
+    // The pre-fix shape was a bare `onSendStart?.(thread.id);` statement —
+    // the call happened, but nothing captured what it returned, so every
+    // terminal callback below had nothing to forward and fell through to
+    // `shouldClearReceipt`'s undefined-generation branch on every single
+    // send from this surface.
+    expect(runtimeTs).not.toMatch(/^\s*onSendStart\?\.\(thread\.id\);\s*$/m);
+    expect(runtimeTs).toMatch(/const gen = onSendStart\?\.\(thread\.id\);/);
+  });
+
+  it("forwards that generation to all three terminal outcomes", () => {
+    expect(runtimeTs).toMatch(/onSendDetached\?\.\(thread\.id, answer\.turnId, gen\);/);
+    expect(runtimeTs).toMatch(/onSendEnd\?\.\(thread\.id, gen\);/);
+    expect(runtimeTs).toMatch(/onSendFailed\?\.\(thread\.id, gen\);/);
+  });
+
+  it("declares onSendStart as returning a generation, not void", () => {
+    // A `void`-typed signature would silently defeat the capture above by
+    // letting a caller assign `gen` and never mean it — TypeScript would
+    // accept `const gen = onSendStart?.(thread.id)` either way, so the
+    // capture line alone does not prove the *type* was updated to promise a
+    // value exists to capture.
+    expect(runtimeTs).toMatch(
+      /onSendStart\?: \(threadId: string\) => number \| undefined;/,
+    );
+  });
+});
