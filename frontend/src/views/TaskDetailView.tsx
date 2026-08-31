@@ -169,20 +169,24 @@ export const MAX_DISCUSSION_CHARS = 4000;
 const DISCUSSION_COUNTER_FROM = MAX_DISCUSSION_CHARS - 500;
 
 /**
- * Clips a message to {@link MAX_DISCUSSION_CHARS}, counting the way the host
- * counts.
+ * How long a message is, counting the way the host counts.
  *
  * Codepoints, not `String.length`: that is UTF-16 code units, so a paste of
- * emoji would be cut at half the limit the host actually applies, and the
- * counter beside it would have been describing a different rule from the one
- * doing the cutting. A plain `maxLength` on the textarea has the same flaw,
+ * emoji would measure double the limit the host actually applies, and the
+ * counter would be describing a different rule from the one the host enforces.
+ * A plain `maxLength` on the textarea has the same flaw *and* the one below,
  * which is why there is not one.
+ *
+ * The composer refuses an over-long message rather than trimming it to fit.
+ * Clipping inside `onChange` was worse than the truncation it was guarding
+ * against: pasting 4,500 characters silently destroyed 500 of them, past the
+ * reach of the browser's own undo, and the operator was told about it by a
+ * counter reading a number they had not typed. Keeping the text and disabling
+ * Post says the same thing and costs them nothing — the same shape as the
+ * redirect composer, which keeps its text when a send fails.
  */
-export function capDiscussion(text: string): string {
-  const chars = [...text];
-  return chars.length <= MAX_DISCUSSION_CHARS
-    ? text
-    : chars.slice(0, MAX_DISCUSSION_CHARS).join("");
+export function countDiscussionChars(text: string): number {
+  return [...text].length;
 }
 
 function priorityStyle(priority: string): string {
@@ -2414,12 +2418,23 @@ export function DiscussionTab({
     }
   }
 
+  // What Post would actually send, and by how much it is over the host's limit.
+  //
+  // Measured on the *trimmed* text because that is what goes on the wire: a
+  // message at exactly the cap followed by a stray newline is not over it, and
+  // blocking it would leave the operator hunting an invisible character.
+  const body = text.trim();
+  const used = countDiscussionChars(body);
+  const over = used - MAX_DISCUSSION_CHARS;
+
   async function post() {
-    // Clipped on the way in as well as on the way out (`onChange`): a value set
-    // by anything other than typing — a paste handled by the browser's own
-    // undo, an autofill — would otherwise reach a host that truncates silently.
-    const body = capDiscussion(text.trim());
-    if (!body || busy) return;
+    // The same `body` and the same `over` the Post button is disabled by, so the
+    // keyboard path (Enter) cannot post something the button refuses. Guarded
+    // here as well as there because Enter does not consult a `disabled`
+    // attribute — and because the host would take an over-long message and
+    // truncate it to a `201`, which is the silence this whole composer exists
+    // to replace.
+    if (!body || over > 0 || busy) return;
     setBusy(true);
     try {
       const posted = await postTaskDiscussion(client, company, taskId, body);
@@ -2543,12 +2558,15 @@ export function DiscussionTab({
           className="min-h-16 text-xs"
           disabled={busy}
           aria-describedby={counterId}
-          // Clipped here rather than left to the host, which truncates a long
-          // post to `MAX_DISCUSSION_CHARS` and answers `201` — so the tail
-          // vanished with no warning and no way to get it back, and the
-          // operator found out by reading their own message back. See
-          // `capDiscussion` for why this is not a `maxLength`.
-          onChange={(e) => setText(capDiscussion(e.target.value))}
+          // Everything they typed or pasted is kept, over the cap included.
+          // The host truncates a long post to `MAX_DISCUSSION_CHARS` and
+          // answers `201` — so the tail used to vanish with no warning — but
+          // the fix for that is to refuse the send, not to destroy the
+          // overflow here. Neither a `maxLength` nor a clip in this handler can
+          // be undone: the browser's undo stack does not reach a value React
+          // rewrote. The counter and the disabled Post below say what is wrong
+          // while the words are still on the screen to fix.
+          onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             // Enter posts; Shift+Enter is a newline. A note about a task is
             // usually one line, and the mouse trip for every one of them is
@@ -2562,7 +2580,13 @@ export function DiscussionTab({
         <Button
           size="sm"
           className="h-8 shrink-0"
-          disabled={busy || !text.trim()}
+          // Down while the message is over the cap, with the counter — which
+          // this points at — carrying the reason and the number to cut. Saving
+          // is disabled rather than silently doing nothing everywhere else on
+          // this page; this is that.
+          disabled={busy || !body || over > 0}
+          aria-describedby={counterId}
+          data-testid="discussion-post"
           onClick={() => void post()}
         >
           {busy ? (
@@ -2580,14 +2604,22 @@ export function DiscussionTab({
         permanent `0 of 4000` under every one-line note is noise. See
         `DISCUSSION_COUNTER_FROM`.
       */}
-      <DiscussionCounter id={counterId} used={[...text].length} />
+      <DiscussionCounter id={counterId} used={used} />
     </div>
   );
 }
 
-/** The composer's character count, and the sentence that appears at the cap. */
+/**
+ * The composer's character count, the sentence that appears at the cap, and the
+ * one that appears past it.
+ *
+ * Past the cap this is the only place the operator is told why Post went down,
+ * so it names the number to cut rather than just going red. Both the textarea
+ * and the Post button point at it with `aria-describedby`, which is what makes
+ * "disabled with a reason" true for a screen reader and not only on screen.
+ */
 function DiscussionCounter({ id, used }: { id: string; used: number }) {
-  const atCap = used >= MAX_DISCUSSION_CHARS;
+  const over = used - MAX_DISCUSSION_CHARS;
   const shown = used >= DISCUSSION_COUNTER_FROM;
   return (
     <p
@@ -2595,11 +2627,16 @@ function DiscussionCounter({ id, used }: { id: string; used: number }) {
       className={cn(
         "text-right text-2xs tabular-nums",
         !shown && "sr-only",
-        shown && (atCap ? "text-status-blocked-text" : "text-muted-foreground"),
+        shown &&
+          (used >= MAX_DISCUSSION_CHARS
+            ? "text-status-blocked-text"
+            : "text-muted-foreground"),
       )}
     >
       {used} of {MAX_DISCUSSION_CHARS} characters
-      {atCap && " — the most a message can hold. Post this and start another."}
+      {over > 0 &&
+        ` — ${over} over the most a message can hold. Shorten it by ${over}, or post it in two.`}
+      {over === 0 && " — the most a message can hold. Post this and start another."}
     </p>
   );
 }

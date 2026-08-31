@@ -41,8 +41,9 @@ export function computeTaskPatch(draft: PatchTask, current: Task): PatchTask {
  * Both fields are optional, and "absent" is a **third** state that must not
  * collapse into "clean": a caller that has not wired the read knows nothing
  * about this card's effects, which is not the same claim as a read that came
- * back empty. `dispatchNeedsConfirm` treats absent the way the host treats
- * `historyIncomplete` — as "cannot say", which confirms.
+ * back empty. That holds **per field** — one half wired and the other absent is
+ * still "cannot say", not a half-price all-clear. See {@link readEffectHistory},
+ * which turns this into the three states rather than leaving it to falsiness.
  */
 export interface EffectHistory {
   /** The effects the journal recorded as executed, or absent if not read. */
@@ -68,6 +69,44 @@ export function patchDispatchesRun(patch: PatchTask): boolean {
 }
 
 /**
+ * What the journal is able to claim about this card's irreversible effects.
+ *
+ * Three states, spelled out, because **two of them are falsy and only one of
+ * those two may skip the confirmation**. Leaning on falsiness is what let a
+ * half-read history — one field wired, the other never passed — decide "clean"
+ * and wave a re-dispatch through on a card that may already have sent a
+ * payment.
+ *
+ * * `"dirty"`  — read, and it recorded something that cannot be taken back.
+ * * `"clean"`  — **both** halves read, and both came back empty.
+ * * `"unknown"` — a half was not read. Not a claim about the card at all.
+ *
+ * `"unknown"` confirms. It has to: the whole point of the gate is that a caller
+ * which cannot describe what this card already did must not assert it did
+ * nothing, and a guard that failed open there would be dead in a way
+ * indistinguishable from working.
+ */
+export type EffectHistoryVerdict = "clean" | "dirty" | "unknown";
+
+/**
+ * Reads {@link EffectHistory} into the three states above.
+ *
+ * A field that *was* read and says something happened settles it as `"dirty"`
+ * whichever way the other field went — an unread second field cannot make a
+ * recorded payment un-happen. Only when nothing is dirty does the absence of
+ * either half matter, and then it is `"unknown"` rather than `"clean"`.
+ */
+export function readEffectHistory(history: EffectHistory): EffectHistoryVerdict {
+  if ((history.irreversible?.length ?? 0) > 0) return "dirty";
+  if (history.historyIncomplete === true) return "dirty";
+  // Nothing known-dirty. "Clean" is a positive claim, so it needs both reads to
+  // have actually happened; an absent half is "cannot say", never an all-clear.
+  const effectsRead = history.irreversible !== undefined;
+  const completenessRead = history.historyIncomplete !== undefined;
+  return effectsRead && completenessRead ? "clean" : "unknown";
+}
+
+/**
  * Whether saving this patch must stop and say what already happened (#351).
  *
  * The condition is deliberately the same one `RetryButton` uses — confirm when
@@ -79,10 +118,5 @@ export function patchDispatchesRun(patch: PatchTask): boolean {
  */
 export function dispatchNeedsConfirm(patch: PatchTask, history: EffectHistory): boolean {
   if (!patchDispatchesRun(patch)) return false;
-  // Neither half read: the dialog cannot say this card is clean, so it says so
-  // by confirming. This is what keeps the guard live for a caller that has not
-  // wired the journal read yet, instead of silently passing a gap off as an
-  // all-clear.
-  if (history.irreversible === undefined && history.historyIncomplete === undefined) return true;
-  return (history.irreversible?.length ?? 0) > 0 || history.historyIncomplete === true;
+  return readEffectHistory(history) !== "clean";
 }

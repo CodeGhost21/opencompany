@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { IrreversibleEffect } from "@/api/tasks";
-import { dispatchNeedsConfirm, patchDispatchesRun } from "@/lib/task-edit";
+import { dispatchNeedsConfirm, patchDispatchesRun, readEffectHistory } from "@/lib/task-edit";
 
 /**
  * The edit dialog's Column select is a second route to the write issue #351
@@ -83,9 +83,30 @@ describe("dispatchNeedsConfirm", () => {
     expect(dispatchNeedsConfirm({ column: "working" }, {})).toBe(true);
   });
 
-  it("still confirms when only one half was wired and it says nothing is known", () => {
+  /**
+   * The partial reads, which is where a falsiness check fails open.
+   *
+   * `{ irreversible: [] }` on its own is *not* "this card is clean" — it is
+   * "no effect was described, and nobody asked whether the journal could
+   * describe them". `{ historyIncomplete: false }` on its own is the mirror:
+   * the journal can describe its history, and nothing read what it says. Each
+   * is one empty-looking field away from an all-clear it has no standing to
+   * give, and each has to confirm.
+   */
+  it("confirms when only one half of the history was read", () => {
+    expect(dispatchNeedsConfirm({ column: "working" }, { irreversible: [] })).toBe(true);
+    expect(dispatchNeedsConfirm({ column: "working" }, { historyIncomplete: false })).toBe(true);
+  });
+
+  /**
+   * A half that *was* read and says something happened settles it on its own.
+   * The unread other half cannot make a recorded payment un-happen.
+   */
+  it("confirms on a dirty half whatever the unread half would have said", () => {
     expect(dispatchNeedsConfirm({ column: "working" }, { historyIncomplete: true })).toBe(true);
-    expect(dispatchNeedsConfirm({ column: "working" }, { irreversible: [] })).toBe(false);
+    expect(
+      dispatchNeedsConfirm({ column: "working" }, { irreversible: [effect("payment.send")] }),
+    ).toBe(true);
   });
 
   /**
@@ -98,5 +119,32 @@ describe("dispatchNeedsConfirm", () => {
     expect(dispatchNeedsConfirm({ column: "done" }, history)).toBe(false);
     expect(dispatchNeedsConfirm({ title: "renamed" }, history)).toBe(false);
     expect(dispatchNeedsConfirm({}, history)).toBe(false);
+  });
+});
+
+/**
+ * The three states, pinned by name rather than through the boolean.
+ *
+ * `dispatchNeedsConfirm` collapses `"dirty"` and `"unknown"` into the same
+ * answer, which is correct and also exactly what hid the bug this replaced: a
+ * partial read returned `false` and read as a considered "clean" instead of the
+ * gap it was. Naming the verdict makes "cannot say" a state a test can see.
+ */
+describe("readEffectHistory", () => {
+  it("calls a card clean only when both halves were read and both were empty", () => {
+    expect(readEffectHistory({ irreversible: [], historyIncomplete: false })).toBe("clean");
+  });
+
+  it("calls a recorded effect, or an admitted gap in the journal, dirty", () => {
+    expect(
+      readEffectHistory({ irreversible: [effect("payment.send")], historyIncomplete: false }),
+    ).toBe("dirty");
+    expect(readEffectHistory({ irreversible: [], historyIncomplete: true })).toBe("dirty");
+  });
+
+  it("calls an unread half unknown, never clean", () => {
+    expect(readEffectHistory({})).toBe("unknown");
+    expect(readEffectHistory({ irreversible: [] })).toBe("unknown");
+    expect(readEffectHistory({ historyIncomplete: false })).toBe("unknown");
   });
 });

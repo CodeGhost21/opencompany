@@ -42,7 +42,7 @@ vi.mock("sonner", () => {
   return { toast };
 });
 
-const { DiscussionTab, MAX_DISCUSSION_CHARS, capDiscussion } = await import(
+const { DiscussionTab, MAX_DISCUSSION_CHARS, countDiscussionChars } = await import(
   "@/views/TaskDetailView"
 );
 
@@ -84,6 +84,21 @@ async function render(client: OpenCompanyClient) {
 
 function textarea(): HTMLTextAreaElement {
   return container.querySelector("textarea") as HTMLTextAreaElement;
+}
+
+function post(): HTMLButtonElement {
+  return container.querySelector('[data-testid="discussion-post"]') as HTMLButtonElement;
+}
+
+/** Records the bodies a post actually reached the client with. */
+function postingClient(seen: string[]): OpenCompanyClient {
+  return {
+    scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+    post: async (_path: string, body: unknown) => {
+      seen.push((body as { text: string }).text);
+      return { seq: 8, author: "ops", atMillis: 0, text: (body as { text: string }).text };
+    },
+  } as unknown as OpenCompanyClient;
 }
 
 /**
@@ -129,31 +144,23 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-describe("capDiscussion", () => {
-  it("leaves anything within the limit exactly as it was typed", () => {
-    expect(capDiscussion("a short note")).toBe("a short note");
-    const atCap = "x".repeat(MAX_DISCUSSION_CHARS);
-    expect(capDiscussion(atCap)).toBe(atCap);
-  });
-
-  it("clips past it, to the host's own number", () => {
-    expect([...capDiscussion("x".repeat(MAX_DISCUSSION_CHARS + 500))].length).toBe(
-      MAX_DISCUSSION_CHARS,
-    );
+describe("countDiscussionChars", () => {
+  it("counts what the operator typed", () => {
+    expect(countDiscussionChars("a short note")).toBe(12);
+    expect(countDiscussionChars("")).toBe(0);
   });
 
   it("counts codepoints, the way the host counts them", () => {
     // `String.length` is UTF-16 code units, so a message of astral-plane
-    // characters would be cut at half the limit the host actually applies —
-    // and the counter beside it would have been describing a different rule
-    // from the one doing the cutting. `cap_discussion` takes `chars()`.
+    // characters would measure double the limit the host actually applies, and
+    // the counter would be describing a different rule from the one the host
+    // enforces. `cap_discussion` in `src/ports/tasks.rs` takes `chars()`.
     //
-    // Deliberately *past* the cap and not at it: a fixture of exactly
-    // `MAX_DISCUSSION_CHARS` emoji returns early on the length check and never
-    // reaches the slice, which is how the first version of this test passed
-    // against a `text.slice(…)` that cut 4000 emoji down to 2000.
-    const emoji = "🙂".repeat(MAX_DISCUSSION_CHARS + 100);
-    expect([...capDiscussion(emoji)].length).toBe(MAX_DISCUSSION_CHARS);
+    // A `maxLength` on the textarea would have had the same flaw, which is why
+    // there is not one — and it could not be undone either, which is the other
+    // reason.
+    expect("🙂".repeat(10).length).toBe(20);
+    expect(countDiscussionChars("🙂".repeat(10))).toBe(10);
   });
 });
 
@@ -177,11 +184,73 @@ describe("the composer surfaces the limit", () => {
     expect(counter().textContent).toContain(`${MAX_DISCUSSION_CHARS - 10} of`);
   });
 
-  it("refuses the overflow in the box rather than letting the host eat it", async () => {
+  it("says so at exactly the cap, without calling it an error", async () => {
     await render(stallingClient([]));
-    await type(textarea(), "x".repeat(MAX_DISCUSSION_CHARS + 200));
-    expect([...textarea().value].length).toBe(MAX_DISCUSSION_CHARS);
+    await type(textarea(), "x".repeat(MAX_DISCUSSION_CHARS));
     expect(counter().textContent).toContain("the most a message can hold");
+    expect(post().disabled).toBe(false);
+  });
+
+  /**
+   * The overflow is refused, **not destroyed**.
+   *
+   * Clipping inside `onChange` reached for the same goal and cost more than the
+   * truncation it was guarding against: pasting 4,200 characters silently threw
+   * 200 of them away, past the reach of the browser's undo, and reported it
+   * with a counter reading a number the operator had never typed. Keeping the
+   * words and taking Post down says the same thing while the text is still on
+   * screen to shorten.
+   */
+  it("keeps an over-long paste and refuses to send it", async () => {
+    await render(stallingClient([]));
+    const over = "x".repeat(MAX_DISCUSSION_CHARS + 200);
+    await type(textarea(), over);
+
+    expect(textarea().value).toBe(over);
+    expect(countDiscussionChars(textarea().value)).toBe(MAX_DISCUSSION_CHARS + 200);
+    expect(post().disabled).toBe(true);
+    expect(counter().textContent).toContain("200 over the most a message can hold");
+  });
+
+  /**
+   * Codepoints on the live path too, not only in the counting helper. A
+   * `String.length` gate would have called 2,100 emoji — well inside the host's
+   * limit — an overflow and refused a message the host would have taken whole.
+   */
+  it("measures a paste of emoji the way the host does", async () => {
+    await render(stallingClient([]));
+    // 2100 codepoints, but 4200 UTF-16 units: over the cap only if you count
+    // the wrong thing.
+    await type(textarea(), "🙂".repeat(2_100));
+    expect(post().disabled).toBe(false);
+    expect(counter().className).toContain("sr-only");
+  });
+
+  /**
+   * Enter posts, and it does not consult the button's `disabled` attribute —
+   * so the refusal has to live in `post()` as well, or the keyboard walks
+   * straight past it into the truncating host.
+   */
+  it("refuses the same message on Enter as it does on the button", async () => {
+    const seen: string[] = [];
+    await render(postingClient(seen));
+    await type(textarea(), "x".repeat(MAX_DISCUSSION_CHARS + 1));
+    await act(async () => {
+      textarea().dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(seen).toHaveLength(0);
+
+    // The same gesture on a message that fits does post, so the assertion above
+    // is about the length and not about the key never working.
+    await type(textarea(), "looks good to me");
+    await act(async () => {
+      textarea().dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(seen).toHaveLength(1);
   });
 });
 

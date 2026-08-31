@@ -126,10 +126,10 @@ export function TaskEditDialog({
    *
    * Both feed the same gate `RetryButton` uses on the Task Detail screen,
    * because saving `column: "working"` here is the identical write. **Absent
-   * is not "clean"** — a caller that has not wired these gets the confirmation
-   * unconditionally on a dispatch, because a dialog that cannot say what
-   * already happened must not pass that gap off as an all-clear. See
-   * `dispatchNeedsConfirm`.
+   * is not "clean"** — and that is per field: a caller that has not wired
+   * *either* of these gets the confirmation unconditionally on a dispatch,
+   * because a dialog that cannot say what already happened must not pass that
+   * gap off as an all-clear. See `readEffectHistory`.
    */
   irreversible?: IrreversibleEffect[];
   historyIncomplete?: boolean;
