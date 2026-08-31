@@ -27,7 +27,6 @@ import {
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarGroup,
   SidebarHeader,
   SidebarInset,
@@ -46,7 +45,8 @@ import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import { RouteLoading } from "@/components/route-loading";
-import { WindowControlsInset } from "@/components/window-chrome";
+import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
+import { WindowTitleBar } from "@/components/window-title-bar";
 import {
   RESTING_ROW,
   SidebarUtilityBar,
@@ -3366,8 +3366,14 @@ export function AppShell({
       {setupController}
 
       {/* `SidebarProvider` paints the chrome layer itself — see its own note on
-          why that fill lives there and not here (issue #1178). */}
-      <SidebarProvider className="h-svh overflow-hidden">
+          why that fill lives there and not here (issue #1178).
+
+          `flex-col`, because the shell is now a title row above a
+          sidebar-and-content row rather than a bare row of two columns. The
+          provider stays the outermost box — the title row holds the profile
+          control, which is inside this context — so the direction is flipped
+          here rather than by wrapping the provider in another element. */}
+      <SidebarProvider className="h-svh flex-col overflow-hidden">
         <a
           href={`#${MAIN_CONTENT_ID}`}
           className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
@@ -3378,75 +3384,71 @@ export function AppShell({
         >
           Skip to content
         </a>
-      <Sidebar collapsible="icon">
+      {/* The window's one title row, above the sidebar and above the content
+          and spanning the full width of the window. It carries the two controls
+          that are about the *console* rather than about the page: which company
+          you are in, and who you are signed in as. Both used to sit in the
+          sidebar column — the switcher at its head under a reserved strip for
+          the traffic lights, the profile row in its footer — which put them at
+          opposite ends of a 13.5rem column and left the lights overlapping a
+          narrow column instead of insetting a bar. See `window-title-bar.tsx`,
+          which owns the geometry including the traffic-light inset. */}
+      <WindowTitleBar
+        switcher={
+          <HostSwitcher
+            variant="titlebar"
+            companyName={feed.status.name}
+            // The company's lifecycle, and every company on this host: both
+            // were rows in the sidebar footer, and both are facts about *which
+            // company you are in* — which is what this control is. See
+            // `HostSwitcher`'s `companyState` for why the lifecycle is not
+            // folded into the connection dot.
+            companyState={lifecycle(feed.status.lifecycle, feed.status.emergency_paused)}
+            companies={companies}
+            activeCompany={company}
+            onSwitchCompany={onSwitchCompany}
+            onBackToPicker={onBackToPicker}
+            onCreateCompany={onCreateCompany}
+            canCreateCompany={client.carriesPlatformBearer}
+          />
+        }
+        profile={
+          // Who you are signed in as, and nothing else. It renders nothing
+          // where there is nobody to name — a host with no sign-in, or a
+          // session that has just gone — and the row simply closes up.
+          <ProfileRow variant="titlebar" client={client} company={company} />
+        }
+      />
+
+      {/* The shell proper, below the title row: the sidebar column and the
+          content column, still flex siblings so the sidebar's `peer` selectors
+          and its in-flow width gap keep working. */}
+      <div className="flex w-full min-h-0 flex-1">
+      <Sidebar
+        collapsible="icon"
+        // The sidebar's container is `fixed inset-y-0 h-svh` — it positions
+        // against the VIEWPORT, so a title row placed above it in the flow does
+        // not push it down and the column would slide underneath the bar. This
+        // is the offset that puts it back, as inline style rather than a class
+        // because `top-*` and `h-*` would be fighting `inset-y-0` and `h-svh`
+        // on the same element and the winner would come down to stylesheet
+        // order.
+        style={{
+          top: WINDOW_TITLE_BAR_HEIGHT,
+          height: `calc(100svh - ${WINDOW_TITLE_BAR_HEIGHT}px)`,
+        }}
+      >
         <SidebarHeader>
-          {/* macOS floats the traffic lights over this corner once the window
-              gives up its title bar, and this corner is the company switcher.
-              Reserve the strip they land in, and let it drag. Renders nothing
-              anywhere else — see `window-chrome.tsx`. */}
-          <WindowControlsInset />
-          {/* The header is the column talking about itself: which host this
-              console is looking at, the utilities that act on the console
-              rather than on the company, and whether the column is showing.
-              Everything BELOW it — the nav group and the footer's standing
-              controls — is the company. Collapse used to be the first row under
-              the switcher, which put a chrome control at the head of a list of
-              destinations and made it read as one (issue #1177); it now sits on
-              the utility bar with the three other controls of its kind.
-
-              `flex-col` on the rail is not a preference. The collapsed column
-              is `--sidebar-width-icon` (3rem) and this block is `p-2`, leaving
-              32px — the exact width of the switcher's glyph, with nothing left
-              over to put beside it. See `SidebarCollapseButton`. */}
-          <div className="flex items-center gap-1.5 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1">
-            {/* Which host, and how every host is doing. It leads because it
-                names where you are — the first thing the column should answer
-                — and it is the only control here that can take you somewhere
-                else entirely. See `host-switcher.tsx`; it replaced the icon
-                rail that used to stand outside this sidebar (issue #1142).
-
-                `min-w-0` so the nameplate truncates instead of pushing the
-                button off the end of a 13.5rem column. */}
-            <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
-              <HostSwitcher
-                companyName={feed.status.name}
-                // The company's lifecycle, and every company on this host:
-                // both were rows in the sidebar footer, and both are facts
-                // about *which company you are in* — which is what this control
-                // is. See `HostSwitcher`'s `companyState` for why the lifecycle
-                // is not folded into the connection dot.
-                companyState={lifecycle(feed.status.lifecycle, feed.status.emergency_paused)}
-                companies={companies}
-                activeCompany={company}
-                onSwitchCompany={onSwitchCompany}
-                onBackToPicker={onBackToPicker}
-                onCreateCompany={onCreateCompany}
-                canCreateCompany={client.carriesPlatformBearer}
-              />
-            </div>
-          </div>
-          {/* Directly under the switcher: Settings, Feedback, Discord and
-              Collapse, as one bar of icons rather than four full-width rows
-              spread across the nav and the footer. See `SidebarUtilityBar`. */}
+          {/* What is left of the header once the switcher moved up into the
+              title row: Settings, Feedback, Discord and Collapse, as one bar of
+              icons rather than four full-width rows spread across the nav and
+              the footer. See `SidebarUtilityBar`. */}
           <SidebarUtilityBar view={view} onNavigate={setView} />
         </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
           <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
-        <SidebarFooter>
-          {/* Who you are signed in as, and nothing else.
-
-              The lifecycle row and the "Switch company" row that used to stand
-              here have both moved into the host switcher at the top of the
-              column — see its `companyState` and its Companies group. Both were
-              answers to "which company am I in, and how is it doing", asked at
-              the opposite end of the sidebar from the control that names it.
-
-              It renders nothing where there is nobody to name — a host with no
-              sign-in, or a session that has just gone. */}
-          <ProfileRow client={client} company={company} />
-        </SidebarFooter>
         </nav>
         <SidebarRail />
       </Sidebar>
@@ -3908,6 +3910,7 @@ export function AppShell({
           <SidebarTrigger aria-label="Toggle sidebar" />
         </div>
       </SidebarInset>
+      </div>
 
       <FeedbackDialog
         client={client}

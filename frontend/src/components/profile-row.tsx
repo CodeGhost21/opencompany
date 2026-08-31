@@ -32,9 +32,22 @@ import { toneFor } from "@/lib/team";
 export function ProfileRow({
   client,
   company,
+  variant = "sidebar",
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Which chrome this is drawn in.
+   *
+   * `titlebar` is the home: the far right of the window's title row, opposite
+   * the company switcher. `sidebar` is the footer row it used to be, kept for
+   * any chrome that still gives it a column to sit at the bottom of.
+   *
+   * The two differ in shape and in nothing else. A sidebar footer row is a
+   * full-width menu item; a title-row control sizes to its own content and
+   * stops. Both open the same dialog.
+   */
+  variant?: "sidebar" | "titlebar";
 }) {
   const [me, setMe] = useState<Me | null>(null);
   const [open, setOpen] = useState(false);
@@ -67,6 +80,54 @@ export function ProfileRow({
   if (!me || typeof me !== "object" || !("email" in me) || !("id" in me)) return null;
   const name = personName(me);
 
+  // 20px, not the 16px a sidebar icon slot would take: 16 is below the size a
+  // face can be read at (see `MessageRow`'s facepile note), and this is the one
+  // control on screen whose whole job is to show you yours. A row's icon slot
+  // sizes to its content, so the extra four pixels cost the label nothing.
+  const face = (
+    <TeammateAvatar
+      name={name}
+      tone={toneFor(me.id || me.email)}
+      avatar={personAvatar(me)}
+      className="size-5 rounded-[4px] text-3xs"
+    />
+  );
+
+  const dialog = (
+    <ProfileDialog
+      client={client}
+      company={company}
+      me={me}
+      open={open}
+      onOpenChange={setOpen}
+      onSaved={setMe}
+    />
+  );
+
+  if (variant === "titlebar") {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          data-testid="profile-row"
+          // Native `title` rather than the sidebar's tooltip component, which
+          // only renders while the rail is collapsed and needs the sidebar
+          // context to know it. This control is not in the rail any more.
+          title={name}
+          // Capped so a long display name cannot push the switcher off the
+          // other end of a narrow window; it truncates instead, exactly as it
+          // did in the column.
+          className="flex max-w-48 items-center gap-2 rounded-lg px-2 py-1 text-sm transition hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        >
+          {face}
+          <span className="truncate">{name}</span>
+        </button>
+        {dialog}
+      </>
+    );
+  }
+
   return (
     <SidebarMenu>
       <SidebarMenuItem>
@@ -75,28 +136,11 @@ export function ProfileRow({
           onClick={() => setOpen(true)}
           data-testid="profile-row"
         >
-          {/* 20px, not the 16px a sidebar icon slot would take: 16 is below the
-              size a face can be read at (see `MessageRow`'s facepile note), and
-              this is the one row on screen whose whole job is to show you yours.
-              A row's icon slot sizes to its content, so the extra four pixels
-              cost the label nothing. */}
-          <TeammateAvatar
-            name={name}
-            tone={toneFor(me.id || me.email)}
-            avatar={personAvatar(me)}
-            className="size-5 rounded-[4px] text-3xs"
-          />
+          {face}
           <span className="truncate">{name}</span>
         </SidebarMenuButton>
       </SidebarMenuItem>
-      <ProfileDialog
-        client={client}
-        company={company}
-        me={me}
-        open={open}
-        onOpenChange={setOpen}
-        onSaved={setMe}
-      />
+      {dialog}
     </SidebarMenu>
   );
 }

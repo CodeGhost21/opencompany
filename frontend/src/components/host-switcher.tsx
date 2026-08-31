@@ -188,13 +188,16 @@ interface Props {
   /**
    * Which chrome this is drawn in.
    *
-   * `sidebar` is the home: the header row of the app shell. `standalone` is for
-   * the screens that have no shell — a host that cannot be reached, a sign-in,
-   * the desktop's "no host to show" — where the switcher is the only way back
-   * to a host that works, and where its absence is what stranded an operator
-   * when the rail was the one holding it.
+   * `titlebar` is the home: the window's full-width title row, right of the
+   * traffic lights and left of everything else. `sidebar` is where that trigger
+   * used to live — the header row of the app shell — and is kept for any chrome
+   * that still hands the switcher a column to sit in. `standalone` is for the
+   * screens that have no shell — a host that cannot be reached, a sign-in, the
+   * desktop's "no host to show" — where the switcher is the only way back to a
+   * host that works, and where its absence is what stranded an operator when
+   * the rail was the one holding it.
    */
-  variant?: "sidebar" | "standalone";
+  variant?: "sidebar" | "standalone" | "titlebar";
   /**
    * The company on screen, when there is one.
    *
@@ -272,11 +275,13 @@ export function HostSwitcher({
         data-testid="host-switcher-status"
         className={cn(
           "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2",
-          // The ring is a CUT-OUT of the ground, and the two variants stand on
+          // The ring is a CUT-OUT of the ground, and the variants stand on
           // different grounds (issue #1178). In the shell the trigger has no
-          // fill at rest, so half this ring lands on the window chrome; the
-          // standalone console draws its own `bg-sidebar` card behind it.
-          variant === "sidebar" ? "ring-chrome" : "ring-sidebar",
+          // fill at rest, so half this ring lands on the window chrome — true
+          // of the title row as much as of the sidebar column, both of which
+          // are the one `bg-chrome` layer showing through. Only the standalone
+          // console draws its own `bg-sidebar` card behind it.
+          variant === "standalone" ? "ring-sidebar" : "ring-chrome",
           STATUS_COPY[worst].dot,
         )}
       />
@@ -355,6 +360,21 @@ export function HostSwitcher({
   };
 
   if (!menu) {
+    // A nameplate with nothing to open. In the title row that is a plain box
+    // rather than a sidebar menu item: the row is not a column of rows, and a
+    // `SidebarMenuButton` there would bring a full-width `w-full` and a hover
+    // fill that promises a click this case does not have.
+    if (variant === "titlebar") {
+      return (
+        <div
+          className="flex min-w-0 items-center gap-2 px-2 py-1"
+          title={switcherTooltip}
+          {...triggerData}
+        >
+          {nameplate}
+        </div>
+      );
+    }
     return (
       <SidebarMenu>
         <SidebarMenuItem>
@@ -507,6 +527,40 @@ export function HostSwitcher({
       </DropdownMenuItem>
     </DropdownMenuContent>
   );
+
+  if (variant === "titlebar") {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          // No `aria-label`, for the reason spelled out on the standalone
+          // trigger below: the company's name and its status are the content,
+          // and a label would speak over both.
+          render={
+            <button
+              type="button"
+              // No border, no shadow, no fill at rest. This trigger stands on
+              // the window chrome rather than in a card — it *is* the title row
+              // — so it announces itself on hover and on focus and otherwise
+              // reads as the window naming itself.
+              //
+              // `w-full` against the row's own `max-w-72` cap, not a width of
+              // its own: the cap belongs to the layout that placed it, and a
+              // second width here would be two answers to one question.
+              className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left transition hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-[popup-open]:bg-sidebar-accent"
+            />
+          }
+          {...triggerData}
+        >
+          {nameplate}
+          {/* Drops rather than flies out to the right: there is no column
+              beside this trigger to open into, and the row it sits in is the
+              top edge of the window. */}
+          <ChevronsUpDown className="ml-auto size-4 shrink-0 text-muted-foreground" />
+        </DropdownMenuTrigger>
+        {renderMenu("bottom")}
+      </DropdownMenu>
+    );
+  }
 
   if (variant === "standalone") {
     return (
