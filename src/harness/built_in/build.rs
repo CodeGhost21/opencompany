@@ -328,6 +328,22 @@ pub fn build_agent(
             deps.approval_requests.clone(),
         ),
     ));
+    // Issue #1890 F: reading another thread of the channel this turn is in.
+    //
+    // On **every** roster agent's belt, not just the orchestrator's — the agent
+    // that needs it is the one answering in the channel, and gating it on
+    // delegation grants would leave a desk lead able to see #1890 E's thread
+    // index and unable to follow any of it.
+    //
+    // Intrinsic on the same terms as the approval tool above: it reads this
+    // company's own journal, scoped at call time to the conversation the turn
+    // is in, so there is no grant for it to be covered by.
+    if let Some(events) = deps.events.clone() {
+        tools.push(Box::new(crate::harness::thread_tools::ReadThreadTool::new(
+            company.clone(),
+            events,
+        )));
+    }
     #[cfg(feature = "mcp")]
     {
         // These read the installed-server registry, so installs and lifecycle

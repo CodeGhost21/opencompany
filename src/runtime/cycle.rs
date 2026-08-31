@@ -3580,6 +3580,17 @@ const THREAD_INDEX_PAGE: usize = 256;
 
 /// One line of the index — a thread the turn may decide to ask about.
 struct ThreadLine {
+    /// The root's sequence, which is the **handle** `read_thread` takes
+    /// (issue #1890 F).
+    ///
+    /// Carried even though a reader gains nothing from seeing it, because the
+    /// alternative is a tool that matches on the opening words — and a model
+    /// paraphrases rather than quotes. Strict matching then fails an obviously
+    /// correct reference, and loose matching reads the *wrong* thread while
+    /// looking like success, which is the cross-thread leak #1890 A exists to
+    /// prevent arriving through the tool instead of the seed. An id is either
+    /// in the index or it is not.
+    root: EventSeq,
     /// The root's own opening words, truncated. The discriminator, and what a
     /// later reference will echo.
     opening: String,
@@ -3593,17 +3604,21 @@ struct ThreadLine {
 }
 
 impl ThreadLine {
-    /// `- "draft the launch email" — 4 replies`
+    /// `- [41] "draft the launch email" — 4 replies`
     ///
     /// State before count where there is one: "finished → In review" answers
     /// the question a reader is actually asking, and a reply count is only how
     /// busy it was.
+    ///
+    /// The id leads because it is the one part a tool call must reproduce
+    /// exactly; the words are what a *reference* will echo, and they follow.
     fn render(&self) -> String {
+        let id = self.root.value();
         match (&self.landed, self.replies) {
-            (Some(landing), _) => format!("- {:?} — {landing}", self.opening),
-            (None, 0) => format!("- {:?} — no reply yet", self.opening),
-            (None, 1) => format!("- {:?} — 1 reply", self.opening),
-            (None, n) => format!("- {:?} — {n} replies", self.opening),
+            (Some(landing), _) => format!("- [{id}] {:?} — {landing}", self.opening),
+            (None, 0) => format!("- [{id}] {:?} — no reply yet", self.opening),
+            (None, 1) => format!("- [{id}] {:?} — 1 reply", self.opening),
+            (None, n) => format!("- [{id}] {:?} — {n} replies", self.opening),
         }
     }
 }
@@ -3661,6 +3676,7 @@ fn thread_index(
                 roots.insert(
                     stored.seq,
                     ThreadLine {
+                        root: stored.seq,
                         opening,
                         replies: 0,
                         landed: None,
@@ -10901,7 +10917,10 @@ timeout)",
             thread_index(&page, "growth", "growth", Some(EventSeq::new(41)), "", &[]);
         assert_eq!(omitted, 0);
         let rendered: Vec<String> = lines.iter().map(ThreadLine::render).collect();
-        assert_eq!(rendered, vec![r#"- "what's our Q3 CAC?" — 1 reply"#]);
+        assert_eq!(
+            rendered,
+            vec![format!(r#"- [{}] "what's our Q3 CAC?" — 1 reply"#, 43)]
+        );
     }
 
     /// A channel-level turn is in no thread, so it sees them all. That is the
@@ -11078,7 +11097,10 @@ timeout)",
         let (lines, _) = thread_index(&page, "growth", "growth", None, "", &settled);
         assert_eq!(
             lines[0].render(),
-            r#"- "draft the launch email" — finished → In review"#,
+            format!(
+                r#"- [{}] "draft the launch email" — finished → In review"#,
+                41
+            ),
             "state beats a reply count: it is what a reader is asking"
         );
     }

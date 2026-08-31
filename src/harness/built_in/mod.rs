@@ -3871,9 +3871,23 @@ impl HarnessPool {
             }),
             _ => None,
         };
-        let (outcome, turn_costs) = deps
-            .approval_requests
-            .turn_scoped(agent.run_with_steer(
+        // Issue #1890 F: the conversation this turn answers, ambient for the
+        // duration of it, so `read_thread` can scope itself to the channel the
+        // turn is actually in. Set here rather than on the tool because a belt
+        // is built once per agent while a conversation changes every message.
+        //
+        // From `live`, which on this branch is where a chat turn's channel
+        // lives. #1890 I moves that identity onto its own argument so an
+        // *unstreamed* turn can have one too; when the two meet, this reads
+        // that instead and nothing else here changes — a `read_thread` is only
+        // meaningful on a turn that has a conversation either way.
+        let turn_chat = match &live {
+            LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
+            LiveStream::Workflow { .. } | LiveStream::Off => None,
+        };
+        let (outcome, turn_costs) = crate::runtime::delegation::with_turn_conversation(
+            turn_chat,
+            deps.approval_requests.turn_scoped(agent.run_with_steer(
                 &augmented,
                 steer,
                 stream_ctx,
@@ -3885,8 +3899,9 @@ impl HarnessPool {
                     LiveStream::On { thread_root, .. } => *thread_root,
                     LiveStream::Workflow { .. } | LiveStream::Off => None,
                 },
-            ))
-            .await?;
+            )),
+        )
+        .await?;
         // Issue #1846: park a durable re-issue marker the moment a pause is
         // seen, mirroring the grant-reissue precedent (`crate::runtime::grants`)
         // — mint on the event that needs a later redemption, not on whatever
