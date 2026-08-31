@@ -2223,6 +2223,7 @@ mod tests {
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![
                 RawNode {
                     id: "start".to_string(),
@@ -2287,6 +2288,7 @@ mod tests {
             id: "wf".to_string(),
             name: "WF".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![RawNode {
                 id: "worker".to_string(),
                 kind: "agent".to_string(),
