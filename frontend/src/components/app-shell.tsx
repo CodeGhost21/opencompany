@@ -144,6 +144,7 @@ import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
+import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";
 import {
   channelForThread,
   channelIdForThread,
@@ -904,6 +905,17 @@ export function AppShell({
   const [liveStepsByThread, setLiveStepsByThread] = useState<
     Record<string, (TurnStep & { toolCallId?: string })[]>
   >({});
+  // The live receipt for each synchronous chat turn in flight (issue #1934),
+  // keyed by host thread id — armed on `onSendStart`, bumped by every live
+  // frame (which also captures who picked the turn up), and cleared on whichever
+  // outcome the POST reaches. Its lifecycle mirrors `liveStepsByThread`'s: the
+  // reply landing on `onSendEnd` is what clears it, exactly as the reply bubble
+  // is appended, so the two swap with no empty frame between them.
+  const [receiptByThread, setReceiptByThread] = useState<Record<string, ChatReceipt>>({});
+  // Roster agent id → display name, so the receipt names the teammate rather
+  // than rendering a raw id (issue #1934). Populated by the desks/roster read
+  // below, which already fetches the roster this is derived from.
+  const [agentNames, setAgentNames] = useState<Record<string, string>>({});
   // The threads with a chat POST currently in flight, so the SSE `agent_reply`
   // echo for each is suppressed — the awaited POST reply is the authoritative,
   // steps-bearing copy (fixes the duplicate-bubble race).
@@ -1251,6 +1263,23 @@ export function AppShell({
     setDecidedApprovals({});
     setDecidingApprovals(new Map());
     setFailedApprovals({});
+    // Another company's live receipts are another namespace too (issue #1935
+    // review, codex 3892523790 / coderabbit 3892517512). Host thread ids like
+    // `main` recur across companies, so left uncleared here a switch could
+    // render the previous company's still-ticking "Sent"/"Picked up by" row
+    // on the new company's identically-named thread until that thread's own
+    // next send re-arms it. The generation-guarded `clearReceipt` (see
+    // `shouldClearReceipt`) closes the OTHER half of this bug — a late
+    // completion from the old company arriving *after* this reset must not
+    // delete whatever the new company has since armed — this reset only
+    // covers the instant of the switch itself.
+    setReceiptByThread((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+    // The name map a receipt resolves an agent id through is exactly as
+    // company-scoped as the receipts it names (same issue). Cleared here too
+    // rather than left to the roster fetch below: that fetch is async, so
+    // without this an id captured off a fresh frame on the new company would
+    // resolve through the previous company's roster until it answers.
+    setAgentNames((prev) => (Object.keys(prev).length === 0 ? prev : {}));
 
     // How far each channel's cold hydration has got, and which thread's
     // request is still in flight, so the 5-second poll below (`rehydrateAll`
@@ -1418,6 +1447,10 @@ export function AppShell({
         // three fabricated ones here.
         const chatDesks = desks === null ? defaultDesks() : desks.map(deskFromDto);
         const roster = team.map(fromDto);
+        // The name map the live receipt resolves an agent id through (issue
+        // #1934) — derived from the roster this effect already read, so it costs
+        // no extra request and is scoped to the company the effect ran for.
+        setAgentNames(Object.fromEntries(roster.map((m) => [m.id, m.name])));
         // Keep the addressing this loop resolves, not just its side effect.
         //
         // The Operator feed's id is folded in here too (issue #1781 review,
@@ -1506,6 +1539,9 @@ export function AppShell({
         // renders something rather than getting stuck.
         if (cancelled || requestCompany !== company) return;
         const fallbackDesks = defaultDesks();
+        // No roster answered, so no agent names for this company — clear rather
+        // than carry the previous company's map into a receipt here (#1934).
+        setAgentNames({});
         setChatChannelByThread(channelMap(fallbackDesks, []));
         // `MAIN_THREAD_ID`, not `fallbackDesks[0]?.id`: `defaultDesks()` no
         // longer carries a fabricated `main` row (issue #1743), so the first
@@ -2479,19 +2515,55 @@ export function AppShell({
   // Mark/unmark a thread's in-flight POST. `onSendStart` also resets its live
   // timeline so a fresh turn starts clean; `onSendEnd` clears it because the
   // final reply now carries the authoritative folded steps.
+  // Drop a thread's receipt when its POST reaches any terminal outcome (issue
+  // #1934). `onSendEnd` is the resolved path and clears it as the reply bubble
+  // lands; a detached/failed/stale POST clears it too, so a receipt never
+  // outlives the send bracket that armed it — from there the openTurns-driven
+  // working row is the live surface, not the receipt.
+  //
+  // `gen`, when given, is the generation the clearing send's own `onSendStart`
+  // returned (issue #1935 review — see `shouldClearReceipt`'s doc for the
+  // cross-company race this closes). Omitted by `Conversation`/
+  // `conversation/runtime.ts`'s calls, which clear unconditionally as before.
+  const clearReceipt = useCallback((threadId: string, gen?: number) => {
+    setReceiptByThread((prev) => {
+      if (!shouldClearReceipt(prev[threadId], gen)) return prev;
+      const next = { ...prev };
+      delete next[threadId];
+      return next;
+    });
+  }, []);
+  // The generation counter a receipt is stamped with at arm time (issue #1935
+  // review). A plain ref, not state: it drives no render on its own, only the
+  // value handed back to the caller and threaded through to whichever
+  // terminal callback eventually clears the receipt it stamped.
+  const receiptGenRef = useRef(0);
   const onSendStart = useCallback((threadId: string) => {
     pendingPostThreadsRef.current.started(threadId);
     activeTurnThreadRef.current = threadId;
     setLiveStepsByThread((prev) => ({ ...prev, [threadId]: [] }));
+    // `lastFrameAt` seeds to `startedAt` so the stall check is "no frame for
+    // 30s" from the send, not an instant stall.
+    const now = Date.now();
+    const gen = ++receiptGenRef.current;
+    setReceiptByThread((prev) => ({
+      ...prev,
+      [threadId]: { startedAt: now, lastFrameAt: now, gen },
+    }));
+    return gen;
   }, []);
-  const onSendEnd = useCallback((threadId: string) => {
-    pendingPostThreadsRef.current.ended(threadId);
-    if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
-    setLiveStepsByThread((prev) => {
-      if (!prev[threadId]?.length) return prev;
-      return { ...prev, [threadId]: [] };
-    });
-  }, []);
+  const onSendEnd = useCallback(
+    (threadId: string, gen?: number) => {
+      pendingPostThreadsRef.current.ended(threadId);
+      if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
+      setLiveStepsByThread((prev) => {
+        if (!prev[threadId]?.length) return prev;
+        return { ...prev, [threadId]: [] };
+      });
+      clearReceipt(threadId, gen);
+    },
+    [clearReceipt],
+  );
   /**
    * A chat POST that resolved for a company the operator has since left
    * (issue #1000).
@@ -2510,9 +2582,18 @@ export function AppShell({
    * clear a live step timeline or the `activeTurnThreadRef` fallback that a
    * *current* company's own in-flight POST is using.
    */
-  const onSendStale = useCallback((threadId: string) => {
-    pendingPostThreadsRef.current.detached(threadId);
-  }, []);
+  const onSendStale = useCallback(
+    (threadId: string, gen?: number) => {
+      pendingPostThreadsRef.current.detached(threadId);
+      // The reply belongs to a company the operator has left; nothing about
+      // this turn is in the active scope, so its receipt must not linger —
+      // unless a newer send has already re-armed this thread id for the
+      // company now on screen, in which case `gen` (this stale send's own
+      // generation) will not match and `clearReceipt` leaves it alone.
+      clearReceipt(threadId, gen);
+    },
+    [clearReceipt],
+  );
   /**
    * The host accepted the turn and handed back its id instead of its answer
    * (issue #983).
@@ -2533,7 +2614,7 @@ export function AppShell({
    * suppression lose nothing: the frame was never dropped, only queued.
    */
   const onSendDetached = useCallback(
-    (threadId: string, turnId?: string) => {
+    (threadId: string, turnId?: string, gen?: number) => {
       const held = pendingPostThreadsRef.current.detached(threadId);
       // Append, never replace (issue #1000). The serial lock queues a second
       // send behind the running turn, and a replace would stop the poll
@@ -2546,8 +2627,11 @@ export function AppShell({
         return { ...prev, [threadId]: [...turns, { turnId, queued: true }] };
       });
       held.forEach((frame) => renderAgentReply(frame));
+      // The turn is now the openTurns row's job, not the receipt's — from a
+      // 202 the working row is armed above and takes over (issue #1934).
+      clearReceipt(threadId, gen);
     },
-    [renderAgentReply],
+    [renderAgentReply, clearReceipt],
   );
   /**
    * The chat POST **threw** — no body, nothing rendered by the view (#1000).
@@ -2582,9 +2666,13 @@ export function AppShell({
    * behind it is not a working row to be invented.
    */
   const onSendFailed = useCallback(
-    (threadId: string) => {
+    (threadId: string, gen?: number) => {
       const held = pendingPostThreadsRef.current.failed(threadId);
       held.forEach((frame) => renderAgentReply(frame));
+      // The request died; the view has rendered its `Couldn't send` line. Drop
+      // the receipt so it does not tick on over a dead POST (issue #1934) — any
+      // durable turn re-armed below drives the working row instead.
+      clearReceipt(threadId, gen);
 
       // Discover whether the host kept the turn after the request died. The
       // throw tells us nothing, but the run rows do: a `pending`/`running` row
@@ -2612,7 +2700,7 @@ export function AppShell({
           /* host without /runs, or offline — nothing to re-arm */
         });
     },
-    [client, company, renderAgentReply],
+    [client, company, renderAgentReply, clearReceipt],
   );
 
   // Fold one live turn frame into the in-flight thread's timeline: a `tool_call`
@@ -2826,6 +2914,18 @@ export function AppShell({
         rows.push({ kind: "thinking", status: "ok", label: "Thinking" });
       }
       return { ...prev, [threadId]: rows };
+    });
+    // Keep this thread's receipt alive off the same frame (issue #1934): a frame
+    // arriving means the turn is advancing, so bump `lastFrameAt` (which clears
+    // any stall) and capture the first agent id we see. Guarded on an existing
+    // receipt — a stray background frame for a thread we never sent on must not
+    // conjure one, mirroring the `if (!threadId) return` guard above.
+    setReceiptByThread((prev) => {
+      const existing = prev[threadId];
+      if (!existing) return prev;
+      const frameAgentId = "agentId" in event ? event.agentId : undefined;
+      const agentId = existing.agentId ?? (frameAgentId || undefined);
+      return { ...prev, [threadId]: { ...existing, lastFrameAt: Date.now(), agentId } };
     });
   }, []);
 
@@ -3439,6 +3539,8 @@ export function AppShell({
           scopeRef={scopeRef}
               openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
+              receiptByThread={receiptByThread}
+              agentNames={agentNames}
               unread={unread}
               onChannelViewed={onChannelViewed}
               onChatPaneVisibilityChange={onChatPaneVisibilityChange}

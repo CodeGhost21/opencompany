@@ -7,6 +7,7 @@ import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
+import { ChatLiveReceipt, type ChatReceipt } from "./ChatLiveReceipt";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -48,6 +49,17 @@ interface Props {
    * an inbound message kicked off shows its work here too (issue #367).
    */
   liveSteps?: TurnStep[];
+  /**
+   * The live receipt for a synchronous chat turn this console just sent (issue
+   * #1934). When present it supersedes {@link TypingRow} — it says "Sent →
+   * Picked up → on step" with a ticking clock instead of bare typing dots — and
+   * folds the same {@link StepTimeline} below the line when steps exist. Absent
+   * for an inbound turn this console never started, which still falls to the
+   * `liveSteps`/`typing` rows below.
+   */
+  receipt?: ChatReceipt;
+  /** Roster agent id → display name, so the receipt never shows a raw id. */
+  agentNames?: Record<string, string>;
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, emoji: string) => void;
   /** Deletes the board card a line opened, and drops its chip (issue #984). */
@@ -148,6 +160,8 @@ export function MessageTimeline({
   typing,
   queued,
   liveSteps,
+  receipt,
+  agentNames,
   onOpenThread,
   onReact,
   onDismissCard,
@@ -168,6 +182,8 @@ export function MessageTimeline({
   latestBudgetPauseMessageIdByAgent,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
+  /** The inner column whose own height rule 2b's `ResizeObserver` watches. */
+  const content = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
   // Rows that arrived locally — a message sent before hydration landed — are
   // still worth showing while the rest of the history is in flight. It is only
@@ -283,6 +299,37 @@ export function MessageTimeline({
     return () => observer.disconnect();
   }, []);
 
+  // Rule 2b — content that grows without moving any of rule 2's dependencies
+  // (issue #1935 review, coderabbit 3892517543). `ChatLiveReceipt`'s 30s
+  // "still waiting" note is timed by a clock entirely internal to that
+  // component: nothing here re-renders when it appears, so rule 2 never fires
+  // and the note can land under the fold with no follow-scroll to reveal it.
+  // A live receipt is the concrete case, but the same gap exists for any
+  // in-place child growth this component was not told about.
+  //
+  // Rule 3's `ResizeObserver` cannot double as this one — it watches the
+  // *scroller's own border box*, which content overflowing inside an
+  // `overflow-y-auto` container never changes; that is the whole reason the
+  // container scrolls instead of growing. This one watches the *content*
+  // column instead — the inner wrapper whose height the rows and receipt
+  // actually determine — so it fires on exactly the growth rule 3 cannot see,
+  // and stays silent on the box-only resizes (composer growing, window
+  // resizing) rule 3 exists for, which do not move this column's own height.
+  useEffect(() => {
+    const contentEl = content.current;
+    const scrollerEl = scroller.current;
+    if (!contentEl || !scrollerEl || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      // Nothing to follow while the transcript is still on the wire, same as
+      // rule 2 — a cold load's content grows repeatedly as history lands, and
+      // rule 1 owns the anchor until it has.
+      if (historyPending || !following.current) return;
+      scrollerEl.scrollTo({ top: scrollerEl.scrollHeight, behavior: "smooth" });
+    });
+    observer.observe(contentEl);
+    return () => observer.disconnect();
+  }, [historyPending]);
+
   return (
     <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
       {/*
@@ -304,7 +351,10 @@ export function MessageTimeline({
        * about what "empty" means — a channel whose intro claimed emptiness
        * while the wrapper anchored for content would jump on every load.
        */}
-      <div className={cn("flex min-h-full flex-col pb-4", empty ? "justify-start" : "justify-end")}>
+      <div
+        ref={content}
+        className={cn("flex min-h-full flex-col pb-4", empty ? "justify-start" : "justify-end")}
+      >
         {/* `empty` only drives the top padding, and the skeleton fills the
             same space real rows will — so a loading channel is spaced like a
             full one and the intro does not jump down and back up. That is also
@@ -364,7 +414,17 @@ export function MessageTimeline({
             />
           ),
         )}
-        {liveStepCount > 0 && !queued ? (
+        {receipt && !queued ? (
+          // The receipt for our own in-flight send (issue #1934) supersedes the
+          // typing dots and carries the live steps itself. A queued turn keeps
+          // its honest "Queued…" row instead — the receipt is a `!queued` state.
+          <ChatLiveReceipt
+            channel={channel}
+            receipt={receipt}
+            agentNames={agentNames}
+            steps={liveSteps ?? []}
+          />
+        ) : liveStepCount > 0 && !queued ? (
           <LiveTurnRow channel={channel} steps={liveSteps ?? []} />
         ) : (
           typing && <TypingRow channel={channel} queued={queued} />

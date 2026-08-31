@@ -74,6 +74,7 @@ import {
 } from "./chat/mentions";
 import { echoCause } from "./chat/EchoPlaceholder";
 import { MessageTimeline } from "./chat/MessageTimeline";
+import type { ChatReceipt } from "./chat/ChatLiveReceipt";
 import { ThreadPanel } from "./chat/ThreadPanel";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import {
@@ -150,8 +151,15 @@ interface Props {
    * flight. Without this bracket the shell's live injection and the awaited
    * reply below both render and the bubble doubles — the exact duplicate-bubble
    * race the Conversation surface already brackets against.
+   *
+   * Returns the generation the shell stamped this send's receipt with (issue
+   * #1935 review). `send` threads it back through whichever terminal callback
+   * this POST reaches, so the shell can tell "my own armed receipt settling"
+   * apart from "a newer send already re-armed this reused thread id" — see
+   * `shouldClearReceipt`. `undefined` when the shell has nothing to say (no
+   * handler wired), which callers must treat the same as "clear unconditionally".
    */
-  onSendStart?: (threadId: string) => void;
+  onSendStart?: (threadId: string) => number | undefined;
   /**
    * Who is present right now, keyed by user id. Empty when the host has no
    * presence route, or when nobody else is connected to this replica.
@@ -175,14 +183,14 @@ interface Props {
   resolveTypingNames?: (chatId: string, parentId?: string) => string[];
   /** Called as a composer is typed in; the caller throttles. */
   onTyping?: (chatId: string, parentId?: string) => void;
-  onSendEnd?: (threadId: string) => void;
+  onSendEnd?: (threadId: string, gen?: number) => void;
   /**
    * The host accepted the turn and answered `202` instead of the reply
    * (issue #983). Distinct from `onSendEnd`, which says the turn is *over*:
    * this one says the POST is over and the turn is not, so the shell keeps the
    * working row up and stops suppressing the live reply frame.
    */
-  onSendDetached?: (threadId: string, turnId?: string) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
   /**
    * The chat POST **threw** rather than answering (issue #1000).
    *
@@ -193,9 +201,9 @@ interface Props {
    * the request that started it, so that held frame is the only copy of the
    * answer anyone is going to get.
    */
-  onSendFailed?: (threadId: string) => void;
+  onSendFailed?: (threadId: string, gen?: number) => void;
   /** Called when a delayed response belongs to a previous company scope. */
-  onSendStale?: (threadId: string) => void;
+  onSendStale?: (threadId: string, gen?: number) => void;
   /**
    * The shell's live company ref, so the stale-response check keeps observing
    * company switches after this view unmounts.
@@ -230,6 +238,20 @@ interface Props {
    * started, which is most of what issue #367 is about.
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
+  /**
+   * The live receipt for a synchronous chat turn in flight, keyed by **host
+   * thread id** (issue #1934) — resolved to this channel's thread the same way
+   * `liveStepsByThread` is. Present between the operator's send and the reply
+   * landing; absent otherwise. Drives the "Sent → Picked up → on step" row that
+   * fills the gap the composer used to leave silent.
+   */
+  receiptByThread?: Record<string, ChatReceipt>;
+  /**
+   * Roster agent id → display name, captured by the shell's desks/roster read
+   * (issue #1934). Lets the receipt name whoever picked the turn up rather than
+   * rendering a raw id; a miss falls back to the channel voice.
+   */
+  agentNames?: Record<string, string>;
   /** Channel id → unread count, for the rail's badges. Owned by the shell. */
   unread?: Record<string, number>;
   /**
@@ -361,6 +383,8 @@ export function ChatView({
   scopeRef,
   openTurns,
   liveStepsByThread,
+  receiptByThread,
+  agentNames,
   unread,
   mentions,
   mentionFeedRevision,
@@ -1387,6 +1411,10 @@ export function ChatView({
         ? dmThreadId(active.member)
         : undefined;
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
+  // The live receipt for this channel's thread (issue #1934), resolved exactly
+  // as `liveSteps` above — same host thread id, same open-thread exclusion at
+  // the render site below.
+  const receipt = activeThreadId ? receiptByThread?.[activeThreadId] : undefined;
   /**
    * The turn this channel is waiting on, if any (issue #983).
    *
@@ -1520,7 +1548,13 @@ export function ChatView({
     // `AgentReply` for our own turn too and pushes it over SSE mid-await, so
     // without this the shell injects that echo *and* the awaited reply lands
     // below — two bubbles for one turn.
-    if (chatId) onSendStart?.(chatId);
+    //
+    // The generation the shell stamped this send's receipt with, if any
+    // (issue #1935 review). Threaded through to whichever terminal callback
+    // this POST reaches below, so a clear this send triggers can never delete
+    // a receipt a *later* send has since armed for the same (possibly
+    // cross-company-reused) thread id — see `shouldClearReceipt`.
+    const gen = chatId ? onSendStart?.(chatId) : undefined;
     // Which of the POST's three outcomes actually happened, decided here and
     // reported once in the `finally`. Only `"resolved"` means the reply is on
     // screen; the other two leave a turn running on the host and the stream as
@@ -1563,7 +1597,7 @@ export function ChatView({
           scopeAtSend.client !== latestScope.client)
       ) {
         outcome = "stale";
-        if (chatId) onSendStale?.(chatId);
+        if (chatId) onSendStale?.(chatId, gen);
         // The POST itself succeeded and journaled — this branch only
         // discards the reply because the scope moved on, so anything the
         // request carried (an attachment among them) is durably claimed.
@@ -1585,7 +1619,7 @@ export function ChatView({
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
-        if (chatId) onSendDetached?.(chatId, answer.turnId);
+        if (chatId) onSendDetached?.(chatId, answer.turnId, gen);
         return true;
       }
       const reply = answer;
@@ -1654,7 +1688,7 @@ export function ChatView({
           scopeAtSend.client !== latestScope.client)
       ) {
         outcome = "stale";
-        if (chatId) onSendStale?.(chatId);
+        if (chatId) onSendStale?.(chatId, gen);
         // Unlike the try-block's stale branch above, the request THREW here —
         // whether it journaled before failing is unknown, not "no" (see this
         // function's doc comment), so this is `undefined`, not `false`.
@@ -1682,8 +1716,8 @@ export function ChatView({
       // answer. Routing the throw here is the drop this whole change removes,
       // put back on the one path the feature exists for.
       if (chatId) {
-        if (outcome === "resolved") onSendEnd?.(chatId);
-        else if (outcome === "failed") onSendFailed?.(chatId);
+        if (outcome === "resolved") onSendEnd?.(chatId, gen);
+        else if (outcome === "failed") onSendFailed?.(chatId, gen);
       }
       setSending(false);
     }
@@ -2161,6 +2195,10 @@ export function ChatView({
               typing={(sending || !!openTurn) && !openThreadId}
               queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
+              // Thread-panel receipts are out of v1 (issue #1934): excluded here
+              // the same way `liveSteps` is when a thread is open.
+              receipt={openThreadId ? undefined : receipt}
+              agentNames={agentNames}
               onOpenThread={setOpenThreadId}
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
