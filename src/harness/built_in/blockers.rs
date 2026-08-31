@@ -123,8 +123,7 @@ const SHAPES: &[Shape] = &[
             "incorrect api key",
             "authentication failed",
             "unauthorized",
-            "401 ",
-            " 401",
+            "401",
             "invalid_api_key",
         ],
         class: BlockerClass {
@@ -179,7 +178,16 @@ pub fn classify_blocker_message(message: &str) -> Option<BlockerClass> {
 /// numbers that mean something else entirely: `port 4010` is not a `401`, and a
 /// request id like `req-4290` is not a `429`. Every other leaf is a phrase that
 /// cannot collide this way, so it stays a plain `contains`.
-const BOUNDED_LEAVES: &[&str] = &[" 401", "429"];
+///
+/// The boundary belongs here and **not** in the leaf. `401` was once spelled as
+/// the pair `"401 "` / `" 401"`, which is a boundary check written in the wrong
+/// place and does not work: the leading-space form put the space *inside* the
+/// leaf, so the start-boundary test read the character before the space — a
+/// letter in every real message — and rejected every one of them. The
+/// trailing-space form then missed `401:` and a line ending in `401`. Both
+/// leaves were dead, and the auth row only ever matched through its prose
+/// phrases.
+const BOUNDED_LEAVES: &[&str] = &["401", "429"];
 
 /// Whether `leaf` occurs in `haystack` with a non-alphanumeric character (or
 /// the string's edge) on both sides.
@@ -309,6 +317,33 @@ mod test {
     fn a_longer_number_is_not_a_status_code() {
         assert_eq!(class_of("dispatch failed on port 4010"), None);
         assert_eq!(class_of("dispatch failed: worker 4290 died"), None);
+    }
+
+    /// A bare `401` is enough on its own, whatever punctuation follows it.
+    ///
+    /// It was not, and nothing said so: the leaf was spelled as the pair
+    /// `"401 "` / `" 401"` — a boundary check written into the leaf instead of
+    /// around it. The leading-space form made the start-boundary test read the
+    /// character *before* the space, a letter in every real provider message,
+    /// so it rejected all of them; the trailing-space form missed `401:` and a
+    /// line ending in `401`. Every existing 401 test passed anyway, because
+    /// each message also carried `invalid api key` or `unauthorized` — the
+    /// prose phrases were doing all the work and the status code none of it.
+    #[test]
+    fn a_bare_401_is_an_auth_blocker_whatever_follows_it() {
+        for message in [
+            "hosted inference returned 401: invalid credentials",
+            "provider rejected the call with http 401",
+            "401 returned by the upstream",
+        ] {
+            let class = class_of(message).unwrap_or_else(|| panic!("unrecognised: {message}"));
+            assert_eq!(
+                class.kind,
+                BlockerKind::Infrastructure,
+                "message: {message}"
+            );
+            assert_eq!(class.source, BlockerSource::Provider, "message: {message}");
+        }
     }
 
     /// The conservative default. An error we cannot name keeps today's
