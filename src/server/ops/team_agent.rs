@@ -998,6 +998,14 @@ async fn edit_agent(
 
     company.runtime.store().save(&record).await?;
 
+    // Release the write lock before the possible rebuild below (PR #1875
+    // review finding): `rebuild_company` now serializes its own
+    // load-through-save of the record on this same lock, and this task
+    // holding it while calling in would deadlock a non-reentrant
+    // `tokio::sync::Mutex` against itself. The save above already landed
+    // under the lock; nothing past this point still needs it held.
+    drop(_lock);
+
     // A harness or model change needs the runtime rebuilt, not just saved.
     //
     // Lanes, router bindings and `LocalAcpAgent`'s model map are snapshots
@@ -1932,6 +1940,7 @@ mod tests {
 
     use crate::company::CompanyManifest;
     use crate::ports::CompanyStore;
+    use crate::ports::store::company_write_lock;
     use crate::ports::types::{CompanyId, CompanyRecord};
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
@@ -3999,6 +4008,91 @@ agent = "claude"
             refused.to_string().contains("runner"),
             "the refusal names the reason: {refused}"
         );
+    }
+
+    /// PR #1875 review finding (CodeRabbit): `edit_agent` drops
+    /// `company_write_lock` before calling into `rebuild_company` when a
+    /// harness/model edit needs one — `rebuild_company` now takes that same
+    /// non-reentrant lock itself, so this task still holding it across the
+    /// call would deadlock the request against its own rebuild. Nothing
+    /// proved that until this test; proven the same way
+    /// `rebuild_company_serializes_against_the_company_write_lock`
+    /// (`src/runtime/rebuild.rs`) proves the equivalent property one layer
+    /// down: hold the lock externally, drive the real request through the
+    /// router, and demand it completes only once the lock is released.
+    #[tokio::test]
+    async fn edit_agent_does_not_deadlock_against_its_own_rebuild() {
+        struct AlwaysRebuilds {
+            home: std::path::PathBuf,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::runtime::RuntimeRebuilder for AlwaysRebuilds {
+            async fn rebuild(
+                &self,
+                _state: &AppState,
+                request: crate::runtime::RebuildRequest,
+            ) -> crate::Result<crate::company::runtime::CompanyRuntime> {
+                RuntimeBuilder::new(self.home.clone(), request.manifest)
+                    .with_id(request.id)
+                    .with_handover(request.handover)
+                    .build()
+                    .await
+            }
+        }
+
+        let home_dir = home();
+        const TOML: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "laptop"
+kind = "acp"
+default = true
+
+[harness.acp]
+transport = "local"
+agent = "claude"
+"#;
+        let state = state_with_manifest(home_dir.path(), TOML)
+            .await
+            .with_rebuilder(std::sync::Arc::new(AlwaysRebuilds {
+                home: home_dir.path().to_path_buf(),
+            }));
+
+        let lock = company_write_lock(&CompanyId::new("acme"));
+        let guard = lock.lock().await;
+
+        let state_for_task = state.clone();
+        let mut task = tokio::spawn(async move {
+            patch_agent(&state_for_task, "ceo", json!({"model": "claude-opus-4-5"})).await
+        });
+
+        // The request must be blocked behind the held lock — give it every
+        // chance to (wrongly) race ahead before declaring it stuck.
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "edit_agent completed while company_write_lock was held elsewhere — it is not \
+             serializing its save against a concurrent writer"
+        );
+
+        drop(guard);
+        let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect(
+                "edit_agent never resumed after the lock was released — it deadlocked against \
+                 its own rebuild_company call",
+            )
+            .expect("task panicked");
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     /// **Review of #745.** An unknown id answers the same way whether or not

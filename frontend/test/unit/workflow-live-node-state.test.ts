@@ -164,6 +164,7 @@ const startFrame = (runId: string): Ev => ({
   workflowId: "digest",
   runId,
   scheduled: true,
+  startedBy: "schedule",
 });
 const nodeStartedFrame = (runId: string, nodeId: string): Ev => ({
   type: "workflow_node_started",

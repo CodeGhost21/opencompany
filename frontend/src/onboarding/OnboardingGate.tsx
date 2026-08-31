@@ -5,15 +5,43 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import { type ActivationStatus, confirmCompanyName } from "@/api/activation";
 import { ApiError } from "@/api/types";
+import { RouteLoading } from "@/components/route-loading";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RouteLoading } from "@/components/route-loading";
 import { cn } from "@/lib/utils";
 import { OAuthView } from "@/views/OAuthView";
 
 // Same reason `app-shell.tsx` lazy-loads it: React Flow is heavy, and it
 // should not tax a screen an operator only sees once.
+// PR #1875 review finding: the name entered here is embedded verbatim into
+// every agent's system prompt (`persona_prompt`, `src/company/prompt.rs`),
+// so an unbounded paste can inflate every model request past its context
+// limit. Mirrors the host's own limit (`COMPANY_NAME_MAX_CHARS`,
+// `src/server/ops/company_profile.rs`) — the API's rejection is the real
+// enforcement point regardless of client, this only avoids a round trip for
+// the common case of a pasted document.
+const COMPANY_NAME_MAX_CHARS = 200;
+
+/**
+ * Clamps `value` to `COMPANY_NAME_MAX_CHARS`, counting Unicode scalar values —
+ * the same definition of "character" the host enforces with `chars().count()`
+ * (`src/server/ops/company_profile.rs`) — rather than UTF-16 code units.
+ *
+ * PR #1875 review finding: the native `maxLength` attribute this field used
+ * to carry counts UTF-16 code units, not scalar values. A name built from
+ * 101-200 astral characters (most emoji, some scripts) passes the host's
+ * `chars().count() <= 200` check, but each such character consumes two
+ * UTF-16 units — so `maxLength={200}` silently refused input past 100 of
+ * them, well inside what the API accepts. `Array.from` iterates by code
+ * point, which is exactly `chars().count()`'s definition (same technique as
+ * `titleFromMessage`, `lib/chat.ts`, and `documentSlug`, `api/memory.ts`).
+ */
+export function clampToCompanyNameLimit(value: string): string {
+  const points = Array.from(value);
+  return points.length <= COMPANY_NAME_MAX_CHARS ? value : points.slice(0, COMPANY_NAME_MAX_CHARS).join("");
+}
+
 const WorkflowsView = lazy(() =>
   import("@/views/WorkflowsView").then((m) => ({ default: m.WorkflowsView })),
 );
@@ -208,7 +236,7 @@ function NameStep({
         <Input
           id="gate-company-name"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => setName(clampToCompanyNameLimit(e.target.value))}
           onKeyDown={(e) => {
             if (e.key === "Enter") void confirm();
           }}

@@ -2,12 +2,12 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   Activity,
   // AppWindow,  // re-add with the Pages nav entry below
+  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
   MessagesSquare,
   Network,
-  Settings2,
   ShieldCheck,
   BookText,
   Wallet,
@@ -46,10 +46,10 @@ import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import { RouteLoading } from "@/components/route-loading";
+import { WindowControlsInset } from "@/components/window-chrome";
 import {
   RESTING_ROW,
-  SidebarCollapseButton,
-  SidebarControls,
+  SidebarUtilityBar,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
 import {
@@ -60,8 +60,13 @@ import {
 import { TourController } from "@/tour/TourController";
 import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
-import { gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
-import { shouldShowOnboardingGate } from "@/onboarding/gate-logic";
+import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
+import {
+  resolveGateAdminCheckError,
+  shouldHoldShellPending,
+  shouldPollActivationForRole,
+  shouldShowOnboardingGate,
+} from "@/onboarding/gate-logic";
 import { me as fetchMe } from "@/api/auth";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
@@ -72,7 +77,14 @@ import {
   type TaskStatus,
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
-import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
+import { withReadTimeout } from "@/lib/read-timeout";
+import {
+  hasOtherOpenTurns,
+  mergeOpenTurns,
+  openTurnsFromRuns,
+  PendingSyncPosts,
+  type OpenTurn,
+} from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
   budgetProximityExpiresAt,
@@ -111,6 +123,7 @@ import {
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import { lifecycle } from "@/lib/language";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
@@ -119,7 +132,7 @@ import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
-import { OperatorOverview } from "@/views/OperatorOverview";
+import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
@@ -160,6 +173,12 @@ const ObservatoryView = lazy(() =>
 // Pulls in the markdown renderer — load on demand.
 const WorkspaceView = lazy(() =>
   import("@/views/WorkspaceView").then((m) => ({ default: m.WorkspaceView })),
+);
+// The company's durable memory. Its own route since it left the settings rail;
+// lazy for the same reason its neighbours are — the shell should paint before a
+// page nobody has asked for yet is parsed.
+const MemoryView = lazy(() =>
+  import("@/views/MemoryView").then((m) => ({ default: m.MemoryView })),
 );
 // The Finance section: Overview (the ledger fold), Invoicing (Chargebee) and
 // Wallet (PayPal). Load on demand — its Overview page is Recharts-backed and
@@ -290,6 +309,11 @@ const NAV: NavItem[] = [
   // `NAV` for why this is one row rather than one per list or a tab strip.
   { view: "ledgers", label: "Work", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
+  // What the company remembers, beside what it keeps. It was a settings
+  // sub-page, which put a surface an operator *reads* behind the rail where
+  // they *change* things — and three clicks in front of "does it already know
+  // this". `#/settings/brain` and `#/memory` both rewrite onto this row.
+  { view: "brain", label: "Brain", icon: Brain },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   // Re-listed. Issue #302 parked the flat Finances page — a single ledger
   // projection with nowhere to go. What comes back is a section: that same
@@ -311,7 +335,13 @@ const NAV: NavItem[] = [
   // (issue #1311). Remove a nav row here and the surface is hidden; remove it
   // from `console-routes.ts` and the surface is gone.
   // { view: "pages", label: "Pages", icon: AppWindow },
-  { view: "settings", label: "Settings", icon: Settings2 },
+  // Settings is NOT here, and its absence is deliberate in the same way the
+  // Pages line above is. It is a utility, not a place an operator works, so it
+  // sits on the sidebar's utility bar with Feedback, Discord and Collapse
+  // (`SidebarUtilityBar`) — which still carries the `data-tour="nav-settings"`
+  // anchor the guided tour spotlights. `#/settings` keeps answering because of
+  // its entry in `@/lib/console-routes`; removing THAT is what would take the
+  // surface away.
 ];
 
 // The console is hash-routed, so a normal `href="#main-content"` would also
@@ -394,6 +424,57 @@ const WORKFLOW_EVENT_WINDOW = 300;
 const TURN_POLL_MS = 4000;
 
 /**
+ * How long the onboarding gate's admin check (PR #1875 review finding) waits
+ * before retrying a `fetchMe` failure that was not a definitive `401` — a
+ * dropped connection or a proxy 5xx, not "this user is not an admin". A few
+ * seconds is generous relative to how rarely this fires (a fresh mount's
+ * first read, or a genuine network blip) and cheap relative to how bad the
+ * alternative is: giving up and reading as non-admin would fail the blocking
+ * gate open for an actual admin.
+ */
+const GATE_ADMIN_CHECK_RETRY_MS = 3000;
+
+/**
+ * How long a single `fetchMe` call is allowed to sit with no response at all
+ * before it is treated as a failure (PR #1875 review finding).
+ *
+ * `resolveGateAdminCheckError`/`GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES` only
+ * ever run once the call's promise *settles* — one way or the other. `fetchMe`
+ * goes through `OpenCompanyClient`, and its request path has no timeout of
+ * its own (`api/transport/browser.ts` calls bare `fetch`, no `AbortSignal`),
+ * so a stalled proxy or a backend that accepts the connection and then never
+ * answers leaves that promise pending forever: no rejection ever reaches the
+ * `catch` below, `failures` never increments, and `isGateAdminStuck` never
+ * flips even though the admin is exactly as wedged as the retry-forever case
+ * three rounds of this file's history already closed. `withReadTimeout` turns
+ * that silence into an ordinary rejection at this bound, which
+ * `resolveGateAdminCheckError` already classifies as non-terminal — so the
+ * existing failure counter below is what actually recovers, this only makes
+ * sure it gets the chance to. Long enough that the legitimate "cold host"
+ * case (the same class of cost `useActivationGate`'s poll interval doc calls
+ * out) is never mistaken for a hang.
+ */
+const GATE_ADMIN_CHECK_TIMEOUT_MS = 20000;
+
+/**
+ * How many consecutive non-settled `fetchMe` failures before the admin check
+ * reports itself stuck, mirroring `useActivationGate`'s `STUCK_AFTER_FAILURES`
+ * (PR #1875 review finding).
+ *
+ * That hook's `stuck` only tracks its own `getActivation` reads — it has no
+ * way to know the admin check is the one wedged. A durable non-401 `fetchMe`
+ * failure (the same class of backend fault: a proxy 5xx, a downstream outage)
+ * leaves `isGateAdmin` at `null` forever, which keeps `shouldHoldShellPending`
+ * returning `true` (its own `input.isAdmin === null` branch) even while
+ * activation itself is reading fine — so `activationGate.stuck` never flips
+ * and the recovery affordance below never appears, wedging an admin who
+ * cannot reach it behind a loader indistinguishable from the one the
+ * activation-side fix already closed. Three failures matches
+ * `STUCK_AFTER_FAILURES`'s own ~9s-at-`GATE_ADMIN_CHECK_RETRY_MS` reasoning.
+ */
+const GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES = 3;
+
+/**
  * Operator-facing copy for a legacy `connect_error` query from the former
  * native OAuth callback (issue #300). The callback now ends in its own dated
  * explanatory page (#838), but an older bookmarked URL still gets a safe
@@ -474,6 +555,13 @@ interface Props {
   companies: CompanyStatus[];
   onSwitchCompany: (id: string) => void;
   onBackToPicker?: () => void;
+  /** Start the New-company flow (issue #1807), owned by `ConnectionConsole`. */
+  onCreateCompany?: () => void;
+  /**
+   * Start the reset (archive + start clean) flow for the given company. Called
+   * from Settings → Lifecycle with the active company's id and name.
+   */
+  onResetCompany?: (id: string, name: string) => void;
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
@@ -484,6 +572,8 @@ export function AppShell({
   companies,
   onSwitchCompany,
   onBackToPicker,
+  onCreateCompany,
+  onResetCompany,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -567,6 +657,27 @@ export function AppShell({
   // whether setup is about to open, and an unheld tour would flash its welcome
   // over it.
   const [setupOpen, setSetupOpen] = useState(true);
+  /**
+   * Whether `SetupController`'s own roster read has landed (PR #1875 review
+   * finding, round 12).
+   *
+   * `setupOpen` starting `true` and a roster read that already landed with
+   * the company genuinely unstaffed are indistinguishable to anything that
+   * only reads `setupOpen` — `shouldHoldShellPending` needs to tell them
+   * apart (see its own doc). `SetupController`'s `onOpenChange` only ever
+   * fires once its internal `checked` is true, so its firing at all is
+   * itself the signal; `handleSetupOpenChange` below turns that into state
+   * the gate predicate can read. A separate flag rather than folding into
+   * `setupOpen` itself: `setupOpen` must stay a plain "is setup on screen or
+   * blocking" boolean for every other reader (`TourController`'s `hold`,
+   * `shouldShowOnboardingGate`), and conflating "resolved" into its value is
+   * exactly the bug this fixes.
+   */
+  const [setupChecked, setSetupChecked] = useState(false);
+  const handleSetupOpenChange = useCallback((open: boolean) => {
+    setSetupChecked(true);
+    setSetupOpen(open);
+  }, []);
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
   // `#/setup` is an intentional, manual recovery path. It is a route rather
@@ -848,10 +959,7 @@ export function AppShell({
    *
    * `gateSkippedThisSession` is read once, into state rather than a plain
    * `const`, so clicking "skip for now" re-renders past the gate without a
-   * page reload — `sessionStorage` alone would need one. Declared before the
-   * poll below so `!gateSkipped` can gate it: nothing left for the gate to
-   * decide once the operator dismissed it, so there is nothing worth polling
-   * `{scope}/activation` for either.
+   * page reload — `sessionStorage` alone would need one.
    */
   const [gateSkipped, setGateSkipped] = useState(() => gateSkippedThisSession(scope));
   useEffect(() => {
@@ -861,35 +969,98 @@ export function AppShell({
     markGateSkipped(scope);
     setGateSkipped(true);
   }, [scope]);
-  const activationGate = useActivationGate(client, company, !gateSkipped);
 
   /**
-   * Whether the signed-in user is this company's admin (PR #1878 review
+   * Whether the signed-in user is this company's admin (PR #1875 review
    * finding) — `null` until the read lands. Mirrors the `admin =
    * (await fetchMe(...)).role === "admin"` pattern every other admin-gated
-   * view in this app already uses (`OAuthView`, `TeamView`, etc.); the only
-   * difference here is the `null` "not yet known" state, because this reader
-   * feeds a gate that must never flash open for a member who cannot clear
-   * it — see `shouldShowOnboardingGate`'s own guard.
+   * view in this app already uses (`OAuthView`, `TeamView`, etc.), with two
+   * differences, both because this reader feeds a *blocking* gate rather
+   * than a read-only view:
+   *
+   * - The `null` "not yet known" state — see `shouldShowOnboardingGate`'s own
+   *   guard for why the gate must never flash open on it.
+   * - A failed read is classified through `resolveGateAdminCheckError`
+   *   instead of settling straight to `false`. Every other view's `catch {
+   *   admin = false }` is safe because the worst case is a control staying
+   *   disabled one round trip longer; here `false` is what suppresses the
+   *   gate, so a transient failure (a dropped connection, a proxy 5xx) would
+   *   read exactly like a real "not an admin" and fail the gate open for an
+   *   actual admin for the rest of that mount (PR #1875 review finding,
+   *   round 2). Only a definitive `401` settles to `false`; anything else
+   *   retries.
+   *
+   * Declared before `activationGate` (below) because that hook's `enabled`
+   * input now reads this state — PR #1875 review finding, round 5.
    */
   const [isGateAdmin, setIsGateAdmin] = useState<boolean | null>(null);
+  /**
+   * True once `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES` consecutive `fetchMe`
+   * failures have failed to settle — see that constant's own doc. Read
+   * alongside `activationGate.stuck` below so the recovery affordance covers
+   * either read wedging, not only the activation one.
+   */
+  const [isGateAdminStuck, setIsGateAdminStuck] = useState(false);
   useEffect(() => {
     let live = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
     setIsGateAdmin(null);
-    void (async () => {
-      let admin = false;
-      try {
-        admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No user plane on this host, or not signed in — treat as non-admin,
-        // same as every other `fetchMe`-gated view.
-      }
-      if (live) setIsGateAdmin(admin);
-    })();
+    setIsGateAdminStuck(false);
+    const load = () => {
+      void (async () => {
+        try {
+          const admin =
+            (await withReadTimeout(fetchMe(client, company), GATE_ADMIN_CHECK_TIMEOUT_MS)).role ===
+            "admin";
+          if (!live) return;
+          setIsGateAdmin(admin);
+          failures = 0;
+          setIsGateAdminStuck(false);
+        } catch (err) {
+          if (!live) return;
+          const outcome = resolveGateAdminCheckError(err);
+          if (outcome.settled) {
+            setIsGateAdmin(outcome.isAdmin);
+            failures = 0;
+            setIsGateAdminStuck(false);
+          } else {
+            failures += 1;
+            if (failures >= GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES) setIsGateAdminStuck(true);
+            retryTimer = setTimeout(load, GATE_ADMIN_CHECK_RETRY_MS);
+          }
+        }
+      })();
+    };
+    load();
     return () => {
       live = false;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
     };
   }, [client, company]);
+
+  // The poll below is passed `shouldPollActivationForRole(isGateAdmin)`, NOT
+  // a bare `true` (PR #1875 review finding, round 5) and NOT `!gateSkipped`
+  // (round 4): `GET {scope}/activation` is the only production caller of
+  // `compute_and_latch` on the host, so an admin who skips and then finishes
+  // the funnel anyway (connects an integration, runs a workflow from the
+  // ordinary shell) needs the poll to still be running to ever notice and
+  // persist it — see `shouldPollActivation` for that half. Round 5 also tried
+  // to stop this poll for a confirmed non-admin, on the premise that no
+  // funnel step is reachable by anyone but the admin; round 7 found that
+  // premise false (`POST {scope}/workflows/{wid}/run` is `ScopedCompany`, not
+  // admin-gated) and reverted it — see `shouldPollActivationForRole`'s own
+  // doc for why every role now polls alike. The poll still stops itself once
+  // the company is actually activated; nothing here needs to.
+  const activationGate = useActivationGate(client, company, shouldPollActivationForRole(isGateAdmin));
+
+  // PR #1875 review finding, round 4: a skip marker from before the funnel
+  // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
+  // already stops gating on it either way), but leaving it in `sessionStorage`
+  // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
+  useEffect(() => {
+    if (activationGate.status?.isActivated) clearGateSkipped(scope);
+  }, [activationGate.status?.isActivated, scope]);
 
   const refreshTaskStatuses = useCallback(async () => {
     const read = ++taskStatusRead.current;
@@ -1207,7 +1378,11 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        const chatDesks = desks.length ? desks.map(deskFromDto) : defaultDesks();
+        // The host answered, so this is the company's desk list — empty
+        // included. `defaultDesks()` stands in only on the `.catch` leg below,
+        // where nothing was answered at all; a company that simply declares no
+        // `[[group_chat]]` used to be given three fabricated ones here.
+        const chatDesks = desks.map(deskFromDto);
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         setChatChannelByThread(channelMap(chatDesks, roster));
@@ -1353,6 +1528,21 @@ export function AppShell({
   useEffect(() => {
     chatChannelByThreadRef.current = chatChannelByThread;
   }, [chatChannelByThread]);
+  /**
+   * Mirrors `openTurns` for the same reason `chatChannelByThreadRef` mirrors
+   * its map: `reReadSettledThread` needs the value as of *when its response
+   * lands*, not as of when the request started.
+   *
+   * What it guards is the live-row clear below. `settle` drops only the turn
+   * that ended and deliberately keeps a queued sibling watched, so a thread
+   * with more work still has an entry here — and a thread-wide clear that
+   * ignored it would delete the rows of a turn that is still running, on the
+   * wide window a history round trip opens (PR #1904 review).
+   */
+  const openTurnsRef = useRef(openTurns);
+  useEffect(() => {
+    openTurnsRef.current = openTurns;
+  }, [openTurns]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1406,7 +1596,7 @@ export function AppShell({
    * settle racing a re-arm — adds nothing.
    */
   const reReadSettledThread = useCallback(
-    (threadId: string) => {
+    (threadId: string, settledTurnId?: string) => {
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -1423,6 +1613,29 @@ export function AppShell({
             scopeRef.current.client !== client
           ) return;
           const hydrated = fromHistory(entries);
+          // The turn is over, so its transient tool rows have served their
+          // purpose — the durable record just folded in is what stands now.
+          //
+          // `injectAgentReply` does this for a turn that *answered*, and for a
+          // long time that covered everything a console would see. A turn that
+          // settles **failed** journals a `TurnFailed` line and emits no
+          // `agent_reply`, so nothing cleared its rows: a detached POST has
+          // already resolved, `onSendEnd` has already run, and the live
+          // timeline sat under the channel claiming work was in flight until
+          // the next send or a reload (PR #1904 review). Harmless while ACP
+          // published no rows at all; not harmless now that it does.
+          //
+          // …but only when the thread has nothing else running. A thread can
+          // hold several detached turns, and `settle` keeps the queued ones
+          // watched; clearing unconditionally would wipe a *newer* turn's rows
+          // whenever its frames arrived while this history read was in flight,
+          // which on a round trip is a wide window. The newer turn's own
+          // settle clears them when it gets there.
+          if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {
+            setLiveStepsByThread((prev) =>
+              prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+            );
+          }
           setThreads((ts) =>
             ts.map((t) => {
               if (t.id !== threadId) return t;
@@ -1514,7 +1727,10 @@ export function AppShell({
       // Deliberately not awaited here, and deliberately not written inline —
       // see `reReadSettledThread` for why the re-read cannot live inside this
       // effect. The line above is what tears this effect down.
-      reReadSettledThread(threadId);
+      //
+      // The turn id goes with it: the re-read's own clear must not be fooled
+      // by a ref that has not caught up with the `setOpenTurns` above.
+      reReadSettledThread(threadId, turnId);
     };
 
     const poll = () => {
@@ -1993,9 +2209,25 @@ export function AppShell({
       // `onSendEnd` does this for a turn this console POSTed; a turn it did not
       // has no send to end, and without this its rows would sit under the
       // channel until the next turn on the same thread replaced them.
-      setLiveStepsByThread((prev) =>
-        prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
-      );
+      //
+      // Guarded on the same condition `reReadSettledThread` uses, and for the
+      // same reason (PR #1904 review): a thread can hold several detached
+      // turns, and this clear is thread-wide. An earlier turn's reply landing
+      // while a later one is still working would erase the rows of the turn
+      // that is *currently* running — which reads as a teammate that stopped,
+      // the exact appearance this timeline exists to prevent. The rows left
+      // standing belong to work that really happened, and the open turn's own
+      // settle clears them.
+      // No turn id to exclude here: a reply arriving over SSE and its turn
+      // settling on the poll are independent events, so the replying turn may
+      // still be listed. That only defers the clear to its own settle, which
+      // then runs the re-read above — the conservative direction, and the one
+      // that never erases a running turn's rows.
+      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+        setLiveStepsByThread((prev) =>
+          prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
+        );
+      }
     },
     // `useEvents` holds its callbacks in refs, so this identity churning as the
     // map lands cannot re-open the SSE stream.
@@ -2411,6 +2643,7 @@ export function AppShell({
         let idx = event.toolCallId
           ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
           : -1;
+        if (idx < 0 && event.toolCallId) return prev;
         if (idx < 0) idx = rows.findIndex((r) => r.status === "running");
         const status = event.status === "error" ? ("error" as const) : ("ok" as const);
         if (idx >= 0) {
@@ -2418,6 +2651,15 @@ export function AppShell({
             ...rows[idx],
             status,
             detail: event.detail ?? rows[idx].detail,
+            // `result` is what came back — the summary `StepTimeline` renders
+            // under the label. Carried for the same reason `detail` is: the
+            // live row and the folded step it is replaced by should not say
+            // different amounts about the same call. It was dropped here while
+            // only the built-in harness streamed (its rows lean on `detail`,
+            // derived from the arguments); an ACP tool call carries its
+            // summary in `result` and nothing else, so a dropped `result` is
+            // the whole of what the row could have said.
+            result: event.result ?? rows[idx].result,
             elapsedMs: event.elapsedMs,
           };
         } else {
@@ -2426,6 +2668,7 @@ export function AppShell({
             status,
             label: event.label ?? "Working",
             detail: event.detail,
+            result: event.result,
             elapsedMs: event.elapsedMs,
             toolCallId: event.toolCallId,
           });
@@ -2703,6 +2946,132 @@ export function AppShell({
     }, []),
   });
 
+  // PR #1875 review finding, round 13: `shouldHoldShellPending` holds on
+  // `!setupChecked` precisely because `SetupController`'s own `onOpenChange`
+  // is the *only* thing that ever sets it (see `setupChecked`'s own doc) —
+  // but the JSX that mounted `<SetupController>` lived below both of this
+  // function's early returns, reachable only once the ordinary shell itself
+  // was chosen. Every fresh mount starts `setupChecked === false`, so the
+  // very predicate this component exists to satisfy made `SetupController`
+  // unreachable: the hold fired, returned before that JSX, `SetupController`
+  // never mounted, `onOpenChange` never fired, and `setupChecked` stayed
+  // `false` forever — a permanent loader, not a brief hold, for every
+  // signed-in operator except a confirmed non-admin (`isAdmin === false`,
+  // the one path `shouldHoldShellPending` returns early on before ever
+  // reaching `setupChecked`) or one who had already skipped in this tab.
+  // Hoisted here and rendered in every branch below so its roster read can
+  // land regardless of which content this render currently picks. Radix's
+  // `Dialog` (via `SetupDialog`) portals its own content and renders nothing
+  // into normal flow while closed, so mounting it alongside `RouteLoading`
+  // or `OnboardingGate` costs nothing visually.
+  //
+  // Round 14: rendering it in every branch is not enough on its own — it has to
+  // sit at the *same* position in all three, or React reconciles it as a
+  // different node and unmounts it on the very transition it exists to survive.
+  // An unstaffed company's first roster result sets `setupChecked` and
+  // `setupOpen` together, which flips this render from a branch below to the
+  // ordinary shell; with the controller under a different root there, React
+  // would throw away the already-proven `unstaffed`/`open` state and issue a
+  // second `listTeam` — exposing the interactive shell while that read is in
+  // flight, and leaving the dialog shut for good if it hangs or fails. So all
+  // three outcomes root at the same `ConsoleProvider` with this as its first
+  // child. That provider is pure context and renders no DOM of its own, so
+  // wrapping the loader and the gate in it costs nothing and hands them the
+  // same ambient `(client, company)` the shell already has.
+  const setupController = (
+    <SetupController
+      client={client}
+      company={company}
+      force={setupForced}
+      routeOpen={view === "setup"}
+      deepLinked={deepLinked}
+      onForceHandled={() => setSetupForced(false)}
+      onOpenChange={handleSetupOpenChange}
+      onCompleted={() => {
+        // Keep these together: Company mounts with the new refresh key, and
+        // setup's payoff is the roster rather than the Overview graph.
+        setTeamBuilt((n) => n + 1);
+        setSetupCompleted(true);
+        setView("company");
+      }}
+      onRouteDismiss={() => setView("overview")}
+    />
+  );
+
+  // PR #1875 review finding, round 8 (widened round 10): hold the shell in a
+  // neutral pending state — never the ordinary interactive shell, never the
+  // gate itself — for as long as the first activation read is unresolved,
+  // whether it is still in flight or already failed once and is retrying.
+  // Without this, the gap below fell straight through to the full shell (its
+  // `shouldShowOnboardingGate` guard reads "not checked yet" identically for
+  // an unresolved read of any cause), leaving an operator clicking around a
+  // shell the funnel had not actually cleared for them to be in, until the
+  // read finally landed and abruptly yanked the gate over it — including on
+  // a merely slow first read (the host scans the journal for this company's
+  // funnel; see `shouldHoldShellPending`'s own doc), not only a proven
+  // outage. `RouteLoading` is the same neutral loader every code-split route
+  // fallback in this file already uses — see its own doc for why a bare
+  // "Loading…" line is not enough (`title` names the page for a screen reader
+  // that never sees a mounted heading otherwise).
+  if (
+    shouldHoldShellPending({
+      status: activationGate.status,
+      checked: activationGate.checked,
+      setupOpen,
+      setupChecked,
+      skippedThisSession: gateSkipped,
+      isAdmin: isGateAdmin,
+      retrying: activationGate.retrying,
+    })
+  ) {
+    // A durable read failure must not read as a hang. `stuck` means three
+    // consecutive non-terminal `getActivation` failures (see
+    // `STUCK_AFTER_FAILURES`) — a malformed event failing the host's
+    // whole-journal scan on every read, say. `checked` never settles, so the
+    // hold above is permanent, and the "skip for now" escape lives inside
+    // `OnboardingGate`, which this branch never mounts: the operator would be
+    // locked out of the whole console by a backend fault with no way forward
+    // (PR #1875 review finding). Offer the same escape here instead of a
+    // loader that never resolves. The polling continues underneath, so a
+    // recovered backend still settles the gate on its own.
+    //
+    // `isGateAdminStuck` covers the other read this hold depends on (PR #1875
+    // review finding): a durable non-401 `fetchMe` failure leaves `isGateAdmin`
+    // at `null` forever with activation reading fine the whole time, so
+    // `activationGate.stuck` alone never flips even though the hold above is
+    // just as permanent — see `GATE_ADMIN_CHECK_STUCK_AFTER_FAILURES`'s own
+    // doc.
+    if (activationGate.stuck || isGateAdminStuck) {
+      return (
+        <ConsoleProvider client={client} company={company}>
+          {setupController}
+          <div className="flex min-h-svh items-center justify-center p-6">
+            <div className="max-w-md space-y-3 text-center">
+              <h1 className="text-lg font-medium">We can’t check your setup right now</h1>
+              <p className="text-sm text-muted-foreground">
+                The console keeps failing to read this company’s setup status. It will keep
+                retrying, but you don’t have to wait.
+              </p>
+              <button
+                type="button"
+                onClick={skipGate}
+                className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Continue to the console
+              </button>
+            </div>
+          </div>
+        </ConsoleProvider>
+      );
+    }
+    return (
+      <ConsoleProvider client={client} company={company}>
+        {setupController}
+        <RouteLoading title="Console" label="Loading…" />
+      </ConsoleProvider>
+    );
+  }
+
   // Issue #1844: the blocking first-run gate. Held behind `!setupOpen` —
   // `setupOpen` is already true for as long as `SetupController`'s dialog is
   // open OR the company is unstaffed (see its own `onOpenChange`), the exact
@@ -2726,14 +3095,17 @@ export function AppShell({
     activationGate.status
   ) {
     return (
-      <OnboardingGate
-        client={client}
-        company={company}
-        status={activationGate.status}
-        currentName={feed.status.name}
-        onRefresh={activationGate.refresh}
-        onSkip={skipGate}
-      />
+      <ConsoleProvider client={client} company={company}>
+        {setupController}
+        <OnboardingGate
+          client={client}
+          company={company}
+          status={activationGate.status}
+          currentName={feed.status.name}
+          onRefresh={activationGate.refresh}
+          onSkip={skipGate}
+        />
+      </ConsoleProvider>
     );
   }
 
@@ -2744,6 +3116,8 @@ export function AppShell({
     // cannot carry a credential. See `lib/console-context.tsx` for why this is
     // deliberately not a general escape from props.
     <ConsoleProvider client={client} company={company}>
+      {setupController}
+
       {/* `SidebarProvider` paints the chrome layer itself — see its own note on
           why that fill lives there and not here (issue #1178). */}
       <SidebarProvider className="h-svh overflow-hidden">
@@ -2759,12 +3133,19 @@ export function AppShell({
         </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
+          {/* macOS floats the traffic lights over this corner once the window
+              gives up its title bar, and this corner is the company switcher.
+              Reserve the strip they land in, and let it drag. Renders nothing
+              anywhere else — see `window-chrome.tsx`. */}
+          <WindowControlsInset />
           {/* The header is the column talking about itself: which host this
-              console is looking at, and whether the column is showing.
+              console is looking at, the utilities that act on the console
+              rather than on the company, and whether the column is showing.
               Everything BELOW it — the nav group and the footer's standing
-              controls — takes you somewhere. Collapse used to be the first row
-              under the switcher, which put a chrome control at the head of a
-              list of destinations and made it read as one (issue #1177).
+              controls — is the company. Collapse used to be the first row under
+              the switcher, which put a chrome control at the head of a list of
+              destinations and made it read as one (issue #1177); it now sits on
+              the utility bar with the three other controls of its kind.
 
               `flex-col` on the rail is not a preference. The collapsed column
               is `--sidebar-width-icon` (3rem) and this block is `p-2`, leaving
@@ -2780,30 +3161,44 @@ export function AppShell({
                 `min-w-0` so the nameplate truncates instead of pushing the
                 button off the end of a 13.5rem column. */}
             <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
-              <HostSwitcher companyName={feed.status.name} />
+              <HostSwitcher
+                companyName={feed.status.name}
+                // The company's lifecycle, and every company on this host:
+                // both were rows in the sidebar footer, and both are facts
+                // about *which company you are in* — which is what this control
+                // is. See `HostSwitcher`'s `companyState` for why the lifecycle
+                // is not folded into the connection dot.
+                companyState={lifecycle(feed.status.lifecycle, feed.status.emergency_paused)}
+                companies={companies}
+                activeCompany={company}
+                onSwitchCompany={onSwitchCompany}
+                onBackToPicker={onBackToPicker}
+                onCreateCompany={onCreateCompany}
+                canCreateCompany={client.carriesPlatformBearer}
+              />
             </div>
-            <SidebarCollapseButton />
           </div>
+          {/* Directly under the switcher: Settings, Feedback, Discord and
+              Collapse, as one bar of icons rather than four full-width rows
+              spread across the nav and the footer. See `SidebarUtilityBar`. */}
+          <SidebarUtilityBar view={view} onNavigate={setView} />
         </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
           <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
         <SidebarFooter>
-          {/* Who you are signed in as, above the controls that act on the
-              company. It renders nothing where there is nobody to name — a host
-              with no sign-in, or a session that has just gone. */}
+          {/* Who you are signed in as, and nothing else.
+
+              The lifecycle row and the "Switch company" row that used to stand
+              here have both moved into the host switcher at the top of the
+              column — see its `companyState` and its Companies group. Both were
+              answers to "which company am I in, and how is it doing", asked at
+              the opposite end of the sidebar from the control that names it.
+
+              It renders nothing where there is nobody to name — a host with no
+              sign-in, or a session that has just gone. */}
           <ProfileRow client={client} company={company} />
-          <SidebarControls
-            lifecycleState={feed.status.lifecycle}
-            emergencyPaused={feed.status.emergency_paused}
-            companies={companies}
-            activeCompany={company}
-            onSwitchCompany={onSwitchCompany}
-            onBackToPicker={onBackToPicker}
-            view={view}
-            onNavigate={setView}
-          />
         </SidebarFooter>
         </nav>
         <SidebarRail />
@@ -2830,18 +3225,16 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
+          {/* `#/overview` is the company graph again — the page #1321 swapped
+              out for the operator landing view. The graph keeps the
+              `#/company/graph` alias that issue gave it, so every link minted
+              while it lived there still resolves.
+
+              `OperatorOverview` is left in the tree, unrouted: its panels are
+              real work (#1015, #1700, #1745) and the decision about where they
+              belong is not this change's to make. Nothing renders it today. */}
           {(view === "overview" || view === "setup") && (
-            <OperatorOverview
-              client={client}
-              company={company}
-              companyName={feed.status.name}
-              feed={feed}
-              scope={scope}
-              // Issue #1015: re-read the run panels when a run parks or fails
-              // while this page stays open (the same tick TaskDetailView
-              // re-reads on).
-              attemptEventTick={attemptEventTick}
-            />
+            <Overview client={client} company={company} companyName={feed.status.name} />
           )}
           {view === "company" && (
             <CompanyView
@@ -2951,6 +3344,19 @@ export function AppShell({
               // than only counting it. The feed the sidebar badge already polls,
               // so the screen says what it is waiting on with no second request.
               parked={feed.approvals}
+              // Issue #1891: and decided here too, not only named. The same
+              // bundle the board and the run drawer get, so a verdict given on
+              // any of the three settles on the others with no reload. Named
+              // as this route's own props rather than the `…Approvals` suffix
+              // the section views take: it is a thin wrapper whose props mirror
+              // `TaskDetailView`'s, which has no other kind of decision to
+              // qualify these against.
+              deciding={decidingApprovals}
+              decided={decidedApprovals}
+              failed={failedApprovals}
+              onDecide={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -3023,11 +3429,25 @@ export function AppShell({
               // second request.
               approvals={feed.approvals}
               now={feed.now}
-              // Issue #883: "Review" on a blocked card opens the queue narrowed
-              // to that card. Through `navigate` rather than `setView` so the
-              // filter lands in the hash and survives a refresh and the Back
-              // button, like every other sub-page.
-              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // Issue #1891: a blocked card decides in place rather than only
+              // reporting that it is blocked. The same four maps the run drawer
+              // receives, owned here for the same reason — an operator who
+              // decides on the board, steps over to Approvals and comes back
+              // must not find a card that forgot what they did. `decided` is
+              // fed by the `approval_resolved` frame as well as by this
+              // console's own resolves, so a decision taken on the page settles
+              // on the board with no reload.
+              //
+              // This replaces `onReviewApprovals`: the card's own "View
+              // details" is an `href` built with `withHostParam`, which lands
+              // the same `#/approvals/<taskId>` in the hash — surviving a
+              // refresh and the Back button — without a callback to route it.
+              decidingApprovals={decidingApprovals}
+              decidedApprovals={decidedApprovals}
+              failedApprovals={failedApprovals}
+              onDecideApproval={(approval, verdict, scope) =>
+                void decideApproval(approval, verdict, scope)
+              }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
               // Lists, which reads the same instance) with no reload.
@@ -3078,6 +3498,11 @@ export function AppShell({
                 // the host rather than this shell guessing here.
                 initialNodeId={sub}
               />
+            </Suspense>
+          )}
+          {view === "brain" && (
+            <Suspense fallback={<RouteLoading title="Brain" label="Loading what your company remembers…" />}>
+              <MemoryView client={client} company={company} />
             </Suspense>
           )}
           {view === "approvals" && (
@@ -3199,6 +3624,7 @@ export function AppShell({
               feed={feed}
               sub={sub}
               onFlag={() => setFeedbackOpen(true)}
+              onResetCompany={onResetCompany}
             />
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
@@ -3229,24 +3655,6 @@ export function AppShell({
         company={company}
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}
-      />
-
-      <SetupController
-        client={client}
-        company={company}
-        force={setupForced}
-        routeOpen={view === "setup"}
-        deepLinked={deepLinked}
-        onForceHandled={() => setSetupForced(false)}
-        onOpenChange={setSetupOpen}
-        onCompleted={() => {
-          // Keep these together: Company mounts with the new refresh key, and
-          // setup's payoff is the roster rather than the Overview graph.
-          setTeamBuilt((n) => n + 1);
-          setSetupCompleted(true);
-          setView("company");
-        }}
-        onRouteDismiss={() => setView("overview")}
       />
 
       <TourController

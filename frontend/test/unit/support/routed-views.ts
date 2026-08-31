@@ -95,7 +95,14 @@ export type Leaf =
 export type Names = readonly Leaf[];
 
 export const NAMED_BY: Record<View, Names> = {
-  overview: [{ pageHeader: "OperatorOverview.tsx" }],
+  /**
+   * `#/overview` is the company graph again — the swap issue #1321 made was
+   * undone, so the page this route actually mounts is `Overview.tsx`.
+   * `OperatorOverview.tsx` is still in the tree and still carries its own
+   * header, but nothing routes to it, so holding this entry to it would have
+   * left the real page free to lose its heading with the guard green.
+   */
+  overview: [{ pageHeader: "Overview.tsx" }],
   /**
    * Three leaves, from `CompanyView`'s own dispatch: `#/company/graph` is the
    * knowledge graph, any other segment is the org chart focused on that desk,
@@ -165,7 +172,12 @@ export const NAMED_BY: Record<View, Names> = {
    * title rather than by a page header. That is the documented exception, not a
    * gap — `OperatorOverview` is what carries the `h1` for this address.
    */
-  setup: [{ pageHeader: "OperatorOverview.tsx" }],
+  /**
+   * The company's durable memory, moved out of the settings rail onto its own
+   * nav row. It was covered by `SETTINGS_NAMED_BY` while it was a sub-page.
+   */
+  brain: [{ pageHeader: "MemoryView.tsx" }],
+  setup: [{ pageHeader: "Overview.tsx" }],
   "not-found": [{ pageHeader: "UnknownRouteView.tsx" }],
 };
 
@@ -189,7 +201,6 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
   hosting: "HostingView.tsx",
   search: "SearchView.tsx",
   skills: "SkillsView.tsx",
-  brain: "MemoryView.tsx",
   usage: "UsageView.tsx",
 };
 

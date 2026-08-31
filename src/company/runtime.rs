@@ -44,6 +44,9 @@ use crate::ports::{
 use crate::ports::ScheduleFireStore;
 // Separate line (#596) for the same reason.
 use crate::ports::WorkflowRunOutputStore;
+// Separate line, same reasons as above: `set_lifecycle` needs the
+// per-company write lock (PR #1875 review finding, second round).
+use crate::ports::store::company_write_lock;
 
 /// The board column a task must enter to be dispatched to its assignee. Read
 /// from the task port (#205) so this edge and the write boundary that validates
@@ -390,6 +393,9 @@ pub struct CompanyRuntime {
     /// replaces it in the registry, or the rebuild failed and
     /// [`resume`](Self::resume) puts this one back to work.
     pub(crate) quiesced: Arc<AtomicBool>,
+    /// Set by a cold build when replay found explicit decision continuations;
+    /// consumed once when the runtime enters the production registry.
+    replay_continuations_on_register: AtomicBool,
     /// WS4: the embedded openhuman harness pool, when wired via
     /// [`RuntimeBuilder::with_harness`](crate::runtime::RuntimeBuilder::with_harness).
     /// Feature-gated so the default build is unaffected.
@@ -523,6 +529,7 @@ impl CompanyRuntime {
             per_agent: Arc::new(TokioMutex::new(HashMap::new())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
+            replay_continuations_on_register: AtomicBool::new(false),
             #[cfg(feature = "openhuman")]
             harness: None,
             #[cfg(feature = "openhuman")]
@@ -1122,35 +1129,48 @@ impl CompanyRuntime {
     /// backstop cannot see — see [`abandon_run`](Self::abandon_run).
     #[cfg(feature = "openhuman")]
     async fn run_dispatch_cycle(self: Arc<Self>, task_id: String, run_id: Option<String>) {
-        let Err(err) = self
+        let report = match self
             .run_cycle(vec![CompanyEvent::TaskDispatched {
                 task_id: task_id.clone(),
                 run_id: run_id.clone(),
             }])
             .await
-        else {
-            return;
-        };
-        // Issue #290 meets issue #242. `ensure_accepting` refuses *before*
-        // `CycleRunner` takes the serial lock, so a dispatch that lands in the
-        // window while this runtime is being replaced never reaches `begin_run`
-        // — and the backstop inside the cycle only settles rows that cycle
-        // started. Every other dispatch failure is already covered in there.
-        // Left alone, the row minted a moment ago would sit `Pending` for the
-        // rest of the process's life: a card reading as under way by an attempt
-        // that never began, which nothing re-drives, and which the rebuild
-        // deliberately does *not* run the boot reaper to clean up.
-        if let Some(id) = run_id.as_deref()
-            && matches!(err, OpenCompanyError::Quiescing(_))
         {
-            self.abandon_run(id, &task_id).await;
-        }
-        tracing::warn!(
-            company = %self.id,
-            task = %task_id,
-            error = %err,
-            "task dispatch cycle failed"
-        );
+            Ok(report) => report,
+            Err(err) => {
+                // Issue #290 meets issue #242. `ensure_accepting` refuses
+                // *before* `CycleRunner` takes the serial lock, so a dispatch
+                // that lands in the window while this runtime is being
+                // replaced never reaches `begin_run` — and the backstop
+                // inside the cycle only settles rows that cycle started.
+                // Every other dispatch failure is already covered in there.
+                // Left alone, the row minted a moment ago would sit `Pending`
+                // for the rest of the process's life: a card reading as under
+                // way by an attempt that never began, which nothing
+                // re-drives, and which the rebuild deliberately does *not*
+                // run the boot reaper to clean up.
+                if let Some(id) = run_id.as_deref()
+                    && matches!(err, OpenCompanyError::Quiescing(_))
+                {
+                    self.abandon_run(id, &task_id).await;
+                }
+                tracing::warn!(
+                    company = %self.id,
+                    task = %task_id,
+                    error = %err,
+                    "task dispatch cycle failed"
+                );
+                return;
+            }
+        };
+        // Issue #1852 Part 1: `run_task`/`refuse_dispatch` already build the
+        // right relay via `relay_reply` — it rides home in this report's
+        // responses — but until now nothing wrote it down. Unlike the
+        // chat-POST path (`journal_chat_replies`) and the approval path
+        // (`publish_continuation`), this dispatch path had no journaling step
+        // at all, so the answer never reached the thread it was spawned from,
+        // live or on reload.
+        self.journal_dispatch_replies(&report).await;
     }
 
     /// Settles an attempt whose cycle was refused before it could start
@@ -1780,6 +1800,268 @@ impl CompanyRuntime {
         })
     }
 
+    /// Durably banks a blocked-node approval the moment its verdict is known,
+    /// for whichever caller reaches it first (issue #1816 / #1825).
+    ///
+    /// Extracted so `settle_approval` and `settle_approval_amended`
+    /// (`runtime/cycle.rs`) can call it **inline, before returning the
+    /// receipt** — closing a window `continue_turn`'s own call alone could
+    /// not: `resolve_approval_spawned` settles the verdict durably and only
+    /// then spawns the detached follow-up task that used to be the sole
+    /// caller of this bank. A restart between that spawn and the task's first
+    /// poll left the settle durable but the bank never run, and boot rehydrate
+    /// only rearms `blocked_nodes` from `journal.blocked_node_approvals()` —
+    /// so a stash whose approval never reached this call is invisible to
+    /// `reconcile_stranded_blocked_nodes` and stranded exactly as before
+    /// #1816's original fix, just through a different crash window.
+    ///
+    /// Idempotent by construction (`mark_approved` is a flag flip,
+    /// `record_blocked_node_approved` is a journal-backed set insert), so
+    /// every caller — the inline settle paths and `continue_turn`'s own
+    /// defense-in-depth call — can run it unconditionally without needing to
+    /// coordinate who "owns" the bank. A no-op for a denial, an id this
+    /// journal never parked, or a turn that is not a blocked agent node's.
+    ///
+    /// # Why the durable write retries inline, then in the background (P1, then P2)
+    ///
+    /// Both inline callers reach this only after
+    /// `approval_gate.resolve_outcome` has already popped `id` from the
+    /// parked set (issue #243's double-submit guard) — that is what makes the
+    /// call idempotent-safe rather than a second decision. It also means a
+    /// re-click of "approve" on the same id short-circuits to
+    /// `ResolveReceipt::AlreadyResolved` upstream and never reaches this
+    /// function again: unlike `spawn_blocked_node_continuation`'s dispatch
+    /// write (which a caller-visible `Err` lets `resume_blocked_agent_node`
+    /// retry, because that stash and approval are still sitting there to
+    /// retry from), there is no external *caller* who can retry *this* write
+    /// — the operator's click already happened, and clicking again is a
+    /// no-op past this point. A single failed attempt on this node's last
+    /// decision is invisible to `reconcile_stranded_blocked_nodes` (see this
+    /// function's doc above) and strands the grant permanently, not until the
+    /// next transient blip clears — so a bounded, synchronous retry runs
+    /// before this call returns to the caller, rather than warning once and
+    /// moving on.
+    ///
+    /// That bounded loop (P1) still gives up after three quick attempts,
+    /// which is exactly as blind to an outage lasting any longer as no retry
+    /// at all — the caller sees success either way, since the grant and the
+    /// resolved-journal line are already committed by the time this runs. P2
+    /// hands an exhausted write to [`spawn_background_approval_bank_retry`](Self::spawn_background_approval_bank_retry)
+    /// instead of only logging it: not a caller retrying, but this function
+    /// retrying itself on borrowed time, for as long as the process backing
+    /// this boot survives the outage.
+    pub(crate) async fn bank_blocked_node_approval(&self, id: &ApprovalId, verdict: Verdict) {
+        if verdict != Verdict::Approve {
+            return;
+        }
+        let Some(turn) = self.journal.approval_cycle(id).flatten() else {
+            return;
+        };
+        if !crate::runtime::workflow_resume::is_node_turn(&turn) {
+            return;
+        }
+        self.blocked_nodes.mark_approved(&turn);
+        const ATTEMPTS: u32 = 3;
+        let mut last_error = None;
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(u64::from(attempt) * 50)).await;
+            }
+            match self.journal.record_blocked_node_approved(&turn).await {
+                Ok(()) => return,
+                Err(error) => last_error = Some(error),
+            }
+        }
+        // Every bounded, inline attempt failed. `error!`, not `warn!`: this is
+        // the only synchronous record of the fact.
+        if let Some(error) = last_error {
+            tracing::error!(
+                company = %self.id,
+                %turn,
+                %error,
+                "[approval] a blocked node's approval could not be durably banked after \
+                 retrying inline; handing the write to a background retry rather than \
+                 accepting the loss"
+            );
+        }
+        // Issue #1825 (P2 follow-up): the bounded loop above used to be where
+        // this gave up — three quick attempts (max ~150ms of backoff) and then
+        // only a log line, so a journal outage lasting even a moment longer
+        // than that fell through as a *successful* settlement: the caller
+        // above sees no error, the grant is already live, and nothing downstream
+        // ever tries this write again (see the doc above `bank_blocked_node_approval`
+        // — there is no retryable caller for it, unlike `spawn_blocked_node_continuation`'s
+        // dispatch write). A restart landing anywhere before the live follow-up
+        // releases the turn then rehydrates the stash from `blocked_stashes`
+        // with `approved: false` (that record is a separate write, made earlier
+        // at park time, and did land), and boot's `reconcile_stranded_blocked_nodes`
+        // reads it off `stashed_turns()` as unapproved — indistinguishable from a
+        // stash nobody ever decided — and retires it, discarding a real approval.
+        //
+        // # Why detached rather than propagated as an error
+        //
+        // Returning `Err` from here instead was considered and rejected. By
+        // this point `ApprovalGate::resolve_outcome` (`settle_approval`,
+        // `runtime/cycle.rs`) has already popped `id` from the parked set —
+        // synchronously, unconditionally, on every path, not something this
+        // function can gate — and `record_resolved` plus (for an approval)
+        // the grant mint have already durably committed. An `Err` here would
+        // misrepresent an approval that already took effect elsewhere as
+        // failed, AND would abort `resolve_approval_spawned` before
+        // `spawn_follow_up` runs — the continuation would then never dispatch
+        // even in the ordinary same-process case, trading a rare cross-restart
+        // gap for a routine same-process failure on any multi-second journal
+        // hiccup. Moving this write earlier, before `resolve_outcome`, so an
+        // abort *would* be clean, is not safe on its own either:
+        // `resolve_outcome` is what tells an `Approve` apart from an `Expired`
+        // default-deny, and writing "this node's continuation is approved"
+        // before that classification risks banking a decision that turns out
+        // to be a deny. Doing that safely needs a peek-then-commit split on
+        // `ApprovalGate::resolve_outcome`'s pop, out of scope for this finding.
+        //
+        // So the accepted trade-off is a *bounded* background retry, not a
+        // synchronous or an unbounded one — the same best-effort-plus-boot-
+        // reconciliation pattern this feature already uses for its other
+        // post-commit durable writes (`record_blocked_node_stashed`,
+        // `BlockedNodeDispatched`). It does not make the crash-during-retry
+        // window zero — nothing single-process can, once the decision is
+        // already irreversible — it shrinks the window from "gone the
+        // instant the third inline attempt fails" to "gone only if the
+        // process dies during the several-second background retry", and
+        // keeps the operator's HTTP response exactly as fast as before:
+        // `settle_approval` has already returned by the time this task
+        // starts, so nothing here adds to the caller's wait.
+        self.spawn_background_approval_bank_retry(turn);
+    }
+
+    /// Keeps retrying [`RuntimeJournal::record_blocked_node_approved`] in the
+    /// background after [`bank_blocked_node_approval`](Self::bank_blocked_node_approval)'s
+    /// bounded inline loop exhausts (issue #1825, P2 follow-up).
+    ///
+    /// Detached on its own clone of the journal handle and the company id —
+    /// not `Arc<Self>` — because nothing else this turn's continuation needs
+    /// lives here: `mark_approved` already flipped the in-process flag this
+    /// same call started with, so a same-process redemption is unaffected
+    /// either way. This task's only job is to keep trying the one durable
+    /// write a restart depends on, until it lands.
+    ///
+    /// Backs off exponentially (200ms doubling, capped at 2s) for up to 8
+    /// further attempts — worst case ~11s of total backoff, not the ~80s a
+    /// wider bound would allow. Deliberately tight: every second this task is
+    /// still retrying is a second in which a process crash loses the
+    /// approval for good (see the doc above), and a real transient blip —
+    /// brief disk contention, a momentary lock — clears in low single-digit
+    /// seconds, not tens of them. Widening this bound trades a smaller
+    /// crash-loss window for catching a longer outage, which is not a trade
+    /// this function should make silently; a store down for longer than ~11s
+    /// needs an operator's attention regardless; a bounded window, not
+    /// forever, so a journal that is down for good does not leak one task
+    /// per stranded approval for the life of the process.
+    /// `record_blocked_node_approved` is idempotent (a journal-backed set
+    /// insert, per its own doc), so a write that lands after the bounded
+    /// inline loop's own attempts already partially failed cannot
+    /// double-record anything.
+    ///
+    /// # Retires a write that lands after its own stash was already released
+    /// (P2, found by chatgpt-codex-connector)
+    ///
+    /// `bank_blocked_node_approval` runs twice per resolve — once inline from
+    /// `settle_approval`, once again as `continue_turn`'s own
+    /// defense-in-depth call — so an inline-exhausted write here can race a
+    /// **second** background retry task for the same turn, spawned by the
+    /// other call site, while the run's own dispatch (which does not wait on
+    /// either) is already releasing the stash
+    /// (`record_blocked_node_released`, which removes `turn` from
+    /// `blocked_node_approvals` along with everything else). A retry that
+    /// lands afterward re-inserts `turn` into `blocked_node_approvals` with
+    /// nothing left to release it — the set is no longer idempotent with
+    /// respect to its own terminal record, and a replay of this exact
+    /// sequence on a future boot reaches the same state: the durable key
+    /// accumulates forever, because nothing ever appends a second
+    /// `BlockedNodeReleased` to retire it. This function's earlier revision
+    /// tried closing the race by checking `blocked_nodes.is_armed` *before*
+    /// each attempt and abandoning the retry outright — proven wrong by
+    /// `a_recovered_approval_bank_failure_lands_via_the_background_retry`,
+    /// which fails every one of the outaged fixture's exhausted appends
+    /// specifically *because* dispatch (which never waits on this write)
+    /// reliably releases the stash before the first 200ms backoff elapses;
+    /// bailing there would make the retry a no-op in the exact outage it
+    /// exists to recover, not only in the race this section closes. So the
+    /// write still runs unconditionally — the fact is real audit history
+    /// either way — and only the resurrected mirror key gets swept: on
+    /// success, if the stash is no longer armed, one more
+    /// `record_blocked_node_released` for the same turn is appended.
+    /// `record_blocked_node_released`'s in-memory removal is already a no-op
+    /// on an absent turn, and on replay this second line reorders correctly
+    /// behind the stray `BlockedNodeApproved` it is retiring, so a future
+    /// boot's replay ends exactly where this process does: nothing left
+    /// behind.
+    fn spawn_background_approval_bank_retry(&self, turn: String) {
+        let journal = self.journal.clone();
+        let blocked_nodes = self.blocked_nodes.clone();
+        let company = self.id.clone();
+        tokio::spawn(async move {
+            const MAX_ATTEMPTS: u32 = 8;
+            const MAX_BACKOFF_MS: u64 = 2_000;
+            let mut backoff_ms: u64 = 200;
+            for attempt in 0..MAX_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                match journal.record_blocked_node_approved(&turn).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            company = %company,
+                            %turn,
+                            attempt,
+                            "[approval] a blocked node's approval bank landed on a background \
+                             retry, after the inline bounded loop exhausted"
+                        );
+                        if !blocked_nodes.is_armed(&turn)
+                            && let Err(error) = journal.record_blocked_node_released(&turn).await
+                        {
+                            tracing::warn!(
+                                company = %company,
+                                %turn,
+                                %error,
+                                "[approval] this write landed after its own stash was already \
+                                 released by another retry or the inline attempt; retiring the \
+                                 resurrected key failed, so a stale entry may linger in \
+                                 blocked_node_approvals until a manual sweep"
+                            );
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        tracing::warn!(
+                            company = %company,
+                            %turn,
+                            attempt,
+                            %error,
+                            "[approval] background retry of a blocked node's approval bank \
+                             failed again"
+                        );
+                    }
+                }
+            }
+            // Issue #1825 (P2 follow-up): every extended attempt failed too.
+            // This is now the loudest record there is — the grant is live, the
+            // decision is durable in the audit trail, but this specific
+            // `BlockedNodeApproved` fact never reached the journal, so a
+            // restart from here on will rehydrate this stash unapproved and
+            // `reconcile_stranded_blocked_nodes` will retire it. There is no
+            // further retry left on this boot; recovering from this point on
+            // needs an operator to re-run the workflow.
+            tracing::error!(
+                company = %company,
+                %turn,
+                attempts = MAX_ATTEMPTS,
+                "[approval] a blocked node's approval could not be durably banked after an \
+                 extended background retry; a restart from here will strand this grant with \
+                 no further automatic recovery — the workflow needs a manual re-run"
+            );
+        });
+    }
+
     /// Runs the continuation a settled verdict owes — **once per turn, not once
     /// per approval** (issue #469).
     ///
@@ -1820,6 +2102,16 @@ impl CompanyRuntime {
         if let Some(turn) = turn.as_deref() {
             self.workflow_gates.decide(turn, &approval_id, verdict);
         }
+        // Issue #1816/#1825: this is the second place a blocked-node approval
+        // gets banked — `settle_approval`/`settle_approval_amended` (issue
+        // #1825) already did it inline, durably, before this detached follow-up
+        // task was even spawned. Calling it again here is a deliberate,
+        // harmless no-op (`mark_approved` and `record_blocked_node_approved`
+        // are both idempotent) kept as defense-in-depth for exactly the
+        // scenario the first bank exists to close: a crash between the settle
+        // returning and this task's first poll would otherwise leave nobody
+        // having banked the decision at all.
+        self.bank_blocked_node_approval(&approval_id, verdict).await;
         let batch = match &turn {
             Some(turn) => match self.continuations.decide(turn, Some(event)) {
                 Some(batch) => batch,
@@ -1844,6 +2136,26 @@ impl CompanyRuntime {
             && crate::runtime::workflow_resume::run_id_from_turn(turn).is_some()
         {
             return self.resume_workflow_run(&approval_id, turn, batch).await;
+        }
+        // An explicit question raised inside a workflow agent node is still a
+        // conversation continuation for that agent, not authority to replay the
+        // workflow node. The ordinary blocked-node path intentionally drops an
+        // all-denied batch; doing that here would swallow the operator's answer
+        // and leave the durable ApprovalContinuation live until expiry. The
+        // request tool is a turn boundary, so this batch is all-explicit by
+        // construction; keep the `all` guard fail-closed if a legacy mixed
+        // batch is ever replayed.
+        if let Some(turn) = turn.as_deref()
+            && crate::runtime::workflow_resume::is_node_turn(turn)
+            && batch.iter().all(|event| {
+                let CompanyEvent::ApprovalResolved { approval_id, .. } = event else {
+                    return false;
+                };
+                self.grants.peek_continuation(approval_id).is_some()
+            })
+        {
+            self.retire_blocked_stash(turn).await;
+            return self.run_continuation(&approval_id, batch).await;
         }
         // Issue #899 (Stage 1): a blocked agent node, likewise not a brain turn.
         // Its gated calls parked under a `workflow-node:` key (disjoint from the
@@ -1943,16 +2255,26 @@ impl CompanyRuntime {
     /// * **all denied or expired** — spawn nothing. The block is final; there is
     ///   nothing to continue, exactly as `resume_run` starts no run for a wholly
     ///   refused batch.
-    /// * **approved but the stash is gone** — a restart lost it (the parked
-    ///   tool-call card carries no lineage to rehydrate from), so the run cannot
-    ///   be located. The operator is told to re-run rather than left waiting.
+    /// * **approved but the stash is gone** — the last-resort branch. Since
+    ///   issue #1816 a restart no longer lands here: the workflow id and trigger
+    ///   input are stashed durably at park time and the boot builder re-arms the
+    ///   [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)
+    ///   from them, so `release` above finds the run. This branch remains only for
+    ///   the genuine no-lineage case (a park whose durable stash write also
+    ///   failed, or one written before #1816): the operator is told to re-run
+    ///   rather than left waiting.
     async fn resume_blocked_agent_node(
         &self,
         approval_id: &ApprovalId,
         turn: &str,
         batch: Vec<CompanyEvent>,
     ) -> Result<CycleReport> {
-        let approved = batch.iter().any(|event| {
+        // Issue #1816: the released batch only names the verdicts this process
+        // held in memory, which a restart between two decisions on the same
+        // node can leave short of an earlier approve. `stashed.approved` (below)
+        // is the durable backstop for exactly that gap — read alongside this,
+        // not instead of it, since the common in-process case never needs it.
+        let batch_approved = batch.iter().any(|event| {
             matches!(
                 event,
                 CompanyEvent::ApprovalResolved {
@@ -1972,9 +2294,24 @@ impl CompanyRuntime {
                 );
             }
         }
-        // Drop the stash whatever the verdict — a refused block has nothing to
-        // continue, and a spawned one has consumed it.
-        let stashed = self.blocked_nodes.release(turn);
+        // Issue #1816 (Stage 4): read the stash without taking it yet. Retiring
+        // it — both the in-memory fast path and the durable journal record
+        // beneath it — used to happen right here, unconditionally, before the
+        // spawn attempt below was even made. A crash strictly during that
+        // awaited spawn then left the release already recorded and the stash
+        // already gone, so a restart rehydrated neither: no pending decision
+        // (already resolved), no stash (already released), nothing left to
+        // retry — exactly the stranding this queue exists to prevent, just
+        // moved one step later. Each branch below now calls
+        // `retire_blocked_stash` itself, only once its own outcome (spawned,
+        // refused, or genuinely un-continuable) is actually final.
+        let stashed = self.blocked_nodes.peek(turn);
+        // The stash's own flag (banked at decide time, and rehydrated across a
+        // restart alongside the stash itself) carries an earlier approve the
+        // batch above may have lost. Either source is enough — the point is
+        // that a genuine approve on this node is never overruled by what this
+        // particular process happened to still be holding.
+        let approved = batch_approved || stashed.as_ref().is_some_and(|s| s.approved);
         if !approved {
             tracing::info!(
                 company = %self.id,
@@ -1982,6 +2319,7 @@ impl CompanyRuntime {
                 "[approval] every gated call on this blocked node was refused or expired, so no \
                  continuation runs"
             );
+            self.retire_blocked_stash(turn).await;
             return Ok(CycleRunner::new(self).already_resolved_report());
         }
         let Some(stashed) = stashed else {
@@ -1996,31 +2334,316 @@ impl CompanyRuntime {
                  continue — re-run the workflow to pick it back up.",
             )
             .await;
+            // Nothing was in the queue to take, but the durable side may still
+            // hold a record naming this turn (the genuine no-lineage case is
+            // driven by the in-memory queue being empty, not necessarily the
+            // journal) — retire it so a later boot does not rehydrate it.
+            self.retire_blocked_stash(turn).await;
             return Ok(CycleRunner::new(self).already_resolved_report());
         };
-        if let Err(error) = crate::runtime::workflow_resume::spawn_blocked_node_continuation(
+        // Issue #1825 (finding `3877718169`, chatgpt-codex-connector): a ghost
+        // decision reaching this **live** path must not repeat a dispatch
+        // that already landed. `reconcile_stranded_blocked_nodes` only ever
+        // calls this function once its own `already_dispatched` check has
+        // already ruled that out — but that check runs once per boot, over
+        // turns with nothing left parked. `continue_turn` routes here off
+        // nothing but a turn key and a fresh `ApprovalResolved`, with no such
+        // filter, and a ghost card supplies that event exactly as faithfully
+        // as a genuine one.
+        //
+        // `ApprovalResolved` is `Durability::Process` by design —
+        // `journal.rs`'s own doc on it: "a ghost approval that is approved a
+        // second time cannot duplicate the effect, because the effect's own
+        // commit is host-durable and `is_executed` skips it." True for the
+        // gated call's own effect, replayed through the same park. Not true
+        // for this node's *continuation dispatch*, which sits behind no such
+        // guard — `spawn_blocked_node_continuation` below launches on nothing
+        // but `stashed.is_some() && approved`. A host crash that loses only
+        // the resolution leaves the card's own `ApprovalParked` line intact
+        // (`Durability::Host`, same tier as `BlockedNodeApproved`/
+        // `BlockedNodeDispatched`) — visible to the operator and decidable
+        // again — while `reconcile_stranded_blocked_nodes`, seeing the turn
+        // still parked, reads that as "waiting on a sibling decision" and
+        // deliberately leaves it alone (see that function's own `continue`
+        // above `already_dispatched`'s check). So the operator's second
+        // click on the reopened card is the only thing left standing between
+        // an already-dispatched continuation and a duplicate one: same model
+        // spend, same external side effects, run twice.
+        if self.journal.is_blocked_node_dispatched(turn) {
+            tracing::warn!(
+                company = %self.id,
+                %turn,
+                "[approval] a decision landed on a blocked node whose continuation was \
+                 already dispatched; recording it and retiring the stash without launching \
+                 a second continuation"
+            );
+            self.retire_blocked_stash(turn).await;
+            return Ok(CycleRunner::new(self).already_resolved_report());
+        }
+        match crate::runtime::workflow_resume::spawn_blocked_node_continuation(
             self,
+            turn,
             &stashed.workflow_id,
             stashed.input,
+            stashed.started_by,
         )
         .await
         {
-            tracing::error!(
+            Ok(()) => {
+                // Issue #1825: `spawn_blocked_node_continuation` itself banks
+                // `BlockedNodeDispatched` now, between admitting the run and
+                // launching its detached task — see that function's doc for
+                // why the marker moved off this side of the call. `Ok(())`
+                // only reaches here once that write has actually landed (a
+                // P1 follow-up made a failed write abort the launch and
+                // propagate instead of warning and proceeding unmarked — see
+                // that call site), so by the time this arm runs the dispatch
+                // is durable *and* the launch happened; nothing left to do on
+                // that front. Only now — spawn has actually taken hold — is
+                // the stash truly spent. Retiring it here rather than up
+                // front is what lets a crash mid-spawn rehydrate the very
+                // stash it needs to retry from, instead of finding both
+                // halves already gone.
+                self.retire_blocked_stash(turn).await;
+                Ok(CycleRunner::new(self).already_resolved_report())
+            }
+            Err(error) => {
+                tracing::error!(
+                    company = %self.id,
+                    %turn,
+                    %error,
+                    "[approval] the workflow run released by a blocked node's approval could \
+                     not be continued"
+                );
+                // Issue #1825 (P2 follow-up): a refusal at the concurrency
+                // ceiling (or, per `spawn_blocked_node_continuation`, any
+                // other failure reached before `RunSupervisor::begin` even
+                // ran, e.g. a transient store read) means nothing was
+                // admitted and nothing was marked dispatched — the stash and
+                // its approval are exactly as durably recoverable as they
+                // were before this attempt. Retiring them here would discard
+                // an approval with real durable state still able to resume
+                // it, leaving nothing to redeem it once capacity frees up.
+                // Keep it stashed and approved so a later boot's
+                // `reconcile_stranded_blocked_nodes` finds it and tries
+                // again, exactly as if this attempt had never run.
+                if Self::is_retryable_dispatch_failure(&error) {
+                    // CodeRabbit (review 5038258829): the only retry path for
+                    // a kept stash is `reconcile_stranded_blocked_nodes`, which
+                    // runs once per boot (`RuntimeBuilder::build`, gated on
+                    // `handover.is_none()`) — not an in-process retry inside
+                    // minutes, which "will retry it automatically" led an
+                    // operator to expect.
+                    self.announce_to_operator(&format!(
+                        "That workflow step's approval is in, but the run could not start \
+                         right now: {error}. The approval stays recorded and is picked back \
+                         up automatically the next time this company starts."
+                    ))
+                    .await;
+                } else {
+                    self.announce_to_operator(&format!(
+                        "That workflow step's approval is in, but the run could not be \
+                         restarted: {error}. Nothing else is waiting on you — re-run the \
+                         workflow to pick it back up."
+                    ))
+                    .await;
+                    // A handled, permanent, in-process failure (as opposed to
+                    // a crash, and as opposed to a retryable refusal above) —
+                    // the operator has already been told to re-run manually,
+                    // so the stash is spent exactly as it was on `main`.
+                    self.retire_blocked_stash(turn).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether a [`spawn_blocked_node_continuation`](crate::runtime::workflow_resume::spawn_blocked_node_continuation)
+    /// failure means nothing was admitted, so the stash it failed to dispatch
+    /// is still worth keeping for a later attempt (issue #1825, P2 follow-up).
+    ///
+    /// [`OpenCompanyError::WorkflowRunLimit`] is the reconciliation-specific
+    /// case the finding names directly: the boot reconciler can rehydrate
+    /// more approved stashes than `[workflows].max_in_flight_runs` admits at
+    /// once, and every one past the ceiling must survive to be retried once
+    /// capacity frees up rather than being discarded on the first refusal.
+    /// [`OpenCompanyError::Store`] and [`OpenCompanyError::StoreIo`] are the
+    /// other case the finding names — `spawn_blocked_node_continuation`'s
+    /// `store().load(...)` for overlay workflows can fail on a host hiccup
+    /// with nothing wrong with the approval or the graph it names. A P1
+    /// follow-up added a second source of the same two variants: a failed
+    /// `record_blocked_node_dispatched` write now aborts the launch instead
+    /// of warning and proceeding unmarked, so that failure reaches here too
+    /// — `begin` already admitted (and this arm's guard already dropped,
+    /// freeing the slot) but nothing launched, which is exactly the shape
+    /// this function exists to keep retryable.
+    ///
+    /// Every other variant reaching this call site — `CompanyNotFound` (the
+    /// graph was deleted) or `InvalidRequest` (no workflow runner wired) — is
+    /// a fact about the company that a retry cannot change, so those stay
+    /// permanent: retire the stash and tell the operator to re-run by hand,
+    /// exactly as `main` already does for them.
+    fn is_retryable_dispatch_failure(error: &OpenCompanyError) -> bool {
+        matches!(
+            error,
+            OpenCompanyError::WorkflowRunLimit { .. }
+                | OpenCompanyError::Store(_)
+                | OpenCompanyError::StoreIo { .. }
+        )
+    }
+
+    /// Retires a blocked-node stash — the in-memory fast path and the durable
+    /// journal record beneath it — once its outcome is truly final (issue
+    /// #1816, Stage 4).
+    ///
+    /// Split out of [`resume_blocked_agent_node`](Self::resume_blocked_agent_node)
+    /// so every one of its terminal branches retires the stash at the same,
+    /// late point rather than up front: see that function's doc comment for
+    /// why firing this before the spawn attempt is the gap this exists to
+    /// close. Best-effort on the durable clear, matching the park's own
+    /// stance — the in-memory drop is what this cycle acts on, and a lost
+    /// release record at worst rehydrates a stash whose approvals are already
+    /// resolved, which no resolve event will ever release again.
+    async fn retire_blocked_stash(&self, turn: &str) {
+        self.blocked_nodes.release(turn);
+        if let Err(error) = self.journal.record_blocked_node_released(turn).await {
+            tracing::warn!(
                 company = %self.id,
                 %turn,
                 %error,
-                "[approval] the workflow run released by a blocked node's approval could not be \
-                 continued"
+                "[approval] a blocked node's durable stash could not be retired; a boot may \
+                 rehydrate an already-resolved block. `reconcile_stranded_blocked_nodes` won't \
+                 re-dispatch it a second time when this call reached the spawn (issue #1825's \
+                 `BlockedNodeDispatched` survives this write's failure), but for the \
+                 all-denied/no-stash callers this remains a genuinely stale record: harmless, \
+                 not re-released, just left sitting in the journal until a future replay"
             );
-            self.announce_to_operator(&format!(
-                "That workflow step's approval is in, but the run could not be restarted: \
-                 {error}. Nothing else is waiting on you — re-run the workflow to pick it back \
-                 up."
-            ))
-            .await;
-            return Err(error);
         }
-        Ok(CycleRunner::new(self).already_resolved_report())
+    }
+
+    /// Boot-time reconciliation for issue #1816's narrowest gap (Stage 3): a
+    /// restart landing between the durable approval bank
+    /// (`record_blocked_node_approved`) and the in-memory decision that would
+    /// have released the block (`ContinuationQueue::decide`) rehydrates an
+    /// approved stash that nothing then triggers.
+    ///
+    /// `record_blocked_node_approved` exists precisely to survive a restart
+    /// that lands on a decision that is *not* the turn's last (its own doc
+    /// comment). What it does not cover on its own is the case where the
+    /// crash lands on the decision that *was* the last one: the journal's
+    /// `parked_turns()` has already dropped every approval for this turn —
+    /// there was nothing left to be parked — so the boot rearm gives
+    /// `ContinuationQueue` nothing to fire on, and only a *future* decision on
+    /// the same turn used to notice the gap. A node whose last call is also
+    /// its only (or final) call has no future decision coming, so the run
+    /// sits stranded rather than resuming the moment the operator's approval
+    /// — which they already gave — should have redeemed it.
+    ///
+    /// Run once per boot, after every other queue is rearmed: a turn whose
+    /// stash is durably marked `approved` and has nothing left parked in the
+    /// journal is exactly that stranded case, resumed the same way a live
+    /// release would resume it, with an empty batch — its decision is already
+    /// durable in the event log and owes nothing further there.
+    ///
+    /// Excludes turns already durably marked `BlockedNodeDispatched` (issue
+    /// #1825): that pair of facts — approved, nothing left parked — also
+    /// describes a stash that *was* already resumed once, if the
+    /// `resume_blocked_agent_node` call that did it got as far as spawning
+    /// the continuation but then lost its `BlockedNodeReleased` write to a
+    /// transient failure. Without the dispatched check this function cannot
+    /// tell that case apart from a genuine strand and would re-dispatch a
+    /// continuation that already ran.
+    ///
+    /// # Unapproved stashes (issue #1825, P2 follow-up)
+    ///
+    /// This used to scan only [`approved_turns`](crate::runtime::blocked_nodes::BlockedNodeQueue::approved_turns),
+    /// on the reasoning that an unapproved turn has nothing worth resuming —
+    /// true, but incomplete: `resume_blocked_agent_node`'s own all-denied
+    /// branch retires a resolved-with-no-approval stash the moment it sees
+    /// one *live*, and a restart landing between that resolution and the
+    /// retirement it owes (or a retirement whose durable write itself fails)
+    /// strands the identical shape this function exists to clean up — just
+    /// unapproved instead of approved. `approved_turns` cannot see it, so on
+    /// `main` it rehydrates on every boot's rearm and is never retired: one
+    /// stale stash held in memory (and in the durable journal beneath it) per
+    /// restart that races this window, accumulating indefinitely. Scanning
+    /// [`stashed_turns`](crate::runtime::blocked_nodes::BlockedNodeQueue::stashed_turns)
+    /// instead and branching on the stash's own `approved` flag lets this
+    /// function retire that case the same way the live path does, rather than
+    /// only ever dispatching.
+    pub(crate) async fn reconcile_stranded_blocked_nodes(&self) {
+        let still_parked: std::collections::HashSet<String> =
+            self.journal.parked_turns().into_iter().collect();
+        // Issue #1825: a turn already durably marked dispatched has already
+        // been resumed once — it is not stranded, it is a `BlockedNodeStashed`
+        // + `BlockedNodeApproved` pair whose paired `BlockedNodeReleased`
+        // write failed after the spawn it retires had already succeeded.
+        // Re-dispatching it here would spawn the same continuation a second
+        // time. See `BlockedNodeDispatched`'s doc comment for the full window
+        // this closes.
+        let already_dispatched: std::collections::HashSet<String> =
+            self.journal.blocked_node_dispatched().into_iter().collect();
+        for turn in self.blocked_nodes.stashed_turns() {
+            if still_parked.contains(&turn) {
+                // Still waiting on a sibling decision — not stranded, just
+                // mid-turn; the eventual last decision will release it.
+                continue;
+            }
+            // Issue #1825 (P2 follow-up): nothing left parked and never
+            // approved is the same all-denied/expired shape
+            // `resume_blocked_agent_node`'s own no-approval branch retires
+            // the moment it sees it live — just reached here because the
+            // crash landed before that retirement (or its durable write)
+            // could run. There is no approval to redeem, only a stash to
+            // stop holding; retire it the same way that branch does and move
+            // on, without touching the dispatched check below, which exists
+            // solely to guard the *approved* replay path.
+            if !self
+                .blocked_nodes
+                .peek(&turn)
+                .is_some_and(|stashed| stashed.approved)
+            {
+                tracing::info!(
+                    company = %self.id,
+                    %turn,
+                    "[approval] a restart stranded a blocked node whose last decision resolved \
+                     with nothing approved, before its retirement could run; retiring the stash \
+                     now instead of leaving it to rehydrate on every future boot"
+                );
+                self.retire_blocked_stash(&turn).await;
+                continue;
+            }
+            if already_dispatched.contains(&turn) {
+                tracing::warn!(
+                    company = %self.id,
+                    %turn,
+                    "[approval] a blocked node's continuation was already dispatched before a \
+                     restart, but its retirement never durably landed; skipping a second \
+                     dispatch and retrying the retirement instead"
+                );
+                // Best-effort retry of the write that failed last time — a
+                // second attempt on a fresh boot has every chance of a
+                // transient failure (disk pressure, a mid-roll host) having
+                // cleared. If it fails again, this boot's warning fires once
+                // more next restart, which is a stale-record annoyance, not a
+                // repeat of the double-dispatch this branch exists to avoid.
+                self.retire_blocked_stash(&turn).await;
+                continue;
+            }
+            let placeholder = ApprovalId::new(format!("boot-reconcile:{turn}"));
+            if let Err(error) = self
+                .resume_blocked_agent_node(&placeholder, &turn, Vec::new())
+                .await
+            {
+                tracing::error!(
+                    company = %self.id,
+                    %turn,
+                    %error,
+                    "[approval] a blocked node stranded by a restart between its last \
+                     approval and its release could not be resumed at boot"
+                );
+            }
+        }
     }
 
     /// Runs one turn's continuation over the decisions it was blocked on, and
@@ -2036,7 +2659,16 @@ impl CompanyRuntime {
         approval_id: &ApprovalId,
         batch: Vec<CompanyEvent>,
     ) -> Result<CycleReport> {
-        match CycleRunner::new(self).run(batch).await {
+        let claims = batch
+            .iter()
+            .filter_map(|event| match event {
+                CompanyEvent::ApprovalResolved { approval_id, .. } => {
+                    self.grants.peek_continuation(approval_id)
+                }
+                _ => None,
+            })
+            .collect();
+        match CycleRunner::new(self).run_continuation(batch, claims).await {
             Ok(mut report) => {
                 self.publish_continuation(approval_id, &mut report).await;
                 Ok(report)
@@ -2355,6 +2987,127 @@ impl CompanyRuntime {
         }
     }
 
+    /// Journals a dispatched card's relay into the conversation it was
+    /// spawned from (issue #1852, Part 1).
+    ///
+    /// [`relay_reply`](crate::harness::built_in::lifecycle::relay_reply)
+    /// already builds the right [`OutboundMessage`] — it carries the origin
+    /// thread in `reply_to` — but `route_response`'s channel lookup finds no
+    /// adapter for an agent id and falls back to the in-memory
+    /// `OperatorChannel` (`runtime::channel`, a "response spy with no durable
+    /// reader"), and until [`run_dispatch_cycle`](Self::run_dispatch_cycle)
+    /// started calling this, nothing wrote the reply down at all. Modeled on
+    /// [`publish_continuation`](Self::publish_continuation): the one
+    /// difference is the destination comes from **each response's own**
+    /// `reply_to.chat_id` — already the origin thread, courtesy of
+    /// `relay_reply` — rather than one conversation recorded for the whole
+    /// report, because a dispatch cycle answers exactly the one card it ran.
+    ///
+    /// Gated on `reply_to` being present, not on its `chat_id` being
+    /// non-empty. That is the one field `relay_reply` sets that no other
+    /// `OutboundMessage` producer does — the synchronous chat-turn cycle that
+    /// `journal_chat_replies` (`server::operator`) journals leaves it `None`
+    /// — so this can never re-journal a bubble that path already wrote, and a
+    /// board-created card (no `origin_chat_id`, so `run_task`/
+    /// `refuse_dispatch` return no relay at all) contributes nothing here
+    /// either. An **empty** `chat_id` is still a real destination, not an
+    /// absent one: `origin_chat_id` preserves `Some("")` for a card spawned
+    /// from General, and `chat_history::same_conversation` treats `""` as an
+    /// alias for General — so it must be journaled, not discarded.
+    ///
+    /// Best-effort, like `HarnessBrain::journal_task_outcome`'s own writes: a
+    /// failure here is logged, never propagated. By the time this runs the
+    /// card is already settled and persisted — its terminal column, its
+    /// `journal_task_outcome` timeline record — so failing the cycle over
+    /// this write would abandon that anchor for a dispatch that has, in fact,
+    /// landed.
+    #[cfg(feature = "openhuman")]
+    async fn journal_dispatch_replies(&self, report: &CycleReport) {
+        for response in &report.responses {
+            let Some(chat_id) = response
+                .reply_to
+                .as_ref()
+                .map(|reply_to| reply_to.chat_id.as_str())
+            else {
+                continue;
+            };
+            // Scanned host-side from the reply text, same as
+            // `publish_continuation` and `journal_chat_replies` — the
+            // console's picker never touched this message.
+            let reply_mentions = self
+                .resolve_mentions(
+                    &response.text,
+                    None,
+                    response
+                        .agent
+                        .as_deref()
+                        .map(|id| Actor {
+                            kind: ActorKind::Agent,
+                            id: id.to_string(),
+                        })
+                        .as_ref(),
+                )
+                .await;
+            match self
+                .events
+                .append(
+                    &self.id,
+                    CompanyEvent::AgentReply {
+                        parent: None,
+                        chat_id: chat_id.to_string(),
+                        // Issue #885: the author, falling back to the
+                        // destination only when the producer named none —
+                        // `relay_reply` always names none, so this is the
+                        // orchestrator answering for its own roster.
+                        agent_id: response
+                            .agent
+                            .clone()
+                            .unwrap_or_else(|| response.channel.clone()),
+                        text: response.text.clone(),
+                        steps: response.steps.clone(),
+                        // Dropped, deliberately — unlike `publish_continuation`
+                        // and `journal_chat_replies`, which carry it through.
+                        // `response.task_id` here always names the very card
+                        // `journal_task_outcome` (`HarnessBrain`) just settled
+                        // and already marked with a `DeskTaskCompleted` pointed
+                        // at this same `chat_id` (issue #377's "finished → …"
+                        // pill, `chat_history::owns`). That pill is already the
+                        // origin thread's card link for this settle; setting
+                        // `task_id` here too would additionally render this
+                        // bubble's own "Card opened" chip (`CardChip`,
+                        // `MessageRow`) — a second link to a card that, by the
+                        // time this prose lands, is not "opened" at all. Two
+                        // links for one settle is `journal_task_outcome`'s own
+                        // "one run's words into one conversation twice" mistake
+                        // (see its doc comment), aimed at a link instead of the
+                        // text — and it is exactly what doubled the e2e
+                        // `chat-dispatch-marker` reload count.
+                        task_id: None,
+                        mentions: reply_mentions.clone(),
+                        // Zero, and stays zero: no reply's mentions reach
+                        // dispatch, so no reply is ever a mention hop.
+                        mention_depth: 0,
+                    },
+                )
+                .await
+            {
+                Ok(seq) => {
+                    if !reply_mentions.is_empty() {
+                        self.notify_mentions(&self.id, &reply_mentions, &seq, None, chat_id)
+                            .await;
+                    }
+                }
+                Err(err) => tracing::warn!(
+                    company = %self.id,
+                    chat_id = %chat_id,
+                    error = %err,
+                    "[dispatch] a card's relay reply could not be journaled; the origin \
+                     thread will not see it"
+                ),
+            }
+        }
+    }
+
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
         let conversation = self
             .journal
@@ -2599,11 +3352,44 @@ impl CompanyRuntime {
         reason: ExpiryReason,
         at_millis: u64,
     ) -> Result<()> {
+        let explicit_request = self
+            .approval_gate
+            .take_expired_effect(id)
+            .filter(|effect| effect.kind == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+            .and_then(|effect| effect.agent.clone().map(|agent| (agent, effect)));
         self.journal.record_expired(id, at_millis, reason).await?;
         // Issue #796: the parked approval is gone, so its work unit is no
         // longer awaiting a resume — drop the pending mark so the checkout it
         // was holding across the park becomes sweepable.
         self.grants.clear_pending(id);
+        if let Some((agent, effect)) = explicit_request {
+            let by = Actor {
+                kind: ActorKind::System,
+                id: "expiry".into(),
+            };
+            if let Err(error) = CycleRunner::new(self)
+                .mint_approval_continuation(id, agent, effect, Verdict::Deny, by.clone())
+                .await
+            {
+                tracing::error!(
+                    approval_id = %id,
+                    %error,
+                    "[approval] an expired explicit request could not queue its denial \
+                     continuation; continuing the retirement sweep"
+                );
+            } else {
+                // Route through the ordinary settled-verdict path so chat and
+                // workflow-node requests both reach the asking agent.
+                drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                    CompanyEvent::ApprovalResolved {
+                        approval_id: id.clone(),
+                        verdict: Verdict::Deny,
+                        by,
+                    },
+                ))));
+                return Ok(());
+            }
+        }
         // Issue #469: releasing the turn this approval was blocking, and
         // running its continuation when this expiry was the last thing it
         // waited on. Spawned rather than awaited: the continuation is a full
@@ -2728,6 +3514,20 @@ impl CompanyRuntime {
             ids.push(grant.approval_id);
         }
 
+        for continuation in self.grants.sweep_continuations(now, GRANT_TTL_MILLIS) {
+            let id = continuation.call.approval_id;
+            self.journal
+                .record_approval_continuation_expired(&id, now)
+                .await?;
+            self.announce_to_operator(&format!(
+                "The `{}` approval decision for `{}` could not be delivered within 15 minutes — \
+                 ask the agent again if the work still matters.",
+                continuation.call.tool, continuation.call.agent
+            ))
+            .await;
+            ids.push(id);
+        }
+
         // Issue #374: standing grants lapse on the same maintenance tick.
         //
         // The sweep is housekeeping and an operator notice, never the
@@ -2818,8 +3618,40 @@ impl CompanyRuntime {
 
     /// Replays the journal to rebuild the executed-key set, the approval queue,
     /// and the live single-use grants (issue #243).
-    pub async fn recover(&self) -> Result<()> {
-        CycleRunner::new(self).recover().await
+    pub async fn recover(self: &Arc<Self>) -> Result<()> {
+        CycleRunner::new(self).recover().await?;
+        self.arm_replayed_continuation_recovery();
+        self.schedule_replayed_continuations();
+        Ok(())
+    }
+
+    /// Arms cold-boot delivery when replay found an explicit decision whose
+    /// detached follow-up had not yet been dispatch-claimed.
+    pub(crate) fn arm_replayed_continuation_recovery(&self) {
+        if !self.journal.replayed_approval_continuations().is_empty() {
+            self.replay_continuations_on_register
+                .store(true, Ordering::Release);
+        }
+    }
+
+    /// Detaches replayed decision follow-ups once the runtime is addressable.
+    /// The atomic makes a duplicate registration or rebuild swap a no-op.
+    pub(crate) fn schedule_replayed_continuations(self: &Arc<Self>) {
+        if !self
+            .replay_continuations_on_register
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        for continuation in self.journal.replayed_approval_continuations() {
+            drop(self.spawn_follow_up(ResolveReceipt::Settled(Box::new(
+                CompanyEvent::ApprovalResolved {
+                    approval_id: continuation.call.approval_id,
+                    verdict: continuation.verdict,
+                    by: continuation.by,
+                },
+            ))));
+        }
     }
 
     /// What every approval ever parked was, keyed by id — including approvals
@@ -2901,12 +3733,111 @@ impl CompanyRuntime {
         live
     }
 
+    /// The parked queue, with each approval's **owning card** resolved (#1891).
+    ///
+    /// What every HTTP reader of the queue should call. [`Self::pending_approvals`]
+    /// projects `task` as the raw link the park stamped, and that link is only
+    /// the *fallback* half of the ownership rule the task detail read applies:
+    /// the attempt (`Effect::run_id`) outranks it wherever there is one, which
+    /// `the_attempt_id_outranks_the_card_link_when_both_are_present` pins. So an
+    /// approval parked under one card's attempt while stamped with another
+    /// card's link was handed out under the stamp, and a console joining on it
+    /// put the row on the wrong card. Read-only that was a wrong label; once the
+    /// board card grew Approve and Decline (#1891) it became an operator
+    /// resolving somebody else's request, which is why the resolution belongs
+    /// here rather than in a console that cannot see an attempt id at all.
+    ///
+    /// **Costs one store read per distinct attempt behind the queue**, not per
+    /// approval and not per card — the ids are deduplicated first, and a queue
+    /// whose parks name no attempt (a chat turn, a scheduler tick) does none.
+    /// That is what keeps it affordable on a route the console polls: the
+    /// alternative the board rejected in #883 was re-reading task detail per
+    /// card per poll.
+    pub async fn pending_approvals_resolved(&self) -> Vec<ApprovalSummary> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut summaries = self.pending_approvals();
+        // Approval id → the **task attempt** that parked it.
+        //
+        // `Effect::run_id` holds two id spaces — a task attempt (#242) and, on
+        // the workflow path, a workflow run — and `generate_id` is only
+        // process-locally unique, so the value alone cannot say which
+        // ([`workflow_run_of`] says exactly this). Resolving a workflow run id
+        // against the run store is therefore not merely useless but unsafe: a
+        // collision with a persisted attempt id would find that attempt's card
+        // and relabel a workflow approval onto it — inventing a card for a
+        // request no card owns, on the surface that now decides.
+        //
+        // So the park *site* discriminates, through the one predicate that
+        // already encodes the rule rather than a second copy of it: a park
+        // `workflow_run_of` claims is a workflow park and is left alone. What
+        // remains is a park linked to a card, where `run_id` is unambiguously
+        // an attempt — which is exactly the misattribution case this exists to
+        // correct, a park stamped with one card while its attempt belongs to
+        // another.
+        //
+        // Conservative in the ambiguous direction, the same way
+        // `workflow_run_of` is: the cost of under-claiming is a blocked row the
+        // board does not draw, and of over-claiming is an operator deciding
+        // another owner's request from this card. Those are not comparable.
+        let attempts: HashMap<String, String> = self
+            .journal
+            .pending()
+            .into_iter()
+            .filter(|p| workflow_run_of(p).is_none())
+            .filter_map(|p| {
+                p.effect
+                    .run_id
+                    .clone()
+                    .map(|run_id| (p.id.as_ref().to_string(), run_id))
+            })
+            .collect();
+        if attempts.is_empty() {
+            return summaries;
+        }
+        let distinct: HashSet<&str> = attempts.values().map(String::as_str).collect();
+        let mut owners: HashMap<String, Option<String>> = HashMap::with_capacity(distinct.len());
+        for run_id in distinct {
+            // Only a **successful** read is recorded. An entry means the store
+            // answered — `Some(card)` or a definite "no card" — and an absent
+            // one means it could not be asked, which `resolve_owners` leaves
+            // the stamped link alone for (#1895 review).
+            //
+            // The distinction is the whole of this arm. Folding a failed read
+            // into "no owner" (an `.ok()` away) unlinks a still-parked
+            // approval, `approvalsForTask` then drops the row, and the card
+            // re-enables Resume while the approval is very much still parked —
+            // a transient store blip handing the operator the re-dispatch this
+            // PR exists to keep out of their hand. A stale link is a label that
+            // may be wrong; a dropped blocker is a card that lies about being
+            // free.
+            match self.runs().get_run(self.id(), run_id).await {
+                Ok(run) => {
+                    owners.insert(run_id.to_string(), run.and_then(|run| run.task_id));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        run_id,
+                        error = %err,
+                        "could not resolve an approval's owning card; keeping its parked link",
+                    );
+                }
+            }
+        }
+        crate::runtime::approval_ownership::resolve_owners(&mut summaries, &attempts, &owners);
+        summaries
+    }
+
     /// The approvals currently awaiting the operator.
     ///
     /// The single projection point for [`ApprovalSummary`], and therefore the
     /// single place issue #372's `agent` + `payload` are filled in. The payload
     /// is redacted and bounded **here**, before it is a summary at all, so no
     /// caller can accidentally serialize the raw effect.
+    ///
+    /// **`task` is the raw park link here.** Every reader that shows an
+    /// approval *against a card* wants [`Self::pending_approvals_resolved`]
+    /// instead — see there for why the stamp alone is not the ownership answer.
     pub fn pending_approvals(&self) -> Vec<ApprovalSummary> {
         self.journal
             .pending()
@@ -2963,7 +3894,9 @@ impl CompanyRuntime {
                 // the same `subject_of` the resolve route's 400 and the mint use,
                 // so the control the card offers and the answer a resolve gets
                 // cannot disagree.
-                broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
+                broadly_grantable: p.effect.kind
+                    != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && crate::runtime::grants::subject_of(&p.effect).is_some()
                     && p.effect.may_be_granted_standing(),
                 // Issue #1458: a standing **denial** is enforced only on the
                 // agent turn path (`standing_deny_applies`); the workflow gate
@@ -2972,10 +3905,12 @@ impl CompanyRuntime {
                 // deny control is offered only where the runtime will actually
                 // enforce it — an agent subject — while the grant half above
                 // still covers a workflow, which can hold a standing permission.
-                broadly_deniable: matches!(
-                    crate::runtime::grants::subject_of(&p.effect),
-                    Some(crate::runtime::grants::GrantSubject::Agent(_))
-                ),
+                broadly_deniable: p.effect.kind
+                    != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+                    && matches!(
+                        crate::runtime::grants::subject_of(&p.effect),
+                        Some(crate::runtime::grants::GrantSubject::Agent(_))
+                    ),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction
@@ -3257,6 +4192,19 @@ impl CompanyRuntime {
     /// no durable record yet is a [`OpenCompanyError::CompanyNotFound`].
     pub async fn set_lifecycle(&self, to: impl Into<String>, by: Actor) -> Result<String> {
         let to = to.into();
+        // Held across the whole load-modify-save cycle (PR #1875 review
+        // finding, second round): `server/provision.rs` calls this directly
+        // for pause/resume, with no lock of its own, so without this a
+        // `PATCH {scope}` name-confirm racing this transition could load
+        // before the rename's `save` lands and save after it, silently
+        // writing the confirmed rename's manifest and `name_confirmed` back
+        // to their pre-rename values — undoing a write that already returned
+        // success and potentially reopening the onboarding name step. Every
+        // other `CompanyStore` load-modify-save cycle in the console
+        // (`company_profile.rs`, `company_logo.rs`, `activation.rs`, …)
+        // already serializes on this same per-company lock.
+        let write_lock = company_write_lock(&self.id);
+        let _lock = write_lock.lock().await;
         let mut record = self
             .store
             .load(&self.id)
@@ -3264,7 +4212,47 @@ impl CompanyRuntime {
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.id.to_string()))?;
         let from = record.lifecycle.clone();
         record.lifecycle = to.clone();
-        self.store.save(&record).await?;
+        // `save_importing`, not `save` (PR #1875 review finding): a bare
+        // lifecycle flip is not `RuntimeBuilder::build`'s activation-aware
+        // migration deciding this record has been seen — it is the console's
+        // pause/resume/suspend/archive control, which can fire on a legacy
+        // pre-#1843 record `build`'s "existing but not running" arm has
+        // deliberately left un-migrated. `save`'s unconditional `true` would
+        // poison that record's gate-seen marker while it is still
+        // unmigrated, permanently blocking the grandfather arm on every
+        // later `running` boot. Forward whatever the marker already is,
+        // unless the grandfather back-fill below fires — that is the one
+        // case this method itself decides the migration, so it persists
+        // `true` for the same reason every deciding arm in `builder.rs` does.
+        let gate_seen = self.store.activation_gate_seen(&self.id).await?;
+        // Grandfather an unmigrated legacy record the moment an in-place
+        // resume (PR #1875 review finding, third round) puts it back to
+        // `running` without going through another `RuntimeBuilder::build` —
+        // the only other place this back-fill runs (`builder.rs`'s own
+        // "running and unlatched" arm). A company already registered in
+        // `state.registry()` never rebuilds across pause/resume (`transition`
+        // in `server/provision.rs` calls straight into this method on the
+        // live runtime), so a legacy pre-#1843 company — never seen by
+        // activation-aware code — that gets paused and resumed by the same
+        // long-lived process would otherwise keep reading as
+        // unconfirmed/unactivated, and the onboarding gate would wrongly
+        // reappear for an established operator, until the process eventually
+        // restarts and `build` finally applies the migration. Gated on
+        // `!gate_seen` and an unset latch exactly like the builder's own arm,
+        // so a genuinely new company still mid-onboarding (whose first save
+        // already stamped the marker `true`) is never falsely grandfathered
+        // by a resume.
+        let gate_seen_to_persist =
+            if to == "running" && !gate_seen && record.activation_completed_at.is_none() {
+                record.name_confirmed = true;
+                record.activation_completed_at = Some(crate::ports::now_millis());
+                true
+            } else {
+                gate_seen
+            };
+        self.store
+            .save_importing(&record, gate_seen_to_persist)
+            .await?;
         self.events
             .append(
                 &self.id,
@@ -3843,6 +4831,56 @@ mod tests {
         (runtime, record, home)
     }
 
+    /// `set_lifecycle` must serialize its load-modify-save cycle against
+    /// `company_write_lock`, exactly like every other console load-modify-save
+    /// (PR #1875 review finding, second round). Proven the same way
+    /// `put_logo_serializes_against_the_company_write_lock`
+    /// (`server/ops/company_logo.rs`) proves it for that handler: hold the
+    /// lock externally, drive the real method, and demand it cannot finish
+    /// while the lock is held.
+    #[tokio::test]
+    async fn set_lifecycle_serializes_against_the_company_write_lock() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+        let runtime = std::sync::Arc::new(runtime);
+        let id = runtime.id().clone();
+
+        let lock = crate::ports::store::company_write_lock(&id);
+        let guard = lock.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            runtime_for_task
+                .set_lifecycle(
+                    "paused",
+                    crate::ports::types::Actor {
+                        kind: crate::ports::types::ActorKind::Operator,
+                        id: "op".to_string(),
+                    },
+                )
+                .await
+        });
+
+        // The method must be blocked behind the held lock — give it every
+        // chance to (wrongly) race ahead before declaring it stuck.
+        let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "set_lifecycle completed while company_write_lock was held \
+             elsewhere — it is not serializing its load-modify-save cycle \
+             against concurrent writers (e.g. a racing name-confirm PATCH)"
+        );
+
+        drop(guard);
+        let from = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("set_lifecycle never resumed after the lock was released")
+            .expect("task panicked")
+            .expect("set_lifecycle failed");
+        assert_eq!(from, "running", "the fixture starts running");
+    }
+
     /// The shared workflow-wiring fixture, re-exported under the name these
     /// tests already use.
     #[cfg(feature = "openhuman")]
@@ -4381,6 +5419,273 @@ mod tests {
             "it never started, so it has no start time"
         );
         assert!(abandoned.finished_at_millis.is_some());
+    }
+
+    /// Issue #1852 Part 1 — the discard bug and its fix, proven directly on
+    /// `run_dispatch_cycle` rather than on any one `Brain`'s output shape.
+    ///
+    /// `RelayBrain` answers a `TaskDispatched` event with exactly the shape
+    /// `relay_reply` (`harness::built_in::lifecycle`) produces: a bubble whose
+    /// `reply_to` names the origin thread and whose `task_id` names the card
+    /// — without standing up a real harness or LLM. Before this fix,
+    /// `run_dispatch_cycle` discarded the `CycleReport` carrying it (`let
+    /// Err(err) = self.run_cycle(...).await else { return; }`), which is the
+    /// generic bug underneath #1852, independent of which `Brain` produced
+    /// the relay: reverting `run_dispatch_cycle` to that shape reproduces the
+    /// failure this test now guards — zero `AgentReply` events land in the
+    /// origin thread, because nothing ever journals the discarded report.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_dispatched_cards_relay_is_journaled_into_its_origin_thread() {
+        use std::sync::Arc;
+
+        use crate::ports::Brain;
+        use crate::ports::TaskRecord;
+        use crate::ports::brain::CycleHost;
+        use crate::ports::tasks::COLUMN_IN_PROGRESS;
+        use crate::ports::types::{
+            CycleRequest, CycleResult, EventSeq, OutboundMessage, ReplyTo, TokenUsage,
+        };
+
+        /// Answers a `TaskDispatched { task_id: "t-1" }` with a
+        /// `relay_reply`-shaped bubble; silent on everything else, mirroring
+        /// `EchoBrain`'s silence on `TaskDispatched`.
+        struct RelayBrain;
+
+        #[async_trait::async_trait]
+        impl Brain for RelayBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                _host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                let mut channel_responses = Vec::new();
+                for event in &req.events {
+                    if let CompanyEvent::TaskDispatched { task_id, .. } = event
+                        && task_id == "t-1"
+                    {
+                        channel_responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: Some("t-1".to_string()),
+                            channel: "ceo".to_string(),
+                            agent: None,
+                            text: "\"Ship it\" is ready for review (ceo ran it).".to_string(),
+                            mentions: Vec::new(),
+                            reply_to: Some(ReplyTo {
+                                chat_id: "strategy".to_string(),
+                            }),
+                            steps: Vec::new(),
+                        });
+                    }
+                }
+                Ok(CycleResult {
+                    channel_responses,
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage::default(),
+                })
+            }
+        }
+
+        let home_dir = tempfile::Builder::new()
+            .prefix("opencompany-relay-journal-")
+            .tempdir()
+            .expect("tempdir");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        let id = crate::ports::types::CompanyId::new("acme");
+        let runtime = Arc::new(
+            crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+                .with_id(id.clone())
+                .with_brain(Arc::new(RelayBrain))
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let card = TaskRecord {
+            id: "t-1".to_string(),
+            title: "Ship it".to_string(),
+            note: None,
+            column: COLUMN_IN_PROGRESS.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 0,
+            // The field the whole bug turns on: without an origin thread,
+            // `relay_reply` is never called at all (a board-created card).
+            origin_chat_id: Some("strategy".to_string()),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        };
+
+        let run_id = runtime.open_run(&card).await;
+        Arc::clone(&runtime)
+            .run_dispatch_cycle(card.id.clone(), run_id)
+            .await;
+
+        let events = runtime
+            .events
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read journal");
+        let relays: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::AgentReply { chat_id, .. } if chat_id == "strategy" => {
+                    Some(&stored.event)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relays.len(),
+            1,
+            "exactly one relay must land in the origin thread, found {relays:?}"
+        );
+        let CompanyEvent::AgentReply {
+            agent_id, task_id, ..
+        } = relays[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            agent_id, "ceo",
+            "the orchestrator answers for its own roster (issue #885 fallback)"
+        );
+        assert_eq!(
+            task_id, &None,
+            "the settle already has its own card link — `DeskTaskCompleted`'s \
+             \"finished → …\" pill (issue #377) — so this bubble must not carry \
+             its own \"Card opened\" chip alongside it"
+        );
+        assert!(
+            crate::server::chat_history::owns("strategy", "Strategy", relays[0]),
+            "the origin desk's own history read must pick this reply up"
+        );
+    }
+
+    /// Issue #1852: the gate that stops a dispatch relay from being posted
+    /// twice.
+    ///
+    /// A response the ordinary chat-turn cycle already journals through
+    /// `journal_chat_replies` (`server::operator`) never carries `reply_to` —
+    /// [`relay_reply`](crate::harness::built_in::lifecycle::relay_reply) is
+    /// the only producer that sets it — so gating on that field structurally
+    /// cannot re-journal a bubble the inline work-card path already wrote.
+    /// The same absence covers a board-created card (no `origin_chat_id`):
+    /// `run_task`/`refuse_dispatch` return no relay for one at all, which is
+    /// this exact "no `reply_to`" shape.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn journal_dispatch_replies_only_touches_relay_shaped_responses() {
+        use crate::CycleReport;
+        use crate::ports::types::{EventSeq, OutboundMessage, ReplyTo};
+
+        let (rt, _home_dir) = runtime_with_events().await;
+
+        let report = CycleReport {
+            responses: vec![
+                // An ordinary chat-turn bubble: no `reply_to`, exactly what
+                // `journal_chat_replies` already owns. Must not be touched
+                // here, or the inline work-card path would double-post.
+                OutboundMessage {
+                    message_id: None,
+                    task_id: None,
+                    channel: "operator".to_string(),
+                    agent: Some("ceo".to_string()),
+                    text: "already handled elsewhere".to_string(),
+                    mentions: Vec::new(),
+                    reply_to: None,
+                    steps: Vec::new(),
+                },
+                // A `reply_to` naming an empty chat id — not degenerate:
+                // `origin_chat_id` preserves `Some("")` for a card spawned
+                // from General, and `chat_history::same_conversation` treats
+                // "" as an alias for General, so this must still journal.
+                OutboundMessage {
+                    message_id: None,
+                    task_id: Some("t-2".to_string()),
+                    channel: "ceo".to_string(),
+                    agent: None,
+                    text: "General-chat relay".to_string(),
+                    mentions: Vec::new(),
+                    reply_to: Some(ReplyTo {
+                        chat_id: String::new(),
+                    }),
+                    steps: Vec::new(),
+                },
+                // The one shape `relay_reply` actually produces.
+                OutboundMessage {
+                    message_id: None,
+                    task_id: Some("t-1".to_string()),
+                    channel: "ceo".to_string(),
+                    agent: None,
+                    text: "\"Ship it\" is ready for review.".to_string(),
+                    mentions: Vec::new(),
+                    reply_to: Some(ReplyTo {
+                        chat_id: "strategy".to_string(),
+                    }),
+                    steps: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        rt.journal_dispatch_replies(&report).await;
+
+        let events = rt
+            .events
+            .read_from(&rt.id, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read journal");
+        let relays: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::AgentReply { .. } => Some(&stored.event),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relays.len(),
+            2,
+            "both reply_to-shaped responses must be journaled — an empty \
+             chat_id is General, not absent — found {relays:?}"
+        );
+        let CompanyEvent::AgentReply {
+            chat_id, task_id, ..
+        } = relays
+            .iter()
+            .find(|event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id == "strategy"))
+            .expect("the named-thread relay must be present")
+        else {
+            unreachable!()
+        };
+        assert_eq!(chat_id, "strategy");
+        // Not `Some("t-1")`, even though the response itself carries it:
+        // `journal_task_outcome` already marked "t-1" settled with its own
+        // `DeskTaskCompleted` card link into this same thread, so this bubble
+        // must not add a second one. See the drop site's own comment.
+        assert_eq!(task_id, &None);
+
+        let CompanyEvent::AgentReply { chat_id, .. } = relays
+            .iter()
+            .find(|event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id.is_empty()))
+            .expect("the empty-chat_id General relay must be present")
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            chat_id, "",
+            "General's own empty chat_id must be preserved verbatim"
+        );
     }
 
     /// Issue #435: the guard that decides whether a remembered thread root is

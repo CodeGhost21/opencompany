@@ -2,7 +2,7 @@
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
 import type { ApprovalSummary, DeskDto, Verdict } from "@/api/types";
-import { isBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
+import { isAnyBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
 import {
   clearTaskCard,
   generalAwareChannel,
@@ -11,7 +11,6 @@ import {
   type Reaction,
 } from "@/lib/chat";
 import {
-  defaultDesks,
   deskClaimsGeneralChannel,
   GENERAL_CHANNEL,
   isGeneralChannel,
@@ -78,12 +77,25 @@ export type Transcripts = Record<string, ChatMessage[]>;
  * message's own `at` timestamp rather than by scan order, because iterating
  * one channel's array to completion before moving to the next would NOT
  * yield cross-channel chronological order on its own.
+ *
+ * Scanned with `isAnyBudgetPauseNotice`, NOT `isBudgetPauseNotice` (issue
+ * #1906). The narrow check is the render-time one — "does this notice get an
+ * Add-credits button" — and filtering the supersession map through it made
+ * every NO-RESEND notice invisible here, while the marker it parked still
+ * overwrote the previous one on the host. maya pauses on an interactive turn
+ * (redeemable notice N1, marker M1); an approval for maya is then approved,
+ * its continuation runs through `run_steered_background`, pauses, and parks M2
+ * (`background: true`) over M1 with a no-resend notice. N1 was still this
+ * map's answer for maya, so its CTA stayed enabled and clicking it sent
+ * `?id=M1.id` — a marker that no longer exists — for a `RedeemMatch::Stale`
+ * 409 that refreshing could never clear. A pause is a pause for supersession
+ * purposes whether or not the operator gets a button for it.
  */
 export function latestBudgetPauseMessageIdByAgent(transcripts: Transcripts): Map<string, string> {
   const latest = new Map<string, { messageId: string; at: number }>();
   for (const messages of Object.values(transcripts)) {
     for (const message of messages) {
-      if (!isBudgetPauseNotice(message.text)) continue;
+      if (!isAnyBudgetPauseNotice(message.text)) continue;
       const agentId = parseBudgetPauseAgent(message.text);
       if (agentId == null) continue;
       const seen = latest.get(agentId);
@@ -325,7 +337,11 @@ function generalChannel(members: TeamMember[]): Channel {
  */
 export function buildChannels(
   members: TeamMember[],
-  desks: Desk[] = defaultDesks(),
+  // Defaults to no desks, not to the fabricated trio. The parameter exists so
+  // a caller that has not read `/desks` yet can still build the rail's roster
+  // half; standing in three desks the company never declared is the bug this
+  // default used to carry into every such caller.
+  desks: Desk[] = [],
   transcripts: Transcripts = {},
 ): ChannelSection[] {
   // A desk that answers to a General spelling owns the company-wide line, and
@@ -1151,6 +1167,27 @@ export type TimelineItem =
  * which is how an operator ends up approving something they were never shown.
  * Each gets its own card, exactly as before this existed.
  */
+/**
+ * The key that decides which approvals share one card (#842, #1891).
+ *
+ * The turn's `batch` when the host named one, and the approval's **own id**
+ * otherwise — which is what makes "ungrouped" the safe default: an id is
+ * unique, so a batchless approval can only ever group with itself. An absent
+ * key means "the host did not say which turn this came from" (a workflow node,
+ * a scheduler tick, an older host), and folding those together would invent a
+ * batch out of two facts that are only alike in being unknown, which is how an
+ * operator ends up approving something they were never shown.
+ *
+ * Extracted so the board card groups exactly as the transcript does (#1895
+ * review). It rendered a paused card's whole queue as one `ApprovalRow`, so a
+ * card holding two turns' parks — or several batchless ones — offered a single
+ * Approve that authorised across them. The rule was already written down here;
+ * the second surface just wasn't reading it.
+ */
+export function approvalBatchKey(approval: ApprovalSummary): string {
+  return approval.batch ?? `solo:${approval.id}`;
+}
+
 export function buildTimelineItems(
   entries: TimelineEntry[],
   approvals: ApprovalSummary[],
@@ -1170,10 +1207,7 @@ export function buildTimelineItems(
   // second one below it.
   const batches = new Map<string, ApprovalSummary[]>();
   for (const approval of approvals) {
-    // The id is the fallback key, which is what makes "ungrouped" the safe
-    // default: an id is unique, so a batchless approval can only ever group
-    // with itself.
-    const key = approval.batch ?? `solo:${approval.id}`;
+    const key = approvalBatchKey(approval);
     const bucket = batches.get(key);
     if (bucket) bucket.push(approval);
     else batches.set(key, [approval]);

@@ -320,6 +320,14 @@ pub fn build_agent(
     // Deliberate-memory tools, oc-authored over this company's own context
     // port — see `memory_tools`'s doc comment for why not the vendored ones.
     let mut tools: Vec<Box<dyn Tool>> = memory_tools(deps, company, &manifest_agent.id);
+    // Approvals are an explicit agent action, not a policy side effect. Every
+    // roster agent gets this intrinsic tool regardless of external grants.
+    tools.push(Box::new(
+        crate::harness::approval_tool::RequestApprovalTool::new(
+            manifest_agent.id.clone(),
+            deps.approval_requests.clone(),
+        ),
+    ));
     #[cfg(feature = "mcp")]
     {
         // These read the installed-server registry, so installs and lifecycle
@@ -407,7 +415,7 @@ pub fn build_agent(
     // run commands with a tool that is not there.
     let mut shell_wired = false;
     if wants_shell || wants_code || wants_web {
-        let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.mode()));
+        let exec_security = Arc::new(toolbelt::exec_security(&workspace, policy.toolbelt_mode()));
         // `shell` and `code` are separate grant namespaces and are wired from
         // separate tool vectors — a company granting only one MUST NOT receive
         // the other's tools (the production `CapabilityFilter` is identity and
@@ -503,6 +511,13 @@ pub fn build_agent(
     // `authorize` / `execute` tools additionally park for operator approval via
     // the `ApprovalPolicy`. Gated on the `composio` feature; the default/
     // `openhuman` build never compiles this.
+    // Issue #1759: the connected toolkits to name in the capability-grounding +
+    // Composio-routing brief, captured HERE — where the tools are actually wired
+    // — and rendered into the persona further down. `Some` only when the tools
+    // land on the belt (grant + resolved credential), so the brief can never
+    // advertise a Composio surface this agent does not hold.
+    #[cfg(feature = "composio")]
+    let mut composio_toolkits: Option<Vec<String>> = None;
     #[cfg(feature = "composio")]
     if crate::company::grants_composio_explicit(grants) {
         match &deps.composio {
@@ -510,14 +525,17 @@ pub fn build_agent(
             // usage sample per completed call, so the Usage view's
             // calls-by-provider chart reflects real connected-tool activity
             // (issue #152). A `None` meter simply leaves metering off.
-            Some(config) => tools.extend(crate::harness::composio::composio_tools(
-                config,
-                crate::harness::composio::ComposioMetering {
-                    company: company.clone(),
-                    agent: manifest_agent.id.clone(),
-                    meter: deps.meter.clone(),
-                },
-            )),
+            Some(config) => {
+                composio_toolkits = Some(config.toolkits.clone());
+                tools.extend(crate::harness::composio::composio_tools(
+                    config,
+                    crate::harness::composio::ComposioMetering {
+                        company: company.clone(),
+                        agent: manifest_agent.id.clone(),
+                        meter: deps.meter.clone(),
+                    },
+                ));
+            }
             None => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
@@ -834,6 +852,27 @@ pub fn build_agent(
         persona.push_str(&crate::harness::publish::publish_brief());
     }
 
+    // Issue #1759: ground the agent in its connected-integration surface and
+    // route provider actions through it. Appended ONLY when the Composio tools
+    // were actually wired above (`composio_toolkits` is `Some`), so — like every
+    // other tool brief here — it never describes a surface this agent does not
+    // hold. The brief itself is a pure renderer in `composio_catalog` (not behind
+    // the `composio` feature) so CI's `openhuman` test lane exercises it; this
+    // call site is feature-gated because the tools it describes are.
+    //
+    // Same `deps.capabilities` check as the `shell`/`code` sandbox brief above
+    // (PR #1780 review): `composio_toolkits` reflects only the GRANT, not the
+    // per-turn capability tier. When a `free`/`starter`/`pro` plan's Composio
+    // budget is exhausted, `filter_by_capabilities` strips every
+    // `composio_*` tool from the belt below — without this check the brief
+    // would still tell the agent to call one.
+    #[cfg(feature = "composio")]
+    if toolbelt::composio_capability_admits(composio_toolkits.is_some(), &deps.capabilities)
+        && let Some(toolkits) = composio_toolkits.as_deref()
+    {
+        persona.push_str(&crate::harness::composio_catalog::composio_brief(toolkits));
+    }
+
     // Skill read surface (read-only catalogue slice). Only materializes when the
     // harness is wired to a skills source; otherwise the agent stays skill-less
     // and the default path is untouched. The catalogue is folded into the
@@ -1069,6 +1108,21 @@ pub fn build_agent(
         Box::new(AttrTolerantXmlDispatcher::default())
     };
 
+    // OpenHuman's tool-pack table withholds `composio_*` schemas unless the
+    // session identifies as its integrations specialist. OpenCompany already
+    // narrows this agent's actual belt by the explicit company and agent grants
+    // above; once that grants Composio, use the supported specialist identity
+    // so the model can call the real tools rather than being offered an absent
+    // pack proxy.
+    #[cfg(feature = "composio")]
+    let agent_definition_name = if composio_toolkits.is_some() {
+        "integrations_agent"
+    } else {
+        manifest_agent.id.as_str()
+    };
+    #[cfg(not(feature = "composio"))]
+    let agent_definition_name = manifest_agent.id.as_str();
+
     let mut agent = AgentBuilder::default()
         // `HarnessModel` upcasts to the tinyagents `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
@@ -1090,7 +1144,7 @@ pub fn build_agent(
         })
         .model_name(model)
         .workspace_dir(workspace)
-        .agent_definition_name(manifest_agent.id.clone())
+        .agent_definition_name(agent_definition_name)
         .auto_save(false)
         .build()
         .map_err(|e| {
@@ -2583,6 +2637,7 @@ mod tests {
             "memory_recall",
             "memory_store",
             "read_workspace_state",
+            "request_approval",
             "shell",
             "web_fetch",
         ];
@@ -2603,6 +2658,12 @@ mod tests {
             expected.sort();
         }
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
+    }
+
+    #[test]
+    fn request_approval_is_intrinsic_and_needs_no_manifest_grant() {
+        let names = built_tool_names(&[], false);
+        assert!(names.contains(&"request_approval".to_string()), "{names:?}");
     }
 
     /// Issue #988: the tool-iteration ceiling is **stated** on every agent this

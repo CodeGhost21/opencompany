@@ -48,6 +48,17 @@ export type View =
   | "ledgers"
   | "team"
   | "workspace"
+  /**
+   * The company's durable memory — what it remembers, and what it forgot.
+   *
+   * A settings sub-page (`#/settings/brain`) until it got its own nav row.
+   * Settings is where an operator changes how the company is configured; the
+   * brain is something they *read*, repeatedly, the way they read the board.
+   * Filing it behind a settings rail meant three clicks to answer "does it
+   * already know this", which is a question asked far more often than any
+   * setting is changed.
+   */
+  | "brain"
   | "approvals"
   | "workflows"
   | "observatory"
@@ -107,6 +118,7 @@ const ROUTABLE: Record<View, true> = {
    */
   team: true,
   workspace: true,
+  brain: true,
   approvals: true,
   workflows: true,
   /**

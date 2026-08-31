@@ -297,6 +297,7 @@ mod test {
             workflow_id: "wf".into(),
             run_id: format!("run-{n}"),
             scheduled: false,
+            started_by: None,
         }
     }
 

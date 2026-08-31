@@ -22,7 +22,7 @@
 import { useEffect, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { ApprovalSummary } from "@/api/types";
+import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import {
   readTaskFocus,
   taskTabHref,
@@ -31,6 +31,7 @@ import {
 } from "@/lib/task-output";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { withHostParam } from "@/hooks/use-host-route";
+import type { DecidedApproval } from "@/views/chat/model";
 import { TaskDetailView } from "@/views/TaskDetailView";
 
 export function TaskDetailRoute({
@@ -39,6 +40,10 @@ export function TaskDetailRoute({
   taskId,
   attemptEventTick,
   parked,
+  deciding,
+  decided,
+  failed,
+  onDecide,
   onOpenThread,
   onLeave,
 }: {
@@ -50,6 +55,12 @@ export function TaskDetailRoute({
   attemptEventTick?: number;
   /** The company's parked approvals, so a waiting card can name what it waits on. */
   parked?: readonly ApprovalSummary[];
+  /** The console-wide decision state the detail decides through (#1891) —
+   *  passed straight down, exactly as `parked` is. */
+  deciding?: ReadonlyMap<string, Verdict>;
+  decided?: Readonly<Record<string, DecidedApproval>>;
+  failed?: Record<string, string>;
+  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
   /** Opens the chat thread this card was created from (issue #246). */
   onOpenThread?: (threadId: string) => void;
   /** Where Back, and a deleted card, go: the board, which lives in Ledgers. */
@@ -71,6 +82,11 @@ export function TaskDetailRoute({
       company={company}
       taskId={taskId}
       attemptEventTick={attemptEventTick}
+      parked={parked}
+      deciding={deciding}
+      decided={decided}
+      failed={failed}
+      onDecide={onDecide}
       focus={focus}
       onTabChange={(tab: TaskTab) => {
         // A tab is part of the task detail's current place, but a succession
@@ -83,7 +99,6 @@ export function TaskDetailRoute({
         // replaceState does not emit hashchange, so follow it locally.
         setFocus(readTaskFocus(next));
       }}
-      parked={parked}
       onBack={onLeave}
       onNavigate={(id) => {
         const view = readLedgerViewMode();

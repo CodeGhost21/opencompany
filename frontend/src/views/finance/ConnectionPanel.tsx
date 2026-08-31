@@ -23,6 +23,16 @@ interface Props {
   /** Test-id prefix, e.g. `chargebee`. */
   testId: string;
   /**
+   * The provider's own mark, sized by the caller, shown before the title.
+   *
+   * A prop rather than a lookup keyed off `title`: this panel is shared, and
+   * the two providers' marks are their trade dress, not our palette — each page
+   * names its own and colours it from the `--brand-*` token that says so.
+   * Optional, so a provider we have no licensed mark for is a bare title rather
+   * than a gap.
+   */
+  logo?: ReactNode;
+  /**
    * Grants `health.grantNamespace`, when a missing grant is what is wrong
    * (issue #1796). Omitted by a caller that has no client to grant with.
    *
@@ -71,6 +81,7 @@ export function ConnectionPanel({
   onExpandedChange,
   onTest,
   testId,
+  logo,
   onGrant,
   canManage = false,
   granting = false,
@@ -118,6 +129,7 @@ export function ConnectionPanel({
             data-testid={`${testId}-toggle`}
           >
             <Chevron className="size-4 shrink-0 text-muted-foreground" />
+            {logo ? <span className="shrink-0">{logo}</span> : null}
             <span className="text-sm font-medium">{title}</span>
             <span
               className="truncate text-xs text-muted-foreground"

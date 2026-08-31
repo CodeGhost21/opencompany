@@ -78,6 +78,8 @@ pub struct StoreWorkflowResolver {
 /// Grouped so [`StoreWorkflowResolver::new`] does not grow more parameters for
 /// one concern. A dry run passes `None`, preserving its no-gate semantics.
 pub struct ChildPolicyGates {
+    /// Production sets this false while policy-generated HITL is disabled.
+    pub policy_hitl_enabled: bool,
     /// The effective company policy, including any console override.
     pub policy: crate::company::Policy,
     /// The parent run resolving this child.
@@ -182,15 +184,19 @@ impl StoreWorkflowResolver {
         let Some(gates) = self.gates.as_ref() else {
             return;
         };
-        let gated = crate::workflows::gate::apply_policy_gates_with_policy(
-            graph,
-            &gates.policy,
-            &self.company,
-            &self.root_id,
-            &gates.run_id,
-            &gates.grants,
-        )
-        .await;
+        let gated = if gates.policy_hitl_enabled {
+            crate::workflows::gate::apply_policy_gates_with_policy(
+                graph,
+                &gates.policy,
+                &self.company,
+                &self.root_id,
+                &gates.run_id,
+                &gates.grants,
+            )
+            .await
+        } else {
+            crate::workflows::gate::policy_hitl_disabled(graph)
+        };
         gates.registry.record(
             child_id,
             ChildGateRecord {
@@ -866,6 +872,7 @@ to = "run"
             CompanyId::new("acme"),
             "root".to_string(),
             Some(ChildPolicyGates {
+                policy_hitl_enabled: true,
                 policy,
                 run_id: "run-1".to_string(),
                 grants: crate::runtime::grants::GrantSet::default(),
@@ -999,6 +1006,7 @@ to = "fetch"
             CompanyId::new("acme"),
             "root".to_string(),
             Some(ChildPolicyGates {
+                policy_hitl_enabled: true,
                 policy,
                 run_id: "run-1".to_string(),
                 grants,

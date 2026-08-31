@@ -188,14 +188,23 @@ fn integration_connected(record: &CompanyRecord, has_composio_connection: Option
 /// Reads the whole journal (`EventSeq::new(0)..`, matching the fallback
 /// [`EventLog::read_before`] itself uses) rather than an indexed query,
 /// because none exists. [`compute_and_latch`] only ever calls this while
-/// [`CompanyRecord::activation_completed_at`] is still `None`, and — as of
-/// issue #1850 review, finding 2 — only once `name_confirmed` and
-/// `integration_connected` are ALSO both true: a prior version of this
-/// comment claimed that bound already held on its own, which was wrong — the
-/// scan ran on every single poll of an unlatched company regardless of the
-/// other two steps, unbounded by event history each time. It is now bounded
-/// to the polls that can actually complete activation, not merely the ones
-/// before it has.
+/// [`CompanyRecord::activation_completed_at`] is still `None`.
+///
+/// Issue #1850 review, finding 2 previously gated this call behind
+/// `name_confirmed && integration_connected` both already reading true, to
+/// avoid an unbounded scan on every single poll of a company still early in
+/// onboarding. PR #1875 review found that shortcut wrong one level up: this
+/// function's answer is not only a latch-progress input, it is also the
+/// `workflowRunSucceeded` field `GET {scope}/activation` projects straight
+/// into `OnboardingGate`'s per-step checklist — a screen whose own contract
+/// is "three quick steps, in any order" (`OnboardingGate.tsx`'s own header
+/// copy). Skipping the scan made an operator who ran a real, possibly costly
+/// workflow before naming the company or connecting an integration see that
+/// step as still undone — not merely late, but actively wrong until the
+/// other two steps cleared — which risked prompting a needless repeat of a
+/// real run. [`compute_and_latch`] now calls this unconditionally whenever
+/// the latch itself is unset, trading back part of the #1850 optimization
+/// for an answer that is never a lie.
 pub(crate) async fn any_workflow_run_succeeded(
     company: &CompanyId,
     events: &Arc<dyn EventLog>,
@@ -269,26 +278,21 @@ pub(crate) async fn compute_and_latch(
     }
 
     let has_composio_connection = has_composio_connection().await;
-    let integration_connected = integration_connected(&record, has_composio_connection);
 
-    // The journal scan below is unbounded and grows with the company's whole
-    // event history (see `any_workflow_run_succeeded`'s own docs) — skip it
-    // whenever the other two steps can't ALREADY both be true, since all
-    // three must hold simultaneously for this poll to complete activation
-    // (issue #1850 review, finding 2). The finding corrected a claim in this
-    // function's own prior comment: EVERY poll of a company whose latch is
-    // unset reached this scan, not merely one call, because it ran
-    // unconditionally regardless of whether name_confirmed or
-    // integration_connected were even true yet — the common case for an
-    // operator still early in onboarding. `workflow_run_succeeded` reads
-    // `false` (never scanned, same shape the latched short-circuit above
-    // already uses for a value it isn't deriving live) whenever either
-    // cheaper step is still missing.
-    let workflow_run_succeeded = if record.name_confirmed && integration_connected {
-        any_workflow_run_succeeded(company, events).await?
-    } else {
-        false
-    };
+    // Scanned unconditionally, even though the other two steps might not be
+    // true yet: this answer is not only the latch's third input, it is also
+    // `workflow_run_succeeded` on the `ActivationStatus` returned below, which
+    // `GET {scope}/activation` projects straight into `OnboardingGate`'s
+    // per-step checklist — an "any order" screen an operator can clear step 3
+    // of before either of the other two (see `any_workflow_run_succeeded`'s
+    // own docs for the PR #1875 finding this corrects). A prior revision
+    // skipped this scan whenever `name_confirmed && integration_connected`
+    // wasn't already true, which kept the *latch* decision cheap (issue #1850
+    // review, finding 2) but made the checklist item read as permanently
+    // undone for exactly that operator — risking a needless repeat of a real,
+    // possibly costly run. Correctness for a screen with money on the line
+    // outranks the earlier optimization.
+    let workflow_run_succeeded = any_workflow_run_succeeded(company, events).await?;
     let status = derive_steps(&record, has_composio_connection, workflow_run_succeeded);
 
     if !status.all_steps_complete() {
@@ -820,13 +824,42 @@ mod test {
         assert!(reloaded.activation_completed_at.is_none());
     }
 
-    /// Issue #1850 review, finding 2: the journal scan behind
-    /// `workflow_run_succeeded` is unbounded and grows with a company's whole
-    /// event history — it must not run on a poll that cannot possibly
-    /// complete activation this round because `name_confirmed` is still
-    /// false, the cheapest of the three steps to know without any IO at all.
+    /// A real, successful workflow run — the same fixture
+    /// `compute_and_latch_stamps_the_record_and_journals_once_all_steps_complete`
+    /// journals — appended for a test's `id` before `compute_and_latch` is
+    /// called on it.
+    async fn journal_a_succeeded_workflow_run(events: &Arc<dyn EventLog>, id: &CompanyId) {
+        events
+            .append(
+                id,
+                CompanyEvent::WorkflowRunFinished {
+                    workflow_id: "digest".to_string(),
+                    scheduled: false,
+                    run_id: Some("run-1".to_string()),
+                    deliveries: Vec::new(),
+                    pending_approvals: Vec::new(),
+                    error: None,
+                    cancelled: false,
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    /// PR #1875 review finding: an operator who ran a real workflow before
+    /// confirming the company's name must still see step 3 of
+    /// `OnboardingGate`'s checklist as done — the screen's own contract is
+    /// "three quick steps, in any order" — not held to `false` by a shortcut
+    /// meant only to keep the *latch* decision cheap (issue #1850 review,
+    /// finding 2). This replaces
+    /// `compute_and_latch_skips_the_journal_scan_when_name_is_not_confirmed`,
+    /// which asserted the now-corrected behavior.
     #[tokio::test]
-    async fn compute_and_latch_skips_the_journal_scan_when_name_is_not_confirmed() {
+    async fn compute_and_latch_reports_workflow_success_even_when_name_is_not_confirmed() {
         let id = CompanyId::new("acme");
         let dir = tempfile::tempdir().expect("tempdir");
         let store: Arc<dyn CompanyStore> = Arc::new(FsCompanyStore::new(dir.path()));
@@ -835,33 +868,37 @@ mod test {
 
         // `composio` granted and a live connection answered below, so
         // `integration_connected` reads true — `name_confirmed` (defaulted
-        // false by the `record()` fixture) is the ONLY step still missing,
-        // and that alone must be enough to skip the scan.
+        // false by the `record()` fixture) is the ONLY step still missing.
         store.save(&record(&id, &["composio"])).await.unwrap();
+        journal_a_succeeded_workflow_run(&events, &id).await;
 
         let status = compute_and_latch(&id, &store, &events, async || Some(true))
             .await
             .unwrap();
-        assert!(!status.is_activated());
         assert!(
-            !status.workflow_run_succeeded,
-            "unscanned reads as false, the same shape the latched short-circuit already uses"
+            !status.is_activated(),
+            "name_confirmed is still false — the funnel as a whole is not done"
+        );
+        assert!(
+            status.workflow_run_succeeded,
+            "the run genuinely succeeded and must project as done regardless of the other steps"
         );
         assert_eq!(
             counting
                 .read_calls
                 .load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "name_confirmed alone being false must skip the journal read entirely"
+            1,
+            "the scan must run to answer the checklist item honestly"
         );
     }
 
     /// The companion case: `name_confirmed` true but `integration_connected`
-    /// still false must ALSO skip the scan — the finding was that repeated
-    /// polling scanned "if the operator hasn't confirmed the name OR
-    /// connected an integration", not only the first of those.
+    /// still false must ALSO report a genuine workflow success — the finding
+    /// was that the old shortcut hid the same fact behind either missing
+    /// step, not only the first of those. Replaces
+    /// `compute_and_latch_skips_the_journal_scan_when_integration_is_not_connected`.
     #[tokio::test]
-    async fn compute_and_latch_skips_the_journal_scan_when_integration_is_not_connected() {
+    async fn compute_and_latch_reports_workflow_success_even_when_integration_is_not_connected() {
         let id = CompanyId::new("acme");
         let dir = tempfile::tempdir().expect("tempdir");
         let store: Arc<dyn CompanyStore> = Arc::new(FsCompanyStore::new(dir.path()));
@@ -871,24 +908,29 @@ mod test {
         let mut r = record(&id, &["composio"]);
         r.name_confirmed = true;
         store.save(&r).await.unwrap();
+        journal_a_succeeded_workflow_run(&events, &id).await;
 
         // No live connection — `integration_connected` reads false.
         let status = compute_and_latch(&id, &store, &events, async || Some(false))
             .await
             .unwrap();
         assert!(!status.is_activated());
-        assert!(!status.workflow_run_succeeded);
+        assert!(
+            status.workflow_run_succeeded,
+            "the run genuinely succeeded and must project as done regardless of the other steps"
+        );
         assert_eq!(
             counting
                 .read_calls
                 .load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "integration_connected alone being false must skip the journal read entirely"
+            1,
+            "the scan must run to answer the checklist item honestly"
         );
     }
 
-    /// Once both cheaper steps ARE true, the scan must still run — this is
-    /// the case the skip above must not swallow.
+    /// The scan runs once both cheaper steps ARE true too — unconditional
+    /// now (see the two tests above), but worth its own case since this is
+    /// the ordinary path that actually completes activation.
     #[tokio::test]
     async fn compute_and_latch_still_scans_once_name_and_integration_are_both_true() {
         let id = CompanyId::new("acme");

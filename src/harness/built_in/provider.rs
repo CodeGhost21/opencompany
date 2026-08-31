@@ -477,12 +477,19 @@ fn attach_tools(
     body: &mut serde_json::Value,
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
+    supports_parallel_control: bool,
 ) {
     if tools.is_empty() {
         return;
     }
     body["tool_choice"] = wire_tool_choice(tool_choice);
     body["tools"] = serde_json::Value::Array(tools);
+    // Profile metadata is local; put the turn-boundary promise on the actual
+    // OpenAI-compatible request so the remote model cannot validly emit an
+    // effectful sibling beside `request_approval`.
+    if supports_parallel_control {
+        body["parallel_tool_calls"] = serde_json::Value::Bool(false);
+    }
 }
 
 // ## Guarding intra-turn history growth
@@ -616,7 +623,12 @@ static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
         ..Modalities::default()
     },
     tool_calling: true,
-    parallel_tool_calls: true,
+    // An explicit approval request is a turn boundary. Asking the provider for
+    // at most one native tool call prevents a sibling effect from being emitted
+    // in the same assistant message and running before the operator sees the
+    // request. The policy queue adds a second serial-execution barrier for a
+    // provider that violates this capability contract.
+    parallel_tool_calls: false,
     // This field activates both `ContextCompressionMiddleware` and
     // `ImageAwareMessageTrimMiddleware`. `TurnModels::effective_context_window`
     // reads `direct.profile().and_then(|p| p.max_input_tokens)`, and the turn
@@ -752,6 +764,64 @@ fn parse_tool_calls(payload: &serde_json::Value) -> Vec<ToolCall> {
         .collect()
 }
 
+/// Extract the visible text from an OpenAI-compatible `content`-shaped field.
+///
+/// The field may be either a plain string (`"hi"`) or an array of content
+/// parts (`[{"type":"text","text":"hi"},…]`) — some providers, and reasoning
+/// models on their `reasoning` field, use the array form. Concatenates the
+/// `text` of every text part; a part counts as text when its `type` is `"text"`
+/// or absent (but a `text` field is present). Returns an empty string when the
+/// value is `null`, absent, or carries no text.
+fn extract_content_text(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => {
+            let mut out = String::new();
+            for part in parts {
+                let is_text = part
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == "text")
+                    .unwrap_or(true);
+                if is_text && let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    out.push_str(text);
+                }
+            }
+            out
+        }
+        _ => String::new(),
+    }
+}
+
+/// Find a refusal encoded as an array-of-parts `content` part
+/// (`{"type":"refusal","refusal":"…"}`) rather than the scalar sibling
+/// `message.refusal` field.
+///
+/// `extract_content_text` only concatenates `"text"`-typed parts, so a
+/// refusal part in the same array is silently dropped and never reaches
+/// visible `content` — it must be recovered separately so the
+/// reasoning-fallback guard can still detect it and refuse to promote
+/// leaked reasoning over it. Concatenates every nonempty refusal part in
+/// order — mirroring how `extract_content_text` concatenates every
+/// `"text"`-typed part rather than stopping at the first, since a provider
+/// splitting a refusal across multiple parts is otherwise silently
+/// truncated to just the first fragment. Returns `None` when the value
+/// isn't an array or carries no refusal part.
+fn extract_array_refusal_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let parts = value?.as_array()?;
+    let mut out = String::new();
+    for part in parts {
+        let is_refusal = part.get("type").and_then(|t| t.as_str()) == Some("refusal");
+        if !is_refusal {
+            continue;
+        }
+        if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str()) {
+            out.push_str(refusal);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 /// Parse an OpenAI-compatible chat-completion payload into a tinyagents
 /// [`ModelResponse`], preserving token usage, native tool calls, AND the managed
 /// billing envelope.
@@ -762,15 +832,20 @@ fn parse_tool_calls(payload: &serde_json::Value) -> Vec<ToolCall> {
 /// amount. `content` is **optional**: a tool-call-only turn carries `content:
 /// null`. Errors only when the response carries neither text nor a tool call.
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
-    let content = payload
-        .pointer("/choices/0/message/content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Content may be a plain string OR an array of `{type:"text",text:…}`
+    // parts; tolerate both.
+    let raw_content = payload.pointer("/choices/0/message/content");
+    let content_is_null = raw_content.is_some_and(serde_json::Value::is_null);
+    let mut content = extract_content_text(raw_content);
     let tool_calls = parse_tool_calls(&payload);
-    if content.is_empty() && tool_calls.is_empty() {
+    if tool_calls.len() > 1
+        && tool_calls
+            .iter()
+            .any(|call| call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+    {
         return Err(TinyAgentsError::Model(
-            "inference response carried neither choices[0].message.content nor tool_calls"
+            "inference returned request_approval with sibling tool calls; the whole batch was \
+             refused so the approval boundary cannot be crossed"
                 .to_string(),
         ));
     }
@@ -778,6 +853,200 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         .pointer("/choices/0/finish_reason")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+
+    // Reasoning-model fallback: a reasoning-only turn returns `content: null`
+    // with the visible text under `reasoning` / `reasoning_content` (string or
+    // array-of-parts). Recover it so the turn is not lost to a hard error —
+    // but only when the model actually finished. Any finish reason other than
+    // a true completion (`length` truncation, `content_filter`, `failed` —
+    // the documented HTTP-200-empty-response silent failure, see
+    // docs/spec/runtime/providers.md — or any other/unknown value) means the
+    // chain of thought itself may be unfinished, so promoting it here would
+    // hand downstream consumers a partial or incorrect thought as if it were
+    // the final answer. Allow-list the known-good completions instead of
+    // blocklisting the failures we happened to think of, so an unrecognized
+    // failure reason fails closed. Fall through to the empty-response error
+    // below otherwise.
+    // Only `stop` means "finished, with prose, asking for nothing else".
+    // `tool_calls` and `function_call` were in this list until PR #1779's
+    // review: both assert the model requested an ACTION, so a response
+    // carrying one of them has not produced a final answer at all — whether
+    // or not the call body parses. Promoting a chain of thought over a
+    // requested action is the same class of substitution the truncation
+    // guard below prevents, so they are excluded here rather than handled by
+    // a special case per payload shape.
+    let genuinely_finished = matches!(finish_reason.as_deref(), Some("stop"));
+    // `tool_calls` above is the *parsed* result: `parse_tool_calls` requires a
+    // `/message/tool_calls` array AND drops any entry missing `function.name`,
+    // and it never reads the legacy singular `message.function_call` field at
+    // all. So a malformed tool-call entry, or a legacy `finish_reason:
+    // "function_call"` response using `message.function_call`, leaves the
+    // parsed `tool_calls` empty even though the model requested an action —
+    // which would let this branch silently swap the requested action for
+    // ordinary prose instead of surfacing the parse/empty error below. Check
+    // the *raw* payload for either call shape, independent of finish_reason,
+    // so a genuinely-requested-but-unparseable call can never be promoted
+    // (Codex review on #1779, comment 3862781739).
+    let raw_tool_call_requested = payload
+        .pointer("/choices/0/message/tool_calls")
+        .is_some_and(|v| match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::Array(arr) => !arr.is_empty(),
+            // A present-but-non-array value (e.g. an object) is not a shape
+            // `parse_tool_calls` or the legacy `function_call` check can
+            // recognize, but it is not an absence either — fail closed
+            // rather than let it read as "nothing requested" and fall
+            // through to the reasoning fallback below.
+            _ => true,
+        })
+        || payload
+            .pointer("/choices/0/message/function_call")
+            .is_some_and(|v| !v.is_null());
+    // How many entries the *raw* array actually carried, when it is an
+    // array at all (legacy `function_call` and non-array shapes have no
+    // raw count to compare against, and are already fully covered by the
+    // `tool_calls.is_empty()` arm below since `parse_tool_calls` only reads
+    // the array shape). Used to catch a *partial* parse: `parse_tool_calls`
+    // silently drops any entry missing `function.name` (it is a
+    // `filter_map`), so a raw array of one valid call and one malformed one
+    // survives parsing as a single-element `tool_calls` — nonempty, so the
+    // `tool_calls.is_empty()` check alone does not fire, and the malformed
+    // entry (a genuinely requested action) is discarded without a trace
+    // (CodeRabbit review on #1779, comment 3877118065).
+    let raw_tool_call_count = payload
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(|v| v.as_array())
+        .map(std::vec::Vec::len);
+    // `finish_reason` can assert an action was requested (`tool_calls`, or
+    // the legacy `function_call` value) even when there is no raw call body
+    // for `raw_tool_call_requested` above to find at all — it only reads
+    // "requested" off a *present, nonempty* `tool_calls` array or a present
+    // legacy `function_call` field, so a missing field or an explicit empty
+    // `tool_calls: []` both read as "nothing requested" to it. When
+    // `content` is also empty this self-corrects anyway, via the
+    // content-and-tool_calls-both-empty catch-all below. But array-shaped
+    // `content` can carry a genuinely nonempty text preamble on its own —
+    // no `reasoning` fallback involved — which makes that catch-all a
+    // no-op too, so the response would return successfully with just the
+    // preamble and no tool call, silently dropping the action the finish
+    // reason itself declared (CodeRabbit review on #1779, comment
+    // 3877608728).
+    let finish_reason_declares_action = matches!(
+        finish_reason.as_deref(),
+        Some("tool_calls") | Some("function_call")
+    );
+    // A tool call was genuinely requested — either the raw payload carries
+    // one (whether or not `parse_tool_calls` accepted it), or the finish
+    // reason alone asserts one — but not every entry survived parsing:
+    // either none did, or some did and some were silently dropped. This
+    // must error even when `content` is nonempty: array-shaped content can
+    // carry a text preamble alongside the malformed (or entirely missing)
+    // call, which would otherwise pass the empty-turn check below and let
+    // the harness silently return the preamble as if it were the whole
+    // answer — the same class of substitution the reasoning-fallback guard
+    // above exists to prevent, just via the *content* channel instead of
+    // `reasoning` (CodeRabbit review on #1779, comments 3872084060 and
+    // 3877608728).
+    if (raw_tool_call_requested || finish_reason_declares_action)
+        && (tool_calls.is_empty() || raw_tool_call_count.is_some_and(|n| n != tool_calls.len()))
+    {
+        let detail = finish_reason
+            .as_deref()
+            .map(|r| format!(" (finish_reason: {r})"))
+            .unwrap_or_default();
+        return Err(TinyAgentsError::Model(format!(
+            "inference response requested a tool call that failed to parse{detail}"
+        )));
+    }
+    // Resolve the refusal, independent of `content`'s shape, ONCE: a
+    // provider can express it as the scalar sibling `message.refusal` field,
+    // or — some providers/gateways normalize a Responses-API-style refusal
+    // this way — as a `{"type":"refusal","refusal":"…"}` part inside
+    // array-shaped `content` itself. `extract_content_text` only
+    // concatenates `"text"`-typed parts, so a refusal-typed part (alone or
+    // alongside a text part) never reaches `content` and `content` can
+    // already be nonempty (a leaked lead-in sentence) by the time this runs.
+    // The scalar field wins when a payload somehow carries both; either one
+    // alone is still the provider's own visible safety response and must be
+    // detected regardless of what shape `content` took (Codex reviews on
+    // #1779, comments 3874381270, 3875001349, 3875101974).
+    let refusal_text = payload
+        .pointer("/choices/0/message/refusal")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| extract_array_refusal_text(payload.pointer("/choices/0/message/content")));
+
+    if tool_calls.is_empty() && !raw_tool_call_requested {
+        if let Some(refusal) = refusal_text {
+            // A refusal is a *completed* decision, not a partial one — unlike
+            // the reasoning fallback below, its precedence must not depend on
+            // `finish_reason`. Gating it on `genuinely_finished` let a
+            // refusal that ends with e.g. `finish_reason: "content_filter"`
+            // (arguably the *more* likely finish reason for an actual
+            // content-policy refusal) fall through untouched, leaving
+            // whatever text or reasoning leaked alongside it to win instead
+            // and silently discard the refusal (Codex review on #1779,
+            // comment 3875167298). It always wins over leaked text/reasoning,
+            // independent of how the turn finished.
+            content = refusal;
+        } else if finish_reason.as_deref() == Some("failed") && !content.is_empty() {
+            // `finish_reason: "failed"` is the documented HTTP-200-empty-
+            // response silent provider failure (docs/spec/runtime/providers.md).
+            // It is a *completed* disclaimer that the turn did not succeed —
+            // like a refusal, not a partial/unfinished state — so it must not
+            // be overridden by whatever text leaked alongside it, the same
+            // way `genuinely_finished` already keeps a truncated/filtered/
+            // failed *reasoning* stream from being promoted below. That gate
+            // only covers the `reasoning` fallback though: `content` itself is
+            // extracted unconditionally at the top of this function (string OR
+            // array-shaped), so a provider that emits real text — a leaked
+            // lead-in sentence, or a fuller partial reply — before reporting
+            // `failed` had that text returned as a successful answer with no
+            // finish_reason check at all. Discard it here so the response
+            // falls through to the empty-turn error below, naming `failed` for
+            // diagnosis (CodeRabbit review on #1779, comment 3878355364).
+            content.clear();
+        } else if genuinely_finished && content_is_null && content.is_empty() {
+            // Reasoning-model fallback: a reasoning-only turn returns
+            // `content: null` with the visible text under `reasoning` /
+            // `reasoning_content` (string or array-of-parts). Only promote it
+            // when the model actually finished — a truncated (`length`),
+            // filtered (`content_filter`), failed, or otherwise-unfinished
+            // chain of thought is not a final answer, and promoting it here
+            // would hand downstream consumers a partial or incorrect thought
+            // as if it were.
+            //
+            // `content.is_empty()` alone is not enough to detect the
+            // reasoning-only shape: it is also true for an explicit
+            // `content: ""` or a non-text content array (e.g. an image-only
+            // part) — both a genuine, visible provider response that
+            // `extract_content_text` simply can't render as text. Requiring
+            // the *raw* field to be absent/null before promoting keeps that
+            // response from being silently swapped for leaked
+            // chain-of-thought (CodeRabbit review on #1779, comment
+            // 3877224319).
+            content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
+            if content.is_empty() {
+                content =
+                    extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
+            }
+        }
+    }
+
+    // Only a genuinely empty turn (no text anywhere, no tool call) is an error.
+    // Fold `finish_reason` into the message so a truncation (`length`) or
+    // `content_filter` stop is diagnosable rather than hidden behind a generic
+    // "carried neither" string.
+    if content.is_empty() && tool_calls.is_empty() {
+        let detail = finish_reason
+            .as_deref()
+            .map(|r| format!(" (finish_reason: {r})"))
+            .unwrap_or_default();
+        return Err(TinyAgentsError::Model(format!(
+            "inference response carried neither choices[0].message.content nor tool_calls{detail}"
+        )));
+    }
 
     let usage = parse_usage(&payload);
     // USD is only present on the managed envelope; the raw `/openai/v1`
@@ -976,7 +1245,12 @@ impl ChatModel<()> for HostedProvider {
         }
         // Native tool calling: expose the turn's tools so the model emits
         // structured `tool_calls` instead of hand-written `<tool_call>` XML.
-        attach_tools(&mut body, wire_tools(&request.tools), &request.tool_choice);
+        attach_tools(
+            &mut body,
+            wire_tools(&request.tools),
+            &request.tool_choice,
+            self.product_identity,
+        );
 
         let base_url = self.config.base_url.trim_end_matches('/');
         let url = format!("{base_url}/chat/completions");
@@ -1142,7 +1416,9 @@ pub async fn request_plan(
     if let Some(cap) = max_tokens {
         body["max_tokens"] = serde_json::json!(cap);
     }
-    attach_tools(&mut body, tools, tool_choice);
+    let supports_parallel_control =
+        decl.is_proxied() || inference::normalize_provider(&decl.provider) == "openrouter";
+    attach_tools(&mut body, tools, tool_choice, supports_parallel_control);
     Ok(RequestPlan {
         url,
         model,
@@ -1525,10 +1801,46 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
         Some(decl.source),
     )
     .await?;
-    payload
-        .pointer("/choices/0/message/content")
-        .and_then(|c| c.as_str())
-        .ok_or_else(|| anyhow::anyhow!("probe response missing choices[0].message.content"))?;
+    // Route through the exact same parser the turn path calls
+    // (`model_response_from_payload`), not a hand-rolled subset of it. An
+    // earlier revision called `extract_content_text` directly here, which
+    // picked up the array-shaped-content case but not the
+    // `reasoning`/`reasoning_content` fallback for reasoning-only turns
+    // (`content: null`, `finish_reason: "stop"`) that lives inside
+    // `model_response_from_payload` — so an endpoint answering with that shape
+    // still passed every real turn while this probe reported the connection
+    // broken (Codex review on #1779, comment 3864906472). Giving the probe a
+    // second, narrower copy of the parsing logic is exactly how it drifted
+    // from the turn path the first time; calling the shared function directly
+    // means there is only one content path to keep in sync.
+    let response = model_response_from_payload(payload)
+        .map_err(|e| anyhow::anyhow!("probe response carried no usable content: {e}"))?;
+    // `model_response_from_payload` accepts a tool-call-only reply — correct
+    // for a real turn, where the model may have been offered tools and
+    // legitimately chose to call one instead of answering in prose. This
+    // probe offers none (`Vec::new()` above), so a tool call here can only
+    // be the endpoint hallucinating or defaulting to an action it was never
+    // given, not a valid response to `ping`. Letting it through would report
+    // a broken endpoint as reachable, passing the setup wizard or console
+    // Test action for a provider that cannot complete the bare chat turn it
+    // exists to verify (CodeRabbit review on #1779, comment 3877827976).
+    //
+    // Checking `content.is_empty()` alone only catches a tool-call-*only*
+    // reply. An endpoint can also emit a text preamble alongside a genuinely
+    // parsed tool call (`content` nonempty AND `tool_calls` nonempty) —
+    // `model_response_from_payload` accepts that combination for a real turn
+    // too, so it clears this guard with content to spare even though a tool
+    // call the probe never offered was still requested. Require the tool-call
+    // list to be empty as well so any tool call at all — bare or alongside
+    // text — fails the probe (CodeRabbit review on #1779, comment
+    // 3878355375).
+    if response.message.content.is_empty() || !response.message.tool_calls.is_empty() {
+        return Err(anyhow::anyhow!(
+            "probe response carried a tool call — endpoint requested an \
+             action instead of (or alongside) answering a turn that offered \
+             no tools"
+        ));
+    }
     Ok(())
 }
 
@@ -1973,6 +2285,848 @@ mod tests {
         assert!(resp.usage.is_none());
     }
 
+    /// Some OpenAI-compatible providers return `content` as an array of parts
+    /// (`[{"type":"text","text":"…"}]`) rather than a bare string. The parser
+    /// must concatenate the `text` of each text part instead of treating the
+    /// non-string value as empty and hard-erroring. Regression for bug #1.
+    #[test]
+    fn parses_content_as_array_of_text_parts() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Hello, " },
+                        { "type": "text", "text": "world" }
+                    ]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("array content parses");
+        assert_eq!(resp.text(), "Hello, world");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A non-null but empty visible content field is not the documented
+    /// reasoning-only shape. It must not cause internal reasoning to be
+    /// promoted as the assistant answer.
+    #[test]
+    fn empty_string_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("empty string content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
+    /// An absent visible content field is distinct from an explicit null and
+    /// must not activate the reasoning-only fallback.
+    #[test]
+    fn absent_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("absent content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
+    /// An unsupported content shape is not equivalent to null content.
+    #[test]
+    fn unsupported_content_does_not_fall_back_to_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "image_url", "image_url": {} }],
+                    "reasoning": "internal thought"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("unsupported content must not promote reasoning");
+        assert!(err.to_string().contains("neither"));
+    }
+
+    /// A reasoning-only turn returns `content: null` with the visible text under
+    /// a `reasoning` field and no tool calls. It must fall back to the reasoning
+    /// text and parse rather than hard-erroring — the managed reasoning brain
+    /// (deepseek/qwen via OpenRouter) is the exact source of the crash.
+    #[test]
+    fn reasoning_only_turn_falls_back_to_reasoning_text() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The answer is 42."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("reasoning-only turn parses");
+        assert_eq!(resp.text(), "The answer is 42.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A refusal turn: `content: null`, `finish_reason: "stop"`, a nonempty
+    /// `message.refusal`, and `reasoning` the model emitted before declining.
+    /// The refusal is the provider's own visible safety response and must win
+    /// over the internal reasoning — promoting the reasoning instead would
+    /// expose exactly the content the model declined to return (CodeRabbit
+    /// review on #1779, comment 3872084054).
+    #[test]
+    fn a_refusal_wins_over_leaked_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The user wants help with something I should decline.",
+                    "refusal": "I can't help with that."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A refusal turn where the array-shaped `content` field itself encodes
+    /// the refusal as a `{"type":"refusal","refusal":"…"}` part instead of
+    /// the scalar sibling `message.refusal` field — some providers/gateways
+    /// normalize a Responses-API-style refusal part into the Chat
+    /// Completions `content` array. `extract_content_text` only concatenates
+    /// `"text"`-typed parts, so the refusal part contributes nothing and
+    /// `content` comes back empty; without an array-aware refusal check the
+    /// scalar `message.refusal` lookup also finds nothing, and the reasoning
+    /// fallback would promote the leaked pre-refusal reasoning as the
+    /// visible answer. The refusal must still win (Codex review on #1779,
+    /// comment 3874381270).
+    #[test]
+    fn a_refusal_wins_over_leaked_reasoning_when_refusal_is_an_array_content_part() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "refusal", "refusal": "I can't help with that." }
+                    ],
+                    "reasoning": "The user wants help with something I should decline."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// Multiple `{"type":"refusal",…}` parts in the same array-shaped
+    /// `content`. `extract_array_refusal_text`'s `find_map` stops at the
+    /// first match, so only the first part's text is recovered — the
+    /// analogous `extract_content_text` concatenates every `"text"`-typed
+    /// part instead of stopping at the first, so the refusal path must do
+    /// the same or it silently truncates the provider's own visible safety
+    /// response (CodeRabbit review on #1779, comment 3878506287).
+    #[test]
+    fn a_refusal_wins_and_is_not_truncated_when_content_array_has_multiple_refusal_parts() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "refusal", "refusal": "I can't help with that. " },
+                        { "type": "refusal", "refusal": "Here's why." }
+                    ]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that. Here's why.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A mixed array: a `"text"`-typed part alongside a `{"type":"refusal",…}`
+    /// part in the same `content` array. `extract_content_text` concatenates
+    /// only the text part, so `content` is already nonempty by the time the
+    /// refusal-precedence block is reached — without checking for an array
+    /// refusal independent of `content`'s emptiness, the block is skipped
+    /// entirely and the turn "succeeds" with just the leaked text fragment,
+    /// silently discarding the provider's actual safety response (Codex
+    /// review on #1779, comment 3875001349).
+    #[test]
+    fn a_refusal_wins_over_leaked_text_when_content_array_mixes_text_and_refusal_parts() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Sure, here's a start: " },
+                        { "type": "refusal", "refusal": "I can't help with that." }
+                    ]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// An array-shaped `content` with only a `"text"`-typed part (no
+    /// `{"type":"refusal",…}` part at all) alongside a nonempty *scalar*
+    /// `message.refusal` sibling field. `extract_content_text` concatenates
+    /// the text part, so `content` is nonempty; `extract_array_refusal_text`
+    /// finds no refusal-typed part, so `array_refusal` is `None`. Gating the
+    /// refusal-precedence block on `content.is_empty() || array_refusal.is_some()`
+    /// alone therefore skips the block entirely and never even looks at the
+    /// scalar `message.refusal` field, leaking the text fragment as the
+    /// answer instead of surfacing the provider's actual safety response
+    /// (Codex review on #1779, comment 3875101974).
+    #[test]
+    fn a_scalar_refusal_wins_over_leaked_text_in_array_shaped_content() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Sure, here's a start: " }
+                    ],
+                    "refusal": "I can't help with that."
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// The mixed-array refusal case above (Codex review comment 3875001349)
+    /// only reproduced with `finish_reason: "stop"`. The refusal-precedence
+    /// block was gated on `genuinely_finished`, so the identical payload with
+    /// `finish_reason: "content_filter"` — arguably the *more* likely finish
+    /// reason a real content-policy refusal ends with — skipped the block
+    /// entirely: `content` was already nonempty from the leaked text part,
+    /// so the empty-response check at the bottom accepted it and returned
+    /// the leaked lead-in as if it were the whole answer, silently
+    /// discarding the refusal. A refusal is a completed decision, not a
+    /// partial one, so its precedence must not depend on `finish_reason` the
+    /// way the reasoning fallback's does (Codex review on #1779, comment
+    /// 3875167298).
+    #[test]
+    fn a_refusal_wins_over_leaked_text_regardless_of_finish_reason() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Sure, here's a start: " },
+                        { "type": "refusal", "refusal": "I can't help with that." }
+                    ]
+                }
+            }]
+        });
+        let resp = model_response_from_payload(payload).expect("refusal turn parses");
+        assert_eq!(resp.text(), "I can't help with that.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// The sibling fallback field: some providers emit the reasoning-only
+    /// text under `reasoning_content` (array-of-parts shape) instead of
+    /// `reasoning`, with `reasoning` itself absent. `extract_content_text`
+    /// handles the array shape and `model_response_from_payload` only tries
+    /// `reasoning_content` once `reasoning` comes back empty — this test
+    /// exercises that second fallback specifically, which the existing
+    /// `reasoning`-field and `content_filter`-error tests do not cover
+    /// (CodeRabbit nitpick on #1779, comment ed359cf20f434c7f7f83c058).
+    #[test]
+    fn reasoning_only_turn_falls_back_to_array_shaped_reasoning_content() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "",
+                    "reasoning_content": [
+                        { "type": "text", "text": "The answer is " },
+                        { "type": "text", "text": "42." }
+                    ]
+                }
+            }]
+        });
+        let resp =
+            model_response_from_payload(payload).expect("reasoning_content-only turn parses");
+        assert_eq!(resp.text(), "The answer is 42.");
+        assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// An explicit `content: ""` (not `null`) is a *visible* empty response,
+    /// not the documented reasoning-only shape — `extract_content_text`
+    /// reduces both to the same empty string, so the old `content.is_empty()`
+    /// check could not tell them apart and promoted `reasoning` anyway. That
+    /// substitutes internal chain-of-thought for whatever unsupported/empty
+    /// response the provider actually sent, the same class of bug the
+    /// refusal-precedence guard above exists to prevent, just triggered by an
+    /// empty string instead of a populated field (CodeRabbit review on
+    /// #1779, comment 3877224319).
+    #[test]
+    fn explicit_empty_string_content_does_not_promote_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "The user wants help with something I should decline."
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("explicit empty-string content must not promote reasoning");
+        assert!(
+            !err.to_string().contains("decline"),
+            "leaked reasoning must not appear in the error, got: {err}"
+        );
+    }
+
+    /// Same gap as above, via the array-content path: a non-text content
+    /// array (e.g. an image-only part) extracts to an empty string too, but
+    /// the raw field is neither absent nor `null` — it is the provider's
+    /// actual (just non-text) response, and must not be silently swapped for
+    /// leaked reasoning (CodeRabbit review on #1779, comment 3877224319).
+    #[test]
+    fn non_text_array_content_does_not_promote_reasoning() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } }
+                    ],
+                    "reasoning": "The user wants help with something I should decline."
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("non-text array content must not promote reasoning");
+        assert!(
+            !err.to_string().contains("decline"),
+            "leaked reasoning must not appear in the error, got: {err}"
+        );
+    }
+
+    /// A genuinely empty turn truncated by `finish_reason: "length"` (max_tokens
+    /// hit) is still an error — but the message must name the finish reason so
+    /// the truncation is diagnosable rather than hidden behind a generic string.
+    #[test]
+    fn truncated_empty_response_errors_with_finish_reason() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": { "role": "assistant", "content": "" }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err("truncated empty turn errors");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("length"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A reasoning-only turn truncated by `finish_reason: "length"` (max_tokens
+    /// hit mid chain-of-thought) must still error, even though `reasoning`
+    /// carries text — the reasoning-fallback exists to recover a *complete*
+    /// answer that only landed under `reasoning`, not to promote a cut-off
+    /// chain of thought into a fabricated final reply. Pre-fix, this payload
+    /// parsed successfully with `resp.text() == "The answer is"`, silently
+    /// handing a partial thought to downstream consumers as if it were the
+    /// finished answer (Codex review on #1779).
+    #[test]
+    fn truncated_reasoning_only_turn_errors_instead_of_promoting_partial_thought() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The answer is"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("truncated reasoning-only turn must not parse as success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("length"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Same as above but for `content_filter` — a filtered reasoning stream is
+    /// just as unfinished as a truncated one and must not be promoted either.
+    #[test]
+    fn content_filtered_reasoning_only_turn_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "Let's think about how to"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("content-filtered reasoning-only turn must not parse as success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("content_filter"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// `finish_reason: "failed"` is the documented HTTP-200-empty-response
+    /// silent provider failure (see docs/spec/runtime/providers.md — observed
+    /// on an oversized request, empty message, zero usage). The pre-fix guard
+    /// blocklisted only `length`/`content_filter`, so a reasoning-only turn
+    /// carrying `failed` still fell through and promoted whatever partial
+    /// reasoning the provider emitted before failing — handing downstream
+    /// consumers an unfinished thought as if it were the answer (Codex
+    /// follow-up review on #1779, comment 3860281502). Must error instead.
+    #[test]
+    fn failed_finish_reason_reasoning_only_turn_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "failed",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The answer is"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("failed reasoning-only turn must not parse as success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Same as `failed_finish_reason_reasoning_only_turn_errors`, but the
+    /// leaked text lives in the *primary* `content` field (array-shaped, the
+    /// form round #8 of this PR taught `extract_content_text` to parse) rather
+    /// than `reasoning`. `content` is extracted unconditionally at the top of
+    /// `model_response_from_payload`, with no `finish_reason` check of its
+    /// own — only the `reasoning` fallback is gated on `genuinely_finished`.
+    /// Pre-fix, this payload parsed successfully with the leaked lead-in
+    /// sentence returned as the answer, silently discarding the provider's own
+    /// `failed` disclaimer (CodeRabbit review on #1779, comment 3878355364).
+    #[test]
+    fn failed_finish_reason_with_leaked_array_content_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "failed",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Let me look that up for you" }
+                    ]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("failed turn with leaked content must not parse as success");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("look that up"),
+            "leaked content must not appear in the error, got: {msg}"
+        );
+        assert!(
+            msg.contains("failed"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// The legacy `finish_reason: "function_call"` shape carries the request
+    /// under the singular `message.function_call` field, which
+    /// `parse_tool_calls` never reads (it only parses the modern
+    /// `message.tool_calls` array). Pre-fix, `finish_reason: "function_call"`
+    /// sat in the `genuinely_finished` allow-list, so with `tool_calls` empty
+    /// (nothing there to parse) and `content: null`, this fell straight into
+    /// the reasoning fallback and silently swapped the requested action for
+    /// prose — the caller never even sees a tool call was dropped. Must error
+    /// instead (Codex follow-up review on #1779, comment 3862781739).
+    #[test]
+    fn legacy_function_call_with_reasoning_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "function_call",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function",
+                    "function_call": { "name": "get_weather", "arguments": "{}" }
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("a raw legacy function_call must not be dropped for promoted reasoning");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("function_call"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A raw `tool_calls` array can be *partially* malformed: one entry
+    /// parses (has `function.name`), one does not. `parse_tool_calls`'s
+    /// `filter_map` drops the malformed entry and returns the single valid
+    /// one — a nonempty `Vec`, so `tool_calls.is_empty()` alone never
+    /// catches it. Pre-fix, the response is returned successfully with only
+    /// the surviving call, silently discarding a genuinely requested action
+    /// (CodeRabbit review on #1779, comment 3877118065). The guard must
+    /// compare the raw array length against the parsed count, not just
+    /// check for emptiness.
+    #[test]
+    fn partially_malformed_tool_calls_array_errors_instead_of_dropping_one_call() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        { "id": "call_1", "type": "function", "function": { "name": "get_weather", "arguments": "{}" } },
+                        { "id": "call_2", "type": "function", "function": { "arguments": "{}" } }
+                    ]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a partially malformed tool_calls array must not silently drop the malformed entry",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool call"),
+            "error must name the dropped tool call for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A malformed modern `tool_calls` entry (missing `function.name`) is
+    /// dropped by `parse_tool_calls`'s `filter_map`, leaving the *parsed*
+    /// `tool_calls` empty even though the raw payload clearly requested one.
+    /// The raw-payload guard must catch this too, not just the legacy
+    /// `function_call` field, so a request that fails to parse surfaces as
+    /// the empty-response error rather than a promoted reasoning answer.
+    #[test]
+    fn malformed_modern_tool_call_with_reasoning_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function",
+                    "tool_calls": [{ "id": "call_1", "type": "function", "function": { "arguments": "{}" } }]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a malformed raw tool_calls entry must not be dropped for promoted reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Array-shaped `content` can carry a text preamble ("Let me check
+    /// that…") alongside a `tool_calls` entry the model genuinely requested
+    /// but that fails to parse (missing `function.name`). `content` reads
+    /// nonempty via `extract_content_text` while `parse_tool_calls` drops the
+    /// call, so a check that only looks at content-or-tool_calls emptiness
+    /// passes and the harness would silently return just the preamble,
+    /// dropping the requested action entirely. The raw-payload guard must
+    /// catch this regardless of whether prose content is also present
+    /// (CodeRabbit review on #1779, comment 3872084060).
+    #[test]
+    fn malformed_tool_call_beside_array_content_preamble_errors_instead_of_silently_dropping() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Let me check that for you." }
+                    ],
+                    "tool_calls": [{ "id": "call_1", "type": "function", "function": { "arguments": "{}" } }]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a malformed raw tool_calls entry beside preamble content must not be silently dropped",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A non-array `message.tool_calls` (e.g. an object instead of a list) is
+    /// neither a legacy `function_call` nor something `.as_array()` accepts,
+    /// so pre-fix the raw-payload guard silently read it as "no call
+    /// present" and fell through to the reasoning fallback below — the exact
+    /// class of substitution the array/legacy checks above exist to prevent,
+    /// just for a shape neither one covers. Must error instead of promoting
+    /// (CodeRabbit review on #1779, comment 3872083353).
+    #[test]
+    fn non_array_tool_calls_with_reasoning_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function",
+                    "tool_calls": {}
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a non-array raw tool_calls value must not be dropped for promoted reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stop"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A `finish_reason: "tool_calls"` response that carries no call body at
+    /// all (no `tool_calls` field, no legacy `function_call` field) must
+    /// error rather than promote `reasoning` into the final answer. The
+    /// finish reason itself asserts the model requested an action; treating
+    /// it as "genuinely finished" let the raw-payload guard (which only
+    /// checks for a *present* call) miss the case where there is no call
+    /// field to find. Pre-fix, this silently swapped the requested action
+    /// for prose (Codex review on #1779, comment 3864692178).
+    #[test]
+    fn tool_calls_finish_reason_with_missing_call_body_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("a tool_calls finish reason with no call body must not promote reasoning");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Same gap, but the provider sends an explicit empty `tool_calls: []`
+    /// array instead of omitting the field — the raw-payload guard treats an
+    /// empty array as "nothing requested" (correctly, for `parse_tool_calls`
+    /// purposes) but that must not be read as license to promote reasoning
+    /// when the finish reason itself claims an action was intended.
+    #[test]
+    fn tool_calls_finish_reason_with_empty_call_array_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function",
+                    "tool_calls": []
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a tool_calls finish reason with an empty call array must not promote reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Same gap again, but via the *content* channel instead of `reasoning`:
+    /// array-shaped `content` carrying a nonempty text preamble ("Let me
+    /// check that…") makes `content` nonempty on its own, with no reasoning
+    /// fallback involved at all. `raw_tool_call_requested` reads a present
+    /// but empty `tool_calls: []` array the same as an absent field (both
+    /// "nothing requested"), so the explicit raw-payload guard never fires;
+    /// and because `content` is already nonempty, the final
+    /// content-and-tool_calls-both-empty catch-all below never fires either.
+    /// The response would be returned successfully with the preamble as the
+    /// full text and no tool call — silently dropping the action the
+    /// `finish_reason` itself asserts was requested (CodeRabbit review on
+    /// #1779, comment 3877608728).
+    #[test]
+    fn tool_calls_finish_reason_with_empty_array_beside_content_preamble_errors_instead_of_dropping_action()
+     {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Let me check that for you." }
+                    ],
+                    "tool_calls": []
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a tool_calls finish reason with an empty call array must not let a content \
+             preamble stand in for the requested action",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool_calls"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Legacy sibling of the above: `finish_reason: "function_call"` with no
+    /// `message.function_call` field at all, beside a nonempty array-shaped
+    /// `content` preamble.
+    #[test]
+    fn function_call_finish_reason_with_missing_call_body_beside_content_preamble_errors_instead_of_dropping_action()
+     {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "function_call",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Let me check that for you." }
+                    ]
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a function_call finish reason with no call body must not let a content preamble \
+             stand in for the requested action",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("function_call"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// The legacy sibling of the above: `finish_reason: "function_call"` with
+    /// no `message.function_call` field present at all.
+    #[test]
+    fn function_call_finish_reason_with_missing_call_body_errors_instead_of_promoting() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "function_call",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I should call the weather function"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload).expect_err(
+            "a function_call finish reason with no call body must not promote reasoning",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("function_call"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// Any other non-success finish reason — including ones this module does
+    /// not name explicitly — must fail closed rather than be assumed safe to
+    /// promote. The guard is an allow-list of genuine textual completions
+    /// (`stop` only — see [`model_response_from_payload`] for why
+    /// `tool_calls`/`function_call` are excluded), not a blocklist of known
+    /// failures, so an unrecognized value never silently promotes reasoning.
+    #[test]
+    fn unrecognized_finish_reason_reasoning_only_turn_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "error",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "Working through it"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("unrecognized finish_reason must not promote reasoning to an answer");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("error"),
+            "error must name finish_reason for diagnosis, got: {msg}"
+        );
+    }
+
+    /// A missing `finish_reason` altogether is unproven, not proven-complete —
+    /// the allow-list requires an explicit good status, so this must also fail
+    /// closed rather than assume the omission means success.
+    #[test]
+    fn missing_finish_reason_reasoning_only_turn_errors() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "Working through it"
+                }
+            }]
+        });
+        let err = model_response_from_payload(payload)
+            .expect_err("missing finish_reason must not promote reasoning to an answer");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("finish_reason"),
+            "no finish_reason detail should be appended when none was present, got: {msg}"
+        );
+    }
+
     /// A tool-call-only turn carries `content: null` and a `tool_calls` array.
     /// It must parse into a response whose message has no text block but the
     /// tool call intact (id, name, arguments parsed from the JSON string), so the
@@ -2006,6 +3160,26 @@ mod tests {
         assert_eq!(calls[0].arguments, serde_json::json!({ "sku": "A-1" }));
         assert!(calls[0].invalid.is_none());
         assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn request_approval_with_siblings_refuses_the_whole_model_response() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {"id":"c1","type":"function","function":{"name":"shell","arguments":"{}"}},
+                        {"id":"c2","type":"function","function":{"name":"request_approval","arguments":"{\"title\":\"Run\",\"question\":\"Proceed?\"}"}}
+                    ]
+                }
+            }]
+        });
+        let error = model_response_from_payload(payload)
+            .expect_err("an approval boundary cannot share one tool-call batch");
+        assert!(error.to_string().contains("sibling tool calls"));
     }
 
     /// A missing/empty tool-call `id` is back-filled with a stable `tool-{index}`
@@ -2052,10 +3226,24 @@ mod tests {
             format: tinyagents::harness::tool::ToolFormat::default(),
         }]);
         let mut body = serde_json::json!({ "model": "chat-v1" });
-        attach_tools(&mut body, tools, &ToolChoice::Required);
+        attach_tools(&mut body, tools, &ToolChoice::Required, true);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "check_inventory");
         assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["parallel_tool_calls"], false);
+        let mut unsupported = serde_json::json!({ "model": "local" });
+        attach_tools(
+            &mut unsupported,
+            wire_tools(&[ToolSchema {
+                name: "check_inventory".to_string(),
+                description: "look up stock".to_string(),
+                parameters: serde_json::json!({ "type": "object" }),
+                format: tinyagents::harness::tool::ToolFormat::default(),
+            }]),
+            &ToolChoice::Required,
+            false,
+        );
+        assert!(unsupported.get("parallel_tool_calls").is_none());
 
         // An assistant tool-call turn → null content + wire tool_calls; the tool
         // result → a `tool` role message carrying its `tool_call_id`.
@@ -2102,6 +3290,10 @@ mod tests {
         assert!(
             profile.tool_calling,
             "native tool calling must be advertised"
+        );
+        assert!(
+            !profile.parallel_tool_calls,
+            "one native call per assistant message keeps request_approval a turn boundary"
         );
     }
 
@@ -2420,6 +3612,10 @@ mod tests {
             plan.body.get("tool_choice").is_none(),
             "no tool_choice without tools"
         );
+        assert!(
+            plan.body.get("parallel_tool_calls").is_none(),
+            "no parallel-tool setting without tools"
+        );
         assert_eq!(plan.bearer.as_deref(), Some("or-key"));
         assert!(plan.url.ends_with("/chat/completions"), "{}", plan.url);
         assert!(
@@ -2638,6 +3834,67 @@ mod tests {
                     "choices": [{ "message": { "role": "assistant", "content": marker } }],
                     "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
                 }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Spawns an in-process OpenAI-compatible stub whose `message.content` is
+    /// the given raw JSON value rather than a plain string — used to exercise
+    /// the array-of-text-parts content shape end to end.
+    async fn spawn_stub_content(content: serde_json::Value) -> String {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let content = content.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "finish_reason": "stop",
+                            "message": { "role": "assistant", "content": content }
+                        }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Spawns an in-process OpenAI-compatible stub whose full `message` object
+    /// is the given raw JSON value — used to exercise shapes `spawn_stub_content`
+    /// cannot, such as a reasoning-only turn (`content: null` with the visible
+    /// text under `reasoning`/`reasoning_content` instead).
+    async fn spawn_stub_message(message: serde_json::Value) -> String {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let message = message.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "finish_reason": "stop",
+                            "message": message
+                        }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                    }))
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3013,6 +4270,153 @@ mod tests {
             calls.load(Ordering::SeqCst),
             2,
             "both turns reached the stub"
+        );
+    }
+
+    /// Codex review on #1779 (comment 3864824480): `model_response_from_payload`
+    /// learned to parse array-shaped `content` (`parses_content_as_array_of_text_parts`
+    /// above), but `probe` — the setup wizard's and the console's "Test" button
+    /// connectivity check — still read `content.as_str()` directly. An endpoint
+    /// answering with array-shaped content therefore passed every real turn
+    /// while its own connection probe reported the connection broken. `probe`
+    /// must route through `model_response_from_payload` itself, the same
+    /// parser the turn path calls, rather than any narrower stand-in for it.
+    #[tokio::test]
+    async fn probe_accepts_array_shaped_content() {
+        let url = spawn_stub_content(serde_json::json!([
+            { "type": "text", "text": "pong" }
+        ]))
+        .await;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url);
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        probe(&decl, None)
+            .await
+            .expect("array-shaped content must be recognized as a successful probe");
+    }
+
+    /// Codex review on #1779 (comment 3864906472): the array-content fix above
+    /// made `probe` call `extract_content_text` directly instead of the shared
+    /// `model_response_from_payload` — which picked up the array-shaped-content
+    /// case but not the `reasoning`/`reasoning_content` fallback for a
+    /// reasoning-only turn (`content: null`, `finish_reason: "stop"`, visible
+    /// text under `reasoning`) that lives inside `model_response_from_payload`.
+    /// A managed reasoning provider answering with that shape passed every
+    /// real turn while its own connection probe reported the connection
+    /// broken — blocking the setup wizard and the console's "Test" button for
+    /// a valid provider. `probe` must route through the exact same parser the
+    /// turn path calls so the two paths cannot diverge again.
+    #[tokio::test]
+    async fn probe_accepts_reasoning_only_content() {
+        let url = spawn_stub_message(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "reasoning": "42 is the answer."
+        }))
+        .await;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url);
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        probe(&decl, None)
+            .await
+            .expect("reasoning-only content must be recognized as a successful probe");
+    }
+
+    /// CodeRabbit review on #1779 (comment 3877827976): `probe` routes
+    /// through the shared `model_response_from_payload`, which is correct
+    /// for a real turn but accepts a tool-call-only reply as a success —
+    /// tool calls are a valid outcome when the caller offered tools. `probe`
+    /// offers none (`Vec::new()`), so an endpoint answering `ping` with a
+    /// tool call instead of prose never actually answered the bare chat turn
+    /// the probe exists to verify. Without an explicit check for visible
+    /// text, the setup wizard or console Test action would report such an
+    /// endpoint as reachable.
+    #[tokio::test]
+    async fn probe_rejects_tool_call_only_reply() {
+        let url = spawn_stub_message(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "lookup_weather", "arguments": "{}" }
+                }
+            ]
+        }))
+        .await;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url);
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = probe(&decl, None)
+            .await
+            .expect_err("a tool-call-only reply to a no-tools probe must not pass");
+        assert!(
+            err.to_string().contains("tool call"),
+            "error should name why the probe failed: {err}"
+        );
+    }
+
+    /// CodeRabbit review on #1779 (comment 3878355375): the tool-call guard
+    /// above only checked `content.is_empty()`, which catches a tool-call-
+    /// *only* reply but not a mixed one — a text preamble alongside a
+    /// genuinely parsed tool call. `model_response_from_payload` accepts that
+    /// combination for a real turn (the finish-reason-declares-an-action
+    /// guard only fires when `tool_calls` fails to parse), so `content` comes
+    /// back nonempty and the pre-fix check let it through even though the
+    /// probe offered no tools and the endpoint still requested one. Must
+    /// still fail the probe.
+    #[tokio::test]
+    async fn probe_rejects_tool_call_alongside_text_preamble() {
+        let url = spawn_stub_message(serde_json::json!({
+            "role": "assistant",
+            "content": "Let me check that for you.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "lookup_weather", "arguments": "{}" }
+                }
+            ]
+        }))
+        .await;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(url);
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = probe(&decl, None)
+            .await
+            .expect_err("a tool call alongside text in a no-tools probe must not pass");
+        assert!(
+            err.to_string().contains("tool call"),
+            "error should name why the probe failed: {err}"
         );
     }
 

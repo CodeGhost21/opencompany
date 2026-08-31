@@ -441,6 +441,28 @@ pub async fn assert_isolation_by_company(
         context.list(&beta, "").await.unwrap().is_empty(),
         "beta context leaked"
     );
+    // `beta` was never saved: the activation gate reads "never seen", exactly
+    // like a company with no bundle/document/row at all.
+    assert!(
+        !store.activation_gate_seen(&beta).await.unwrap(),
+        "a company that was never saved must report the activation gate as \
+         never seen"
+    );
+    // PR #1875 review finding: `alpha` WAS just saved, by this same
+    // activation-aware build, so the gate must already read "seen" —
+    // immediately, with no second save. A backend that leaves this at the
+    // `CompanyStore` trait's always-`false` default cannot tell a fresh
+    // company's second boot apart from a genuine pre-#1843 legacy record, and
+    // `RuntimeBuilder::build`'s grandfather back-fill would silently
+    // auto-activate every such company on that backend the moment it
+    // restarts before onboarding finishes — the exact bug #1843 fixed,
+    // reopened for whichever backend forgets this.
+    assert!(
+        store.activation_gate_seen(&alpha).await.unwrap(),
+        "a company just saved by activation-aware code must have the \
+         activation gate marked as seen — a backend inheriting the trait's \
+         always-false default would re-open the #1843 auto-activation bug"
+    );
 
     // `alpha` still sees its own data.
     let loaded = store.load(&alpha).await.unwrap().expect("alpha record");
@@ -611,6 +633,63 @@ pub async fn assert_isolation_by_company(
         1
     );
     assert_eq!(context.list(&alpha, "").await.unwrap().len(), 1);
+}
+
+/// PR #1875 review finding: `CompanyStore::save` stamps `activation_gate_seen:
+/// true` unconditionally, on the reasoning (its own doc comment) that "every
+/// OTHER call site really is activation-aware code doing a normal write" —
+/// true for a `running` company, but not for one still `paused` on its first
+/// post-upgrade boot. `RuntimeBuilder::build`'s own "existing but not
+/// running" arm already knows this and deliberately leaves the marker exactly
+/// as recorded rather than migrating a paused legacy record — but that
+/// protection only covers saves `build` itself makes. Any OTHER ordinary
+/// write against the same still-paused, not-yet-migrated record — e.g.
+/// `company_logo::put_logo`'s plain load-modify-save cycle, which does not
+/// check lifecycle at all — used to stamp the marker `true` regardless,
+/// poisoning it before the company's own first `running` boot ever gets to
+/// decide. Once poisoned, the grandfather arm's `!gate_already_seen` guard
+/// can never fire again, and a genuinely legacy operator who resumes their
+/// paused company is shown the fresh-company onboarding funnel instead of
+/// being grandfathered in.
+pub async fn assert_paused_ordinary_save_preserves_activation_gate(store: Arc<dyn CompanyStore>) {
+    let id = CompanyId::new("paused-legacy");
+    let mut paused = record(&id);
+    paused.lifecycle = "paused".to_string();
+
+    // Simulate a legacy pre-#1843 bundle that is still unmigrated:
+    // `activation_gate_seen` explicitly `false`, exactly like a record no
+    // activation-aware `build` has ever decided.
+    store.save_importing(&paused, false).await.unwrap();
+    assert!(
+        !store.activation_gate_seen(&id).await.unwrap(),
+        "setup: the fixture must start gate-unseen"
+    );
+
+    // An ordinary write against the still-paused record — a console route
+    // like `company_logo::put_logo` that loads, mutates one field, and calls
+    // plain `save`, with no lifecycle check of its own.
+    paused.manifest.company.logo_url = Some("data:image/png;base64,AA==".to_string());
+    store.save(&paused).await.unwrap();
+
+    assert!(
+        !store.activation_gate_seen(&id).await.unwrap(),
+        "an ordinary write against a still-paused, not-yet-migrated legacy \
+         record must not stamp the activation gate marker `true` — only a \
+         `running` boot's own migration decision may, or a resumed legacy \
+         company is shown onboarding it should have been grandfathered past"
+    );
+
+    // Once the company is actually running, an ordinary save is still free to
+    // stamp the marker — the common case `save`'s `true` exists for, which
+    // the fix above must not break.
+    let mut running = paused.clone();
+    running.lifecycle = "running".to_string();
+    store.save(&running).await.unwrap();
+    assert!(
+        store.activation_gate_seen(&id).await.unwrap(),
+        "an ordinary write against a running company must still mark the \
+         activation gate as seen"
+    );
 }
 
 /// Event and ledger logs are append-only: prior entries never move or mutate
@@ -873,6 +952,7 @@ pub async fn assert_event_retention(events: Arc<dyn EventLog>) {
         workflow_id: "wf".to_string(),
         run_id: format!("run-{n}"),
         scheduled: false,
+        started_by: None,
     };
     let audit = |n: u64| CompanyEvent::LifecycleChanged {
         from: "running".to_string(),
@@ -3388,6 +3468,137 @@ pub async fn assert_delete_label_survives_a_concurrent_identical_put(
     }
 }
 
+/// Demands one search semantics under [`ContextStore::search`] from *every*
+/// backend.
+///
+/// This assertion exists because `fs`, `sqlite` and `mongodb` each carried their
+/// own copy of the search function, and all three copies were identically wrong:
+/// a `body.find(query)` substring test scored 1.0, and truncation to `limit`
+/// happened before any sorting. Three copies that agree by accident are three
+/// copies that drift apart again — so the semantics is pinned here rather than
+/// reviewed per backend.
+///
+/// What a store must do:
+///
+/// 1. **partial overlap counts**, because the memory loop searches with the
+///    whole incoming message as its query and that never comes back verbatim;
+/// 2. **the score ranks**, and rare words weigh more than words that appear
+///    everywhere;
+/// 3. **`limit` cuts *after* ranking**, not in read order;
+/// 4. **no overlap is no hit**, so an empty result still means "there is nothing
+///    here";
+/// 5. the score stays inside `[0, 1]`, as [`ChunkHit`] promises.
+pub async fn assert_context_search_ranking(context: Arc<dyn ContextStore>) {
+    let alpha = CompanyId::new("alpha");
+    let put = |label: &'static str, body: String| {
+        let context = context.clone();
+        let alpha = alpha.clone();
+        async move {
+            context
+                .put(
+                    &alpha,
+                    ContextChunk {
+                        label: label.to_string(),
+                        body,
+                    },
+                )
+                .await
+                .unwrap()
+        }
+    };
+
+    // Four older memories that share only the everyday words, and one that is
+    // really about the subject. In read order the right one is last — exactly
+    // the arrangement in which the old code returned the four oldest.
+    let mut noise = Vec::new();
+    for (label, body) in [
+        (
+            "task-outcome/a",
+            "Task: put the minutes of the meeting in the folder\nOutcome: done",
+        ),
+        (
+            "task-outcome/b",
+            "Task: send the agenda for the week to the team\nOutcome: done",
+        ),
+        (
+            "task-outcome/c",
+            "Task: check the addresses in the list of customers\nOutcome: done",
+        ),
+        (
+            "task-outcome/d",
+            "Task: put Monday's review in the agenda\nOutcome: done",
+        ),
+    ] {
+        noise.push(put(label, body.to_string()).await);
+    }
+    let target = put(
+        "task-outcome/e",
+        "Task: produce the quarterly overview of revenue for the north region\nOutcome: in the folder"
+            .to_string(),
+    )
+    .await;
+
+    // Today's question: same substance, different words. Under a substring test
+    // this yields zero hits.
+    let question =
+        "produce the quarterly overview of revenue for the north region again for the customer";
+
+    let all = context.search(&alpha, question, usize::MAX).await.unwrap();
+    assert!(
+        !all.is_empty(),
+        "partial overlap must hit; a substring test returned nothing here"
+    );
+    assert_eq!(
+        all[0].addr, target,
+        "the memory sharing the rare words belongs on top"
+    );
+    for hit in &all {
+        assert!(
+            (0.0..=1.0).contains(&hit.score),
+            "score outside the port contract [0,1]: {}",
+            hit.score
+        );
+    }
+    for hit in all.iter().skip(1) {
+        assert!(
+            hit.score < all[0].score,
+            "a hit on everyday words alone must not tie with the real one"
+        );
+    }
+
+    // `limit` must not cut in read order: with one slot the best must survive,
+    // not the oldest.
+    let one = context.search(&alpha, question, 1).await.unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(
+        one[0].addr, target,
+        "limit belongs after ranking, not before it"
+    );
+
+    // The snippet shows where the hit is, not the start of the chunk.
+    assert!(
+        one[0].snippet.contains("quarterly"),
+        "the snippet must wrap the hit; got: {}",
+        one[0].snippet
+    );
+
+    // No overlap stays no hit.
+    assert!(
+        context
+            .search(&alpha, "shipbuilding", usize::MAX)
+            .await
+            .unwrap()
+            .is_empty(),
+        "without overlap nothing should come back"
+    );
+
+    // And the noise was not thrown away: it is still there, it just scores lower.
+    assert_eq!(
+        context.list(&alpha, "").await.unwrap().len(),
+        noise.len() + 1
+    );
+}
+
 /// Asserts the [`UsageMeter`] contract: isolation, record, and windowed query.
 pub async fn assert_usage_meter(usage: Arc<dyn UsageMeter>) {
     let alpha = CompanyId::new("alpha");
@@ -3970,6 +4181,7 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
 
     assert!(ws.is_empty(&alpha).await.unwrap());
@@ -4142,6 +4354,7 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
         // about them through to storage.
         size: Some(999_999),
         sha256: Some("not-a-real-digest".to_string()),
+        adopted: false,
     };
 
     // A payload that is emphatically not text: a lone continuation byte, an
@@ -4249,6 +4462,7 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
             mime: None,
             size: None,
             sha256: None,
+            adopted: false,
             ..node("note", "brief.md", None, None)
         },
         Some("# Brief"),
@@ -4395,6 +4609,7 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
         ..node("swap-old", "report.md", None, None)
     };
     ws.create(&alpha, &old, Some("# old")).await.unwrap();
@@ -4655,6 +4870,7 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     ws.create(&alpha, &note, Some("body")).await.unwrap();
     let refused = ws
@@ -4791,6 +5007,113 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
     assert_eq!(&after.node().id, &ids[0]);
 }
 
+/// The adoption lease every backend must honour (issue #1839).
+///
+/// #1801 gave the tree an empty-folder rollback: a folder one caller minted, then
+/// failed to write beneath, is removed by
+/// [`delete_if_empty`](WorkspaceStore::delete_if_empty). But a folder one caller
+/// mints, a second caller can *adopt* — and the adopter has a legitimate reason
+/// to write into it that the minter's rollback must not sweep away. The lease is
+/// how the store records that second writer:
+///
+/// * an [`adopt_or_create_folder`](WorkspaceStore::adopt_or_create_folder) that
+///   **adopts** stamps [`WorkspaceNode::adopted`], durably, before it returns;
+/// * `delete_if_empty` refuses a folder carrying the flag even while it is still
+///   childless — that is the whole point, since the adopter's write has not
+///   landed yet.
+///
+/// A freshly minted folder does **not** carry it, so the rollback #1801 exists
+/// for still works: a minted-unadopted-empty folder is deleted. This is what
+/// keeps "swept a genuine leak" and "kept a folder someone else is writing into"
+/// on opposite sides of one bit.
+pub async fn assert_workspace_adoption_lease(ws: Arc<dyn WorkspaceStore>) {
+    use crate::ports::workspace::FolderClaim;
+
+    let alpha = CompanyId::new("alpha");
+    let origin = WorkspaceOrigin::Agent {
+        id: "cmo".to_string(),
+    };
+
+    // -- A minted, unadopted folder is not leased --------------------------
+    let minted = ws
+        .adopt_or_create_folder(&alpha, None, "task-A", origin.clone())
+        .await
+        .expect("a free name is claimable");
+    assert!(minted.was_created(), "the name was free");
+    assert!(
+        !minted.node().adopted,
+        "a freshly minted folder carries no adoption lease"
+    );
+    let minted_id = minted.node().id.clone();
+
+    // -- A second claim adopts it, and stamps the lease durably ------------
+    let adopted = ws
+        .adopt_or_create_folder(&alpha, None, "task-A", origin.clone())
+        .await
+        .expect("an existing folder is adopted");
+    assert!(!adopted.was_created(), "the folder was already there");
+    assert!(
+        matches!(adopted, FolderClaim::Adopted(_)),
+        "a second claimer adopts rather than mints"
+    );
+    assert!(
+        adopted.node().adopted,
+        "adoption stamps the lease on the returned node"
+    );
+    assert_eq!(adopted.node().id, minted_id, "and it is the same folder");
+    // The flag is persisted, not only present on the returned value — a fresh
+    // read (the path `delete_if_empty` and the rollback take) must see it.
+    let seen = ws
+        .tree(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.id == minted_id)
+        .expect("the folder is in the tree");
+    assert!(
+        seen.adopted,
+        "the lease survives a round trip through the store"
+    );
+
+    // -- delete_if_empty refuses the adopted-empty folder ------------------
+    assert!(
+        !ws.delete_if_empty(&alpha, &minted_id)
+            .await
+            .expect("delete_if_empty must not error on an adopted folder"),
+        "an adopted folder is refused while still childless — its writer has not landed"
+    );
+    assert!(
+        ws.tree(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.id == minted_id),
+        "and it must still be standing"
+    );
+
+    // -- but a minted, never-adopted empty folder still deletes ------------
+    let leak = ws
+        .adopt_or_create_folder(&alpha, None, "task-B", origin)
+        .await
+        .expect("a second free name is claimable");
+    assert!(leak.was_created());
+    let leak_id = leak.node().id.clone();
+    assert!(
+        ws.delete_if_empty(&alpha, &leak_id)
+            .await
+            .expect("delete_if_empty on an unadopted empty folder"),
+        "a minted, unadopted, empty folder is the #1801 leak and must still be swept"
+    );
+    assert!(
+        !ws.tree(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.id == leak_id),
+        "and it must be gone"
+    );
+}
+
 /// Asserts that a reader concurrent with a writer on the SAME node never errors
 /// and never observes a partial body (issue #887).
 ///
@@ -4852,6 +5175,7 @@ pub async fn assert_workspace_sibling_names(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
 
     // A folder to hold the contended name, plus the root as a second scope.
@@ -4973,6 +5297,7 @@ pub async fn assert_workspace_read_never_tears(ws: Arc<dyn WorkspaceStore>) {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     };
     ws.create(&company, &node, Some(&whole_a))
         .await
@@ -5066,6 +5391,7 @@ fn folder_node(id: &str, name: &str) -> WorkspaceNode {
         mime: None,
         size: None,
         sha256: None,
+        adopted: false,
     }
 }
 
