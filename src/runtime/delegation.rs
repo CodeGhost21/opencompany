@@ -130,12 +130,19 @@ pub trait RunTurn: Send + Sync {
     /// [`run_steered`](Self::run_steered). It is *this* method the dispatched
     /// card's own turns pass a sink to, which is what makes the card's trace
     /// durable while the turn runs even though nothing is streamed.
+    ///
+    /// `chat` is the conversation the turn belongs to, which is **not** implied
+    /// by the absence of a stream (issue #1890 I). A dispatched card passes
+    /// [`ChatTarget::default`] and binds to nothing; an approval's re-issued
+    /// call passes the conversation the approval was raised in, so it runs
+    /// against that thread's history rather than whatever was loaded last.
     async fn run_steered_background(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
         control: &SteerControl,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome>;
 
@@ -425,6 +432,7 @@ impl RunTurn for NoTurn {
         _agent_id: &str,
         _message: &str,
         _control: &SteerControl,
+        _chat: ChatTarget<'_>,
         _run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         Err(no_turn_error())
@@ -4559,6 +4567,7 @@ finished → In review\n]"
             agent_id: &str,
             message: &str,
             control: &SteerControl,
+            _chat: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             Ok(self.next(agent_id, message, Some(control)).await)

@@ -944,8 +944,15 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None, None, None, None, None)
-            .await
+        self.run_with_steer(
+            message,
+            None,
+            None,
+            None,
+            None,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
+        .await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -978,15 +985,25 @@ impl CompanyAgent {
         stream: Option<crate::turn_stream::TurnStreamCtx>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
         chat_seed: Option<chat_seed::ChatSeedRequest>,
-        // The thread this turn belongs to (#1890), carried in its own right
-        // rather than read off `chat_seed`. The binding must not depend on an
-        // optional dependency: `chat_seed` is `None` whenever no `EventLog` is
-        // wired, so reading the root from it made two different threads of one
-        // channel compare equal on such a host — no clear, no re-seed, and the
-        // leak this whole change exists to close, reopened in exactly the
-        // configuration that cannot re-seed its way out of it (coderabbit
-        // review finding).
-        thread_root: Option<EventSeq>,
+        // The conversation this turn belongs to (#1890), carried in its own
+        // right rather than read off `chat_seed` or off `stream`.
+        //
+        // **Neither half may be inferred.** The root cannot come from
+        // `chat_seed`: that is `None` whenever no `EventLog` is wired, so
+        // reading it there made two threads of one channel compare equal on
+        // such a host — no clear, no re-seed, and the leak this epic exists to
+        // close, reopened in exactly the configuration that cannot re-seed its
+        // way out of it (coderabbit review on #1896). And the channel cannot
+        // come from `stream`, which is what #1890 I fixes: a turn that has a
+        // conversation but publishes no live frames — an approval's re-issued
+        // call — was indistinguishable from a turn that has none, so it ran
+        // against whatever history was last loaded and then answered into a
+        // thread it had never been bound to.
+        //
+        // One [`ChatTarget`] rather than two loose `Option`s, for the reason
+        // that type documents: a mis-paired channel and root compiles and then
+        // answers into the wrong conversation.
+        chat: crate::runtime::delegation::ChatTarget<'_>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
@@ -1005,10 +1022,37 @@ impl CompanyAgent {
         // nothing (a dispatched task card carries no operator chat to bind to),
         // and also `None` for a workflow agent node (issue #1702) — it routes by
         // run/node, not a chat thread, so there is nothing to bind history to.
-        let turn_chat_id: Option<String> = stream.as_ref().and_then(|ctx| match &ctx.route {
-            crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
-            crate::turn_stream::LiveRoute::Workflow { .. } => None,
-        });
+        // Issue #1890 I: the live route when there is one, the caller's `chat`
+        // otherwise.
+        //
+        // Streaming is about where transient frames are published; identity is
+        // about which conversation's history this turn may see. Deriving the
+        // second from the first made every *unstreamed* turn identity-less —
+        // which is the bug, since an approval's re-issued call streams nothing
+        // and still belongs to the conversation it was raised in.
+        //
+        // **The stream still wins when present**, and that is not laziness: the
+        // turn-stream route has already folded an unaddressed message onto
+        // `DEFAULT_DESK` (`mod.rs`'s chat route), so reading `chat.chat_id`
+        // there would hand back `None` and unbind a turn that today binds to
+        // General — the exact behaviour
+        // `an_unaddressed_message_still_binds_to_its_thread` exists to pin, and
+        // which #1896's review already established is correct rather than a
+        // gap. So this is a strict extension: nothing that streams changes.
+        //
+        // Residue, stated rather than discovered: an approval raised in an
+        // *unaddressed* message still has `origin_thread: None`, so its
+        // re-issued call binds to nothing exactly as before. Closing that means
+        // teaching `ChatTarget` to tell "unaddressed" from "no conversation at
+        // all", which is a wider change than this one.
+        let turn_chat_id: Option<String> = stream
+            .as_ref()
+            .and_then(|ctx| match &ctx.route {
+                crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
+                crate::turn_stream::LiveRoute::Workflow { .. } => None,
+            })
+            .or_else(|| chat.chat_id.map(str::to_string));
+        let thread_root = chat.thread_root;
         // The company this turn's chat seed (if any) projects from — same
         // "captured before `stream` moves" reasoning as `turn_chat_id` above.
         // Only meaningful alongside `turn_chat_id`, so `None` for exactly the
@@ -2060,16 +2104,16 @@ impl Default for HarnessPool {
 enum LiveStream<'a> {
     Off,
     On {
-        chat_id: Option<&'a str>,
-        /// The thread within `chat_id` this turn belongs to (#1890), `None`
-        /// for the channel itself.
+        /// Where this turn's transient frames are published — and **only**
+        /// that, since issue #1890 I.
         ///
-        /// Rides here rather than as a seventh positional argument because
-        /// this variant is already the turn's *chat identity* and not only its
-        /// stream key — `chat_id` is what the history seed is scoped by, and
-        /// the thread is the other half of that scope. Nothing about live
-        /// streaming reads it.
-        thread_root: Option<EventSeq>,
+        /// The thread used to ride here too, on the argument that this variant
+        /// "is already the turn's chat identity and not only its stream key".
+        /// That conflation is what I removes: identity now travels on the
+        /// `ChatTarget` the caller passes, so a turn can have a conversation
+        /// and stream nothing — which an approval's re-issued call does, and
+        /// which this enum could not express.
+        chat_id: Option<&'a str>,
     },
     /// A workflow agent node (issue #1702): it streams live like `On`, but its
     /// frames route by the workflow run + node rather than a chat thread — the
@@ -3215,8 +3259,8 @@ impl HarnessPool {
             None,
             LiveStream::On {
                 chat_id: chat.chat_id,
-                thread_root: chat.thread_root,
             },
+            chat,
             None,
         )
         .await
@@ -3246,6 +3290,9 @@ impl HarnessPool {
             deps,
             None,
             LiveStream::Off,
+            // A dispatched card's own turn answers no conversation: its steps
+            // go to the card's note, and nothing binds to a thread.
+            crate::runtime::delegation::ChatTarget::default(),
             run_sink,
         )
         .await
@@ -3282,6 +3329,9 @@ impl HarnessPool {
                 run_id: workflow_run_id,
                 node_id,
             },
+            // Routed by run and node, not by a conversation — there is none to
+            // bind history to (issue #1702).
+            crate::runtime::delegation::ChatTarget::default(),
             run_sink,
         )
         .await
@@ -3317,8 +3367,8 @@ impl HarnessPool {
             Some(control),
             LiveStream::On {
                 chat_id: chat.chat_id,
-                thread_root: chat.thread_root,
             },
+            chat,
             run_sink,
         )
         .await
@@ -3329,6 +3379,26 @@ impl HarnessPool {
     /// bubble. Its transient turn frames must not reach the live console
     /// timeline (they'd misattribute to a chat thread), so this path publishes
     /// nothing while still honouring the operator steer control (#125 review).
+    ///
+    /// # It still has a conversation, when its caller does (issue #1890 I)
+    ///
+    /// `chat` is separate from the (absent) stream, and that separation is the
+    /// whole of what I fixes. An approval's re-issued call comes through here:
+    /// it publishes no frames, but it *was* raised in a conversation, and the
+    /// grant has recorded which one since #435. With identity read off the
+    /// stream, that call was indistinguishable from a dispatched card's turn —
+    /// so it ran against whatever history happened to be loaded and then
+    /// answered into the thread it had never been bound to.
+    ///
+    /// A dispatched card's turn passes [`ChatTarget::default()`] and keeps
+    /// exactly the behaviour it had: no binding, and — deliberately — no clear
+    /// either, since one background task can span several turns that depend on
+    /// what accumulated between them.
+    // One over the limit, and the one that pushed it there is the whole point
+    // of #1890 I: the conversation must be sayable independently of the stream.
+    // Bundling the rest into a struct to get back under would hide six
+    // parameters that every sibling entry point on this type spells out.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_steered_background(
         &self,
         company: &CompanyId,
@@ -3336,6 +3406,7 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         control: &SteerControl,
+        chat: crate::runtime::delegation::ChatTarget<'_>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
         self.run_inner(
@@ -3345,6 +3416,7 @@ impl HarnessPool {
             deps,
             Some(control),
             LiveStream::Off,
+            chat,
             run_sink,
         )
         .await
@@ -3549,7 +3621,14 @@ impl HarnessPool {
         // reason (issue #1840): a confined turn is intentionally context-free, so
         // it carries none of the desk's recent history.
         let (outcome, turn_costs) = agent
-            .run_with_steer(message, None, stream_ctx, None, None, None)
+            .run_with_steer(
+                message,
+                None,
+                stream_ctx,
+                None,
+                None,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await?;
 
         let provider_slug = deps.provider.telemetry_provider_id();
@@ -3580,6 +3659,11 @@ impl HarnessPool {
         deps: &HarnessDeps,
         steer: Option<&SteerControl>,
         live: LiveStream<'_>,
+        // Which conversation this turn belongs to, independent of whether it
+        // streams (#1890 I). For a live chat turn it is the same pair `live`
+        // carries; for an approval's re-issued call it is the conversation the
+        // approval was raised in, with no stream at all.
+        chat: crate::runtime::delegation::ChatTarget<'_>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
         let agent = {
@@ -3864,10 +3948,7 @@ impl HarnessPool {
                 raw_message: message.to_string(),
                 events: events.clone(),
                 store: deps.store.clone(),
-                thread_root: match &live {
-                    LiveStream::On { thread_root, .. } => *thread_root,
-                    _ => None,
-                },
+                thread_root: chat.thread_root,
             }),
             _ => None,
         };
@@ -3876,15 +3957,12 @@ impl HarnessPool {
         // turn is actually in. Set here rather than on the tool because a belt
         // is built once per agent while a conversation changes every message.
         //
-        // From `live`, which on this branch is where a chat turn's channel
-        // lives. #1890 I moves that identity onto its own argument so an
-        // *unstreamed* turn can have one too; when the two meet, this reads
-        // that instead and nothing else here changes — a `read_thread` is only
-        // meaningful on a turn that has a conversation either way.
-        let turn_chat = match &live {
-            LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
-            LiveStream::Workflow { .. } | LiveStream::Off => None,
-        };
+        // From the caller's `chat` since #1890 I, which is what the note F
+        // shipped with said would happen when the two met: identity no longer
+        // rides on the stream, so an approval's re-issued call — unstreamed,
+        // but raised in a conversation — can read that conversation's threads
+        // like any other turn.
+        let turn_chat = chat.chat_id.map(str::to_string);
         let (outcome, turn_costs) = crate::runtime::delegation::with_turn_conversation(
             turn_chat,
             deps.approval_requests.turn_scoped(agent.run_with_steer(
@@ -3893,12 +3971,9 @@ impl HarnessPool {
                 stream_ctx,
                 run_sink.clone(),
                 chat_seed_request,
-                // From `live`, not from the seed request: the binding must hold
-                // on a host with no event log wired too (#1890).
-                match &live {
-                    LiveStream::On { thread_root, .. } => *thread_root,
-                    LiveStream::Workflow { .. } | LiveStream::Off => None,
-                },
+                // The caller's own, not read off `live` (#1890 I). A turn can
+                // have a conversation and stream nothing.
+                chat,
             )),
         )
         .await?;
@@ -7133,7 +7208,14 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control), None, None, None, None)
+            .run_with_steer(
+                "hi",
+                Some(&control),
+                None,
+                None,
+                None,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
             .await
             .expect("runs");
         assert_eq!(
@@ -11721,6 +11803,40 @@ budget_usd_daily = 0.0
 
         /// An UNADDRESSED threaded message still binds to its thread.
         ///
+        /// Issue #1890 I: an **unstreamed** turn still binds when its caller
+        /// names a conversation.
+        ///
+        /// The approval re-dispatch is the case. It runs through
+        /// `run_steered_background` — no live stream, because a re-issued call
+        /// shows no chat bubble — and before this its identity was read off
+        /// that absent stream, so it bound to nothing: it ran against whatever
+        /// history the agent happened to be holding and then published its
+        /// answer into the origin thread regardless.
+        ///
+        /// A dispatched card's turn is the other side of the same rule and must
+        /// keep binding to nothing, since it answers the board rather than a
+        /// conversation.
+        #[test]
+        fn identity_and_streaming_are_separate_questions() {
+            use crate::runtime::delegation::ChatTarget;
+
+            // What the approval re-dispatch now passes: the conversation the
+            // grant recorded, with no stream at all.
+            let reissued = ChatTarget::in_thread(Some("growth"), Some(EventSeq::new(41)));
+            assert_eq!(reissued.chat_id, Some("growth"));
+            assert_eq!(reissued.thread_root, Some(EventSeq::new(41)));
+
+            // What a dispatched card's turn passes — unchanged behaviour.
+            let card = ChatTarget::default();
+            assert_eq!(card.chat_id, None);
+            assert_eq!(card.thread_root, None);
+
+            // The two are distinguishable, which is the whole of the fix: before
+            // it, both arrived at the binding as "no stream, therefore no
+            // conversation".
+            assert_ne!(reissued, card);
+        }
+
         /// A codex review on #1896 read `run_with_steer`'s `if let Some(incoming)
         /// = turn_chat_id` guard and concluded that a client sending `parent`
         /// without `chat` loses its root, so sibling threads on the default desk
