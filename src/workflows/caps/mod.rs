@@ -2286,10 +2286,28 @@ impl HarnessAgentRunner {
                 Value::Array(_) => {
                     value = parsed_reply.clone();
                 }
+                // Codex #3893851364 review: a scalar reply (`42`, `true`,
+                // `"ok"`) is the same "gate certified this, but the emitted
+                // value doesn't carry it" gap as the bare-array case just
+                // above. `field_present` on `field = "json"` passes for ANY
+                // present, non-null value under the envelope's `json` key —
+                // that includes a scalar, which the best-effort JSON parse
+                // produces just as readily as an object or array. A scalar
+                // can't merge into the `{text, agent_ref}` object shape
+                // either (there's no key to merge it under), so replace
+                // `value` wholesale here too, matching the array arm rather
+                // than falling through to the catch-all below and silently
+                // discarding the certified value. `item.text` still
+                // independently carries the raw reply string, unaffected.
+                Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+                    value = parsed_reply.clone();
+                }
                 // Not valid JSON (the common case, even among nodes that
                 // declared a postcondition — e.g. `non_empty` needs only
-                // prose) — leave `value` as the ordinary `{text, agent_ref}`
-                // shape.
+                // prose) or a literal JSON `null` reply — leave `value` as
+                // the ordinary `{text, agent_ref}` shape. A `null` never
+                // carries anything a downstream `=item.json.*` binding could
+                // usefully read, so there's nothing to replace it with.
                 _ => {}
             }
         }
@@ -3916,6 +3934,83 @@ mod tests {
         // from `outcome.reply` directly, not from `value`) both still carry
         // it — nothing that reads the prose loses it.
         assert_eq!(outcome.reply, "[\"x\", \"y\"]");
+    }
+
+    /// Codex #3893851364 on #1937 — the scalar companion to the bare-array
+    /// fix above. `field_present` on `field = "json"` passes for ANY present,
+    /// non-null value under the envelope's `json` key — including a bare
+    /// scalar reply like `42`, which is valid JSON the best-effort parse
+    /// happily produces. Before this fix, the emission match had an arm for
+    /// `Value::Object` (merge) and `Value::Array` (replace wholesale) but
+    /// none for a scalar, so it fell through to the catch-all `_ => {}` and
+    /// `value` stayed the plain `{text, agent_ref}` wrapper — the gate
+    /// certified `42`, but a downstream `=item.json` binding resolved to the
+    /// wrapper, not the number. RED on the code as it stood before this fix:
+    /// the final assertion (`value, json!(42)`) failed with
+    /// `value = {"agent_ref": "researcher", "text": "42"}` instead.
+    #[tokio::test]
+    async fn a_bare_scalar_reply_replaces_the_emitted_value_wholesale() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-bare-scalar-emission-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "42".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937g"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937g"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937g".to_string(),
+            "run-1937g".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "scorer",
+                    "prompt": "reply with a single confidence score",
+                    "postcondition": { "require": "field_present", "field": "json" }
+                }),
+            )
+            .await
+            .expect(
+                "a reply that IS valid JSON — even a bare scalar like `42` — satisfies \
+                 field_present on `json`: the envelope's `json` key holds a present, \
+                 non-null value",
+            );
+
+        // The actual finding: the SAME scalar `field = \"json\"` certified
+        // above must be exactly what the emitted value holds — not the old
+        // `{text, agent_ref}` wrapper the gate never validated.
+        assert_eq!(value, json!(42));
+        // The raw reply string is still available independently, same as the
+        // array case: nothing that reads the prose loses it.
+        assert_eq!(outcome.reply, "42");
     }
 
     /// Codex #3893619015 on #1937 — traces the underlying mechanism this
