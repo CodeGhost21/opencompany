@@ -17,10 +17,16 @@ import type { TimelineEntry } from "./tasks";
 /**
  * Where one attempt stands.
  *
- * The two *parked* statuses are separated by *who unblocks the work* (epic
- * #183): `waiting_approval` means a **person** must act; `paused` means
- * anything else must — a dependency, a rate limit, a missing credential, a
- * retry, an operator's pause.
+ * The *parked* statuses are separated by *who unblocks the work* (epic #183):
+ * `waiting_approval` means a **person** must decide; `blocked` means a person
+ * must **answer** (issue #1861 — a rejected model id, an expired credential, a
+ * missing prerequisite, an agent's own question); `paused` means anything else
+ * must — a dependency, a rate limit, a retry, an operator's pause.
+ *
+ * `waiting_approval` and `blocked` are both "waiting on you" and still must not
+ * be collapsed: an approval has an effect behind it that approving performs,
+ * while a blocker has only a question to answer. The console offers different
+ * controls for the two, so it has to be able to tell them apart.
  *
  * `paused` is currently unreachable from a delegation, so nothing in the UI may
  * *depend* on seeing it — but it is handled everywhere a status is, because a
@@ -36,6 +42,7 @@ export type RunStatus =
   | "running"
   | "waiting_approval"
   | "paused"
+  | "blocked"
   | "succeeded"
   | "failed"
   | "cancelled"
@@ -222,6 +229,7 @@ export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
   running: "Running",
   waiting_approval: "Waiting on you",
   paused: "Paused",
+  blocked: "Waiting on your answer",
   succeeded: "Succeeded",
   failed: "Failed",
   cancelled: "Cancelled",

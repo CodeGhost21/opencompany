@@ -1077,7 +1077,14 @@ async fn a_blocked_plan_returns_the_card_with_the_gap_named() {
     run_planning_pass(Arc::clone(&runtime), "t-2".to_string()).await;
 
     let after = read(&runtime, "t-2").await;
-    assert_eq!(after.column, COLUMN_TODO, "it must not dispatch");
+    // Issue #1861: `paused`, not `todo`. The gap is answerable — somebody
+    // connects Slack — so the card waits with a question on it rather than
+    // dropping back among the cards nobody has started.
+    assert_eq!(
+        after.column,
+        crate::ports::tasks::COLUMN_PAUSED,
+        "it must not dispatch, and it must not read as fresh work either"
+    );
     let plan = after.plan.expect("the brief is kept, not discarded");
     assert!(!plan.is_dispatchable());
     assert_eq!(plan.blockers().len(), 1);
@@ -1087,6 +1094,86 @@ async fn a_blocked_plan_returns_the_card_with_the_gap_named() {
     assert!(
         note.contains("slack"),
         "an operator must be able to read the gap off the board: {note}"
+    );
+}
+
+/// Issue #1861: the gap does not only land on the note, it lands on the
+/// operator's queue — durably, so it survives the pass that raised it and
+/// expires through the approval TTL rather than waiting forever.
+///
+/// A missing `connection` is **infrastructure**: nobody on the roster can see
+/// whether the operator's Slack is connected, so the class has to route past
+/// #1866's ask-around rung rather than into it.
+#[tokio::test]
+async fn a_missing_prerequisite_parks_a_question_for_the_operator() {
+    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+
+    let reply = r#"{"description":"Post the announcement","steps":[{"title":"Post it","detail":"in #general"}],
+        "prerequisites":[{"kind":"connection","name":"slack","why":"the announcement goes there"}],
+        "risks":[],"verification":"it is visible in the channel","scope":"the post only"}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-prereq", "maya"))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-prereq".to_string()).await;
+
+    let pending = runtime.pending_approvals();
+    assert_eq!(pending.len(), 1, "the gap reaches the operator's queue");
+
+    let parked = runtime
+        .journal
+        .pending()
+        .into_iter()
+        .find(|p| p.effect.kind.starts_with("blocker."))
+        .expect("a blocker is parked");
+    assert_eq!(parked.effect.kind, "blocker.infrastructure");
+    assert!(
+        parked.effect.agent.is_none(),
+        "a planning blocker is nobody's blocked tool call"
+    );
+
+    let payload: BlockerPayload =
+        serde_json::from_value(parked.effect.payload.clone()).expect("payload round-trips");
+    assert_eq!(payload.kind, BlockerKind::Infrastructure);
+    assert_eq!(payload.source, BlockerSource::Prereq);
+    assert_eq!(
+        payload.step,
+        Some(BlockerStep::Task {
+            task_id: "t-prereq".to_string()
+        }),
+        "the resume tiers need to know which card stopped"
+    );
+    assert!(payload.reason.contains("slack"), "{}", payload.reason);
+    assert!(!payload.needed.trim().is_empty());
+}
+
+/// The ownership cases stay #1106's: a card with no usable owner still returns
+/// to To-do carrying its candidates, and parks nothing. Asking a second time,
+/// on a second surface, for one decision would be worse than the silence.
+#[tokio::test]
+async fn an_unowned_card_still_returns_to_todo_and_parks_nothing() {
+    let reply = r#"{"description":"Post the announcement","steps":[{"title":"Post it","detail":"in #general"}],
+        "prerequisites":[],"risks":[],"verification":"visible","scope":"the post only",
+        "proposedAssignee":""}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    let mut unowned = card("t-unowned", "maya");
+    unowned.assignee = String::new();
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &unowned)
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-unowned".to_string()).await;
+
+    let after = read(&runtime, "t-unowned").await;
+    assert_eq!(after.column, COLUMN_TODO);
+    assert!(
+        runtime.pending_approvals().is_empty(),
+        "who owns a card is one decision, asked in one place"
     );
 }
 

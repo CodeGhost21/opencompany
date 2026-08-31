@@ -200,12 +200,13 @@ pub(crate) fn budget_pause_notice_no_resend(pause: &crate::harness::BudgetPause)
 
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
+use crate::ports::blockers::{BlockerPayload, BlockerStep};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::runs::{RunOutcome, RunStatus};
 use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact, TaskOutputSource};
 use crate::ports::types::{
-    CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
-    TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
+    CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup,
+    OutboundMessage, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
 };
 use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
@@ -1185,8 +1186,18 @@ impl HarnessBrain {
                                 Ok(handoff) => handoff,
                                 Err(err) => {
                                     let result = format!("hand-off failed: {err}");
-                                    settle(&mut card, TaskRunEnd::Failed, &responder, &result);
-                                    break (TaskRunEnd::Failed, result);
+                                    // Issue #1861: a hand-off that failed on a
+                                    // rejected model id or a dead integration
+                                    // is as answerable as a direct dispatch
+                                    // that did — the delegate hit the same
+                                    // wall, so it asks the same question.
+                                    let end = self.settle_as_blocker_or_failure(
+                                        &card.id,
+                                        &result,
+                                        sink.as_ref().map(|s| s.run_id()),
+                                    );
+                                    settle(&mut card, end, &responder, &result);
+                                    break (end, result);
                                 }
                             };
                             // `settle` writes the note (attributed to whoever
@@ -1266,9 +1277,19 @@ impl HarnessBrain {
                             break (end, result);
                         }
                         Err(err) => {
+                            // Issue #1861: the main settle site. A stop the
+                            // classifier recognises as answerable parks a
+                            // blocker and lands the card `paused` with the
+                            // question on it; everything else settles `Failed`
+                            // exactly as before.
                             let result = format!("dispatch failed: {err}");
-                            settle(&mut card, TaskRunEnd::Failed, &responder, &result);
-                            break (TaskRunEnd::Failed, result);
+                            let end = self.settle_as_blocker_or_failure(
+                                &card.id,
+                                &result,
+                                sink.as_ref().map(|s| s.run_id()),
+                            );
+                            settle(&mut card, end, &responder, &result);
+                            break (end, result);
                         }
                     }
                 }
@@ -1438,7 +1459,13 @@ impl HarnessBrain {
                 .stamp_run(approvals_before, sink.run_id()),
             None => 0,
         };
-        let settled = lifecycle::settled_run_status(run_end, parked);
+        // Issue #1861: and how many of them were *questions* rather than
+        // decisions. Counted from the same boundary `stamp_run` stamps from, so
+        // the two describe one set — and unconditionally, because a card with
+        // no attempt row still parks its blocker and still must not land in
+        // review with an unanswered question on it.
+        let blockers = self.deps.approval_requests.blockers_since(approvals_before);
+        let settled = lifecycle::settled_run_status_with_blockers(run_end, parked, blockers);
 
         // ── Issues #244 + #339: record what the run produced, then say so on
         //    the card — both **before** the one card write ────────────────────
@@ -1602,11 +1629,12 @@ impl HarnessBrain {
         self.settle_run(
             sink.as_deref(),
             settled,
-            // Only a failure carries a reason: `error` is "why this went
+            // A failure or blocked attempt carries a reason: `error` is "why this went
             // wrong", not "what the agent said". Stamping a success's reply
             // here would put the deliverable in a field every reader renders
             // as a fault.
-            matches!(settled, RunStatus::Failed).then_some(result_text.as_str()),
+            matches!(settled, RunStatus::Failed | RunStatus::Blocked)
+                .then_some(result_text.as_str()),
         )
         .await;
 
@@ -1779,7 +1807,12 @@ impl HarnessBrain {
         // Only a failure carries a reason: `error` is "why this went wrong", not
         // "what the agent said". Stamping a success's reply here would put the
         // deliverable in a field every reader renders as a fault.
-        let error = matches!(status, RunStatus::Failed).then_some(result);
+        //
+        // Issue #1861: a blocker carries one too. It is the same kind of
+        // sentence — why the attempt stopped — and it is the only copy of the
+        // question on the attempt row, so omitting it would leave the run
+        // history saying an attempt stopped and refusing to say what for.
+        let error = matches!(status, RunStatus::Failed | RunStatus::Blocked).then_some(result);
         self.settle_run(sink, status, error).await;
     }
 
@@ -2813,6 +2846,107 @@ impl HarnessBrain {
             }
         }
         Ok(())
+    }
+
+    /// Decides how a failed dispatch should settle (issue #1861): as a blocker
+    /// the operator can answer, or as the plain failure it always was.
+    ///
+    /// The one place the two settle sites ask the question, so `run_task`
+    /// cannot classify a hand-off failure by one rule and a dispatch failure by
+    /// another.
+    ///
+    /// A [`Transient`](crate::ports::blockers::BlockerKind::Transient)
+    /// classification returns [`TaskRunEnd::Failed`] like an unrecognised one:
+    /// recognising a rate limit tells us **not** to ask anybody about it.
+    fn settle_as_blocker_or_failure(
+        &self,
+        task_id: &str,
+        reason: &str,
+        run_id: Option<&str>,
+    ) -> TaskRunEnd {
+        match crate::harness::built_in::blockers::classify_blocker_message(reason) {
+            Some(class) => self.queue_blocker(
+                class,
+                BlockerStep::Task {
+                    task_id: task_id.to_string(),
+                },
+                reason,
+                run_id,
+            ),
+            None => TaskRunEnd::Failed,
+        }
+    }
+
+    /// Queues a blocker for the operator, or reports that this failure is not
+    /// one (issue #1861).
+    ///
+    /// Returns the ending the caller should settle with:
+    /// [`TaskRunEnd::Blocked`] when the stop was recognised as answerable by a
+    /// person, and [`TaskRunEnd::Failed`] — today's behaviour, unchanged — for
+    /// everything else.
+    ///
+    /// # Why this rides the approval-request queue
+    ///
+    /// A blocker needs exactly what a gated tool call needs: a durable park
+    /// that survives a restart, a continuation armed against this cycle, and an
+    /// entry on the operator's queue. All three already happen, once, in
+    /// [`park_approval_requests`](Self::park_approval_requests) →
+    /// [`CycleHost::park_effect`]. Pushing onto the same queue inherits them
+    /// instead of standing up a second park path that would have to be kept in
+    /// step with the first.
+    ///
+    /// The ordering that makes it work: `run_task` runs inside the cycle's
+    /// event loop, and the drain is after it, so a blocker queued here is
+    /// parked before this cycle ends.
+    ///
+    /// # Approving one does nothing, on purpose
+    ///
+    /// The effect carries no `amount_usd`, no `channel`/`text` pair and a kind
+    /// no executor matches, so `perform_effect` falls through it — and
+    /// [`agent`](Effect::agent) is `None`, so no single-use grant is minted and
+    /// no re-dispatch is attempted. That is the intended v1 boundary: #1861
+    /// makes the stop durable, visible and expirable; carrying the operator's
+    /// *answer* back into the stopped turn is #1863. Stamping `agent` here
+    /// instead would re-dispatch the agent to call `escalate_to_human` again,
+    /// which would park again.
+    fn queue_blocker(
+        &self,
+        class: crate::harness::built_in::blockers::BlockerClass,
+        step: BlockerStep,
+        reason: &str,
+        run_id: Option<&str>,
+    ) -> TaskRunEnd {
+        if !class.kind.parks() {
+            return TaskRunEnd::Failed;
+        }
+        let payload = BlockerPayload {
+            kind: class.kind,
+            source: class.source,
+            step: Some(step),
+            reason: reason.to_string(),
+            needed: class.needed.to_string(),
+        };
+        let effect = Effect {
+            kind: payload.effect_kind(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            // Serialization cannot fail for this shape; an empty payload would
+            // still park correctly (the kind carries the gap class), so a
+            // fallback beats refusing to ask.
+            payload: serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+            agent: None,
+            run_id: run_id.map(str::to_string),
+        };
+        self.deps
+            .approval_requests
+            .push(crate::harness::built_in::policy::ApprovalRequest {
+                tool: payload.kind.effect_kind(),
+                reason: reason.to_string(),
+                effect,
+            });
+        TaskRunEnd::Blocked
     }
 
     /// Drains the approval-request queue and parks each request on the host's
@@ -11885,6 +12019,139 @@ agent = "claude"
             bubble.agent.as_deref(),
             Some("operator"),
             "a notice must not store the author a destination-overwrite produces"
+        );
+    }
+
+    // ── Issue #1861: blockers park instead of settling Failed ───────────────
+
+    /// The acceptance case: a dispatch that died on a model id the provider
+    /// rejects is answerable — somebody can set a real one — so it parks and
+    /// the card lands `paused` carrying the question, instead of dropping back
+    /// into To-do indistinguishable from work nobody started.
+    #[tokio::test]
+    async fn a_rejected_model_id_parks_a_blocker_rather_than_settling_failed() {
+        use crate::harness::policy::ApprovalRequestQueue;
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+
+        let reason = "dispatch failed: the model `gpt-nonexistent` does not exist or you do not \
+                      have access to it";
+        let end = brain.settle_as_blocker_or_failure("t-1", reason, Some("run-1"));
+
+        assert_eq!(end, TaskRunEnd::Blocked);
+        assert_eq!(
+            lifecycle::landing_column(end),
+            crate::ports::tasks::COLUMN_PAUSED,
+            "a card with an open question on it has not failed — it is waiting"
+        );
+
+        let drained = requests.drain(8);
+        assert_eq!(drained.requests.len(), 1, "exactly one question is asked");
+        let effect = &drained.requests[0].effect;
+        assert_eq!(effect.kind, "blocker.infrastructure");
+        assert_eq!(effect.run_id.as_deref(), Some("run-1"));
+
+        let payload: BlockerPayload =
+            serde_json::from_value(effect.payload.clone()).expect("the payload round-trips");
+        assert_eq!(payload.kind, BlockerKind::Infrastructure);
+        assert_eq!(payload.source, BlockerSource::Provider);
+        assert_eq!(
+            payload.step,
+            Some(BlockerStep::Task {
+                task_id: "t-1".to_string()
+            })
+        );
+        assert!(
+            !payload.needed.trim().is_empty(),
+            "a question that does not say what would answer it wastes the asking"
+        );
+    }
+
+    /// The conservative default, pinned: a failure the classifier does not
+    /// recognise keeps today's behaviour exactly and asks nobody. Being wrong
+    /// in this direction costs a `Failed` that #1865 already surfaces; being
+    /// wrong the other way spends an operator's attention on a question they
+    /// cannot answer.
+    #[tokio::test]
+    async fn an_unrecognised_failure_still_fails_and_asks_nobody() {
+        use crate::harness::policy::ApprovalRequestQueue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+
+        let end =
+            brain.settle_as_blocker_or_failure("t-1", "dispatch failed: index out of bounds", None);
+
+        assert_eq!(end, TaskRunEnd::Failed);
+        assert_eq!(
+            lifecycle::landing_column(end),
+            crate::ports::tasks::COLUMN_TODO
+        );
+        assert!(
+            requests.drain(8).requests.is_empty(),
+            "an unrecognised failure must not reach the operator as a question"
+        );
+    }
+
+    /// Recognising a transient stop is how we know **not** to ask: a rate limit
+    /// resolves itself, so it settles like any other failure and nothing is
+    /// parked.
+    #[tokio::test]
+    async fn a_rate_limit_settles_without_asking_anybody() {
+        use crate::harness::policy::ApprovalRequestQueue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+
+        let end = brain.settle_as_blocker_or_failure(
+            "t-1",
+            "dispatch failed: hosted inference returned 429: rate limit exceeded",
+            None,
+        );
+
+        assert_eq!(end, TaskRunEnd::Failed);
+        assert!(requests.drain(8).requests.is_empty());
+    }
+
+    /// Approving a blocker must do **nothing** in this issue — the answer is
+    /// carried back into the stopped turn by #1863, and until then an approve
+    /// that half-executed something would be worse than one that does not.
+    ///
+    /// `perform_effect` acts on three things: an `amount_usd` (writes a ledger
+    /// entry), a `channel`+`text` pair in the payload (sends a message), and
+    /// the email kind. This pins that a blocker effect carries none of them, so
+    /// the no-op is a property of the shape rather than a coincidence somebody
+    /// could break by adding a field.
+    #[tokio::test]
+    async fn a_parked_blocker_carries_nothing_an_executor_would_act_on() {
+        use crate::harness::policy::ApprovalRequestQueue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+
+        brain.settle_as_blocker_or_failure(
+            "t-1",
+            "tool call failed: could not connect to mcp server `slack`",
+            None,
+        );
+
+        let drained = requests.drain(8);
+        let effect = &drained.requests[0].effect;
+        assert!(effect.amount_usd.is_none(), "a question costs nothing");
+        assert!(
+            effect.payload.get("channel").is_none() && effect.payload.get("text").is_none(),
+            "a `channel`+`text` payload would make approving a blocker post a message"
+        );
+        assert!(
+            effect.agent.is_none(),
+            "stamping an agent would mint a grant and re-dispatch the turn, which would \
+             call the escalation again and park a second time"
         );
     }
 }

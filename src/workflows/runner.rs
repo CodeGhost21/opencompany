@@ -497,6 +497,10 @@ async fn run_workflow_inner(
         let workflow_id = workflow.id.clone();
         let run_id = run_id.clone();
         let collector_attempts = attempts.clone();
+        // Issue #1865 (CodeRabbit review on #1905): read by the journal write
+        // below so the durable event records the same status the settle-time
+        // `reclassify_capped_nodes` will put on the in-memory row.
+        let collector_capped = capped.clone();
         async move {
             let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
             // Issue #1008: node_id -> `{ "items": [ … ] }`, canonical-shaped so
@@ -540,12 +544,36 @@ async fn run_workflow_inner(
                         transcript,
                         diagnostics,
                     } => {
+                        // Issue #1865: the engine reports a turn that
+                        // truncated at `max_tool_iterations` (or paused for
+                        // budget) as `Ok` — in its own terms it is, the node
+                        // returned — and the host relabels it at settle via
+                        // `reclassify_capped_nodes`. That relabel only ever
+                        // reached the in-memory `WorkflowRun.nodes`, so the
+                        // journal kept saying `Ok` and a run re-read from
+                        // history scored `ok` where the synchronous response
+                        // said `degraded`: one run, two verdicts, depending on
+                        // which surface you asked.
+                        //
+                        // Written correctly here rather than carried on
+                        // `WorkflowRunFinished` and relabelled on the read (the
+                        // shape `relabel_blocked` uses): the fact is already
+                        // known at this point — the cap is pushed inside the
+                        // turn, strictly before the engine emits this node's
+                        // `Finished` — so the durable event can simply be right
+                        // the first time instead of being corrected by every
+                        // reader forever.
+                        let journaled_status = if collector_capped.contains(&node_id) {
+                            crate::ports::WorkflowNodeStatus::Error
+                        } else {
+                            status
+                        };
                         if let Some(events) = journal_nodes.as_ref() {
                             let event = CompanyEvent::WorkflowNodeFinished {
                                 workflow_id: workflow_id.clone(),
                                 run_id: run_id.clone(),
                                 node_id: node_id.clone(),
-                                status,
+                                status: journaled_status,
                                 elapsed_ms,
                                 // Issue #1014: the broken-wiring paths ride the
                                 // durable event too, so a re-read run (folded
@@ -705,7 +733,7 @@ async fn run_workflow_inner(
     // on the failure/blocked arms below; `nodes` stays the output-free row list
     // the journal and `WorkflowRun.nodes` carry. A drain failure yields an empty
     // map, so a persist on that path simply records "produced none".
-    let (nodes, partial_nodes, node_transcripts): (
+    let (mut nodes, partial_nodes, node_transcripts): (
         Vec<crate::ports::WorkflowRunNodeRow>,
         serde_json::Map<String, Value>,
         serde_json::Map<String, Value>,
@@ -806,6 +834,13 @@ async fn run_workflow_inner(
                     // snapshot on the failure arm exactly as on the blocked one.
                     notices.push(run_output_persist_failed_notice());
                 }
+                // Reclassify capped nodes before they move into the partial run,
+                // the same as the settled arm does. A node that hit the iteration
+                // cap reports Ok but settled Failed, so both must agree on Error.
+                // Ordered after `reclassify_blocked` but the two cannot collide:
+                // `run_turn` returns `Err` on the blocked arm before reaching
+                // max_tool_iterations, so no node is both blocked and capped.
+                reclassify_capped_nodes(&mut nodes, &capped.take());
                 // Issue #1008 (second half): the failure carries the partial run
                 // rather than only a message. The nodes that ran before the break
                 // really did open board cards, park approvals and raise notices,
@@ -880,6 +915,10 @@ async fn run_workflow_inner(
                 &ctx.started_by,
             )
             .await;
+            // Reclassify capped nodes before they move into the blocked run, the
+            // same as the settled arm does. A node that hit the iteration cap
+            // reports Ok but settled Failed, so both must agree on Error.
+            reclassify_capped_nodes(&mut nodes, &capped.take());
             return Ok(blocked_run(BlockedRun {
                 nodes,
                 blocked,
@@ -1171,7 +1210,6 @@ async fn run_workflow_inner(
     // wrote `on_error = "continue"` or `"route"` asked for the branch to survive
     // the block, and gets it. The run-level record stays truthful either way, so
     // the post-pass runs on this arm too rather than only on the halted one.
-    let mut nodes = nodes;
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
@@ -2311,6 +2349,43 @@ mod tests {
             elapsed_ms: 10,
             diagnostics: Vec::new(),
         }
+    }
+
+    /// The third half of that reconciliation, and the one that was missing
+    /// (CodeRabbit review on #1905): what the **journal** records.
+    ///
+    /// `reclassify_capped_nodes` below only ever reached the in-memory
+    /// `WorkflowRun.nodes`, so a capped node's durable `WorkflowNodeFinished`
+    /// kept the engine's `Ok`. `GET /workflows/runs` folds its rows from those
+    /// events, so the same run read back scored `ok` while the synchronous
+    /// response said `degraded` — one run, two verdicts, depending on which
+    /// surface you asked. The collector now consults `RunCappedNodes` before it
+    /// writes, so the event carries the relabelled status and both surfaces
+    /// derive the verdict from the same fact.
+    ///
+    /// Pinned on `RunCappedNodes::contains` rather than by driving a whole run:
+    /// the read is the entire mechanism, and it has to answer without draining
+    /// — `take` would leave the settle-time relabel with an empty list, which
+    /// is the one way to "fix" history and break the live path instead.
+    #[test]
+    fn the_capped_read_answers_without_draining_the_settle_time_list() {
+        let capped = super::super::caps::RunCappedNodes::default();
+        capped.push("summarize".to_string());
+
+        assert!(capped.contains("summarize"), "the journal write asks first");
+        assert!(!capped.contains("fetch"), "and only about its own node");
+        assert!(
+            capped.contains("summarize"),
+            "asking must not consume it — the settle-time relabel comes after"
+        );
+
+        let mut nodes = vec![node_row("summarize", WorkflowNodeStatus::Ok)];
+        reclassify_capped_nodes(&mut nodes, &capped.take());
+        assert_eq!(
+            nodes[0].status,
+            WorkflowNodeStatus::Error,
+            "the in-memory row still gets its flip, so the two surfaces agree"
+        );
     }
 
     /// Issue #1865: the run-level half of the iteration-cap reconciliation —

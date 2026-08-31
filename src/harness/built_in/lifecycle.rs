@@ -111,6 +111,18 @@ pub enum TaskRunEnd {
     /// (`MAX_REDIRECTS_PER_DISPATCH`); the last run's reply is finalized
     /// rather than looping forever.
     RedirectsExhausted,
+    /// The turn stopped on something **a person can answer** and parked a
+    /// durable blocker instead of settling (issue #1861): a rejected model id,
+    /// an expired credential, a missing prerequisite, or the assignee's own
+    /// `escalate_to_human`.
+    ///
+    /// Separate from [`Failed`](Self::Failed) because the two need opposite
+    /// treatment. A failure is over — the card returns to To-do and the reason
+    /// is history. A blocker is an open question: the card parks, somebody is
+    /// asked, and the answer resumes the step. Reaching this arm means the
+    /// classifier decided the stop was answerable; everything it does not
+    /// recognise keeps settling `Failed`.
+    Blocked,
 }
 
 /// The orchestrator's verdict on a card sitting in `in_review` (issue #186
@@ -295,6 +307,11 @@ pub fn settled_landing_column(end: TaskRunEnd, parked_approvals: usize) -> &'sta
 /// * [`Paused`](TaskRunEnd::Paused) → [`Paused`](RunStatus::Paused). Epic #183
 ///   decision 2: an operator pause is resolved by *resuming*, not by a person
 ///   approving something, so it is `Paused` and never `WaitingApproval`.
+/// * [`Blocked`](TaskRunEnd::Blocked) → [`Blocked`](RunStatus::Blocked). Epic
+///   #183 decision 2 again, and the case it did not have a status for: the
+///   attempt is waiting on *a person*, but on an answer rather than on an
+///   approval. It parks rather than settling, so the card lands in
+///   [`COLUMN_PAUSED`] with the question on it.
 /// * [`Delegated`](TaskRunEnd::Delegated) → [`Paused`](RunStatus::Paused). A
 ///   hand-off is not an ending at all — the card stays in
 ///   [`COLUMN_IN_PROGRESS`] — and it is unreachable as a run settle today,
@@ -310,6 +327,7 @@ pub fn run_status_for(end: TaskRunEnd) -> RunStatus {
         TaskRunEnd::Failed => RunStatus::Failed,
         TaskRunEnd::Cancelled => RunStatus::Cancelled,
         TaskRunEnd::Paused | TaskRunEnd::Delegated => RunStatus::Paused,
+        TaskRunEnd::Blocked => RunStatus::Blocked,
     }
 }
 
@@ -334,6 +352,44 @@ pub fn run_status_for(end: TaskRunEnd) -> RunStatus {
 pub fn settled_run_status(end: TaskRunEnd, parked_approvals: usize) -> RunStatus {
     match run_status_for(end) {
         RunStatus::Succeeded if parked_approvals > 0 => RunStatus::WaitingApproval,
+        settled => settled,
+    }
+}
+
+/// [`settled_run_status`] with issue #1861's blocker overlay: a turn that
+/// raised a question the operator has to answer settles
+/// [`Blocked`](RunStatus::Blocked).
+///
+/// `blockers` counts the blocker parks **this attempt's own turns** queued —
+/// an `escalate_to_human` call, or a host-classified failure inside a
+/// delegated turn.
+///
+/// # Why it outranks `WaitingApproval` but not a failure
+///
+/// Both park the card, so the board reads the same either way; the difference
+/// is what the run history says the operator owes. An approval is a decision
+/// about an effect that is ready to happen. A blocker is a question with
+/// nothing behind it yet. Reporting the second as the first sends somebody to
+/// the Approvals page looking for something to approve.
+///
+/// A run that **failed or was cancelled** keeps its own status, exactly as the
+/// approval overlay leaves it: the operator has a bigger problem than an
+/// unanswered question, and relabelling the failure would hide why the work
+/// actually stopped.
+///
+/// # Why the ending is not rewritten instead
+///
+/// [`TaskRunEnd`] stays whatever the turn did. The success-terminal check that
+/// records a run's artifacts and outputs reads the *ending*, not this status —
+/// so an agent that wrote a spec and then asked a question keeps the spec. It
+/// is the same separation the approval overlay draws, for the same reason.
+pub fn settled_run_status_with_blockers(
+    end: TaskRunEnd,
+    parked_approvals: usize,
+    blockers: usize,
+) -> RunStatus {
+    match settled_run_status(end, parked_approvals) {
+        RunStatus::Succeeded | RunStatus::WaitingApproval if blockers > 0 => RunStatus::Blocked,
         settled => settled,
     }
 }
@@ -901,5 +957,50 @@ mod test {
             relay_text(&blank, "maya", "ceo"),
             "\"Ship the thing\" is ready for review (maya ran it)."
         );
+    }
+
+    /// Issue #1861: a turn that raised a question settles `Blocked`, not
+    /// `Succeeded` and not `WaitingApproval` — the operator owes an answer, not
+    /// a decision.
+    #[test]
+    fn a_question_outranks_a_plain_success_and_an_approval() {
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Completed, 0, 1),
+            RunStatus::Blocked
+        );
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Completed, 2, 1),
+            RunStatus::Blocked,
+            "a turn that both asked and parked an approval is waiting on the answer first"
+        );
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Completed, 0, 0),
+            RunStatus::Succeeded,
+            "no question, no relabel"
+        );
+    }
+
+    /// A failure keeps its own status even with a question outstanding: the
+    /// operator has a bigger problem, and relabelling would hide why the work
+    /// stopped. The same stance the approval overlay takes.
+    #[test]
+    fn a_failure_keeps_its_status_even_with_a_question_pending() {
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Failed, 0, 1),
+            RunStatus::Failed
+        );
+        assert_eq!(
+            settled_run_status_with_blockers(TaskRunEnd::Cancelled, 0, 1),
+            RunStatus::Cancelled
+        );
+    }
+
+    /// The card parks either way, and the blocker ending lands it in `paused`
+    /// rather than back in To-do where a bounced card and an open question
+    /// would look the same.
+    #[test]
+    fn a_blocked_ending_lands_the_card_paused() {
+        assert_eq!(landing_column(TaskRunEnd::Blocked), COLUMN_PAUSED);
+        assert_eq!(run_status_for(TaskRunEnd::Blocked), RunStatus::Blocked);
     }
 }
