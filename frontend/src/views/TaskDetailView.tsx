@@ -9,6 +9,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -16,9 +17,11 @@ import {
 } from "react";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   Ban,
   ChevronRight,
+  CircleHelp,
   ClipboardList,
   Clock,
   CornerDownRight,
@@ -31,6 +34,7 @@ import {
   MessagesSquare,
   Pencil,
   Play,
+  RotateCcw,
   Send,
   Square,
   Trash2,
@@ -83,7 +87,9 @@ import {
   blockingTaskApprovals,
   decidingForTask,
   pendingApprovalWait,
+  taskApprovalBlock,
   taskApprovalRows,
+  RESUME_BLOCKED_REASON,
 } from "@/lib/task-approvals";
 import { formatDuration, timeOf } from "@/lib/timeline-format";
 import { TimelineList, runStatusTone } from "@/views/runs/RunTimeline";
@@ -119,7 +125,12 @@ import { cn } from "@/lib/utils";
 import { formatUsdCost } from "@/lib/cost";
 import { effectDone } from "@/lib/language";
 
-import { labelFor, PRIORITY_STYLES, type TaskColumn } from "@/lib/board-columns";
+import {
+  BOARD_DONE,
+  labelFor,
+  PRIORITY_STYLES,
+  type TaskColumn,
+} from "@/lib/board-columns";
 import { useBoardColumns } from "@/hooks/use-board-columns";
 import { toast } from "sonner";
 import { ArtifactsTab } from "./ArtifactsTab";
@@ -130,6 +141,53 @@ import { TaskWorkflowProposalPanel } from "./TaskWorkflowProposalPanel";
 
 /** How often to re-poll the detail while the screen is open (visibility-gated). */
 const POLL_MS = 4000;
+
+/**
+ * The longest discussion message the host will keep, in **codepoints**.
+ *
+ * Mirrors `MAX_DISCUSSION_CHARS` in `src/ports/tasks.rs`, which **truncates
+ * rather than rejects**: an over-long post still returns `201`, with its tail
+ * silently gone. So the only way an operator learned this limit existed was by
+ * reading their own echoed row and finding it cut — after the words were
+ * already lost. Stated in the box instead, so it is a limit you meet rather
+ * than one you discover.
+ *
+ * Kept as a number here rather than fetched, on `MAX_AVATAR_MB`'s precedent:
+ * it is a constant of the write boundary, and a console that had to ask for it
+ * would have nothing to say before the answer arrived.
+ */
+export const MAX_DISCUSSION_CHARS = 4000;
+
+/**
+ * Where the character counter stops being invisible.
+ *
+ * A note on a card is usually one line, and a permanent `0 / 4000` under every
+ * one of them is noise that teaches nobody anything. It appears when it starts
+ * to matter — and it exists in the DOM the whole time regardless, so the
+ * textarea's `aria-describedby` never points at nothing.
+ */
+const DISCUSSION_COUNTER_FROM = MAX_DISCUSSION_CHARS - 500;
+
+/**
+ * How long a message is, counting the way the host counts.
+ *
+ * Codepoints, not `String.length`: that is UTF-16 code units, so a paste of
+ * emoji would measure double the limit the host actually applies, and the
+ * counter would be describing a different rule from the one the host enforces.
+ * A plain `maxLength` on the textarea has the same flaw *and* the one below,
+ * which is why there is not one.
+ *
+ * The composer refuses an over-long message rather than trimming it to fit.
+ * Clipping inside `onChange` was worse than the truncation it was guarding
+ * against: pasting 4,500 characters silently destroyed 500 of them, past the
+ * reach of the browser's own undo, and the operator was told about it by a
+ * counter reading a number they had not typed. Keeping the text and disabling
+ * Post says the same thing and costs them nothing — the same shape as the
+ * redirect composer, which keeps its text when a send fails.
+ */
+export function countDiscussionChars(text: string): number {
+  return [...text].length;
+}
 
 function priorityStyle(priority: string): string {
   return (
@@ -185,6 +243,54 @@ function neverDispatched(task: Task): boolean {
   return stage === "pending" || UNSTARTED_COLUMNS.has(stage);
 }
 
+/** Whether the host has any dispatch window at all to show for this card. */
+function hasDispatchWindow(
+  worked: { millis: number; live: boolean } | null,
+): boolean {
+  return worked !== null && (worked.millis > 0 || worked.live);
+}
+
+/**
+ * Whether this card has genuinely never been dispatched — derived **once**, for
+ * every part of the screen that has an opinion about it (issue #465).
+ *
+ * One function with several readers rather than several readings, on
+ * `taskApprovalBlock`'s grounds. Before this the screen gave the same state
+ * three different names in three places: the header said "Not yet dispatched",
+ * the button beneath it said "Retry", and pressing that button raised
+ * "Dispatched — the assignee is working on it." The header and the toast were
+ * both right; "Retry" was the one that was false, because there is no earlier
+ * attempt to try again. Nothing on screen tied the three together, so nothing
+ * could notice.
+ */
+function neverStartedYet(
+  task: Task,
+  worked: { millis: number; live: boolean } | null,
+): boolean {
+  return !hasDispatchWindow(worked) && neverDispatched(task);
+}
+
+/**
+ * Whether the card is finished, so re-dispatch is not an offer to make.
+ *
+ * Retry rendered — and worked — on a Done card: one click re-ran a settled
+ * task, spending an agent turn to redo work somebody had already accepted.
+ * `done` is the only closed phase the board declares
+ * (`src/ledger/board.rs::exactly_one_phase_is_closed_and_it_is_done`), so this
+ * is the whole of the guard.
+ *
+ * Asked of the ledger's own `closed` flag rather than matched against the
+ * word, on `lib/board-columns`'s standing grounds: a closed status added on the
+ * host and not here is one the console silently keeps offering Retry for.
+ * `columns` is itself a ledger read and is empty until it lands, so the phase
+ * word is the fallback for that window — a Retry that flickers onto a Done card
+ * for one read is the same bug arriving a second later.
+ */
+function isFinished(task: Task, columns: TaskColumn[]): boolean {
+  const held = columns.find((c) => c.id === task.column);
+  return held ? held.closed : task.column === BOARD_DONE;
+}
+
 /**
  * Extends a host-computed duration to `now` while its span is still open.
  *
@@ -238,13 +344,43 @@ const EMPTY_FAILED: Record<string, string> = {};
  *
  * Returns `null` for a plan with nothing to report, so the trigger stays a
  * plain word.
+ *
+ * **The colour is not the signal.** It was: the rendered text was a bare
+ * number, and red-versus-amber was the only thing separating "this card cannot
+ * start" from "this card will pause to ask you something" — which is no
+ * distinction at all to the reader who cannot see the difference, and none in a
+ * screenshot printed in greyscale. So each tone now carries its own `Icon`
+ * (the same two shapes the plan brief's own headline uses, `AlertTriangle` for
+ * blocked and `CircleHelp` for unresolved, so the tab and the brief it opens
+ * agree) and its own `label`, which is what a screen reader reads and what a
+ * pointer gets as a tooltip. The number stays for everyone else.
  */
-function planTabCount(plan: TaskPlan): { count: number; tone: string } | null {
+export function planTabCount(plan: TaskPlan): {
+  count: number;
+  tone: string;
+  /** The non-colour half of the signal, drawn beside the count. */
+  Icon: typeof AlertTriangle;
+  /** Said instead of the bare number to anything that is not reading colour. */
+  label: string;
+} | null {
   const { blocking, approval, unchecked } = tallyPrerequisites(plan);
-  if (blocking > 0) return { count: blocking, tone: "text-destructive" };
+  const things = (n: number) => (n === 1 ? "prerequisite" : "prerequisites");
+  if (blocking > 0) {
+    return {
+      count: blocking,
+      tone: "text-destructive",
+      Icon: AlertTriangle,
+      label: `${blocking} blocking ${things(blocking)}`,
+    };
+  }
   const unresolved = approval + unchecked;
   if (unresolved > 0) {
-    return { count: unresolved, tone: "text-status-blocked-text" };
+    return {
+      count: unresolved,
+      tone: "text-status-blocked-text",
+      Icon: CircleHelp,
+      label: `${unresolved} unresolved ${things(unresolved)}`,
+    };
   }
   return null;
 }
@@ -264,7 +400,6 @@ export function TaskDetailView({
   onBack,
   onNavigate,
   onOpenThread,
-  onSaved,
   onDeleted,
 }: {
   client: OpenCompanyClient;
@@ -307,8 +442,16 @@ export function TaskDetailView({
   onNavigate: (id: string) => void;
   /** Open the chat thread this card was created from (issue #246). */
   onOpenThread?: (threadId: string) => void;
-  /** Hand a saved card back to the board for reconciliation. */
-  onSaved: (t: Task) => void;
+  /*
+   * There is no `onSaved`. There was, and every one of its five call sites
+   * handed a saved card to a `() => {}`: it existed to reconcile the board
+   * rendered *beside* this screen, and since issue #1140 there is no such
+   * sibling — the board is the `tasks` ledger, it is not mounted while this is,
+   * and it re-reads from the host when the operator returns to it. `load()` is
+   * what actually refreshes this screen, and it always was; the prop was a
+   * second refresh path that refreshed nothing, which is worse than no path at
+   * all because it reads like the one doing the work.
+   */
   /** Tell the board a card was deleted. */
   onDeleted: (id: string) => void;
 }) {
@@ -471,6 +614,54 @@ export function TaskDetailView({
     return () => window.clearInterval(timer);
   }, [ticking]);
 
+  /**
+   * What the company queue says is holding this card — the board's derivation,
+   * read here so the two surfaces cannot disagree (#883, #1891).
+   */
+  const approvalBlock = useMemo(
+    () => (detail ? taskApprovalBlock(parked, detail.task.id) : null),
+    [parked, detail],
+  );
+  /**
+   * Whether Retry/Resume is the wrong click right now.
+   *
+   * A run parked on an approval is **finished** as far as the runs store is
+   * concerned: the card leaves `GET …/tasks/inflight`, so `inflight` is `null`,
+   * so `ControlBar` renders its else-branch — and the else-branch is Retry,
+   * enabled, directly underneath a row reading "Waiting on your approval". One
+   * click there spends a second agent turn on work the operator is still being
+   * asked to authorise, and re-runs it from the start; since #469 the last
+   * verdict continues the parked turn on its own, so the approval *is* the
+   * resume and this button is never the way to give it.
+   *
+   * The board has been getting this right since #883 and this screen never
+   * did — `taskApprovalBlock` was written for both halves and had no production
+   * caller at all.
+   *
+   * **Two reads, unioned**, because either on its own leaves the button live
+   * for a poll. `approvalBlock` is the company queue, which is what the board
+   * keys on and where a decidable row comes from; `awaitingApproval` is this
+   * screen's own `GET …/tasks/{id}`, computed by the host with an ownership
+   * rule (`approval_owner`) this side cannot see, and it lands first when an
+   * approval has parked but the feed has not delivered it yet. They can
+   * disagree for one poll in either direction, and down is the safe answer for
+   * both: a Retry the operator has to wait four seconds for is a nuisance, and
+   * a Retry that fires beside a pending approval is a paid duplicate turn.
+   */
+  const blockedOnApproval = awaitingApproval || approvalBlock !== null;
+  /**
+   * The tab actually shown, which is not always the tab that was asked for.
+   *
+   * `?tab=plan` is addressable now (`lib/task-output`), and Plan is the one tab
+   * that a *particular* card may not have. A stale link, or one card's link
+   * opened on another, would otherwise select a tab with no trigger and no
+   * panel: a bare tab bar over an empty screen. Falls back the way
+   * `readTaskFocus` falls back on every other stale query — to Timeline —
+   * and deliberately does **not** rewrite the address, because the operator may
+   * be one lineage hop from the card that link was written for.
+   */
+  const activeTab = tab === "plan" && detail && !detail.task.plan ? "timeline" : tab;
+
   if (notFound) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
@@ -496,10 +687,18 @@ export function TaskDetailView({
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/*
         This pane's heading is the card's own title, inside `DetailHeader`,
-        which needs a loaded `detail`. So a cold `#/tasks/<id>` was unnamed
-        while the read was in flight, and stayed unnamed if it failed with
-        anything other than a 404 — `detail` is left null and nothing retries
-        (codex review, #1785).
+        which needs a loaded `detail`. So a cold `#/tasks/<id>` is unnamed while
+        the read is in flight, and stays unnamed for as long as it keeps failing
+        with anything other than a 404 (codex review, #1785).
+
+        That review's wording — "`detail` is left null and nothing retries" —
+        was wrong about the second half, and left as it was would have sent the
+        next reader looking for a recovery that already exists:
+        `startVisiblePolling` re-runs `load()` every four seconds and clears
+        `error` the moment one succeeds. What was actually missing is that an
+        operator could not *see* it. A back bar, a red alert and an empty pane
+        is indistinguishable from a dead end, so the pane below offers that same
+        read as a button and says the polling is happening anyway.
 
         "Task", not the id: an id is a string the operator did not choose and
         cannot read out, and announcing one would be worse than announcing the
@@ -550,10 +749,12 @@ export function TaskDetailView({
                 inflight={inflight}
                 irreversible={detail.irreversibleEffects}
                 historyIncomplete={detail.historyIncomplete}
+                blockedOnApproval={blockedOnApproval}
+                neverStarted={neverStartedYet(detail.task, worked)}
+                finished={isFinished(detail.task, columns)}
                 client={client}
                 company={company}
                 onChanged={load}
-                onSaved={onSaved}
                 onEdit={() => setEditing(true)}
               />
 
@@ -590,13 +791,12 @@ export function TaskDetailView({
                 client={client}
                 company={company}
                 task={detail.task}
-                onSaved={onSaved}
                 onReload={load}
               />
             )}
 
             <Tabs
-              value={tab}
+              value={activeTab}
               onValueChange={(next) => {
                 const selected = String(next);
                 setTab(selected);
@@ -628,11 +828,24 @@ export function TaskDetailView({
                     Plan
                     {(() => {
                       const badge = planTabCount(detail.task.plan!);
-                      return badge ? (
-                        <span className={cn("ml-1.5 tabular-nums", badge.tone)}>
-                          {badge.count}
+                      if (!badge) return null;
+                      const { Icon } = badge;
+                      return (
+                        <span
+                          className={cn(
+                            "ml-1.5 inline-flex items-center gap-0.5 tabular-nums",
+                            badge.tone,
+                          )}
+                          title={badge.label}
+                        >
+                          <Icon className="size-3" aria-hidden />
+                          {/* The number is the sighted reading of `label`, so
+                              it is hidden from assistive tech rather than read
+                              out twice ("2 · 2 blocking prerequisites"). */}
+                          <span aria-hidden>{badge.count}</span>
+                          <span className="sr-only">{badge.label}</span>
                         </span>
-                      ) : null;
+                      );
                     })()}
                   </TabsTrigger>
                 )}
@@ -640,7 +853,17 @@ export function TaskDetailView({
                 <TabsTrigger value="discussion">Discussion</TabsTrigger>
               </TabsList>
 
+              {/*
+                Each panel opens with its own `h2` (issue: heading levels).
+                The screen's only heading was the card title in `DetailHeader`,
+                an `h1` — and the Artifacts panel renders an `h3` per artifact
+                (`ArtifactsTab`), so the outline jumped h1 → h3 and a reader
+                navigating by heading had no way to tell which section they had
+                landed in. `sr-only` because the tab bar is already the visible
+                label; duplicating it in ink would be the same word twice.
+              */}
               <TabsContent value="timeline" className="mt-4">
+                <h2 className="sr-only">Timeline</h2>
                 <TimelineList
                   empty={
                     <EmptyState
@@ -653,6 +876,7 @@ export function TaskDetailView({
               </TabsContent>
 
               <TabsContent value="attempts" className="mt-4">
+                <h2 className="sr-only">Attempts</h2>
                 <AttemptsTab
                   client={client}
                   company={company}
@@ -664,6 +888,7 @@ export function TaskDetailView({
 
               {detail.task.plan && (
                 <TabsContent value="plan" className="mt-4">
+                  <h2 className="sr-only">Plan</h2>
                   <TaskPlanBrief
                     plan={detail.task.plan}
                     // Issue #1106: answering the brief's ownership question is
@@ -673,10 +898,9 @@ export function TaskDetailView({
                     // reach the card by a path that skips that check.
                     onPick={async (id) => {
                       try {
-                        const saved = await patchTask(client, company, detail.task.id, {
+                        await patchTask(client, company, detail.task.id, {
                           assignee: id,
                         });
-                        onSaved(saved);
                         await load();
                         toast.success(`Assigned to ${id}.`);
                       } catch (e) {
@@ -690,6 +914,7 @@ export function TaskDetailView({
               )}
 
               <TabsContent value="artifacts" className="mt-4">
+                <h2 className="sr-only">Artifacts</h2>
                 <ArtifactsTab
                   client={client}
                   company={company}
@@ -700,6 +925,7 @@ export function TaskDetailView({
               </TabsContent>
 
               <TabsContent value="discussion" className="mt-4">
+                <h2 className="sr-only">Discussion</h2>
                 <DiscussionTab
                   // Keyed by card: a different task is a different thread, and
                   // the tab accumulates the one it is shown.
@@ -715,13 +941,57 @@ export function TaskDetailView({
             </Tabs>
           </div>
         </ScrollArea>
+      ) : error ? (
+        /*
+          The non-404 failure. `load()` sets `error`, leaves `detail` null, and
+          this ternary used to fall through to `null` — back bar, red alert,
+          nothing else on the screen. See the note above the header: the poll
+          does recover on its own, but a pane with no control in it does not
+          say so, and an operator who cannot tell a slow failure from a
+          permanent one leaves.
+
+          `setLoading(true)` hands the wait back to the skeleton branch above,
+          so the button visibly does something; a second failure lands back
+          here with the alert refreshed.
+        */
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+          <p className="text-sm font-medium">This task could not be loaded.</p>
+          <p className="max-w-sm text-xs text-muted-foreground">
+            The console keeps trying every few seconds on its own, and will show
+            the card as soon as one of those reads succeeds. Try again now if
+            you would rather not wait.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setLoading(true);
+              void load();
+            }}
+          >
+            <RotateCcw className="mr-1.5 size-4" />
+            Try again
+          </Button>
+        </div>
       ) : null}
 
       <TaskEditDialog
         task={editing && detail ? detail.task : null}
+        // The dialog's Column select emits the same `{column: "working"}` this
+        // bar's Retry sends, so it is behind the same #351 confirmation — and
+        // that gate treats an unread journal as "cannot say" and confirms
+        // unconditionally. These are the read, so a clean card stops being
+        // asked. Passed as `detail?.…` rather than defaulted: `[]` would mean
+        // "this card did nothing irreversible", which is a claim nothing has
+        // checked while `detail` is still null, and the point of the gate is
+        // that it never passes a gap off as an all-clear. The dialog is only
+        // ever open with `detail` loaded (`task` above is null otherwise), so
+        // in practice it always receives the real answer.
+        inflight={inflight}
+        irreversible={detail?.irreversibleEffects}
+        historyIncomplete={detail?.historyIncomplete}
         onClose={() => setEditing(false)}
-        onSaved={(t) => {
-          onSaved(t);
+        onSaved={() => {
           setEditing(false);
           void load();
         }}
@@ -866,15 +1136,26 @@ function DetailHeader({
   );
 }
 
-function ControlBar({
+/*
+ * Exported for `test/unit/task-detail-control-bar.test.ts`, on the same grounds
+ * `AwaitingApprovalRow` is: every claim this bar has to keep — that Retry is
+ * down while the card is blocked on a sign-off, that it is not offered at all
+ * on a finished card, that a never-dispatched card says "Dispatch", and that a
+ * composed redirect survives its run settling — only exists at the rendered
+ * control. Each of them looks completely normal in the source and is wrong on
+ * the screen, which is exactly the class of bug this file has collected.
+ */
+export function ControlBar({
   task,
   inflight,
   irreversible,
   historyIncomplete,
+  blockedOnApproval,
+  neverStarted,
+  finished,
   client,
   company,
   onChanged,
-  onSaved,
   onEdit,
 }: {
   task: Task;
@@ -886,10 +1167,22 @@ function ControlBar({
   irreversible: IrreversibleEffect[];
   /** Whether the journal holds executed history it cannot describe (#351). */
   historyIncomplete: boolean;
+  /**
+   * Whether this card is stopped behind a sign-off (#883). Derived by the
+   * screen, not here: it takes the company queue **and** the host's own
+   * approvals, and this bar sees neither. Down rather than hidden, as on the
+   * board card — an operator has to be able to see that Retry is the wrong
+   * click, not wonder where it went.
+   */
+  blockedOnApproval: boolean;
+  /** Whether nothing has ever been dispatched for this card (issue #465) —
+   *  the same answer the header prints, so the two cannot use two words. */
+  neverStarted: boolean;
+  /** Whether the card is in a closed column, where re-dispatch is not offered. */
+  finished: boolean;
   client: OpenCompanyClient;
   company: string | null;
   onChanged: () => Promise<void> | void;
-  onSaved: (t: Task) => void;
   onEdit: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -901,14 +1194,25 @@ function ControlBar({
   const pending = inflight?.pendingAction ?? null;
   const steerDisabled = busy || pending !== null;
 
+  /**
+   * Steers the run named by `key`.
+   *
+   * The key is a parameter rather than read off `inflight` inside, because the
+   * `if (!inflight) return` that used to open this function was a **silent
+   * no-op** wearing a guard's clothes: the redirect composer below survives the
+   * run settling (see it for why), so Send stayed live, and pressing it did
+   * nothing at all — no request, no error, no toast. Taking the key makes the
+   * absence of a run something the caller has to answer for, at the one site
+   * where it can actually happen.
+   */
   async function steer(
+    key: string,
     action: SteerAction,
     opts?: { instruction?: string; confirm?: boolean },
   ) {
-    if (!inflight) return;
     setBusy(true);
     try {
-      await steerTask(client, company, inflight.key, { action, ...opts });
+      await steerTask(client, company, key, { action, ...opts });
       setRedirecting(false);
       setInstruction("");
       await onChanged();
@@ -922,12 +1226,11 @@ function ControlBar({
   async function patchColumn() {
     setBusy(true);
     try {
-      const saved = await patchTask(client, company, task.id, {
+      await patchTask(client, company, task.id, {
         // The phase word, not the stage: the host resolves `working` to
         // `in_progress`, which is what dispatches (issue #1512).
         column: "working",
       });
-      onSaved(saved);
       await onChanged();
       toast.success("Dispatched — the assignee is working on it.");
     } catch (e) {
@@ -958,10 +1261,9 @@ function ControlBar({
   async function planFirst() {
     setBusy(true);
     try {
-      const saved = await patchTask(client, company, task.id, {
+      await patchTask(client, company, task.id, {
         column: "planning",
       });
-      onSaved(saved);
       await onChanged();
       toast.success("Planning — a brief is being written for this card.");
     } catch (e) {
@@ -983,10 +1285,9 @@ function ControlBar({
     }
     setBusy(true);
     try {
-      const saved = await patchTask(client, company, task.id, {
+      await patchTask(client, company, task.id, {
         assignee: next,
       });
-      onSaved(saved);
       await onChanged();
       setReassigning(false);
       toast.success("Reassigned.");
@@ -999,7 +1300,27 @@ function ControlBar({
     }
   }
 
-  const resumeLabel = task.stage === "paused" ? "Resume" : "Retry";
+  /**
+   * One word per state, and the honest one (issue #465).
+   *
+   * `Dispatch` for a card nothing has ever run: "Retry" claimed an earlier
+   * attempt that does not exist, three lines under a header reading "Not yet
+   * dispatched" and one click away from a toast reading "Dispatched". Same
+   * derivation as the header's, handed down, so they cannot drift apart again.
+   */
+  const resumeLabel =
+    task.stage === "paused" ? "Resume" : neverStarted ? "Dispatch" : "Retry";
+
+  /** Whether the composed redirect can actually be sent right now. */
+  const canRedirect =
+    inflight !== null && !steerDisabled && instruction.trim() !== "";
+
+  function sendRedirect() {
+    // Narrowing, not a guard: `canRedirect` already holds Send down when there
+    // is no run, and the Enter key reads the same flag.
+    if (!inflight || !canRedirect) return;
+    void steer(inflight.key, "redirect", { instruction: instruction.trim() });
+  }
 
   return (
     <div className="border-t bg-card/40 p-3">
@@ -1024,7 +1345,7 @@ function ControlBar({
                   size="sm"
                   className="h-8"
                   disabled={steerDisabled}
-                  onClick={() => void steer("pause")}
+                  onClick={() => void steer(inflight.key, "pause")}
                 >
                   <Square className="mr-1.5 size-3.5" />
                   Stop
@@ -1056,21 +1377,36 @@ function ControlBar({
                   description="This stops the run. It can be retried afterwards from the board or here."
                   confirmLabel="Cancel run"
                   destructive
-                  onConfirm={() => void steer("cancel", { confirm: true })}
+                  onConfirm={() =>
+                    void steer(inflight.key, "cancel", { confirm: true })
+                  }
                 />
               </>
             )}
           </>
         ) : (
           <>
-            <RetryButton
-              label={resumeLabel}
-              title={task.title}
-              irreversible={irreversible}
-              historyIncomplete={historyIncomplete}
-              disabled={busy}
-              onConfirm={() => void patchColumn()}
-            />
+            {/* Not on a finished card. Retry rendered — and worked — on a card
+                in Done, so one click re-ran a task somebody had already
+                accepted and paid for a turn to redo it. `isFinished` asks the
+                ledger which columns are closed rather than matching the word;
+                see it. */}
+            {!finished && (
+              <RetryButton
+                label={resumeLabel}
+                title={task.title}
+                irreversible={irreversible}
+                historyIncomplete={historyIncomplete}
+                // Issue #883, arriving at the detail screen a year after the
+                // board card got it. A run parked on an approval has settled to
+                // the runs store, so `inflight` is null and this *is* the
+                // branch that renders — Retry, live, directly above a row
+                // saying the card is waiting on your approval.
+                disabled={busy || blockedOnApproval}
+                reason={blockedOnApproval ? RESUME_BLOCKED_REASON : undefined}
+                onConfirm={() => void patchColumn()}
+              />
+            )}
             {/* Only before anything has started: planning a card that has
                 already been worked would write a brief for work that exists,
                 which is the one shape the pass has nothing useful to say
@@ -1122,31 +1458,78 @@ function ControlBar({
         </div>
       </div>
 
+      {/*
+        The redirect composer, and the one control on this bar that outlives the
+        run it steers.
+
+        It is a sibling of the button row rather than a child of the `inflight`
+        branch, which is what saves the operator's words: a run settling — it
+        finished, it parked on an approval, it was cancelled — flips `inflight`
+        to null on the next four-second poll, and had this lived inside that
+        branch the whole composer would have vanished mid-sentence with the
+        typed instruction gone and nothing said about it.
+
+        Surviving is not enough on its own, and for a while it was all that
+        happened: the row stayed, Send stayed enabled, and pressing it reached
+        the `if (!inflight) return` that used to open `steer` — no request, no
+        error, no toast, a control that silently did nothing. So the composer
+        now says what became of the run and holds the text until the operator
+        decides what to do with it. Sending it is the one thing that cannot be
+        offered: `steerTask` addresses a live run by key, and the run is gone.
+      */}
       {redirecting && (
-        <div className="mt-2 flex items-center gap-2">
-          <Input
-            autoFocus
-            value={instruction}
-            placeholder="New instruction for the run…"
-            className="h-8"
-            disabled={steerDisabled}
-            onChange={(e) => setInstruction(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && instruction.trim())
-                void steer("redirect", { instruction: instruction.trim() });
-            }}
-          />
-          <Button
-            size="sm"
-            className="h-8"
-            disabled={steerDisabled || !instruction.trim()}
-            onClick={() =>
-              void steer("redirect", { instruction: instruction.trim() })
-            }
-          >
-            <Send className="mr-1.5 size-3.5" />
-            Send
-          </Button>
+        <div className="mt-2 space-y-1.5">
+          <div className="flex items-center gap-2">
+            <Input
+              autoFocus
+              value={instruction}
+              placeholder="New instruction for the run…"
+              className="h-8"
+              // Still editable with no run: the text is here to be read back
+              // and copied out, and a greyed-out box invites a reload that
+              // would be the very loss this is preventing.
+              disabled={steerDisabled}
+              onChange={(e) => setInstruction(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") sendRedirect();
+              }}
+            />
+            <Button
+              size="sm"
+              className="h-8"
+              disabled={!canRedirect}
+              title={
+                inflight === null
+                  ? "This attempt has already settled — there is no run left to redirect."
+                  : undefined
+              }
+              onClick={sendRedirect}
+            >
+              <Send className="mr-1.5 size-3.5" />
+              Send
+            </Button>
+          </div>
+          {inflight === null && (
+            <div className="flex items-start gap-2">
+              <p className="min-w-0 flex-1 text-2xs text-status-blocked-text">
+                This attempt settled before the redirect was sent, so there is no
+                run left to steer. What you typed is kept above rather than
+                dropped — copy it out, or start the card again and redirect the
+                new run.
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 shrink-0 text-2xs"
+                onClick={() => {
+                  setInstruction("");
+                  setRedirecting(false);
+                }}
+              >
+                Discard
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -1237,9 +1620,12 @@ function LineageRail({
   if (!lineage.parent && lineage.children.length === 0) return null;
   return (
     <div className="rounded-xl border bg-card/40 p-3">
-      <p className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+      {/* A heading in everything but its tag, which is how the page came to
+          have exactly one (the `h1` in `DetailHeader`) and then jump straight
+          to the `h3`s its tab panels render. */}
+      <h2 className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
         Lineage
-      </p>
+      </h2>
       <div className="space-y-1.5">
         {lineage.parent && (
           <button
@@ -1898,7 +2284,9 @@ function ExportButton({
  * long discussion is not re-sent every 4s). Older messages are pulled on demand
  * and kept here, so walking back through a thread survives the next poll.
  */
-function DiscussionTab({
+/** Exported for `test/unit/task-detail-discussion-limits.test.ts` — see
+ *  `ControlBar` above for why these tests render rather than read. */
+export function DiscussionTab({
   messages,
   hasMore,
   taskId,
@@ -1915,6 +2303,20 @@ function DiscussionTab({
 }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  /**
+   * The `seq` of the message currently being withdrawn, or `null`.
+   *
+   * Every other mutating control on this screen has a busy state and this one
+   * did not, so a second click fired a second `DELETE` — and a third, and a
+   * fourth. The host is idempotent, so nothing broke and nothing ever would
+   * have; what it cost was the operator's confidence, since the only reply to
+   * a click was the row changing whenever the request happened to land. The
+   * `seq` rather than a boolean so the spinner appears on the row the operator
+   * pressed, not on all of them.
+   */
+  const [redacting, setRedacting] = useState<number | null>(null);
+  /** Stable id for the counter the composer describes itself by. */
+  const counterId = useId();
   /**
    * Every message this tab has been shown, oldest first, deduped by `seq` — the
    * journal key, and the only identity a message has.
@@ -2000,6 +2402,9 @@ function DiscussionTab({
    * does: the parent holds the authoritative page.
    */
   async function redact(seq: number) {
+    // One at a time, and never the same one twice: see `redacting`.
+    if (redacting !== null) return;
+    setRedacting(seq);
     try {
       const row = await redactTaskDiscussion(client, company, taskId, seq);
       absorb([row]);
@@ -2008,12 +2413,28 @@ function DiscussionTab({
       toast.error(
         e instanceof Error ? e.message : "could not remove the message",
       );
+    } finally {
+      setRedacting(null);
     }
   }
 
+  // What Post would actually send, and by how much it is over the host's limit.
+  //
+  // Measured on the *trimmed* text because that is what goes on the wire: a
+  // message at exactly the cap followed by a stray newline is not over it, and
+  // blocking it would leave the operator hunting an invisible character.
+  const body = text.trim();
+  const used = countDiscussionChars(body);
+  const over = used - MAX_DISCUSSION_CHARS;
+
   async function post() {
-    const body = text.trim();
-    if (!body || busy) return;
+    // The same `body` and the same `over` the Post button is disabled by, so the
+    // keyboard path (Enter) cannot post something the button refuses. Guarded
+    // here as well as there because Enter does not consult a `disabled`
+    // attribute — and because the host would take an over-long message and
+    // truncate it to a `201`, which is the silence this whole composer exists
+    // to replace.
+    if (!body || over > 0 || busy) return;
     setBusy(true);
     try {
       const posted = await postTaskDiscussion(client, company, taskId, body);
@@ -2093,8 +2514,16 @@ function DiscussionTab({
                         className="-mr-1 size-6 shrink-0 text-muted-foreground hover:text-destructive"
                         aria-label={`Remove the message from ${m.author}`}
                         data-testid="discussion-redact"
+                        // Down for the whole thread while any withdrawal is in
+                        // flight, and spinning on the row that started it.
+                        disabled={redacting !== null}
+                        data-busy={redacting === m.seq ? "true" : undefined}
                       >
-                        <Trash2 className="size-3.5" />
+                        {redacting === m.seq ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-3.5" />
+                        )}
                       </Button>
                     }
                     title="Remove this message?"
@@ -2128,6 +2557,15 @@ function DiscussionTab({
           rows={2}
           className="min-h-16 text-xs"
           disabled={busy}
+          aria-describedby={counterId}
+          // Everything they typed or pasted is kept, over the cap included.
+          // The host truncates a long post to `MAX_DISCUSSION_CHARS` and
+          // answers `201` — so the tail used to vanish with no warning — but
+          // the fix for that is to refuse the send, not to destroy the
+          // overflow here. Neither a `maxLength` nor a clip in this handler can
+          // be undone: the browser's undo stack does not reach a value React
+          // rewrote. The counter and the disabled Post below say what is wrong
+          // while the words are still on the screen to fix.
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             // Enter posts; Shift+Enter is a newline. A note about a task is
@@ -2142,7 +2580,13 @@ function DiscussionTab({
         <Button
           size="sm"
           className="h-8 shrink-0"
-          disabled={busy || !text.trim()}
+          // Down while the message is over the cap, with the counter — which
+          // this points at — carrying the reason and the number to cut. Saving
+          // is disabled rather than silently doing nothing everywhere else on
+          // this page; this is that.
+          disabled={busy || !body || over > 0}
+          aria-describedby={counterId}
+          data-testid="discussion-post"
           onClick={() => void post()}
         >
           {busy ? (
@@ -2153,7 +2597,47 @@ function DiscussionTab({
           Post
         </Button>
       </div>
+
+      {/*
+        Always in the DOM, so the textarea's `aria-describedby` never points at
+        nothing; `sr-only` until the count is close enough to matter, because a
+        permanent `0 of 4000` under every one-line note is noise. See
+        `DISCUSSION_COUNTER_FROM`.
+      */}
+      <DiscussionCounter id={counterId} used={used} />
     </div>
+  );
+}
+
+/**
+ * The composer's character count, the sentence that appears at the cap, and the
+ * one that appears past it.
+ *
+ * Past the cap this is the only place the operator is told why Post went down,
+ * so it names the number to cut rather than just going red. Both the textarea
+ * and the Post button point at it with `aria-describedby`, which is what makes
+ * "disabled with a reason" true for a screen reader and not only on screen.
+ */
+function DiscussionCounter({ id, used }: { id: string; used: number }) {
+  const over = used - MAX_DISCUSSION_CHARS;
+  const shown = used >= DISCUSSION_COUNTER_FROM;
+  return (
+    <p
+      id={id}
+      className={cn(
+        "text-right text-2xs tabular-nums",
+        !shown && "sr-only",
+        shown &&
+          (used >= MAX_DISCUSSION_CHARS
+            ? "text-status-blocked-text"
+            : "text-muted-foreground"),
+      )}
+    >
+      {used} of {MAX_DISCUSSION_CHARS} characters
+      {over > 0 &&
+        ` — ${over} over the most a message can hold. Shorten it by ${over}, or post it in two.`}
+      {over === 0 && " — the most a message can hold. Post this and start another."}
+    </p>
   );
 }
 
@@ -2202,6 +2686,7 @@ function RetryButton({
   irreversible,
   historyIncomplete,
   disabled,
+  reason,
   onConfirm,
 }: {
   label: string;
@@ -2209,13 +2694,27 @@ function RetryButton({
   irreversible: IrreversibleEffect[];
   historyIncomplete: boolean;
   disabled: boolean;
+  /**
+   * Why the button is down, when it is down for a reason worth reading — the
+   * board card's treatment (#883), and on both branches, because a card that is
+   * blocked *and* has irreversible history renders the dialog trigger and would
+   * otherwise be a dead button with no explanation.
+   */
+  reason?: string;
   onConfirm: () => void;
 }) {
   // Nothing to warn about and nothing unaccounted for: the plain button, wired
   // straight through, exactly as it behaved before this existed.
   if (irreversible.length === 0 && !historyIncomplete) {
     return (
-      <Button variant="outline" size="sm" className="h-8" disabled={disabled} onClick={onConfirm}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-8"
+        disabled={disabled}
+        title={reason}
+        onClick={onConfirm}
+      >
         <Play className="mr-1.5 size-3.5" />
         {label}
       </Button>
@@ -2227,7 +2726,13 @@ function RetryButton({
   return (
     <ConfirmButton
       trigger={
-        <Button variant="outline" size="sm" className="h-8" disabled={disabled}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8"
+          disabled={disabled}
+          title={reason}
+        >
           <Play className="mr-1.5 size-3.5" />
           {label}
         </Button>
