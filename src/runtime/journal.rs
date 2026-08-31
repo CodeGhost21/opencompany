@@ -2149,6 +2149,29 @@ impl RuntimeJournal {
     /// Records that a parked approval expired to a default-deny, removing it
     /// from the queue. This is the durable audit entry for
     /// default-deny-on-silence.
+    /// Drops the in-memory traces of a park whose durable line never landed
+    /// (issue #1861).
+    ///
+    /// [`record_parked`](Self::record_parked) populates `origins`, `parked` and
+    /// the retained effect *before* it appends, so a failing append leaves a
+    /// live approval in the projection that no journal line will ever replay:
+    /// present until this process exits, gone on the next boot. This removes
+    /// the three entries and writes nothing — deliberately, since the caller is
+    /// here precisely because the durable write is the thing that failed, and a
+    /// compensating record would be a second write down the same broken path.
+    ///
+    /// **Not a retirement.** Nothing was durably parked, so there is nothing to
+    /// retire and no default-deny to record; the caller reports the park as
+    /// failed and its own path returns the card. Contrast
+    /// [`CompanyRuntime::unpark_blocker`](crate::company::CompanyRuntime), which
+    /// undoes a park that *did* land and therefore owes the full audit trail.
+    pub fn discard_unrecorded_park(&self, id: &ApprovalId) {
+        let mut state = self.state.lock().expect("journal state poisoned");
+        state.parked.remove(id);
+        state.origins.remove(id);
+        state.approval_effects.remove(id);
+    }
+
     pub async fn record_expired(
         &self,
         id: &ApprovalId,

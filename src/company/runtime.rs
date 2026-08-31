@@ -1332,7 +1332,23 @@ impl CompanyRuntime {
             run_id: None,
         };
         let approval_id = self.approvals.park(&self.id, effect.clone()).await?;
-        self.journal
+        // The gate park is already live at this point, so a failing journal
+        // write cannot simply `?` out: the caller would read the park as failed
+        // and return the card to To-do while the gate still held a decidable
+        // approval against it — an operator shown a question for a card nobody
+        // paused, the same inconsistency `unpark_blocker` exists to prevent on
+        // the other side of this pair.
+        //
+        // Undone in memory only, and that is the whole point: the durable write
+        // is the thing that failed, so a compensating *record* would go down
+        // the same broken path. `resolve_outcome` with a `Deny` drops the
+        // parked entry and mints nothing — `GrantedCall` exists only on the
+        // `Approved` arm — and `discard_unrecorded_park` clears the projection
+        // rows `record_parked` inserted before its append. Nothing was durably
+        // parked, so nothing is durably retired; the error propagates and the
+        // caller returns the card exactly as it does for a refused park.
+        if let Err(err) = self
+            .journal
             .record_parked(
                 &approval_id,
                 &effect,
@@ -1346,7 +1362,28 @@ impl CompanyRuntime {
                 },
                 None,
             )
-            .await?;
+            .await
+        {
+            self.approval_gate.resolve_outcome(
+                &approval_id,
+                Verdict::Deny,
+                Actor {
+                    kind: ActorKind::System,
+                    id: "park-rollback".into(),
+                },
+                now_millis(),
+            );
+            self.journal.discard_unrecorded_park(&approval_id);
+            tracing::warn!(
+                company = %self.id,
+                task = %task_id,
+                %approval_id,
+                error = %err,
+                "[blockers] a blocker could not be journaled; its gate entry was rolled back so \
+                 the card returns rather than leaving an undecidable question"
+            );
+            return Err(err);
+        }
         if let Err(err) = self
             .events
             .append(
@@ -4824,6 +4861,67 @@ impl std::fmt::Debug for CompanyRuntime {
 
 #[cfg(test)]
 mod tests {
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
+    /// every append once armed — a full or read-only data volume, which is the
+    /// failure mode `park_blocker`'s rollback exists for.
+    ///
+    /// Armed by the test rather than from birth, so boot's own journal writes
+    /// still land and the runtime under test is an ordinary one that lost its
+    /// volume mid-life.
+    #[cfg(feature = "openhuman")]
+    #[derive(Default)]
+    struct RefusingJournalStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        armed: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "openhuman")]
+    impl RefusingJournalStore {
+        fn arm(&self) {
+            self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RefusingJournalStore {
+        async fn append_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "RefusingJournalStore: the volume is full".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            lines: Vec<String>,
+        ) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
     use super::{
         CompanyEvent, continuation_failure_notice, emergency_from_load, task_enters_in_progress,
         task_enters_planning,
@@ -6461,6 +6559,80 @@ mod tests {
         assert_eq!(
             chat_id, "desk-general",
             "it still lands in the thread it answers"
+        );
+    }
+
+    /// Issue #1861 (found by Codex on #1905): a gate park that lands and then
+    /// fails to journal must not leave the approval decidable.
+    ///
+    /// # The window
+    ///
+    /// `park_blocker` parks on the gate first and journals second. A `?` on the
+    /// journal write reported the park as failed — so `settle_blocked` returned
+    /// the card to To-do — while the gate still held a live, decidable entry
+    /// against it. The operator is then shown a question for a card nobody
+    /// paused, which is the exact inconsistency `unpark_blocker` exists to
+    /// prevent on the other side of this pair.
+    ///
+    /// `record_parked` also populates the projection *before* its append, so
+    /// the same failure left a pending approval that no journal line would ever
+    /// replay: visible until the process exits, gone after a boot.
+    ///
+    /// Both are asserted here, because clearing one without the other just
+    /// moves the disagreement.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_that_cannot_be_journaled_leaves_no_decidable_approval() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let journal = std::sync::Arc::new(RefusingJournalStore::default());
+        let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(crate::ports::types::CompanyId::new("acme"))
+            .with_journal_store(journal.clone())
+            .build()
+            .await
+            .expect("runtime");
+
+        // The volume goes away *after* boot, so this is an ordinary runtime.
+        journal.arm();
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+        };
+
+        let parked = runtime.park_blocker(&payload, "t-1").await;
+        assert!(
+            parked.is_err(),
+            "an unjournaled park is reported as a failed park, so the caller returns the card"
+        );
+
+        assert!(
+            runtime.approval_gate.parked_ids().is_empty(),
+            "the gate entry must be rolled back — otherwise the operator can decide a blocker \
+             for a card that was handed straight back to To-do"
+        );
+        assert!(
+            runtime.pending_approvals().is_empty(),
+            "and the projection row `record_parked` inserted before its append must go with it"
         );
     }
 }
