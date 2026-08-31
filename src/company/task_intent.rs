@@ -190,6 +190,8 @@ const ACTION_VERBS: &[&str] = &[
     "cancel",
     "start",
     "stop",
+    "move",
+    "close",
     "implement",
     "deploy",
     "configure",
@@ -330,6 +332,32 @@ const READ_VERBS: &[&str] = &[
 /// read that lands there costs the operator nothing, whereas the gated request
 /// cost them the work.
 const READ_PHRASES: &[&str] = &["walk me through", "let me know", "remind me"];
+
+/// Phrases that point at the board or a card already on it, rather than at a new
+/// deliverable. Matched anywhere in the message, word-boundary-checked so "the
+/// card" does not fire inside "the cardstock".
+const BOARD_DEIXIS: &[&str] = &[
+    "the task card",
+    "this card",
+    "that card",
+    "the card",
+    "this task",
+    "that task",
+    "the ticket",
+    "the board",
+    "the column",
+    "the backlog",
+    "the kanban",
+];
+
+/// Mutable fields of a card. Ambiguous alone ("update the status page" is real
+/// work), so they demote only in board context — see
+/// [`field_noun_in_board_context`].
+const BOARD_FIELD_NOUNS: &[&str] = &["the status", "the priority", "the assignee"];
+
+/// Words that, immediately after a [`BOARD_FIELD_NOUNS`] phrase, mark it as the
+/// object of a board operation rather than the head of a longer noun.
+const BOARD_CONNECTIVES: &[&str] = &["on", "of", "for", "to", "and"];
 
 /// Max length of a generated task title.
 const TITLE_MAX: usize = 80;
@@ -478,12 +506,18 @@ pub fn triage_message_detailed(text: &str) -> TriageOutcome {
 
     // Frame beats interrogative: a polite instruction stays work.
     if REQUEST_FRAMES.iter().any(|f| core.starts_with(f)) && contains_action(core) {
+        if refers_to_board_entity(core) {
+            return matched(MessageTriage::Chatter);
+        }
         return matched(MessageTriage::Track(to_title(trimmed)));
     }
     if is_question(core) {
         return matched(MessageTriage::Answer);
     }
     if starts_with_action(core) {
+        if refers_to_board_entity(core) {
+            return matched(MessageTriage::Chatter);
+        }
         return matched(MessageTriage::Track(to_title(trimmed)));
     }
     // The residue. Every rule above declined, so this says only "no rule
@@ -681,6 +715,72 @@ fn starts_with_action(lower: &str) -> bool {
     // Trim trailing punctuation on the first word ("build," / "fix:").
     let first = first.trim_end_matches([',', ':', ';', '.', '!']);
     ACTION_VERBS.contains(&first)
+}
+
+/// Whether the object of the request is the board itself or a card on it — a
+/// message *about* the kanban rather than a new deliverable.
+fn refers_to_board_entity(lower: &str) -> bool {
+    if BOARD_DEIXIS.iter().any(|p| contains_word_bounded(lower, p)) {
+        return true;
+    }
+    field_noun_in_board_context(lower)
+}
+
+/// True when `phrase` occurs in `lower` with non-alphanumeric edges, so only a
+/// whole word matches.
+fn contains_word_bounded(lower: &str, phrase: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(phrase) {
+        let start = from + rel;
+        let end = start + phrase.len();
+        let before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after = end == lower.len() || !bytes[end].is_ascii_alphanumeric();
+        if before && after {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// A [`BOARD_FIELD_NOUNS`] phrase used as a board operation's object: clause-final,
+/// or immediately followed by a connective/preposition/punctuation rather than a
+/// continuing noun.
+fn field_noun_in_board_context(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    for phrase in BOARD_FIELD_NOUNS {
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(phrase) {
+            let start = from + rel;
+            let end = start + phrase.len();
+            from = start + 1;
+            let before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let after = end == lower.len() || !bytes[end].is_ascii_alphanumeric();
+            if before && after && followed_by_board_context(&lower[end..]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether what trails a field noun marks it as a board operation's object: the
+/// clause ends, or the next token is punctuation or a [`BOARD_CONNECTIVES`] word
+/// — but not a continuing noun ("the status **page**").
+fn followed_by_board_context(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    match rest.chars().next() {
+        None => true,
+        Some(c) if !c.is_alphanumeric() => true,
+        Some(_) => {
+            let next_word = rest
+                .split(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or("");
+            BOARD_CONNECTIVES.contains(&next_word)
+        }
+    }
 }
 
 /// An action verb/phrase appears anywhere (used behind a request frame).
@@ -950,6 +1050,85 @@ mod tests {
         assert_eq!(
             triage_message("could you please fix the checkout bug?"),
             MessageTriage::Track("Fix the checkout bug".to_string())
+        );
+    }
+
+    /// The predicate the board guard turns on: deixis matches anywhere, field
+    /// nouns demote only in board context, and everything else is real work.
+    #[test]
+    fn board_entity_predicate_reads_the_object_of_the_request() {
+        // Tier 1 — deixis, matched anywhere in the message.
+        for msg in [
+            "update the status on the task card",
+            "move this card to done",
+            "close the ticket",
+            "reprioritise the backlog",
+            "look at the board",
+        ] {
+            assert!(refers_to_board_entity(msg), "should be board: {msg}");
+        }
+        // Tier 2 — a field noun that is the object of a board operation.
+        assert!(refers_to_board_entity("update the status on the board"));
+        assert!(refers_to_board_entity("bump the priority")); // clause-final
+        assert!(refers_to_board_entity("change the assignee to nova")); // connective
+        // Tier 2 — a field noun that heads a longer noun is real work.
+        assert!(!refers_to_board_entity("update the status page"));
+        assert!(!refers_to_board_entity("draft the priority list"));
+        // No board vocabulary at all.
+        for msg in [
+            "update the landing page",
+            "move the deploy to staging",
+            "create a task tracker",
+        ] {
+            assert!(!refers_to_board_entity(msg), "should not be board: {msg}");
+        }
+        // A boundary check: deixis must not fire inside a larger word.
+        assert!(!refers_to_board_entity("restock the cardstock"));
+    }
+
+    /// A board operation phrased as an instruction is a *decision* to touch the
+    /// existing card, not a new deliverable — so it is `Chatter` (Matched), not
+    /// a second `Track` card. The incident that opened the issue leads the list.
+    #[test]
+    fn a_board_operation_does_not_mint_a_second_card() {
+        for msg in [
+            "can you also update the status on the task card?",
+            "update the status on the task card",
+            "please move the card to done",
+            "can you update the priority on this task?",
+            "close the ticket",
+            "update the status on the board",
+        ] {
+            let out = triage_message_detailed(msg);
+            assert_eq!(out.triage, MessageTriage::Chatter, "should not card: {msg}");
+            assert_eq!(
+                out.confidence,
+                TriageConfidence::Matched,
+                "a board op is a decision, not an abstention: {msg}"
+            );
+            assert!(detect_task_intent(msg).is_none(), "no card for: {msg}");
+        }
+    }
+
+    /// The other side of the trade: real work that merely mentions a board word
+    /// (or a field noun heading a longer noun) still cards.
+    #[test]
+    fn real_work_that_mentions_a_field_still_cards() {
+        for (msg, title) in [
+            ("update the landing page", "Update the landing page"),
+            ("move the deploy to staging", "Move the deploy to staging"),
+            ("update the status page", "Update the status page"),
+            ("create a task tracker", "Create a task tracker"),
+        ] {
+            assert_eq!(
+                triage_message(msg),
+                MessageTriage::Track(title.to_string()),
+                "should stay work: {msg}"
+            );
+        }
+        assert_eq!(
+            triage_message("can you review the design"),
+            MessageTriage::Track("Review the design".to_string())
         );
     }
 
