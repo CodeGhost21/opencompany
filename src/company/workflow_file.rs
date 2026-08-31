@@ -1526,6 +1526,25 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                     ));
                 }
             }
+            // Codex #3893851369 review: `evaluate_postcondition` resolves
+            // `field` against the SAME `{ text, agent_ref, json }` envelope
+            // `run_turn` builds just above its call site — those three keys
+            // are the only roots `resolve_path` can ever walk from. A bare
+            // structured field like `field = "items"` (no `json.` prefix)
+            // therefore resolves `output.get("items")`, which is never
+            // present on that envelope no matter what the agent replies —
+            // `field_present`/`non_empty_list` fail on every single run, not
+            // just a badly-shaped one. Refused at author time, the same way
+            // the `json.text`/`json.agent_ref` collision just above is,
+            // rather than shipping a gate that can never pass.
+            if let Some(field) = postcondition.field.as_deref() {
+                let root = field.split('.').next().unwrap_or("");
+                if !matches!(root, "json" | "text" | "agent_ref") {
+                    problems.push(format!(
+                        "{label} has a `postcondition.field` of `{field}` — the emitted output only resolves fields rooted at `json`, `text`, or `agent_ref`; a bare field like `{field}` never lands at runtime. Use `json.{field}` to check the parsed reply's `{field}` key."
+                    ));
+                }
+            }
         }
 
         // Reserved config keys: the first-class fields above are written into
@@ -2281,7 +2300,7 @@ mod tests {
                     destination: None,
                     postcondition: Some(WorkflowPostconditionDef {
                         require: "field_present".to_string(),
-                        field: Some("items".to_string()),
+                        field: Some("json.items".to_string()),
                     }),
                 },
             ],
@@ -2299,7 +2318,12 @@ mod tests {
             .as_ref()
             .expect("the postcondition survived the round trip");
         assert_eq!(postcondition.require, "field_present");
-        assert_eq!(postcondition.field.as_deref(), Some("items"));
+        // Codex #3893851369 on #1937: the bare `items` this test used to
+        // assert here validates but can never resolve at runtime (see
+        // `postcondition_field_with_a_bare_structured_root_is_rejected`) —
+        // the documented `json.items` form is the only one `parse_workflow`
+        // now accepts.
+        assert_eq!(postcondition.field.as_deref(), Some("json.items"));
     }
 
     /// Issue #1866: `postcondition` is operator-only policy, exactly like
@@ -2710,7 +2734,7 @@ mod tests {
             agent = "ceo"
             [node.postcondition]
             require = "field_present"
-            field = "items"
+            field = "json.items"
             [[edge]]
             from = "start"
             to = "worker"
@@ -2719,7 +2743,7 @@ mod tests {
         let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
         let postcondition = worker.postcondition.as_ref().expect("postcondition set");
         assert_eq!(postcondition.require, "field_present");
-        assert_eq!(postcondition.field.as_deref(), Some("items"));
+        assert_eq!(postcondition.field.as_deref(), Some("json.items"));
     }
 
     #[test]
@@ -2792,6 +2816,79 @@ mod tests {
         "#;
         let err = parse_workflow(src).unwrap_err();
         assert!(err.to_string().contains("but no `field`"), "{err}");
+    }
+
+    /// Codex #3893851369 on #1937: a bare structured field like `field =
+    /// "items"` validates today but can NEVER resolve at runtime —
+    /// `evaluate_postcondition` checks `field` against the `{ text,
+    /// agent_ref, json }` envelope `run_turn` builds, and a bare `items`
+    /// root is not one of those three keys, so `resolve_path` always returns
+    /// `None` regardless of what the agent replies. Refused at author time
+    /// instead of shipping a gate that can never pass. Before this fix this
+    /// assertion is RED: `parse_workflow` returns `Ok`, so `.unwrap_err()`
+    /// panics with "called `Result::unwrap_err()` on an `Ok` value".
+    #[test]
+    fn postcondition_field_with_a_bare_structured_root_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            field = "items"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("never lands at runtime") && message.contains("json.items"),
+            "{message}"
+        );
+    }
+
+    /// Companion GREEN: the documented `json.` prefix from the same field
+    /// name parses fine — the rejection above targets the missing prefix,
+    /// not the field name `items` itself.
+    #[test]
+    fn postcondition_field_with_the_json_prefix_still_parses() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            field = "json.items"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let file = parse_workflow(src).expect("the documented `json.` prefix is accepted");
+        let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
+        assert_eq!(
+            worker
+                .postcondition
+                .as_ref()
+                .and_then(|p| p.field.as_deref()),
+            Some("json.items")
+        );
     }
 
     /// Codex #3893619015 on #1937: `text`/`agent_ref` are the two top-level
