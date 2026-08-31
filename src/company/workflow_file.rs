@@ -1184,6 +1184,43 @@ fn list_company_workflows_union(
     files
 }
 
+/// The JSON value kinds a `postcondition.require` predicate could EVER
+/// accept from its resolved `field` target, expressed structurally so the
+/// intersection check in [`validate`] catches a future predicate's own
+/// narrow accepted set the same way it catches `non_empty_list` today,
+/// without a hand-written special case per predicate (issue #1937 boundary
+/// sweep — see [`root_possible_kinds`] for the other half of the rule).
+///
+/// `None` means "no constraint from this predicate": `non_empty` ignores
+/// `field` entirely (it only ever reads the envelope's own `text`), and
+/// `field_present` accepts any present, non-null value regardless of kind —
+/// neither can ever conflict with what a root statically guarantees.
+fn require_accepted_kinds(require: &str) -> Option<&'static [&'static str]> {
+    match require {
+        "non_empty_list" => Some(&["array"]),
+        _ => None,
+    }
+}
+
+/// The JSON value kinds a `postcondition.field` root could EVER hold, when
+/// that is knowable purely from how the envelope [`evaluate_postcondition`]
+/// evaluates against is constructed — independent of anything the agent
+/// replies. `text` and `agent_ref` are unconditionally strings (`run_turn`
+/// inserts `outcome.reply` and the real roster id, both raw `String`
+/// fields, before anything else runs). `json` (bare or dotted) carries the
+/// agent's own best-effort-parsed reply, whose shape this binary cannot
+/// predict at author time, so `None` here means "unconstrained" — every
+/// other `field` root is already refused elsewhere in [`validate`], so this
+/// function is only ever asked about a root that passed those checks.
+///
+/// [`evaluate_postcondition`]: crate::workflows::caps::postcondition::evaluate_postcondition
+fn root_possible_kinds(root: &str) -> Option<&'static [&'static str]> {
+    match root {
+        "text" | "agent_ref" => Some(&["string"]),
+        _ => None,
+    }
+}
+
 /// Collects every validation problem in prosumer language. Empty means valid.
 ///
 /// `strict` picks the severity surface (issue #682). The two NEW #661 author-time
@@ -1567,6 +1604,51 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                 if matches!(root, "text" | "agent_ref") && segments.next().is_some() {
                     problems.push(format!(
                         "{label} has a `postcondition.field` of `{field}` — `{root}` is always a plain string in the emitted output, so a dotted descendant like `{field}` can never resolve at runtime. Use `{root}` on its own (no further path), or target structured data under `json` instead."
+                    ));
+                }
+            }
+            // Codex #3894277296 on #1937 — the checks above are root-AWARE
+            // (which key can `field` even name) but not predicate-aware
+            // (whether the value THAT root guarantees can ever satisfy the
+            // declared `require`). `non_empty_list` on a bare `field =
+            // "text"` or `field = "agent_ref"` slips past every check above:
+            // both are real, exact, childless roots — but they are ALWAYS
+            // strings (`run_turn` inserts `outcome.reply` / the real roster
+            // id, both raw `String`s, unconditionally), and
+            // `non_empty_list` only ever accepts a `Value::Array`. No reply
+            // the agent could ever give changes that — this is a fourth
+            // shape of the same "gate that can never pass" defect the three
+            // checks above exist to close (bare `items`, `text.`/
+            // `agent_ref.` descendants, and — at evaluation time, since it
+            // depends on the runtime value not the static path —
+            // `field_present`'s bare-scalar-under-`json` refusal).
+            //
+            // Expressed structurally rather than as a fifth special case:
+            // for each `require`, `require_accepted_kinds` names which JSON
+            // value kinds could EVER let it return `Ok` (`None` = no
+            // constraint — the predicate ignores `field`, like `non_empty`,
+            // or accepts any non-null value regardless of kind, like
+            // `field_present`); `root_possible_kinds` names which kinds a
+            // `field` root could EVER hold, when that is knowable purely
+            // from the envelope's own construction (`None` for `json`/
+            // `json.<path>` — the agent's own reply, unconstrained). When
+            // BOTH are known and their intersection is empty, no reply can
+            // ever satisfy the gate — reject. This is the same rule that
+            // would catch a FIFTH predicate with its own narrow accepted
+            // set against `text`/`agent_ref`, without needing its own
+            // special case written by hand.
+            if let Some(field) = postcondition.field.as_deref() {
+                let root = field.split('.').next().unwrap_or("");
+                if let (Some(accepted), Some(possible)) = (
+                    require_accepted_kinds(&postcondition.require),
+                    root_possible_kinds(root),
+                ) && !accepted.iter().any(|k| possible.contains(k))
+                {
+                    let require = &postcondition.require;
+                    problems.push(format!(
+                        "{label} declares `require = \"{require}\"` with `field = \"{field}\"` — `{root}` can only ever be a {}, and `{require}` only ever accepts a {}, so this gate can never pass no matter what the agent replies. Target `json` (or a dotted path under it) instead.",
+                        possible.join(" or "),
+                        accepted.join(" or "),
                     ));
                 }
             }
@@ -2988,6 +3070,86 @@ mod tests {
             );
             parse_workflow(&src)
                 .unwrap_or_else(|err| panic!("field `{field}` on its own is valid: {err}"));
+        }
+    }
+
+    /// Codex #3894277296 on #1937 — the fourth structurally-impossible-gate
+    /// finding: `non_empty_list` only ever accepts a `Value::Array`, but
+    /// `text`/`agent_ref` are real, exact, childless roots (they pass every
+    /// check above), and BOTH are unconditionally strings — no reply the
+    /// agent could ever give makes `resolve_path(output, "text")` or
+    /// `resolve_path(output, "agent_ref")` come back an array. Before this
+    /// fix this assertion is RED: `parse_workflow` returns `Ok`, so
+    /// `.unwrap_err()` panics.
+    #[test]
+    fn postcondition_non_empty_list_on_text_or_agent_ref_is_rejected() {
+        for field in ["text", "agent_ref"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "non_empty_list"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            let err = parse_workflow(&src).expect_err(&format!(
+                "non_empty_list on `{field}` can never see an array"
+            ));
+            let message = err.to_string();
+            assert!(
+                message.contains("can never pass") && message.contains(field),
+                "field `{field}`: {message}"
+            );
+        }
+    }
+
+    /// Companion GREEN, both halves of the rule: `non_empty_list` still
+    /// parses fine against `json` content (the root this predicate CAN be
+    /// satisfied through), and `field_present` still parses fine against
+    /// `text`/`agent_ref` (already pinned by
+    /// `postcondition_field_of_exactly_text_or_agent_ref_still_parses`
+    /// above — restated here as the other half of the same intersection
+    /// rule: `field_present` accepts any non-null kind, so it never
+    /// conflicts with a root's fixed kind, only `non_empty_list` does).
+    #[test]
+    fn postcondition_non_empty_list_on_json_content_still_parses() {
+        for field in ["json", "json.items"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "non_empty_list"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            parse_workflow(&src)
+                .unwrap_or_else(|err| panic!("field `{field}` is `json` content: {err}"));
         }
     }
 
