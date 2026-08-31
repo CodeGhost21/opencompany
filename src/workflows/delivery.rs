@@ -1490,21 +1490,33 @@ async fn send_to_channel_adapter(
     };
     let journal_channel = if is_operator {
         let feed = record.operator_feed_channel();
-        // Issue #1781 review (CodeRabbit P2 follow-up): `operator_feed_channel`
-        // diverts to `OPERATOR_CHANNEL_COLLISION_FALLBACK` without re-checking
-        // that address is itself free — a second grandfathered desk name can
-        // still shadow it (see `operator_feed_channel_fallback_shadowed`'s own
-        // doc for why no third address closes this). There is nowhere else to
-        // journal this report, so it still lands on `feed`; log loudly rather
-        // than let the misroute go unnoticed.
+        // Issue #1781 review (CodeRabbit P2 follow-up, then a fresh P2 on the
+        // follow-up itself): `operator_feed_channel` diverts to
+        // `OPERATOR_CHANNEL_COLLISION_FALLBACK` without re-checking that
+        // address is itself free — a second grandfathered desk name can still
+        // shadow it (see `operator_feed_channel_fallback_shadowed`'s own doc
+        // for why no third address closes this). There is nowhere safe left to
+        // journal this report: sending it to `feed` anyway would silently mix
+        // it into that shadowing desk's own transcript while still reporting
+        // `Sent`. Refuse instead of guessing — the operator can rename the
+        // colliding desk and re-run, which a `Sent`-but-misrouted report would
+        // never have surfaced a reason to do.
         if record.operator_feed_channel_fallback_shadowed() {
             tracing::error!(
                 company = %record.id,
                 fallback = feed,
                 "operator feed collision-fallback channel is itself shadowed by a \
-                 grandfathered desk name; this workflow report will be misrouted \
-                 into that desk's own transcript"
+                 grandfathered desk name; refusing this workflow report instead of \
+                 misrouting it into that desk's own transcript"
             );
+            return Err((
+                DeliveryReason::ChannelCollisionShadowed,
+                format!(
+                    "the operator feed's collision-fallback address (`{feed}`) is itself \
+                     claimed by another desk's name, so this report has no safe address to \
+                     journal to — rename the colliding desk to clear this"
+                ),
+            ));
         }
         feed
     } else {
@@ -2461,6 +2473,95 @@ role = "Chief of Staff"
             landed.iter().all(|chat_id| chat_id != OPERATOR_CHANNEL),
             "the literal `operator` line must stay untouched by the durable \
              feed — that is the teammate's own DM address: {landed:?}"
+        );
+    }
+
+    /// Issue #1781 review (fresh P2 on `operator_feed_channel_fallback_shadowed`
+    /// itself): the residual double collision that predicate detects must not
+    /// merely be logged while the report ships anyway. Reuses this fixture's
+    /// manifest shape from `CompanyRecord`'s own
+    /// `operator_feed_channel_fallback_shadowed_detects_a_double_collision` test
+    /// (`ports::types`) — one grandfathered desk named "Operator" (shadowing the
+    /// primary address) and a second, different desk named "operator-feed"
+    /// (shadowing the collision fallback) — and proves the delivery layer
+    /// refuses the send rather than journaling into that second desk's own
+    /// transcript while still reporting `Sent`.
+    #[tokio::test]
+    async fn a_double_collision_refuses_delivery_instead_of_misrouting() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), false, true);
+
+        let mut collided = record(&[]);
+        collided.manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[group_chat]]
+id = "legacy_ops"
+name = "Operator"
+members = []
+
+[[group_chat]]
+id = "ops2"
+name = "operator-feed"
+members = []
+"#,
+        )
+        .expect("valid manifest with a double grandfathered collision");
+        assert!(
+            collided.operator_feed_channel_fallback_shadowed(),
+            "fixture must actually be in the double-collision state this test \
+             exercises, or it proves nothing"
+        );
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &collided,
+            &graph("channel", Some(OPERATOR_CHANNEL)),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(
+            reports[0].status,
+            DeliveryStatus::Failed,
+            "a shadowed fallback must be reported as a failed delivery, never \
+             `Sent` — a `Sent` row here is exactly the silent misroute this test \
+             guards against: {reports:?}"
+        );
+        assert_eq!(
+            reports[0].reason,
+            DeliveryReason::ChannelCollisionShadowed,
+            "{reports:?}"
+        );
+
+        let landed = h
+            .events
+            .read_from(
+                &h.company,
+                crate::ports::types::EventSeq::new(0),
+                usize::MAX,
+            )
+            .await
+            .expect("journal readable")
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            landed.is_empty(),
+            "a refused delivery must not append anything to the event log — in \
+             particular nothing must land on \"operator-feed\", the second \
+             desk's own transcript: {landed:?}"
         );
     }
 
