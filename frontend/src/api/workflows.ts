@@ -89,6 +89,23 @@ export interface WorkflowNode {
    * classifies its call as reaching outside the company.
    */
   repeatable?: boolean;
+  /**
+   * A deterministic postcondition (issue #1866): a mechanical predicate
+   * checked against the node's output before it is allowed to flow
+   * downstream — `require` is `"non_empty"` | `"field_present"` |
+   * `"non_empty_list"`, `field` a dotted path into the output (required for
+   * `field_present`, optional for `non_empty_list`).
+   *
+   * Only ever set through the write route, on `agent` nodes today. This
+   * console has no control for it, so every read/write path here must carry
+   * it through verbatim like `onError`/`retry`/`requiresApproval`/
+   * `repeatable` — dropping it on an unrelated edit silently removes a
+   * run-safety gate the operator declared (issue #1937 review).
+   */
+  postcondition?: {
+    require: string;
+    field?: string;
+  };
   /** Where an `output` node's report goes when the run finishes. */
   destination?: WorkflowDestination;
 }

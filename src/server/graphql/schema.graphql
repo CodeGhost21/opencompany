@@ -1483,6 +1483,12 @@ type WorkflowNode {
 	words, so the model shape needs no camelCase mirror the way `retry` does.
 	"""
 	destination: JSON
+	"""
+	A node's declared deterministic postcondition (issue #1866), as a JSON
+	scalar for the same reason `destination` is — `require`/`field` are
+	single words, so no camelCase mirror is needed.
+	"""
+	postcondition: JSON
 }
 
 """

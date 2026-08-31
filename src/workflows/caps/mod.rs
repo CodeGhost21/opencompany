@@ -51,6 +51,10 @@
 
 mod dry_run;
 mod http;
+/// Issue #1866: the deterministic postcondition tier of the sufficiency gate —
+/// mechanical predicates over a node's output, evaluated before the node's
+/// success settles.
+mod postcondition;
 pub(crate) mod resolver;
 mod state;
 mod tools;
@@ -2354,6 +2358,81 @@ impl HarnessAgentRunner {
             return Err(EngineError::Capability(message));
         }
 
+        // ── Issue #1866: the deterministic postcondition gate ────────────────
+        //
+        // A node whose declared `postcondition` the output fails does not feed
+        // downstream, full stop — checked BEFORE the hit_iteration_cap decision
+        // below and before the attempt row settles Succeeded. A capped turn's
+        // partial reply is exactly the truncation class this gate is meant to
+        // catch, so it is deliberately not special-cased here: if a
+        // postcondition is declared, it is checked regardless of whether the
+        // cap already would have failed the attempt on its own. This runs
+        // AFTER the `abnormal_stop` check above: a refusal/cancellation has
+        // already returned `Err` with no reply worth evaluating by the time
+        // this is reached.
+        //
+        // `on_error` defaults to `"stop"` and `retry.max_attempts` to `1` (the
+        // same contract issue #881's block above leans on), so returning `Err`
+        // halts the branch at this node with no retry re-running the turn, and
+        // nothing downstream ever sees the insufficient output.
+        // Codex review on #1937: `require = "field_present"`/`"non_empty_list"`
+        // document a dotted `field` like `json.items`, which only ever
+        // resolves against the engine's `{ json, text, raw }` capability-node
+        // envelope — so this best-effort parses the agent's reply as JSON (an
+        // agent prompted to answer with structured output does), giving those
+        // two predicates real structured content to check instead of an
+        // object that can never be a `Value::Array`. A reply that is not
+        // valid JSON (the common case — agent nodes are prose by default)
+        // parses to `Null`, so `field_present`/`non_empty_list` fail with
+        // their ordinary "missing"/"not a list" gap message rather than
+        // crashing or silently passing.
+        //
+        // Codex #3893330383 on #1937: the gate's evaluation envelope needs
+        // this parse, but the node's own emitted output must see the SAME
+        // parsed value too, or the gate can certify `field_present`/
+        // `non_empty_list` while a downstream `=item.json.<field>` binding
+        // still resolves to null.
+        //
+        // CodeRabbit #3893565788 review: gated on `postcondition_declared`,
+        // computed only when a postcondition is actually declared — this
+        // parse (and the merge it feeds, below) must not run for the vast
+        // majority of agent nodes that never opted into structured-output
+        // evaluation. Before this gate, ANY agent node whose reply happened
+        // to parse as a JSON object had that object's keys merged into its
+        // emitted output, changing the output contract for every existing
+        // workflow whether or not it ever declared a postcondition — a
+        // `=item.json.<field>` binding that reliably resolved to null for
+        // every past run could start resolving to model-controlled content
+        // depending on what the agent happened to reply this run, for a node
+        // that never asked for structured output at all.
+        let postcondition_declared = request.get("postcondition").is_some();
+        let parsed_reply = if postcondition_declared {
+            serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
+
+        if let Some(spec) = request.get("postcondition") {
+            let envelope = json!({
+                "text": outcome.reply,
+                "agent_ref": agent_ref,
+                "json": parsed_reply.clone(),
+            });
+            if let Err(gap) = postcondition::evaluate_postcondition(spec, &envelope) {
+                let message = format!(
+                    "workflow node `{}` failed its postcondition: {gap}",
+                    node_id.as_deref().unwrap_or(agent_ref)
+                );
+                self.settle_attempt(
+                    run_sink.as_ref(),
+                    crate::ports::RunStatus::Failed,
+                    Some(message.clone()),
+                )
+                .await;
+                return Err(EngineError::Capability(message));
+            }
+        }
+
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
         // reply as `text` so a downstream `=item.text` binding resolves. A
         // workflow node carries no chat bubble, so the turn's steps are dropped
@@ -2415,7 +2494,92 @@ impl HarnessAgentRunner {
             (crate::ports::RunStatus::Succeeded, None)
         };
         self.settle_attempt(run_sink.as_ref(), status, error).await;
-        let value = json!({ "text": outcome.reply, "agent_ref": agent_ref });
+        // `value` becomes `AgentRunOutcome.json` in `run` below, which lands at
+        // the engine's item envelope `json` (tinyflows' `finish_agent_run` —
+        // `Value::Object`/`Value::Array` pass through unchanged, anything else
+        // becomes `Null`) — i.e. this literal object IS what a downstream
+        // `=item.json.<field>` binding reads. Reflecting `parsed_reply` here
+        // (Codex #3893330383 on #1937) makes that binding resolve to the SAME
+        // value the postcondition gate above just certified, instead of a
+        // wrapper that never carried it.
+        //
+        // Scoped to `postcondition_declared` (CodeRabbit #3893565788): every
+        // agent node without a declared postcondition keeps the exact
+        // `{text, agent_ref}` shape it always had, unaffected by whatever the
+        // model happened to reply — the behavior change is confined to the
+        // population that opted into structured-output evaluation.
+        let mut value = json!({ "text": outcome.reply, "agent_ref": agent_ref });
+        if postcondition_declared {
+            match &parsed_reply {
+                // `text`/`agent_ref` are already in `value` and merged with
+                // `or_insert` (base wins on any key collision) rather than the
+                // other way around: `delivery.rs::report_text` reads a
+                // delivered report's body via `item.json.text` (falling back
+                // to a nested `item.json.json.text`, its own doc names this
+                // exact double-wrap), so `value["text"]` must always stay the
+                // raw reply string — a reply that happens to parse as JSON
+                // must not make the delivered report lose its prose to the
+                // parsed object's own (irrelevant) `text` key.
+                Value::Object(parsed_map) => {
+                    if let Value::Object(out_map) = &mut value {
+                        for (k, v) in parsed_map {
+                            out_map.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+                // Codex #3893541856 review: a bare JSON array (the no-`field`
+                // `non_empty_list` case) can't merge into the `{text,
+                // agent_ref}` object shape — so replace `value` wholesale
+                // with the array itself rather than dropping it, the same
+                // "downstream must see what the gate certified" reasoning as
+                // the object case. `=item.json` (the whole value) then
+                // resolves to the exact array `non_empty_list` validated.
+                // `item.text` (a separate, top-level field on the emitted
+                // outcome, not nested under `json`) still independently
+                // carries the raw reply string, so nothing that reads the
+                // prose loses it — only `item.json.text` specifically stops
+                // resolving for this one node, and only because this node
+                // declared it wants list-shaped output, not prose.
+                Value::Array(_) => {
+                    value = parsed_reply.clone();
+                }
+                // Codex #3894162757 on #1937 — a scalar reply does NOT get
+                // the same wholesale-replace treatment as an array, despite
+                // looking like the same case. An earlier round tried exactly
+                // that (`value = parsed_reply.clone()` here too) and it was
+                // wrong: unlike an array, a bare scalar can never survive to
+                // a downstream binding regardless of what this function
+                // does. tinyflows' own envelope construction
+                // (`finish_agent_run` / `envelope::structured_of`, vendored)
+                // clamps `AgentRunOutcome.json` to `Value::Null` for
+                // anything that is not an `Object`/`Array` — "scalars carry
+                // no structure" is that crate's own stated invariant, not
+                // something this function can opt out of. Setting `value` to
+                // a bare `42` here just moves the wrong-value-downstream bug
+                // one layer out: `run_turn` would return the certified `42`,
+                // but the ENGINE would still null it before any `=item.json`
+                // binding ever saw it — proven end-to-end by
+                // `workflows::runner::tests::
+                // a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`.
+                // The gate itself now refuses to certify this shape in the
+                // first place (`postcondition::evaluate_postcondition`'s
+                // `field_present` arm rejects a scalar under the bare `json`
+                // root) — an author who wants a scalar delivered needs the
+                // agent to reply with an object naming it
+                // (`{"score": 42}`) and target the dotted path
+                // (`field = "json.score"`), which already works via the
+                // `Value::Object` merge arm above. So this arm is
+                // deliberately absent: a scalar falls to the catch-all below,
+                // same as any other reply that cannot merge cleanly.
+                //
+                // Not valid JSON (the common case, even among nodes that
+                // declared a postcondition — e.g. `non_empty` needs only
+                // prose), a literal JSON `null` reply, or — per the above — a
+                // bare scalar: leave `value` as the ordinary `{text,
+                // agent_ref}` shape. Nothing here can usefully replace it.
+                _ => {}
+            }
+        }
         Ok((value, outcome))
     }
 }
@@ -3449,6 +3613,962 @@ mod tests {
         assert!(
             message.contains("the agent declined to continue"),
             "the error must carry the abnormal-stop reason, not a generic failure: {message}"
+        );
+    }
+
+    /// Issue #1866 (deterministic tier) — the RED-on-old proof. A capped
+    /// turn's partial reply already settles the attempt row `Failed` (issue
+    /// #1865, pinned above), but on the pre-#1866 `run_turn` it still returns
+    /// `Ok` and flows the truncated text downstream via `=items` — nothing
+    /// stops it. Declaring a `postcondition` this same output fails must
+    /// ALSO turn the return into `Err`, so nothing downstream ever binds it.
+    ///
+    /// Reuses [`CappedWorkflowTurn`] — its `{ "text": "partial answer, still
+    /// going", "agent_ref": ... }` envelope has no `items` field, so
+    /// `field_present` on `items` is exactly the gap this node's truncated
+    /// output represents. On the code as it stood before this issue, this
+    /// assertion fails: `run_turn` returns `Ok` here (see the sibling test
+    /// above, which asserts `.expect(...)` on the identical outcome).
+    #[tokio::test]
+    async fn a_node_whose_postcondition_fails_halts_before_returning_ok() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-postcondition-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(CappedWorkflowTurn);
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1866"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1866"));
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1866".to_string(),
+            "run-1866".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "loop_step",
+                    "prompt": "keep going",
+                    "postcondition": { "require": "field_present", "field": "items" }
+                }),
+            )
+            .await;
+
+        let err = result.expect_err(
+            "a truncated reply that also fails its declared postcondition must halt — \
+             this is the RED-on-old assertion: pre-#1866 code returns Ok here",
+        );
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("items"),
+            "the halting message should name what the output was missing: {message}"
+        );
+
+        // The ordinary failure bucket, not `WaitingApproval` — nobody has to
+        // approve a bad output the way they approve a gated tool call.
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1866".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts.len(), 1, "one attempt for one node turn");
+        assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
+    }
+
+    /// Companion GREEN: a node with no `postcondition` declared is completely
+    /// unaffected — the exact back-compat contract every other first-class
+    /// field on this call site keeps (`on_error`, `retry`,
+    /// `requires_approval`). Reuses the ordinary `RecordingWorkflowTurn` /
+    /// `ok_outcome` fixture the #1702 dispatch test above already trusts.
+    #[tokio::test]
+    async fn a_node_with_no_postcondition_is_unaffected() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-no-postcondition-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1866b"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1866b"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1866b".to_string(),
+            "run-1866b".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn("researcher", json!({ "node_id": "plain", "prompt": "go" }))
+            .await
+            .expect("a node with no postcondition must not be gated at all");
+        assert_eq!(outcome.reply, "ok");
+        assert_eq!(value["text"], "ok");
+    }
+
+    /// Companion GREEN: an output that DOES satisfy its declared
+    /// postcondition returns `Ok` exactly as an ungated node would — the gate
+    /// only ever removes a path, never adds one for output that clears it.
+    #[tokio::test]
+    async fn a_satisfying_output_still_returns_ok() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-satisfying-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1866c"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1866c"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1866c".to_string(),
+            "run-1866c".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        // `RecordingWorkflowTurn::ok_outcome` replies "ok" — non-empty, so
+        // `non_empty` is satisfied and the turn proceeds exactly as if no
+        // postcondition were declared at all.
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "plain",
+                    "prompt": "go",
+                    "postcondition": { "require": "non_empty" }
+                }),
+            )
+            .await
+            .expect("an output that satisfies its postcondition must not be halted");
+        assert_eq!(outcome.reply, "ok");
+        assert_eq!(value["text"], "ok");
+    }
+
+    /// Codex review on #1937 (issue #1866) — the RED-on-old proof for
+    /// `non_empty_list`. The postcondition envelope this call site built was
+    /// always `{ "text": <reply>, "agent_ref": <ref> }`: an object, never a
+    /// `Value::Array`, so a `require = "non_empty_list"` declaration with no
+    /// `field` could never be satisfied by ANY agent reply — including a
+    /// reply that is itself the literal JSON text of a non-empty list, which
+    /// is exactly what this test sends. On the code as it stood before this
+    /// fix, this assertion fails: `run_turn` returns `Err` here because the
+    /// envelope's `json` never carried the agent's parsed reply.
+    ///
+    /// Updated for Codex #3893541856 (bare-array emission): the emitted
+    /// `value` is now the array itself, not an object with a `text` key — see
+    /// `a_bare_array_reply_replaces_the_emitted_value_wholesale` below for the
+    /// dedicated coverage of that shape. `outcome.reply` (a separate field,
+    /// untouched by any of this) still carries the raw string regardless.
+    #[tokio::test]
+    async fn a_reply_that_is_a_json_list_satisfies_non_empty_list_with_no_field() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-postcondition-list-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "[\"x\", \"y\"]".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937".to_string(),
+            "run-1937".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "list two things",
+                    "postcondition": { "require": "non_empty_list" }
+                }),
+            )
+            .await
+            .expect(
+                "a reply that IS the JSON text of a non-empty list must satisfy \
+                 `non_empty_list` with no `field` — this is the RED-on-old assertion: \
+                 pre-fix code always built a `{text, agent_ref}` envelope that could \
+                 never be seen as a `Value::Array`",
+            );
+        assert_eq!(outcome.reply, "[\"x\", \"y\"]");
+        assert_eq!(value, json!(["x", "y"]));
+    }
+
+    /// Companion: a plain-prose reply (the common case — agent nodes are not
+    /// asked for structured output by default) still fails `non_empty_list`
+    /// honestly, rather than the fix silently passing everything through
+    /// once a `json` key exists on the envelope.
+    #[tokio::test]
+    async fn a_prose_reply_still_fails_non_empty_list_with_no_field() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-postcondition-prose-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "here is a summary, not a list".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937b"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937b"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937b".to_string(),
+            "run-1937b".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "list two things",
+                    "postcondition": { "require": "non_empty_list" }
+                }),
+            )
+            .await;
+
+        let err = result.expect_err(
+            "a plain-prose reply must still fail `non_empty_list` — the fix must not \
+             silently pass every reply once the envelope carries a `json` key",
+        );
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("not a list"),
+            "the halting message should say the shape did not match: {message}"
+        );
+    }
+
+    /// CodeRabbit review on #1937 (issue #1866) — confirms the fix covers
+    /// `field_present` with the documented `json.items` dotted path, not just
+    /// `non_empty_list`'s no-field form (the two are fixed by the same
+    /// envelope change: the reply is best-effort JSON-parsed into a `json`
+    /// key, and `field_present`'s existing dotted-path resolution reaches it
+    /// like any other nested object). On the code as it stood before the fix,
+    /// this assertion fails: the envelope carried no `json` key at all, so
+    /// `json.items` could never resolve.
+    #[tokio::test]
+    async fn a_reply_that_is_json_satisfies_field_present_on_a_json_dotted_path() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-postcondition-field-present-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"items\": [1, 2, 3]}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937c"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937c"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937c".to_string(),
+            "run-1937c".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "reply with a JSON object naming items",
+                    "postcondition": { "require": "field_present", "field": "json.items" }
+                }),
+            )
+            .await
+            .expect(
+                "a reply that IS a JSON object carrying `items` must satisfy \
+                 `field_present` on the documented `json.items` path",
+            );
+        assert_eq!(outcome.reply, "{\"items\": [1, 2, 3]}");
+        assert_eq!(value["text"], "{\"items\": [1, 2, 3]}");
+    }
+
+    /// Codex review on #1937 (issue #1866) — the emitted-value companion to
+    /// the test above: `value` (the tuple's first element) is exactly what
+    /// `run`'s `AgentRunOutcome.json` becomes (`json: value.clone()`, a few
+    /// lines below this call site), which tinyflows' `finish_agent_run`
+    /// (`nodes/integration/agent.rs`) then lands unchanged at the item
+    /// envelope's `json` whenever it is an `Object`/`Array` — i.e. `value`
+    /// literally IS what a downstream `=item.json.<field>` binding reads.
+    /// Before merging `parsed_reply`'s fields into `value` (Codex
+    /// #3893330383), this was `{"text": ..., "agent_ref": ...}` regardless of
+    /// what the reply parsed to, so the gate above could pass while
+    /// `value["items"]` (and therefore `item.json.items` downstream) stayed
+    /// absent. See `a_structured_agent_reply_is_readable_by_a_downstream_json_binding`
+    /// in `workflows::runner` for the same claim proven through a real
+    /// two-node graph with an actual `=item.json.items` expression, not just
+    /// this unit-level inspection of the returned tuple.
+    #[tokio::test]
+    async fn the_parsed_reply_lands_in_the_emitted_value_a_downstream_binding_reads() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-postcondition-emitted-value-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"items\": [1, 2, 3]}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937d"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937d"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937d".to_string(),
+            "run-1937d".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, _outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "reply with a JSON object naming items",
+                    "postcondition": { "require": "field_present", "field": "json.items" }
+                }),
+            )
+            .await
+            .expect("the postcondition is satisfied, so the turn must succeed");
+
+        // `text`/`agent_ref` must survive the merge unchanged — delivery.rs's
+        // report_text reads a delivered report's body via `item.json.text`
+        // and must keep finding the raw reply string here, not the parsed
+        // object's own (absent, in this reply) `text` key.
+        assert_eq!(value["text"], "{\"items\": [1, 2, 3]}");
+        assert_eq!(value["agent_ref"], "researcher");
+        // The actual finding: the SAME value `field = "json.items"` certified
+        // above must also be readable off the emitted value a downstream
+        // binding sees.
+        assert_eq!(value["items"], json!([1, 2, 3]));
+    }
+
+    /// CodeRabbit #3893565788 on #1937 — the "blast radius" proof. A node
+    /// with NO declared postcondition, whose reply happens to be valid JSON,
+    /// must emit the exact `{text, agent_ref}` shape it always has — the
+    /// merge must never run for a node that did not opt into structured
+    /// output evaluation. On the code as it stood right after the
+    /// #3893330383 fix (before this scoping), this assertion fails:
+    /// `revenue` would appear as a top-level key in `value`, changing the
+    /// output contract for every agent node in every existing workflow that
+    /// happens to reply with a JSON object, whether or not it ever declared
+    /// a postcondition.
+    #[tokio::test]
+    async fn a_reply_that_parses_as_json_is_not_merged_without_a_declared_postcondition() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-no-postcondition-json-reply-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"revenue\": 12000, \"text\": \"ignored\"}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937e"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937e"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937e".to_string(),
+            "run-1937e".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        // No `postcondition` key at all — the ordinary, overwhelmingly common
+        // case: an agent node nobody ever asked to declare a run-safety gate.
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({ "node_id": "analyst", "prompt": "give me the numbers" }),
+            )
+            .await
+            .expect("a node with no postcondition must not be gated at all");
+
+        assert_eq!(outcome.reply, "{\"revenue\": 12000, \"text\": \"ignored\"}");
+        assert_eq!(
+            value,
+            json!({
+                "text": "{\"revenue\": 12000, \"text\": \"ignored\"}",
+                "agent_ref": "researcher",
+            }),
+            "a node with no declared postcondition must emit exactly {{text, agent_ref}} \
+             regardless of what the reply parses as — no `revenue` key, and `text` must \
+             stay the raw reply string, not the parsed object's own `text` value: {value}"
+        );
+    }
+
+    /// Codex #3893541856 on #1937 — the bare-array companion to the object
+    /// merge above. A node whose declared `non_empty_list` (no `field`)
+    /// passes against a bare JSON-array reply must emit that array itself as
+    /// `value`, not the `{text, agent_ref}` wrapper the gate never validated
+    /// — otherwise a downstream `=item.json` binding (reading the whole
+    /// value, not a dotted field into it) resolves to the wrapper instead of
+    /// the array the gate certified, reproducing the exact defect
+    /// #3893330383 fixed for the object case.
+    #[tokio::test]
+    async fn a_bare_array_reply_replaces_the_emitted_value_wholesale() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-bare-array-emission-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "[\"x\", \"y\"]".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937f"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937f"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937f".to_string(),
+            "run-1937f".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "list two things",
+                    "postcondition": { "require": "non_empty_list" }
+                }),
+            )
+            .await
+            .expect("a reply that IS a non-empty JSON array must satisfy non_empty_list");
+
+        // The gate certified the array; the emitted value must literally BE
+        // that array — not an object wrapping it, and not the old
+        // `{text, agent_ref}` shape.
+        assert_eq!(value, json!(["x", "y"]));
+        // The raw reply string is still available independently: `outcome`
+        // (a distinct field from `value`) and `AgentRunOutcome.text` (built
+        // from `outcome.reply` directly, not from `value`) both still carry
+        // it — nothing that reads the prose loses it.
+        assert_eq!(outcome.reply, "[\"x\", \"y\"]");
+    }
+
+    /// Codex #3894162757 on #1937 — supersedes a prior round's
+    /// `a_bare_scalar_reply_replaces_the_emitted_value_wholesale`, which
+    /// asserted `run_turn`'s OWN return value and never noticed that
+    /// tinyflows nulls a bare scalar one layer further out (see the doc
+    /// comment on the removed `Value::Bool(_) | Value::Number(_) |
+    /// Value::String(_)` emission arm, and
+    /// `workflows::runner::tests::a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
+    /// for the full-graph proof of the delivery gap that test missed).
+    /// `field_present` on the bare `field = "json"` root can now never
+    /// pass for a scalar reply — the gate refuses to certify a shape it
+    /// knows cannot reach a downstream `=item.json` binding.
+    #[tokio::test]
+    async fn a_bare_scalar_reply_fails_field_present_on_the_bare_json_root() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-bare-scalar-rejected-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "42".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937g"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937g"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937g".to_string(),
+            "run-1937g".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "scorer",
+                    "prompt": "reply with a single confidence score",
+                    "postcondition": { "require": "field_present", "field": "json" }
+                }),
+            )
+            .await;
+
+        let err = result.expect_err(
+            "a bare scalar reply (`42`) must NOT satisfy field_present on the bare \
+             `json` root — tinyflows can never deliver a scalar through \
+             `=item.json` (it normalizes anything but Object/Array to null), so \
+             certifying it would pass a gate whose value the workflow can never \
+             actually read",
+        );
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("json") && message.contains("scalar"),
+            "the halting message should say why a scalar under `json` cannot \
+             satisfy this gate: {message}"
+        );
+    }
+
+    /// Codex #3894038816 on #1937 — the silent-disable finding, traced
+    /// end-to-end rather than inferred. `postcondition` rides inside the
+    /// engine-resolved node config (`translate_node` writes it as an
+    /// ordinary config key, same as `on_error`/`retry` — see the module doc
+    /// above the function), so `tinyflows::expr::resolve` — the SAME
+    /// resolution `nodes::execution::resolve_config_traced` runs on the
+    /// whole node config before an agent node's turn — walks straight into
+    /// it. An authored `field = "=item.missing"` is an ordinary
+    /// `=`-expression as far as that resolver is concerned; it does not know
+    /// or care that this particular leaf is a safety policy rather than
+    /// ordinary data.
+    ///
+    /// Step 1 below proves `translate()` carries the expression through
+    /// UNRESOLVED (translation is not where resolution happens). Step 2
+    /// proves the mechanism concretely: running the real
+    /// `tinyflows::expr::resolve` against a scope whose `item` genuinely
+    /// lacks `missing` (the ordinary case the author meant to catch) turns
+    /// `postcondition.field` into a plain `Value::Null` — indistinguishable,
+    /// at that point, from no `field` having been authored at all. Step 3
+    /// feeds exactly that resolved shape to `run_turn`.
+    ///
+    /// `field = "=item.missing"` cannot reach this point through
+    /// `parse_workflow` today — `workflow_file::validate`'s bare-structured-
+    /// root check (`postcondition_field_with_a_bare_structured_root_is_rejected`)
+    /// rejects it as a byproduct, since no `=`-expression's first dotted
+    /// segment can ever equal `json`/`text`/`agent_ref`. This test builds the
+    /// node directly instead (the same technique
+    /// `agent_ref_survives_a_spoofing_config` in `workflows::translate` uses)
+    /// to isolate the SECOND, independent layer: `evaluate_postcondition`
+    /// must not silently pass just because *something upstream* — this
+    /// resolution step today, a future one tomorrow — turned a validated
+    /// `field` into null before `run_turn` ever saw it.
+    ///
+    /// RED on the code as it stood before the `evaluate_postcondition` fix:
+    /// `run_turn` returned `Ok`, for a reply ("just prose, no items here")
+    /// that plainly satisfies nothing — the gate silently did not run.
+    #[tokio::test]
+    async fn a_field_resolved_away_by_an_authored_expression_fails_closed_at_run_turn() {
+        use crate::company::{
+            WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowPostconditionDef,
+        };
+        use crate::workflows::translate::translate;
+
+        // Step 1 — author `field = "=item.missing"` directly on the model
+        // (bypassing `parse_workflow`/`validate`, per the doc comment above),
+        // and confirm `translate()` carries it through as the literal
+        // expression string — translation does not resolve expressions.
+        let file = WorkflowFile {
+            global: false,
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            owner_desk: None,
+            nodes: vec![WorkflowNodeDef {
+                id: "worker".into(),
+                kind: WorkflowNodeKind::Agent,
+                name: "Worker".into(),
+                summary: None,
+                agent: Some("researcher".into()),
+                schedule: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                repeatable: None,
+                destination: None,
+                postcondition: Some(WorkflowPostconditionDef {
+                    require: "field_present".to_string(),
+                    field: Some("=item.missing".to_string()),
+                }),
+            }],
+            edges: Vec::new(),
+        };
+        let graph = translate(&file);
+        let node_config = graph.nodes[0].config.clone();
+        assert_eq!(
+            node_config["postcondition"]["field"], "=item.missing",
+            "translate() must carry the authored expression through UNRESOLVED —              it is config resolution, not translate(), that evaluates it"
+        );
+
+        // Step 2 — run the SAME resolution the engine runs
+        // (`tinyflows::nodes::execution::resolve_config_traced` calls
+        // `tinyflows::expr::resolve` on the whole config tree) against a
+        // scope whose `item` genuinely has no `missing` key — the ordinary
+        // case `=item.missing` exists to catch.
+        let scope = json!({ "item": { "other_field": "present, but not the missing key" } });
+        let resolved_config = tinyflows::expr::resolve(&node_config, &scope);
+        assert_eq!(
+            resolved_config["postcondition"]["field"],
+            Value::Null,
+            "traced: config resolution turns the authored `=item.missing` into a              plain JSON null before run_turn ever sees it"
+        );
+
+        // Step 3 — feed exactly that resolved postcondition to `run_turn`,
+        // with a reply that plainly does not satisfy any real check.
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-expression-field-resolved-away-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "just prose, no items here".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937h"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937h"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937h".to_string(),
+            "run-1937h".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let request = json!({
+            "node_id": "worker",
+            "prompt": "say something",
+            "postcondition": resolved_config["postcondition"].clone(),
+        });
+
+        let result = runner.run_turn("researcher", request).await;
+
+        let err = result.expect_err(
+            "a postcondition whose `field` resolved away to null must halt the node —              the gate silently not running is worse than the gate certifying the wrong              value",
+        );
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("field_present"),
+            "the halting message should name the predicate that could not be              evaluated: {message}"
+        );
+    }
+
+    /// Codex #3893619015 on #1937 — traces the underlying mechanism this
+    /// finding names, at the layer `evaluate_postcondition`/`run_turn`
+    /// operates on. `postcondition_field_into_reserved_json_key_is_rejected`
+    /// in `company::workflow_file::tests` is the actual fix: `validate()`
+    /// refuses `field: "json.text"`/`"json.agent_ref"` at author time, so no
+    /// graph that ever reaches `run_turn` in production can carry one. This
+    /// test constructs the request `run_turn` would see if that guarantee
+    /// were ever bypassed, to pin — and make visible — exactly why the
+    /// validation-time rejection is the right layer for the fix rather than
+    /// something patchable here: `text`/`agent_ref` are inserted into `value`
+    /// FIRST and merged with `or_insert` (base wins), on purpose, so
+    /// `delivery.rs::report_text` keeps finding the raw reply string for the
+    /// overwhelming majority of nodes whose reply is plain prose — the same
+    /// base-wins rule that protects that majority is exactly what makes a
+    /// `field` colliding with one of those two reserved keys validate a
+    /// value the emitted output can never actually hold.
+    #[tokio::test]
+    async fn a_colliding_field_would_diverge_between_gate_and_emitted_value() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-colliding-field-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"text\": [\"a\", \"b\"], \"agent_ref\": 123}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937g"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937g"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937g".to_string(),
+            "run-1937g".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        // `field = "json.text"`: the parsed reply's OWN `text` key is an
+        // array. `field_present` only asks "is this present and non-null" —
+        // it passes, having validated an ARRAY.
+        let (value, _outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "reply with structured data",
+                    "postcondition": { "require": "field_present", "field": "json.text" }
+                }),
+            )
+            .await
+            .expect("field_present on json.text finds the parsed reply's own text key, an array");
+
+        // But the emitted `value["text"]` — what a downstream `=item.json.text`
+        // binding actually reads — is the RAW REPLY STRING (`or_insert`, base
+        // wins), a completely different type from the array the gate just
+        // validated. Gate green; downstream gets a string where the author
+        // was told to expect (and validated) a non-empty array.
+        assert!(
+            value["text"].is_string(),
+            "value[\"text\"] must still be the raw reply string (the report_text              guarantee), not the array the gate validated: {value}"
+        );
+        assert_ne!(
+            value["text"],
+            json!(["a", "b"]),
+            "the gate validated json.text as an array, but the emitted value's              text key is a different value entirely: {value}"
+        );
+
+        // Same divergence on `agent_ref`: the parsed reply's own `agent_ref`
+        // is the number 123; the gate's `field_present` on `json.agent_ref`
+        // passes on that number, but the emitted `value["agent_ref"]` is the
+        // real roster id string, not 123.
+        let (value2, _outcome2) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "reply with structured data",
+                    "postcondition": { "require": "field_present", "field": "json.agent_ref" }
+                }),
+            )
+            .await
+            .expect("field_present on json.agent_ref finds the parsed reply's own agent_ref key");
+        assert_eq!(
+            value2["agent_ref"], "researcher",
+            "the emitted agent_ref must stay the real roster id (not the model-supplied              123 the gate validated): {value2}"
         );
     }
 

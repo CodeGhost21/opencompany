@@ -143,6 +143,11 @@ describe("an explicit-company connection resetting its company", () => {
               setup_complete: true,
             })
           : null,
+      // The create/reset dialog's auth-mode preflight, read on open.
+      (req) =>
+        req.method === "GET" && path(req) === "/api/v1/companies/provisioning"
+          ? json(200, { auth_mode: "email", wallets_required: false })
+          : null,
       // The initial boot lookup for the connection's own default company —
       // legitimate, happens once before anything else.
       (req) =>

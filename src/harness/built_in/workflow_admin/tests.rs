@@ -658,6 +658,64 @@ async fn a_seed_backed_workflow_reads_uneditable_and_refuses_both_writes() {
     );
 }
 
+const SEED_WITH_POSTCONDITION_TOML: &str = r#"
+id = "seeded-pc"
+name = "Seeded worker flow"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "worker"
+kind = "agent"
+name = "Worker"
+agent = "assistant"
+[node.postcondition]
+require = "non_empty"
+[[edge]]
+from = "start"
+to = "worker"
+"#;
+
+/// Codex review on #1937 (issue #1866, thread 3) — the RED-on-old proof.
+/// `seed_draft` rebuilds a [`crate::company::RawNode`] per node from the
+/// parsed [`crate::company::WorkflowFile`] for the seed read path — every
+/// other run-policy field (`on_error`, `retry`, `requires_approval`,
+/// `repeatable`, `destination`) is carried through `.clone()`, so a seed
+/// node's declared `postcondition` must be too, or two things go wrong at
+/// once: the runtime still enforces a gate the agent is never told about,
+/// and `project_workflow_spec`'s `unexpressible` residue — the ONLY place
+/// `read_workflow` surfaces a run-policy field the agent-facing spec can't
+/// carry — silently omits it. On the code as it stood before this fix, the
+/// second assertion below fails: `seed_draft` zeroed `postcondition` before
+/// `project_workflow_spec` ever ran, so `unexpressible` was empty and the
+/// whole "per-node run policy" sentence never appeared.
+#[tokio::test]
+async fn a_seed_backed_postcondition_is_named_in_the_read_projection() {
+    let fx = Fixture::new();
+    fx.write_seed("seeded-pc", SEED_WITH_POSTCONDITION_TOML);
+
+    let read = ReadWorkflowTool::new(fx.admin())
+        .execute(json!({ "id": "seeded-pc" }))
+        .await
+        .unwrap();
+    let payload = data(&read);
+    assert_eq!(payload["editable"], json!(false));
+
+    // The agent-facing spec has no `postcondition` field at all (same as
+    // `on_error`/`retry`) — it can only ever be named in the `unexpressible`
+    // prose the markdown reply carries. Match the exact phrase
+    // `unexpressible_summary` renders (`node \`worker\` (postcondition)`),
+    // not a bare substring — the workflow's own name must not collide.
+    let markdown = read.output_for_llm(true);
+    assert!(
+        markdown.contains("node `worker` (postcondition)"),
+        "a seed-defined postcondition must be named in the read reply's \
+         per-node run policy summary, or the agent is told a stricter gate \
+         does not exist when the runtime still enforces one: {markdown}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4. the agent-surface refusals
 // ---------------------------------------------------------------------------

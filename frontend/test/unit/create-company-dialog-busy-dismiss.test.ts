@@ -31,6 +31,7 @@ function stubClient(opts: {
 }) {
   return {
     carriesPlatformBearer: true,
+    provisioningInfo: vi.fn(() => Promise.resolve({ auth_mode: "email", wallets_required: false })),
     lifecycle: opts.lifecycle ?? (() => Promise.resolve()),
     provisionCompany:
       opts.provisionCompany ?? (() => Promise.resolve({ id: "acme-x" } as CompanyStatus)),

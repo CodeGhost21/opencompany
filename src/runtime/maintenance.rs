@@ -63,17 +63,48 @@ use crate::runtime::scheduler::{Clock, MINUTE_MS, PRUNE_CUTOFF_MINUTES, millis_t
 /// design supplies a policy with stronger product semantics.
 pub(crate) const TRACE_RETENTION_LIMIT: usize = 32;
 
+/// Retires the registry entry, and both ownership records, of a company whose
+/// archive left it registered.
+///
+/// The maintenance loop owns no `AppState`, so the cleanup archive performs
+/// inline is injected as this trait. The production implementation lives beside
+/// `archive` in `server::provision` and runs the same three removals.
+#[async_trait::async_trait]
+pub trait CompanyEvictor: Send + Sync {
+    /// Removes `company` from the registry and drops its ownership rows —
+    /// but only if the runtime still registered under `company` is the exact
+    /// instance `expected` names. `expected` is the runtime this call site
+    /// itself just read `status()` as `"archived"` from; passing it lets the
+    /// implementation refuse to remove a replacement that has since taken
+    /// the id over (a rebuild swap, the production case) instead of evicting
+    /// whatever it finds by id alone (codex review on #1943, PR comment
+    /// 3894439351).
+    async fn evict(&self, company: &CompanyId, expected: &Arc<CompanyRuntime>);
+}
+
 /// Retires expired approvals, expired grants and stale fire claims for every
 /// company in the registry, once a minute.
 pub struct MaintenanceTicker {
     registry: CompanyRegistry,
     clock: Arc<dyn Clock>,
+    evictor: Option<Arc<dyn CompanyEvictor>>,
 }
 
 impl MaintenanceTicker {
     /// Builds a ticker over every company in `registry`, driven by `clock`.
     pub fn new(registry: CompanyRegistry, clock: Arc<dyn Clock>) -> Self {
-        Self { registry, clock }
+        Self {
+            registry,
+            clock,
+            evictor: None,
+        }
+    }
+
+    /// Wires the eviction hook that retires a company left registered after its
+    /// archive persisted `lifecycle: "archived"` but skipped registry cleanup.
+    pub fn with_evictor(mut self, evictor: Arc<dyn CompanyEvictor>) -> Self {
+        self.evictor = Some(evictor);
+        self
     }
 
     /// Runs one maintenance pass over every registered company. Returns how
@@ -113,6 +144,22 @@ impl MaintenanceTicker {
             // exactly as it is for a continuation released by an operator
             // clicking Decline on a paused company today.
             retired += sweep_company(&company, &runtime, minute).await.len();
+
+            // Retire a company whose archive persisted `lifecycle: "archived"`
+            // but left it registered (the stranded-cleanup path).
+            if let Some(evictor) = &self.evictor {
+                let status = runtime.status().await;
+                if let Err(err) = &status {
+                    tracing::warn!(%company, %err, "[maintenance] archive-eviction status read failed");
+                }
+                if should_evict_archived(&status) {
+                    tracing::info!(
+                        %company,
+                        "[maintenance] evicting a company left registered after archive"
+                    );
+                    evictor.evict(&company, &runtime).await;
+                }
+            }
         }
         retired
     }
@@ -144,6 +191,15 @@ impl MaintenanceTicker {
             }
         })
     }
+}
+
+/// Whether a re-read `status()` marks a still-registered company for eviction.
+///
+/// `archived` alone qualifies — `running`/`paused`/`suspended` are left
+/// registered — and a read failure (`Err`) defers rather than evicting, so an
+/// unproven failure never removes a company, mirroring `archive`'s own default.
+fn should_evict_archived(status: &crate::Result<crate::runtime::types::CompanyStatus>) -> bool {
+    matches!(status, Ok(status) if status.lifecycle == "archived")
 }
 
 /// One company's maintenance pass: retire overdue approvals, expire unredeemed
@@ -611,6 +667,130 @@ mod test {
             traces.last().unwrap().cycle_id,
             format!("cycle-{TRACE_RETENTION_LIMIT}")
         );
+    }
+
+    /// Records every company the ticker asks it to evict.
+    struct RecordingEvictor {
+        evicted: std::sync::Mutex<Vec<CompanyId>>,
+    }
+
+    impl RecordingEvictor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                evicted: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn evicted(&self) -> Vec<CompanyId> {
+            self.evicted.lock().expect("evictor mutex").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl super::CompanyEvictor for RecordingEvictor {
+        async fn evict(&self, company: &CompanyId, _expected: &Arc<CompanyRuntime>) {
+            self.evicted
+                .lock()
+                .expect("evictor mutex")
+                .push(company.clone());
+        }
+    }
+
+    fn operator() -> Actor {
+        Actor {
+            kind: ActorKind::Operator,
+            id: "operator".into(),
+        }
+    }
+
+    /// A registered company with no overdue gate — the eviction tests care only
+    /// about its lifecycle, not its approval queue.
+    async fn registered_company(home: &std::path::Path) -> (Arc<CompanyRuntime>, CompanyRegistry) {
+        let runtime = Arc::new(
+            RuntimeBuilder::new(home.to_path_buf(), unscheduled_manifest())
+                .build()
+                .await
+                .expect("runtime builds"),
+        );
+        let registry = CompanyRegistry::new();
+        registry.insert(runtime.id().clone(), Arc::clone(&runtime));
+        (runtime, registry)
+    }
+
+    fn ticker_with(registry: CompanyRegistry, evictor: Arc<RecordingEvictor>) -> MaintenanceTicker {
+        MaintenanceTicker::new(
+            registry,
+            Arc::new(FakeClock::new(now_millis() + 60 * MINUTE)),
+        )
+        .with_evictor(evictor)
+    }
+
+    /// A: a company that persisted `lifecycle: "archived"` but was left
+    /// registered is evicted, and the evictor's removals fire for its id.
+    #[tokio::test]
+    async fn an_archived_but_still_registered_company_is_evicted() {
+        let home_dir = tmp_home();
+        let (runtime, registry) = registered_company(home_dir.path()).await;
+        runtime
+            .set_lifecycle("archived", operator())
+            .await
+            .expect("archive");
+
+        let evictor = RecordingEvictor::new();
+        let ticker = ticker_with(registry, evictor.clone());
+        ticker.tick().await;
+
+        assert_eq!(
+            evictor.evicted(),
+            vec![runtime.id().clone()],
+            "an archived-but-registered company must be evicted"
+        );
+    }
+
+    /// B: `running`, `paused` and `suspended` companies are left registered —
+    /// the predicate is `archived` alone.
+    #[tokio::test]
+    async fn a_non_archived_company_is_left_registered() {
+        for lifecycle in ["running", "paused", "suspended"] {
+            let home_dir = tmp_home();
+            let (runtime, registry) = registered_company(home_dir.path()).await;
+            runtime
+                .set_lifecycle(lifecycle, operator())
+                .await
+                .expect("set lifecycle");
+
+            let evictor = RecordingEvictor::new();
+            let ticker = ticker_with(registry, evictor.clone());
+            ticker.tick().await;
+
+            assert!(
+                evictor.evicted().is_empty(),
+                "a {lifecycle} company must not be evicted"
+            );
+        }
+    }
+
+    /// C: a `status()` read failure defers — the predicate never evicts on an
+    /// `Err`, only on a proven `archived`.
+    #[test]
+    fn a_status_read_failure_defers_eviction() {
+        use super::should_evict_archived;
+
+        let status = |lifecycle: &str| crate::runtime::types::CompanyStatus {
+            id: CompanyId::new("acme"),
+            name: "Acme".into(),
+            logo_url: None,
+            lifecycle: lifecycle.into(),
+            pending_approvals: 0,
+            template_provenance: None,
+            emergency_paused: false,
+        };
+
+        assert!(should_evict_archived(&Ok(status("archived"))));
+        assert!(!should_evict_archived(&Ok(status("running"))));
+        assert!(!should_evict_archived(&Err(
+            crate::error::OpenCompanyError::CompanyNotFound("acme".into())
+        )));
     }
 
     /// Recursively lists files under `root`. Test-only; the journal's on-disk

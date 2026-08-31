@@ -416,6 +416,11 @@ pub struct WorkflowNodeDef {
     /// nodes only. `None` (every legacy graph) keeps the pre-#170 behaviour: the
     /// value surfaces in the run-result drawer and goes nowhere else.
     pub destination: Option<WorkflowDestinationDef>,
+    /// Issue #1866 (deterministic tier): a mechanical check the node's output
+    /// must pass before the run advances past it. `agent` nodes only in this
+    /// slice — see [`WorkflowPostconditionDef`]. `None` (every legacy graph)
+    /// keeps the pre-#1866 behaviour: quality is assumed, never checked.
+    pub postcondition: Option<WorkflowPostconditionDef>,
 }
 
 /// Where an `output` node's report goes when the run completes.
@@ -465,6 +470,33 @@ pub struct WorkflowRetryDef {
     /// Backoff curve: `fixed` (default, constant delay) or `exponential`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff: Option<String>,
+}
+
+/// A node's declared deterministic postcondition (issue #1866, deterministic
+/// tier only) — a mechanical predicate checked against the node's output
+/// before it is allowed to flow downstream. Mirrors the way
+/// [`WorkflowRetryDef`] carries the free-form `retry.*` config keys as typed
+/// model data: the console and validation see one shape, and
+/// [`crate::workflows::caps::HarnessAgentRunner::run_turn`] reads the lowered
+/// form straight off node config, the same seam `on_error`/`retry` already
+/// use.
+///
+/// Agent nodes only for this slice — `tool_call`/`http_request` are a
+/// follow-up (see the issue's fix shape).
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkflowPostconditionDef {
+    /// Which predicate to check: `non_empty`, `field_present`, or
+    /// `non_empty_list`. An unrecognized value is rejected at author time by
+    /// [`validate`]; [`crate::workflows::caps::postcondition::evaluate_postcondition`]
+    /// fails OPEN on one anyway, for a graph saved by a different binary
+    /// version.
+    #[serde(default)]
+    pub require: String,
+    /// A dotted path into the node's output (e.g. `json.items`). Required for
+    /// `field_present`; optional for `non_empty_list` (defaults to the whole
+    /// output); unused by `non_empty`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
 }
 
 /// A directed edge between two nodes.
@@ -560,6 +592,11 @@ pub(crate) struct RawNode {
     pub(crate) retry: Option<WorkflowRetryDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) requires_approval: Option<bool>,
+    /// Issue #1866: table-valued like `retry`, so it must precede any scalar
+    /// field for the same `toml::to_string` reason documented on `retry`
+    /// above — kept beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) postcondition: Option<WorkflowPostconditionDef>,
     /// Kept LAST in the struct: `toml::to_string` refuses to emit a scalar after
     /// a table, so a table-valued field must not be followed by a scalar one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -726,6 +763,12 @@ pub(crate) fn project_workflow_spec(raw: &RawWorkflow) -> WorkflowSpecProjection
         if let Some(repeatable) = node.repeatable {
             fields.push(("repeatable", repeatable.to_string()));
         }
+        if let Some(postcondition) = &node.postcondition {
+            fields.push((
+                "postcondition",
+                serde_json::to_string(postcondition).unwrap_or_else(|_| "set".to_string()),
+            ));
+        }
         if !fields.is_empty() {
             unexpressible.push((node.id.clone(), fields));
         }
@@ -838,6 +881,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 requires_approval: node.requires_approval,
                 repeatable: node.repeatable,
                 destination: node.destination,
+                postcondition: node.postcondition,
             })
             .collect(),
         edges: raw
@@ -1140,6 +1184,43 @@ fn list_company_workflows_union(
     files
 }
 
+/// The JSON value kinds a `postcondition.require` predicate could EVER
+/// accept from its resolved `field` target, expressed structurally so the
+/// intersection check in [`validate`] catches a future predicate's own
+/// narrow accepted set the same way it catches `non_empty_list` today,
+/// without a hand-written special case per predicate (issue #1937 boundary
+/// sweep — see [`root_possible_kinds`] for the other half of the rule).
+///
+/// `None` means "no constraint from this predicate": `non_empty` ignores
+/// `field` entirely (it only ever reads the envelope's own `text`), and
+/// `field_present` accepts any present, non-null value regardless of kind —
+/// neither can ever conflict with what a root statically guarantees.
+fn require_accepted_kinds(require: &str) -> Option<&'static [&'static str]> {
+    match require {
+        "non_empty_list" => Some(&["array"]),
+        _ => None,
+    }
+}
+
+/// The JSON value kinds a `postcondition.field` root could EVER hold, when
+/// that is knowable purely from how the envelope [`evaluate_postcondition`]
+/// evaluates against is constructed — independent of anything the agent
+/// replies. `text` and `agent_ref` are unconditionally strings (`run_turn`
+/// inserts `outcome.reply` and the real roster id, both raw `String`
+/// fields, before anything else runs). `json` (bare or dotted) carries the
+/// agent's own best-effort-parsed reply, whose shape this binary cannot
+/// predict at author time, so `None` here means "unconstrained" — every
+/// other `field` root is already refused elsewhere in [`validate`], so this
+/// function is only ever asked about a root that passed those checks.
+///
+/// [`evaluate_postcondition`]: crate::workflows::caps::postcondition::evaluate_postcondition
+fn root_possible_kinds(root: &str) -> Option<&'static [&'static str]> {
+    match root {
+        "text" | "agent_ref" => Some(&["string"]),
+        _ => None,
+    }
+}
+
 /// Collects every validation problem in prosumer language. Empty means valid.
 ///
 /// `strict` picks the severity surface (issue #682). The two NEW #661 author-time
@@ -1422,6 +1503,157 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
             }
         }
 
+        // `postcondition` (issue #1866, deterministic tier): a mechanical
+        // check the node's output must pass before the run advances. Agent
+        // nodes only in this slice — `tool_call`/`http_request` are a
+        // follow-up, so any other kind naming one is rejected the same way
+        // `destination` is rejected off an `output` node above. `require`
+        // must be one of the three known predicates and `field_present`
+        // needs a `field` to check — an author who leaves it out has
+        // declared a gate that can never resolve.
+        if let Some(postcondition) = &node.postcondition {
+            if kind != Some(WorkflowNodeKind::Agent) {
+                problems.push(format!(
+                    "{label} sets `postcondition` but is a `{}` node — only `agent` nodes carry a postcondition today.",
+                    node.kind
+                ));
+            }
+            match postcondition.require.as_str() {
+                "non_empty" | "non_empty_list" => {}
+                "field_present" => {
+                    if postcondition
+                        .field
+                        .as_deref()
+                        .is_none_or(|f| f.trim().is_empty())
+                    {
+                        problems.push(format!(
+                            "{label} has a `postcondition` with `require = \"field_present\"` but no `field` — name the field it must find."
+                        ));
+                    }
+                }
+                other => problems.push(format!(
+                    "{label} has an unknown `postcondition.require` `{other}` — use one of non_empty, field_present, non_empty_list."
+                )),
+            }
+            // Codex #3893619015 review: `text` and `agent_ref` are the two
+            // reserved top-level keys the emitted output always carries —
+            // `HarnessAgentRunner::run_turn` inserts the raw reply string
+            // under `text` and the real roster id under `agent_ref` FIRST,
+            // then merges the parsed reply's own fields in with `or_insert`
+            // (base wins on any collision), the same guarantee
+            // `delivery.rs::report_text` depends on to find prose in a
+            // delivered report rather than the literal string "null". A
+            // `field` that drills into the PARSED reply's own `json.text` or
+            // `json.agent_ref` key can therefore never be validated
+            // consistently with what a downstream binding reads: the gate
+            // checks the parsed value (which could be any shape the model
+            // chose), but `item.json.text`/`item.json.agent_ref` always stays
+            // the raw reply string / real agent ref — a type- and
+            // value-mismatch between what passed and what a `=item.json.text`
+            // binding actually resolves to. Refused at author time, the same
+            // way `field_present` with no `field` is refused above, rather
+            // than left as a silent runtime divergence.
+            if let Some(field) = postcondition.field.as_deref() {
+                let mut segments = field.split('.');
+                if segments.next() == Some("json")
+                    && matches!(segments.next(), Some("text") | Some("agent_ref"))
+                {
+                    problems.push(format!(
+                        "{label} has a `postcondition.field` of `{field}` — `json.text` and `json.agent_ref` are reserved: the emitted output always carries the raw reply under `text` and the roster id under `agent_ref`, so a dotted path into the parsed reply's OWN `text`/`agent_ref` key can never match what a downstream binding reads. Name a different field, or drop `field` on `non_empty_list` to check the whole parsed reply instead."
+                    ));
+                }
+            }
+            // Codex #3893851369 review: `evaluate_postcondition` resolves
+            // `field` against the SAME `{ text, agent_ref, json }` envelope
+            // `run_turn` builds just above its call site — those three keys
+            // are the only roots `resolve_path` can ever walk from. A bare
+            // structured field like `field = "items"` (no `json.` prefix)
+            // therefore resolves `output.get("items")`, which is never
+            // present on that envelope no matter what the agent replies —
+            // `field_present`/`non_empty_list` fail on every single run, not
+            // just a badly-shaped one. Refused at author time, the same way
+            // the `json.text`/`json.agent_ref` collision just above is,
+            // rather than shipping a gate that can never pass.
+            if let Some(field) = postcondition.field.as_deref() {
+                let root = field.split('.').next().unwrap_or("");
+                if !matches!(root, "json" | "text" | "agent_ref") {
+                    problems.push(format!(
+                        "{label} has a `postcondition.field` of `{field}` — the emitted output only resolves fields rooted at `json`, `text`, or `agent_ref`; a bare field like `{field}` never lands at runtime. Use `json.{field}` to check the parsed reply's `{field}` key."
+                    ));
+                }
+            }
+            // Codex #3894162768 on #1937 — direct extension of the bare-root
+            // check just above: it validates the FIRST segment is one of the
+            // three real envelope roots, but says nothing about what comes
+            // after. `text` and `agent_ref` are ALWAYS strings in that
+            // envelope (`run_turn` inserts `outcome.reply` / the real roster
+            // id, both raw `String`s), and `resolve_path`'s only move is an
+            // object-field `.get()` at each dot — indexing into a JSON
+            // string always yields `None`, never a panic and never a value.
+            // So a descendant like `text.foo` or `agent_ref.id` can no more
+            // resolve than a bare `items` could: it fails
+            // `field_present`/`non_empty_list` on every single run,
+            // regardless of what the agent replies — the same "gate that can
+            // never pass" defect the bare-root check above exists to close,
+            // one level deeper. Only `json` carries real structure to descend
+            // into; `text` and `agent_ref` stay valid ONLY as exact,
+            // childless roots.
+            if let Some(field) = postcondition.field.as_deref() {
+                let mut segments = field.split('.');
+                let root = segments.next().unwrap_or("");
+                if matches!(root, "text" | "agent_ref") && segments.next().is_some() {
+                    problems.push(format!(
+                        "{label} has a `postcondition.field` of `{field}` — `{root}` is always a plain string in the emitted output, so a dotted descendant like `{field}` can never resolve at runtime. Use `{root}` on its own (no further path), or target structured data under `json` instead."
+                    ));
+                }
+            }
+            // Codex #3894277296 on #1937 — the checks above are root-AWARE
+            // (which key can `field` even name) but not predicate-aware
+            // (whether the value THAT root guarantees can ever satisfy the
+            // declared `require`). `non_empty_list` on a bare `field =
+            // "text"` or `field = "agent_ref"` slips past every check above:
+            // both are real, exact, childless roots — but they are ALWAYS
+            // strings (`run_turn` inserts `outcome.reply` / the real roster
+            // id, both raw `String`s, unconditionally), and
+            // `non_empty_list` only ever accepts a `Value::Array`. No reply
+            // the agent could ever give changes that — this is a fourth
+            // shape of the same "gate that can never pass" defect the three
+            // checks above exist to close (bare `items`, `text.`/
+            // `agent_ref.` descendants, and — at evaluation time, since it
+            // depends on the runtime value not the static path —
+            // `field_present`'s bare-scalar-under-`json` refusal).
+            //
+            // Expressed structurally rather than as a fifth special case:
+            // for each `require`, `require_accepted_kinds` names which JSON
+            // value kinds could EVER let it return `Ok` (`None` = no
+            // constraint — the predicate ignores `field`, like `non_empty`,
+            // or accepts any non-null value regardless of kind, like
+            // `field_present`); `root_possible_kinds` names which kinds a
+            // `field` root could EVER hold, when that is knowable purely
+            // from the envelope's own construction (`None` for `json`/
+            // `json.<path>` — the agent's own reply, unconstrained). When
+            // BOTH are known and their intersection is empty, no reply can
+            // ever satisfy the gate — reject. This is the same rule that
+            // would catch a FIFTH predicate with its own narrow accepted
+            // set against `text`/`agent_ref`, without needing its own
+            // special case written by hand.
+            if let Some(field) = postcondition.field.as_deref() {
+                let root = field.split('.').next().unwrap_or("");
+                if let (Some(accepted), Some(possible)) = (
+                    require_accepted_kinds(&postcondition.require),
+                    root_possible_kinds(root),
+                ) && !accepted.iter().any(|k| possible.contains(k))
+                {
+                    let require = &postcondition.require;
+                    problems.push(format!(
+                        "{label} declares `require = \"{require}\"` with `field = \"{field}\"` — `{root}` can only ever be a {}, and `{require}` only ever accepts a {}, so this gate can never pass no matter what the agent replies. Target `json` (or a dotted path under it) instead.",
+                        possible.join(" or "),
+                        accepted.join(" or "),
+                    ));
+                }
+            }
+        }
+
         // Reserved config keys: the first-class fields above are written into
         // the engine config LAST, so a `config` entry naming one would be
         // silently ignored — reject it as a footgun instead. `destination` is
@@ -1437,6 +1669,7 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                 "schedule",
                 "destination",
                 "repeatable",
+                "postcondition",
             ] {
                 if table.contains_key(reserved) {
                     problems.push(format!(
@@ -2096,6 +2329,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -2110,6 +2344,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -2126,6 +2361,132 @@ mod tests {
         let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
         assert_eq!(worker.agent.as_deref(), Some("ceo"));
         assert_eq!(file.edges[0].label.as_deref(), Some("ok"));
+    }
+
+    /// Issue #1866: a declared `postcondition` survives the render -> re-parse
+    /// round trip [`WorkflowSpecProjection`]/the console draft path relies on,
+    /// and — because [`WorkflowPostconditionDef`] is table-valued —
+    /// `toml::to_string` does not choke on field order the way it would if a
+    /// scalar field followed it (the reason `postcondition` sits beside
+    /// `retry`, before `destination`, on [`RawNode`]).
+    #[test]
+    fn render_workflow_round_trip_preserves_postcondition() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            owner_desk: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: None,
+                    destination: None,
+                    postcondition: None,
+                },
+                RawNode {
+                    id: "worker".to_string(),
+                    kind: "agent".to_string(),
+                    name: "Worker".to_string(),
+                    summary: None,
+                    agent: Some("ceo".to_string()),
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: None,
+                    destination: None,
+                    postcondition: Some(WorkflowPostconditionDef {
+                        require: "field_present".to_string(),
+                        field: Some("json.items".to_string()),
+                    }),
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "worker".to_string(),
+                label: None,
+            }],
+        };
+        let toml_src = render_workflow(&raw).expect("renders, even with a table field present");
+        let file = parse_workflow(&toml_src).expect("re-parses the rendered graph");
+        let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
+        let postcondition = worker
+            .postcondition
+            .as_ref()
+            .expect("the postcondition survived the round trip");
+        assert_eq!(postcondition.require, "field_present");
+        // Codex #3893851369 on #1937: the bare `items` this test used to
+        // assert here validates but can never resolve at runtime (see
+        // `postcondition_field_with_a_bare_structured_root_is_rejected`) —
+        // the documented `json.items` form is the only one `parse_workflow`
+        // now accepts.
+        assert_eq!(postcondition.field.as_deref(), Some("json.items"));
+    }
+
+    /// Issue #1866: `postcondition` is operator-only policy, exactly like
+    /// `retry` and `requires_approval` beside it — the agent authoring schema
+    /// cannot express it, so [`project_workflow_spec`] must list it in
+    /// [`WorkflowSpecProjection::unexpressible`] rather than silently
+    /// dropping it on an agent-driven full-replacement edit.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn project_workflow_spec_lists_postcondition_as_unexpressible() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            owner_desk: None,
+            nodes: vec![RawNode {
+                id: "worker".to_string(),
+                kind: "agent".to_string(),
+                name: "Worker".to_string(),
+                summary: None,
+                agent: Some("ceo".to_string()),
+                schedule: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                repeatable: None,
+                destination: None,
+                postcondition: Some(WorkflowPostconditionDef {
+                    require: "non_empty".to_string(),
+                    field: None,
+                }),
+            }],
+            edges: Vec::new(),
+        };
+        let projection = project_workflow_spec(&raw);
+        assert_eq!(projection.unexpressible.len(), 1);
+        let (node_id, fields) = &projection.unexpressible[0];
+        assert_eq!(node_id, "worker");
+        assert!(
+            fields.iter().any(|(name, _)| *name == "postcondition"),
+            "postcondition must be named in the unexpressible residue: {fields:?}"
+        );
+        assert!(
+            projection.unexpressible_summary().contains("postcondition"),
+            "{}",
+            projection.unexpressible_summary()
+        );
+        // And it does not leak into the agent-facing spec itself.
+        let worker_spec = projection.spec["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "worker")
+            .unwrap();
+        assert!(worker_spec.get("postcondition").is_none());
     }
 
     /// A rendered graph that fails structural validation (no trigger) surfaces
@@ -2151,6 +2512,7 @@ mod tests {
                 requires_approval: None,
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: vec![],
         };
@@ -2437,6 +2799,444 @@ mod tests {
         "#;
         let err = parse_workflow(src).unwrap_err();
         assert!(err.to_string().contains("inside `config`"), "{err}");
+    }
+
+    #[test]
+    fn postcondition_inside_config_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.config]
+            postcondition = "non_empty"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("inside `config`"), "{err}");
+    }
+
+    #[test]
+    fn postcondition_valid_on_an_agent_node_parses() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            field = "json.items"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let file = parse_workflow(src).expect("a postcondition on an agent node is valid");
+        let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
+        let postcondition = worker.postcondition.as_ref().expect("postcondition set");
+        assert_eq!(postcondition.require, "field_present");
+        assert_eq!(postcondition.field.as_deref(), Some("json.items"));
+    }
+
+    #[test]
+    fn postcondition_on_a_non_agent_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.postcondition]
+            require = "non_empty"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only `agent` nodes carry a postcondition"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn postcondition_with_an_unknown_require_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "smells_right"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown `postcondition.require` `smells_right`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn postcondition_field_present_without_a_field_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("but no `field`"), "{err}");
+    }
+
+    /// Codex #3893851369 on #1937: a bare structured field like `field =
+    /// "items"` validates today but can NEVER resolve at runtime —
+    /// `evaluate_postcondition` checks `field` against the `{ text,
+    /// agent_ref, json }` envelope `run_turn` builds, and a bare `items`
+    /// root is not one of those three keys, so `resolve_path` always returns
+    /// `None` regardless of what the agent replies. Refused at author time
+    /// instead of shipping a gate that can never pass. Before this fix this
+    /// assertion is RED: `parse_workflow` returns `Ok`, so `.unwrap_err()`
+    /// panics with "called `Result::unwrap_err()` on an `Ok` value".
+    #[test]
+    fn postcondition_field_with_a_bare_structured_root_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            field = "items"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("never lands at runtime") && message.contains("json.items"),
+            "{message}"
+        );
+    }
+
+    /// Companion GREEN: the documented `json.` prefix from the same field
+    /// name parses fine — the rejection above targets the missing prefix,
+    /// not the field name `items` itself.
+    #[test]
+    fn postcondition_field_with_the_json_prefix_still_parses() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            field = "json.items"
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let file = parse_workflow(src).expect("the documented `json.` prefix is accepted");
+        let worker = file.nodes.iter().find(|n| n.id == "worker").unwrap();
+        assert_eq!(
+            worker
+                .postcondition
+                .as_ref()
+                .and_then(|p| p.field.as_deref()),
+            Some("json.items")
+        );
+    }
+
+    /// Codex #3894162768 on #1937 — direct extension of the bare-root check
+    /// above: `text` and `agent_ref` are always plain strings in the
+    /// emitted output, so a dotted descendant like `text.foo` or
+    /// `agent_ref.id` can never resolve at runtime (`resolve_path` indexes a
+    /// `Value::String` with `.get("foo")`, which is always `None` — never a
+    /// panic, never a value). Before this fix this assertion is RED:
+    /// `parse_workflow` returns `Ok`, so `.unwrap_err()` panics.
+    #[test]
+    fn postcondition_field_dotted_into_text_or_agent_ref_is_rejected() {
+        for field in ["text.foo", "agent_ref.id"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "field_present"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            let err = parse_workflow(&src)
+                .expect_err(&format!("field `{field}` dots into a scalar root"));
+            assert!(
+                err.to_string().contains("always a plain string"),
+                "field `{field}`: {err}"
+            );
+        }
+    }
+
+    /// Companion GREEN: the exact, childless roots `text` and `agent_ref`
+    /// stay valid on their own — the rejection above targets a dotted
+    /// DESCENDANT, not the roots themselves (already proven fine by
+    /// `postcondition_field_that_merely_resembles_a_reserved_key_still_parses`'s
+    /// bare `"text"` case; pinned again here alongside `agent_ref` for
+    /// symmetry with the failing test above).
+    #[test]
+    fn postcondition_field_of_exactly_text_or_agent_ref_still_parses() {
+        for field in ["text", "agent_ref"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "field_present"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            parse_workflow(&src)
+                .unwrap_or_else(|err| panic!("field `{field}` on its own is valid: {err}"));
+        }
+    }
+
+    /// Codex #3894277296 on #1937 — the fourth structurally-impossible-gate
+    /// finding: `non_empty_list` only ever accepts a `Value::Array`, but
+    /// `text`/`agent_ref` are real, exact, childless roots (they pass every
+    /// check above), and BOTH are unconditionally strings — no reply the
+    /// agent could ever give makes `resolve_path(output, "text")` or
+    /// `resolve_path(output, "agent_ref")` come back an array. Before this
+    /// fix this assertion is RED: `parse_workflow` returns `Ok`, so
+    /// `.unwrap_err()` panics.
+    #[test]
+    fn postcondition_non_empty_list_on_text_or_agent_ref_is_rejected() {
+        for field in ["text", "agent_ref"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "non_empty_list"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            let err = parse_workflow(&src).expect_err(&format!(
+                "non_empty_list on `{field}` can never see an array"
+            ));
+            let message = err.to_string();
+            assert!(
+                message.contains("can never pass") && message.contains(field),
+                "field `{field}`: {message}"
+            );
+        }
+    }
+
+    /// Companion GREEN, both halves of the rule: `non_empty_list` still
+    /// parses fine against `json` content (the root this predicate CAN be
+    /// satisfied through), and `field_present` still parses fine against
+    /// `text`/`agent_ref` (already pinned by
+    /// `postcondition_field_of_exactly_text_or_agent_ref_still_parses`
+    /// above — restated here as the other half of the same intersection
+    /// rule: `field_present` accepts any non-null kind, so it never
+    /// conflicts with a root's fixed kind, only `non_empty_list` does).
+    #[test]
+    fn postcondition_non_empty_list_on_json_content_still_parses() {
+        for field in ["json", "json.items"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "non_empty_list"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            parse_workflow(&src)
+                .unwrap_or_else(|err| panic!("field `{field}` is `json` content: {err}"));
+        }
+    }
+
+    /// Codex #3893619015 on #1937: `text`/`agent_ref` are the two top-level
+    /// keys the emitted output always carries (`run_turn` inserts the raw
+    /// reply string / real roster id, then merges the parsed reply's own
+    /// fields in with `or_insert` — base wins on any collision, so
+    /// `delivery.rs::report_text` keeps finding prose in the overwhelming
+    /// majority of nodes whose reply isn't structured at all). A `field`
+    /// drilling into the parsed reply's OWN `json.text`/`json.agent_ref` key
+    /// can never be validated consistently with what a downstream binding
+    /// reads — the gate would check whatever shape the model chose to put
+    /// under that key, but the emitted value stays the raw string / real
+    /// roster id regardless. Refused at author time rather than left as a
+    /// silent runtime divergence a workflow could actually ship with.
+    #[test]
+    fn postcondition_field_into_reserved_json_key_is_rejected() {
+        for field in ["json.text", "json.agent_ref", "json.text.nested"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "field_present"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            let err = parse_workflow(&src)
+                .expect_err(&format!("field `{field}` collides with a reserved key"));
+            assert!(
+                err.to_string().contains("reserved"),
+                "field `{field}`: {err}"
+            );
+        }
+    }
+
+    /// Companion GREEN: a `field` that does NOT collide with either reserved
+    /// key — including one that merely starts with `text`/`agent_ref` as a
+    /// substring, or names the outer envelope's own `text` (not
+    /// `json.text`) — still parses. The rejection is exactly the two
+    /// reserved dotted paths, not a blanket ban on the words `text` or
+    /// `agent_ref` anywhere in a `field`.
+    #[test]
+    fn postcondition_field_that_merely_resembles_a_reserved_key_still_parses() {
+        for field in [
+            "json.items",
+            "json.text_summary",
+            "json.agent_reference",
+            "text",
+        ] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "field_present"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            parse_workflow(&src).unwrap_or_else(|err| {
+                panic!("field `{field}` does not collide with a reserved key: {err}")
+            });
+        }
     }
 
     #[test]
@@ -3584,6 +4384,7 @@ to = "to_channel"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -3601,6 +4402,7 @@ to = "to_channel"
                         kind: "email".to_string(),
                         target: Some("ada@example.com".to_string()),
                     }),
+                    postcondition: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -3639,6 +4441,7 @@ to = "to_channel"
                 requires_approval: None,
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: Vec::new(),
         };
@@ -3671,6 +4474,7 @@ to = "to_channel"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -3685,6 +4489,7 @@ to = "to_channel"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -3903,6 +4708,7 @@ to = "to_channel"
                 requires_approval: None,
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: Vec::new(),
         };
@@ -3937,6 +4743,7 @@ to = "to_channel"
                     requires_approval: n.requires_approval,
                     repeatable: None,
                     destination: n.destination.clone(),
+                    postcondition: None,
                 })
                 .collect(),
             edges: Vec::new(),
