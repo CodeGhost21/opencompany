@@ -146,6 +146,74 @@ function baseClient(overrides: Partial<OpenCompanyClient>): OpenCompanyClient {
 }
 
 describe("the week-1 nudge banner (PR #1878 review)", () => {
+  it("does not resurrect a dismissed nudge off a poll that was already in flight", async () => {
+    // codex review finding (comment 3892534919): `hasCreatedLocallyRef`
+    // guards only the create path (`handleCreated`, tested above) —
+    // dismissal has no analogous latch, so a poll tick already in flight
+    // when the operator clicks Dismiss can resolve afterward carrying the
+    // same row, still unread from the server's point of view at the moment
+    // that response was captured, and resurrect the banner the operator just
+    // closed.
+    let call = 0;
+    const gate = deferred<{ notifications: NotificationDto[]; unread: number }>();
+    const markedRead: string[] = [];
+    const client = baseClient({
+      notifications: () => {
+        call += 1;
+        // The initial render fires TWO effects that each call `refreshNudge`
+        // (the `[company, refreshNudge]` mount effect, and the `[approvalsNow]`
+        // poll effect — which also runs on the very first render, since
+        // `approvalsNow` is already a defined prop, not becoming one later).
+        // Both resolve immediately with the real row, so the banner is
+        // showing before the race begins. Only the LATER poll tick (the
+        // second render, below) hangs on `gate`.
+        if (call <= 2) {
+          return Promise.resolve({ notifications: [nudgeRow("n1")], unread: 1 });
+        }
+        return gate.promise;
+      },
+      markNotificationsRead: async (ids: string[]) => {
+        markedRead.push(...ids);
+        return { unread: 0 };
+      },
+    });
+
+    window.location.hash = "#/workflows";
+    await act(async () => {
+      root.render(
+        createElement(WorkflowsView, { client, company: "acme", sub: null, approvalsNow: 1_000 }),
+      );
+    });
+    expect(banner()).not.toBeNull();
+
+    // The host's poll cadence ticks — a second `refreshNudge` fetch starts
+    // and is now in flight against `gate`.
+    await act(async () => {
+      root.render(
+        createElement(WorkflowsView, { client, company: "acme", sub: null, approvalsNow: 2_000 }),
+      );
+    });
+
+    // The operator dismisses the banner before that poll resolves.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="workflow-week1-nudge-dismiss"]')
+        ?.click();
+    });
+    expect(banner()).toBeNull();
+
+    // The stale poll now resolves, carrying the same row the dismiss just
+    // marked read — captured before that write reached the server.
+    await act(async () => {
+      gate.resolve({ notifications: [nudgeRow("n1")], unread: 1 });
+      await gate.promise;
+    });
+
+    expect(banner()).toBeNull();
+    expect(markedRead).toContain("n1");
+  });
+
+
   it("does not resurrect a nudge off a fetch that was already stale when this session created a workflow", async () => {
     const gate = deferred<{ notifications: NotificationDto[]; unread: number }>();
     const markedRead: string[] = [];
@@ -190,6 +258,43 @@ describe("the week-1 nudge banner (PR #1878 review)", () => {
 
     expect(banner()).toBeNull();
     expect(markedRead).toContain("n1");
+  });
+
+  it("clears every duplicate nudge row on dismissal, not only the one shown", async () => {
+    // codex review finding (comment 3892594021): `LifecycleScheduler`
+    // explicitly permits two racing replicas to both file a nudge for the
+    // same user, and `pickActiveNudge` deliberately collapses such
+    // duplicates to one banner. Dismissing that banner used to mark only the
+    // shown row read, so the next poll picked the other still-unread
+    // duplicate and immediately resurrected the just-dismissed banner.
+    const markedRead: string[][] = [];
+    const client = baseClient({
+      notifications: async () => ({
+        notifications: [nudgeRow("n1"), nudgeRow("n2")],
+        unread: 2,
+      }),
+      markNotificationsRead: async (ids: string[]) => {
+        markedRead.push([...ids]);
+        return { unread: 0 };
+      },
+    });
+
+    window.location.hash = "#/workflows";
+    await act(async () => {
+      root.render(createElement(WorkflowsView, { client, company: "acme", sub: null }));
+    });
+    expect(banner()).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="workflow-week1-nudge-dismiss"]')
+        ?.click();
+    });
+
+    expect(banner()).toBeNull();
+    const cleared = markedRead.flat();
+    expect(cleared).toContain("n1");
+    expect(cleared).toContain("n2");
   });
 
   it("still shows a fetch that resolves stale when no local create happened", async () => {

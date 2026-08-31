@@ -61,7 +61,7 @@ import type {
   Verdict,
 } from "@/api/types";
 import { Week1NudgeBanner } from "@/components/week1-nudge-banner";
-import { pickActiveNudge } from "@/lib/week1-nudge";
+import { pickActiveNudge, WEEK1_NUDGE_KIND } from "@/lib/week1-nudge";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -457,14 +457,42 @@ export function WorkflowsView({
   // should ever put the banner back up. Reset on a company switch, since a
   // create in one company says nothing about another.
   const hasCreatedLocallyRef = useRef(false);
+  // codex review finding (comment 3892534919): `hasCreatedLocallyRef` only
+  // ever invalidates a stale `refreshNudge` response against a LOCAL CREATE.
+  // Dismissal (`clearNudge` below) had no equivalent — a poll already in
+  // flight when the operator clicks Dismiss can resolve afterward carrying
+  // the same row, still unread from the server's point of view at the
+  // instant that response was captured, and `setNudge(active)` would put the
+  // just-dismissed banner right back up. A monotonic generation counter,
+  // bumped by every local action that should invalidate whatever is
+  // currently in flight (dismissal, and — folded into the mount/reseat
+  // effect below — a company or client change), closes both gaps with one
+  // mechanism: a response is only applied if the request that produced it is
+  // still the most recent one this component cares about.
+  const nudgeRequestGeneration = useRef(0);
+  // codex review finding (comment 3892594021): `pickActiveNudge` picks ONE
+  // row to show — by design, per its own doc comment, since
+  // `LifecycleScheduler` explicitly permits two racing replicas to both file
+  // a nudge for the same user. Dismissal used to mark only the shown row
+  // (`current.id`) read, so a genuine duplicate landed back on the very next
+  // poll: the other, still-unread row is exactly what `pickActiveNudge`
+  // picks next. Tracked separately from `nudge` (which is deliberately the
+  // single row the banner renders) so `clearNudge` can mark every duplicate
+  // read in one write instead of only the one on screen.
+  const unreadNudgeIdsRef = useRef<string[]>([]);
   const refreshNudge = useCallback(() => {
     const requestCompany = company;
+    const requestGeneration = ++nudgeRequestGeneration.current;
     client
       .notifications(requestCompany, "workflow_nudge")
       .then((feed) => {
         if (requestCompany !== companyRef.current) return; // stale: company switched mid-flight
+        if (requestGeneration !== nudgeRequestGeneration.current) return; // stale: superseded by a newer request or a local action
         const rows = Array.isArray(feed?.notifications) ? feed.notifications : [];
         const active = pickActiveNudge(rows);
+        unreadNudgeIdsRef.current = rows
+          .filter((row) => row.kind === WEEK1_NUDGE_KIND && row.readAt === undefined)
+          .map((row) => row.id);
         if (active && hasCreatedLocallyRef.current) {
           // This response was already stale the moment it landed — see
           // `hasCreatedLocallyRef`'s own doc comment. Reconcile the server
@@ -488,6 +516,11 @@ export function WorkflowsView({
   useEffect(() => {
     setNudge(null);
     hasCreatedLocallyRef.current = false;
+    // Also invalidates anything already in flight against the previous
+    // company or client (the "in-place host reseat that preserves the
+    // company slug" half of comment 3892534919) — `refreshNudge`'s identity
+    // already changes on either, so this effect already re-runs for both.
+    nudgeRequestGeneration.current += 1;
     refreshNudge();
   }, [company, refreshNudge]);
   // Issue #1845 (review: PR #1878): the host files this nudge off a daily
@@ -510,8 +543,18 @@ export function WorkflowsView({
   const clearNudge = useCallback(() => {
     const current = nudgeRef.current;
     if (!current) return;
+    // Invalidate any `refreshNudge` fetch already in flight — see
+    // `nudgeRequestGeneration`'s own doc comment. Its `.then` still runs
+    // (this does not cancel the network request), it just no longer applies
+    // what it finds.
+    nudgeRequestGeneration.current += 1;
     setNudge(null);
-    void client.markNotificationsRead([current.id], company).catch(() => {
+    // Every unread duplicate from the last refresh, not only the one shown —
+    // see `unreadNudgeIdsRef`'s own doc comment. Falls back to just the shown
+    // row if nothing was tracked yet (dismissed before any refresh landed).
+    const ids = unreadNudgeIdsRef.current.length > 0 ? unreadNudgeIdsRef.current : [current.id];
+    unreadNudgeIdsRef.current = [];
+    void client.markNotificationsRead(ids, company).catch(() => {
       // The optimistic clear could be wrong (offline, older host); the next
       // poll below reconciles rather than leaving a stale local `null`.
       refreshNudge();
