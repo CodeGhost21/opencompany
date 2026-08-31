@@ -3393,6 +3393,11 @@ impl HarnessPool {
     /// exactly the behaviour it had: no binding, and — deliberately — no clear
     /// either, since one background task can span several turns that depend on
     /// what accumulated between them.
+    // One over the limit, and the one that pushed it there is the whole point
+    // of #1890 I: the conversation must be sayable independently of the stream.
+    // Bundling the rest into a struct to get back under would hide six
+    // parameters that every sibling entry point on this type spells out.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_steered_background(
         &self,
         company: &CompanyId,

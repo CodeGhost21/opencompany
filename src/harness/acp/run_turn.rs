@@ -808,6 +808,10 @@ impl AcpRunTurn {
     /// [`Self::steered`] with both timing bounds made explicit — the post-cancel
     /// grace and the per-cancel-RPC bound — so the tests can expire them in
     /// milliseconds rather than waiting out the real windows.
+    // One over the limit since #1890 H, and the one that pushed it there is the
+    // conversation the session is keyed by. Bundling the timing bounds back
+    // together would undo exactly what this function exists to expose.
+    #[allow(clippy::too_many_arguments)]
     async fn steered_with_grace(
         &self,
         company: &CompanyId,
