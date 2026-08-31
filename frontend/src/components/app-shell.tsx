@@ -99,6 +99,10 @@ import {
   threadViewAdvancesChannel,
   threadsToReReadForMentions,
 } from "@/lib/mention-badge";
+import {
+  operationalNotificationSeverity,
+  operationalNotificationsToAnnounce,
+} from "@/lib/operational-notifications";
 import { usePresence } from "@/hooks/use-presence";
 import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
@@ -1830,6 +1834,12 @@ export function AppShell({
   // thread for. One re-read per mention, not one per poll: a re-read that
   // fails (offline) is retried by the next reload rather than hammered.
   const mentionReReadSubjectsRef = useRef<Set<string>>(new Set());
+  // Ids of non-mention (`dispatch_failed` / `approval_expired` /
+  // `workflow_run_*`) rows this session has already toasted. These rows come
+  // back on every poll until marked read server-side, so this local guard is
+  // what keeps a single dispatch failure from toasting once per interval
+  // instead of once — see `@/lib/operational-notifications`.
+  const operationalAnnouncedRef = useRef<Set<string>>(new Set());
   const refreshMentions = useCallback(() => {
     const requestCompany = company;
     const revision = ++mentionFeedRevision.current;
@@ -1874,6 +1884,37 @@ export function AppShell({
           // without the guard every tick would re-read the same threads.
           subjects.forEach((s) => mentionReReadSubjectsRef.current.add(s));
           threadIds.forEach((threadId) => reReadSettledThread(threadId));
+        }
+        // `dispatch_failed` / `approval_expired` / `workflow_run_*` rows go
+        // through this same durable feed but are not mentions, so nothing
+        // above ever renders or acknowledges them — they would sit "unread"
+        // forever despite coming back on every poll (Codex #1883 P1). A toast
+        // is this feed's minimal rendering, and the row is marked read the
+        // moment it is shown: it is durable, the toast is not, and there is
+        // no inbox view here for a person to come back and dismiss it from
+        // later.
+        const toAnnounce = operationalNotificationsToAnnounce(
+          next,
+          operationalAnnouncedRef.current,
+        );
+        if (toAnnounce.length > 0) {
+          const ids = toAnnounce.map((n) => n.id);
+          ids.forEach((id) => operationalAnnouncedRef.current.add(id));
+          for (const n of toAnnounce) {
+            if (operationalNotificationSeverity(n) === "error") toast.error(n.title);
+            else toast.warning(n.title);
+          }
+          setMentionFeed((current) =>
+            current.map((n) => (ids.includes(n.id) ? { ...n, readAt: Date.now() } : n)),
+          );
+          void client.markNotificationsRead(ids, requestCompany).catch(() => {
+            // A failed mark-read leaves the row unread server-side; the next
+            // poll re-fetches it, finds it still in `readAt: undefined`, but
+            // `operationalAnnouncedRef` has already seen its id, so it is not
+            // re-toasted. The row itself is not lost — it is still durable
+            // and still returned — only the toast is best-effort, matching
+            // how mention marking already treats offline/older-host failure.
+          });
         }
       })
       .catch(() => {
