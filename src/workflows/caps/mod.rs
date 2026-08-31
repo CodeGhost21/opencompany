@@ -811,6 +811,22 @@ impl RunCappedNodes {
             .push(node_id);
     }
 
+    /// Whether `node_id`'s turn was recorded here, **without** draining
+    /// (issue #1865, CodeRabbit review on #1905).
+    ///
+    /// The progress collector needs this at the moment it journals a node's
+    /// `WorkflowNodeFinished`, and [`take`](Self::take) cannot serve it: the
+    /// settle-time `reclassify_capped_nodes` still has to see the same list
+    /// afterwards. Reading rather than draining is what lets the durable event
+    /// and the in-memory row agree about the same node.
+    pub fn contains(&self, node_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("run capped-nodes poisoned")
+            .iter()
+            .any(|id| id == node_id)
+    }
+
     /// Takes everything recorded so far, leaving the collector empty.
     pub fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.inner.lock().expect("run capped-nodes poisoned"))
@@ -917,6 +933,19 @@ pub struct ParkedCalls {
     /// strictly worse than being blocked on a card, and the node's diagnosis
     /// says so separately.
     pub unparkable: usize,
+    /// How many of [`approval_ids`](Self::approval_ids) came from an agent's
+    /// **blocker** (`escalate_to_human`) rather than from a gated tool call
+    /// (CodeRabbit review on #1905).
+    ///
+    /// The two ride the same list and settle the node the same way, but they
+    /// promise different things. A gated call resumes on approval: the park
+    /// carries the node's turn key, so a verdict re-runs the turn. A blocker
+    /// is parked `Unlinked`, with `agent: None` and no continuation, precisely
+    /// because answering a question is not the same act as authorising a call —
+    /// so deciding it resumes nothing until #1863/#1864 land. Counted here so
+    /// [`blocked_diagnosis`] can stop telling the operator and the model that
+    /// the run continues on approval when, for these ids, it will not.
+    pub blockers: usize,
 }
 
 impl ParkedCalls {
@@ -1526,7 +1555,27 @@ impl HarnessAgentRunner {
         }
     }
 
-    async fn park_gated_calls(&self, node_id: Option<&str>, node_turn: &str) -> ParkedCalls {
+    /// `node_id` is the graph's own id and stays `Option` — a hand-built
+    /// request or a graph compiled before #881 has none, and the approval rows
+    /// report that honestly rather than inventing one.
+    ///
+    /// `resolved_node_id` is the identity the **run** knows the node by:
+    /// `node_id` when there is one, the agent ref otherwise, which is exactly
+    /// what [`WorkflowBlockedNode::node_id`] carries for the same node. A
+    /// parked blocker's [`BlockerStep::Node`] must use that one and not the
+    /// bare option (CodeRabbit review on #1905) — it used to fall back to `"-"`,
+    /// so on the no-`node_id` path the blocker named a node that appears
+    /// nowhere in the run, leaving #1864's node-level restart with no target to
+    /// resolve.
+    ///
+    /// [`WorkflowBlockedNode::node_id`]: crate::ports::WorkflowBlockedNode::node_id
+    /// [`BlockerStep::Node`]: crate::ports::blockers::BlockerStep::Node
+    async fn park_gated_calls(
+        &self,
+        node_id: Option<&str>,
+        resolved_node_id: &str,
+        node_turn: &str,
+    ) -> ParkedCalls {
         let mut summary = ParkedCalls::default();
         let mut rows: Vec<crate::ports::WorkflowRunApprovalRow> = Vec::new();
         let row = |tool: Option<String>,
@@ -1582,10 +1631,11 @@ impl HarnessAgentRunner {
                         continue;
                     }
                 };
-            // Add the node step using the resolved node id.
+            // The identity the run knows this node by, so the blocker points at
+            // a node that is actually in the run — see `resolved_node_id`.
             payload.step = Some(crate::ports::blockers::BlockerStep::Node {
                 run_id: self.run_id.clone(),
-                node_id: node_id.unwrap_or("-").to_string(),
+                node_id: resolved_node_id.to_string(),
             });
             // Update the effect with the augmented payload.
             blocker_request.effect.payload =
@@ -1616,6 +1666,7 @@ impl HarnessAgentRunner {
                 Ok(approval_id) => {
                     push_tool(&mut summary.tools, &blocker_request.tool);
                     summary.approval_ids.push(approval_id.to_string());
+                    summary.blockers += 1;
                     rows.push(row(
                         Some(blocker_request.tool.clone()),
                         crate::ports::WorkflowApprovalOutcome::Parked,
@@ -2153,9 +2204,11 @@ impl HarnessAgentRunner {
             // reclassifying it as "blocked" would hide one behind an approval
             // nobody has answered.
             let parked = claim
-                .scoped(Box::pin(
-                    self.park_gated_calls(node_id.as_deref(), &node_turn),
-                ))
+                .scoped(Box::pin(self.park_gated_calls(
+                    node_id.as_deref(),
+                    &lineage_node,
+                    &node_turn,
+                )))
                 .await;
             // Issue #661 (M5): likewise on both arms, and for the same reason. A
             // turn that failed after calling `spawn_task` had already been told the
@@ -2543,11 +2596,39 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
             if parked.unparkable == 1 { "it" } else { "them" }
         ));
     }
+    // What deciding the cards actually does, which is not one answer
+    // (CodeRabbit review on #1905). A gated call's park carries the node's turn
+    // key, so a verdict re-runs the turn and the run goes on. A blocker's does
+    // not — it is parked `Unlinked` with no continuation, deliberately, because
+    // answering a question is not authorising a call — so deciding it resumes
+    // nothing until #1863/#1864. Promising an auto-resume for those is how an
+    // operator ends up approving a card and watching a run that never moves.
+    let resume = if waiting == 0 {
+        String::new()
+    } else if parked.blockers == 0 {
+        " Approving the card continues this run automatically; because approving re-runs the \
+         agent's turn, a changed decision may ask again."
+            .to_string()
+    } else if parked.blockers == waiting {
+        format!(
+            " {} a question the agent raised, not a call waiting to be authorised: answering it \
+             is recorded against the card, but it does not restart this run — re-run the \
+             workflow once the answer is in hand.",
+            if waiting == 1 {
+                "The card is"
+            } else {
+                "The cards are"
+            }
+        )
+    } else {
+        " Some of these are gated tool calls, which continue this run when approved; the rest \
+         are questions the agent raised, which are recorded but do not restart it — re-run the \
+         workflow once those are answered."
+            .to_string()
+    };
     format!(
         "workflow node '{node}' is blocked: {tools} needed approval before {agent_ref} could \
-         finish, so the node produced no deliverable and nothing after it ran. {}. Approving the \
-         card continues this run automatically; because approving re-runs the agent's turn, a \
-         changed decision may ask again.",
+         finish, so the node produced no deliverable and nothing after it ran. {}.{resume}",
         what.join("; ")
     )
 }
@@ -3453,6 +3534,76 @@ mod tests {
     /// in `park_gated_calls` armed the queue, so the peek is `None`. Post-fix
     /// it holds this run's own trigger input, proving the card cannot outrun
     /// the stash that redeems it.
+    /// What the node's diagnosis promises has to match what deciding the card
+    /// actually does (CodeRabbit review on #1905).
+    ///
+    /// A gated tool call and an agent's blocker ride the same `approval_ids`
+    /// and settle the node identically, but only the first resumes on approval:
+    /// its park carries the node's turn key, while a blocker is parked
+    /// `Unlinked` with `agent: None` and no continuation — deliberately, since
+    /// answering a question is not authorising a call. The diagnosis said
+    /// "Approving the card continues this run automatically" for both, which
+    /// for a blocker is an operator approving a card and then watching a run
+    /// that never moves.
+    #[test]
+    fn the_diagnosis_only_promises_a_resume_it_can_keep() {
+        let gated = ParkedCalls {
+            tools: vec!["publish_artifact".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+            blockers: 0,
+        };
+        let text = blocked_diagnosis(Some("work"), "writer", &gated);
+        assert!(
+            text.contains("continues this run automatically"),
+            "a gated call really does resume on approval: {text}"
+        );
+
+        let blocker = ParkedCalls {
+            tools: vec!["escalate_to_human".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+            blockers: 1,
+        };
+        let text = blocked_diagnosis(Some("work"), "writer", &blocker);
+        assert!(
+            !text.contains("continues this run automatically"),
+            "a blocker resumes nothing until #1863/#1864: {text}"
+        );
+        assert!(
+            text.contains("does not restart this run"),
+            "and it has to say so, not merely omit the promise: {text}"
+        );
+
+        let mixed = ParkedCalls {
+            tools: vec![
+                "publish_artifact".to_string(),
+                "escalate_to_human".to_string(),
+            ],
+            approval_ids: vec!["appr-1".to_string(), "appr-2".to_string()],
+            unparkable: 0,
+            blockers: 1,
+        };
+        let text = blocked_diagnosis(Some("work"), "writer", &mixed);
+        assert!(
+            text.contains("continue this run when approved") && text.contains("do not restart it"),
+            "a mixed node has to describe both, since neither sentence is true of all of it: \
+             {text}"
+        );
+
+        // Nothing was parked at all — every call failed to park — so there is
+        // no card to promise anything about.
+        let none_parked = ParkedCalls {
+            tools: vec!["publish_artifact".to_string()],
+            approval_ids: Vec::new(),
+            unparkable: 1,
+            blockers: 0,
+        };
+        let text = blocked_diagnosis(Some("work"), "writer", &none_parked);
+        assert!(!text.contains("Approving the card"), "{text}");
+        assert!(!text.contains("does not restart"), "{text}");
+    }
+
     #[tokio::test]
     async fn park_gated_calls_arms_the_stash_before_any_block_settle_pass_runs() {
         use crate::harness::policy::{ApprovalRequest, ApprovalScope};
@@ -3523,7 +3674,7 @@ mod tests {
         // The real call a turn's tool loop makes. No block-settle pass runs
         // anywhere in this test.
         claim
-            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .scoped(runner.park_gated_calls(Some("work"), "work", &node_turn))
             .await;
 
         let stashed = parking.blocked_nodes.peek(&node_turn).expect(
@@ -3629,7 +3780,7 @@ mod tests {
         // The real call a turn's tool loop makes. No block-settle pass runs
         // anywhere in this test.
         claim
-            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .scoped(runner.park_gated_calls(Some("work"), "work", &node_turn))
             .await;
 
         let stashed = journal
@@ -3744,7 +3895,7 @@ mod tests {
             .await;
 
         let summary = claim
-            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .scoped(runner.park_gated_calls(Some("work"), "work", &node_turn))
             .await;
 
         assert!(
@@ -3958,7 +4109,7 @@ mod tests {
             .await;
 
         let summary = claim
-            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .scoped(runner.park_gated_calls(Some("work"), "work", &node_turn))
             .await;
 
         assert_eq!(summary.approval_ids.len(), 2, "both calls must have parked");
@@ -4044,7 +4195,7 @@ mod tests {
         let node_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
         claim
-            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .scoped(runner.park_gated_calls(Some("work"), "work", &node_turn))
             .await;
         (notices.take(), queue)
     }
