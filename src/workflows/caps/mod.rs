@@ -3918,6 +3918,113 @@ mod tests {
         assert_eq!(outcome.reply, "[\"x\", \"y\"]");
     }
 
+    /// Codex #3893619015 on #1937 — traces the underlying mechanism this
+    /// finding names, at the layer `evaluate_postcondition`/`run_turn`
+    /// operates on. `postcondition_field_into_reserved_json_key_is_rejected`
+    /// in `company::workflow_file::tests` is the actual fix: `validate()`
+    /// refuses `field: "json.text"`/`"json.agent_ref"` at author time, so no
+    /// graph that ever reaches `run_turn` in production can carry one. This
+    /// test constructs the request `run_turn` would see if that guarantee
+    /// were ever bypassed, to pin — and make visible — exactly why the
+    /// validation-time rejection is the right layer for the fix rather than
+    /// something patchable here: `text`/`agent_ref` are inserted into `value`
+    /// FIRST and merged with `or_insert` (base wins), on purpose, so
+    /// `delivery.rs::report_text` keeps finding the raw reply string for the
+    /// overwhelming majority of nodes whose reply is plain prose — the same
+    /// base-wins rule that protects that majority is exactly what makes a
+    /// `field` colliding with one of those two reserved keys validate a
+    /// value the emitted output can never actually hold.
+    #[tokio::test]
+    async fn a_colliding_field_would_diverge_between_gate_and_emitted_value() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-colliding-field-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"text\": [\"a\", \"b\"], \"agent_ref\": 123}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937g"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937g"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937g".to_string(),
+            "run-1937g".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        // `field = "json.text"`: the parsed reply's OWN `text` key is an
+        // array. `field_present` only asks "is this present and non-null" —
+        // it passes, having validated an ARRAY.
+        let (value, _outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "reply with structured data",
+                    "postcondition": { "require": "field_present", "field": "json.text" }
+                }),
+            )
+            .await
+            .expect("field_present on json.text finds the parsed reply's own text key, an array");
+
+        // But the emitted `value["text"]` — what a downstream `=item.json.text`
+        // binding actually reads — is the RAW REPLY STRING (`or_insert`, base
+        // wins), a completely different type from the array the gate just
+        // validated. Gate green; downstream gets a string where the author
+        // was told to expect (and validated) a non-empty array.
+        assert!(
+            value["text"].is_string(),
+            "value[\"text\"] must still be the raw reply string (the report_text              guarantee), not the array the gate validated: {value}"
+        );
+        assert_ne!(
+            value["text"],
+            json!(["a", "b"]),
+            "the gate validated json.text as an array, but the emitted value's              text key is a different value entirely: {value}"
+        );
+
+        // Same divergence on `agent_ref`: the parsed reply's own `agent_ref`
+        // is the number 123; the gate's `field_present` on `json.agent_ref`
+        // passes on that number, but the emitted `value["agent_ref"]` is the
+        // real roster id string, not 123.
+        let (value2, _outcome2) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "lister",
+                    "prompt": "reply with structured data",
+                    "postcondition": { "require": "field_present", "field": "json.agent_ref" }
+                }),
+            )
+            .await
+            .expect("field_present on json.agent_ref finds the parsed reply's own agent_ref key");
+        assert_eq!(
+            value2["agent_ref"], "researcher",
+            "the emitted agent_ref must stay the real roster id (not the model-supplied              123 the gate validated): {value2}"
+        );
+    }
+
     /// Issue #638: a node that gates more calls than the cap allows leaves the
     /// operator a **notice**, not only a log line.
     ///
