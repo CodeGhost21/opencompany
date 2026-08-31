@@ -162,26 +162,44 @@ pub fn classify_blocker_message(message: &str) -> Option<BlockerClass> {
         .iter()
         .find(|shape| {
             shape.leaves.iter().any(|leaf| {
-                // Special handling for " 401" to require word boundaries and avoid
-                // matching "port 4010" or similar false positives (issue #1861).
-                // Special handling for numeric and space-prefixed tokens to require word boundaries
-                // and avoid matching false positives like "port 4010" → " 401" or "4290" → "429".
-                if *leaf == " 401" || *leaf == "429" {
-                    if let Some(pos) = haystack.find(leaf) {
-                        let start_boundary = pos == 0
-                            || haystack[..pos].ends_with(|c: char| !c.is_ascii_alphanumeric());
-                        let end = pos + leaf.len();
-                        let has_trailing_boundary = end >= haystack.len()
-                            || haystack[end..].starts_with(|c: char| !c.is_ascii_alphanumeric());
-                        return start_boundary && has_trailing_boundary;
-                    }
-                    false
+                if BOUNDED_LEAVES.contains(leaf) {
+                    contains_bounded(&haystack, leaf)
                 } else {
                     haystack.contains(leaf)
                 }
             })
         })
         .map(|shape| shape.class)
+}
+
+/// The leaves that only count as a match when they stand alone as a word
+/// (issue #1861).
+///
+/// Both are bare status codes, and a bare status code is a substring of longer
+/// numbers that mean something else entirely: `port 4010` is not a `401`, and a
+/// request id like `req-4290` is not a `429`. Every other leaf is a phrase that
+/// cannot collide this way, so it stays a plain `contains`.
+const BOUNDED_LEAVES: &[&str] = &[" 401", "429"];
+
+/// Whether `leaf` occurs in `haystack` with a non-alphanumeric character (or
+/// the string's edge) on both sides.
+///
+/// **Every occurrence, not the first.** Checking only the first one is how
+/// `request req-4290 received http 429` used to read as unrecognised: the scan
+/// stopped at the `429` inside `4290`, rejected its trailing `0`, and never
+/// reached the real status code later in the line. A missed transient shape is
+/// not a harmless miss — the row below it is the auth row, so a throttled
+/// request whose body also names a key would park as a credential problem and
+/// wait for a person who has nothing to fix.
+fn contains_bounded(haystack: &str, leaf: &str) -> bool {
+    haystack.match_indices(leaf).any(|(pos, _)| {
+        let starts_clean =
+            pos == 0 || haystack[..pos].ends_with(|c: char| !c.is_ascii_alphanumeric());
+        let end = pos + leaf.len();
+        let ends_clean = end >= haystack.len()
+            || haystack[end..].starts_with(|c: char| !c.is_ascii_alphanumeric());
+        starts_clean && ends_clean
+    })
 }
 
 /// The class a planning pass's missing prerequisite parks as.
@@ -261,6 +279,36 @@ mod test {
     fn a_throttled_key_reads_as_transient_not_as_bad_auth() {
         let class = class_of("429 too many requests for this api key").expect("recognised");
         assert_eq!(class.kind, BlockerKind::Transient);
+    }
+
+    /// The boundary check reads every occurrence, not just the first.
+    ///
+    /// A provider line that names a request id before its status code —
+    /// `req-4290 … http 429` — used to stop at the `429` inside `4290`, reject
+    /// its trailing `0`, and never reach the real code. The miss was not
+    /// neutral: the auth row sits below the transient one, so the same body
+    /// mentioning a key would then park a self-resolving throttle as a broken
+    /// credential and wait for a person with nothing to fix.
+    #[test]
+    fn a_status_code_is_found_past_an_earlier_unbounded_lookalike() {
+        let class = class_of("request req-4290 received HTTP 429").expect("recognised");
+        assert_eq!(class.kind, BlockerKind::Transient);
+
+        let auth_flavoured =
+            class_of("request req-4290 failed: http 429 for this api key").expect("recognised");
+        assert_eq!(
+            auth_flavoured.kind,
+            BlockerKind::Transient,
+            "the real 429 must still outrank the auth row it is quoted beside"
+        );
+    }
+
+    /// …and the boundary itself still holds: a longer number that merely starts
+    /// with a status code is not that status code.
+    #[test]
+    fn a_longer_number_is_not_a_status_code() {
+        assert_eq!(class_of("dispatch failed on port 4010"), None);
+        assert_eq!(class_of("dispatch failed: worker 4290 died"), None);
     }
 
     /// The conservative default. An error we cannot name keeps today's
