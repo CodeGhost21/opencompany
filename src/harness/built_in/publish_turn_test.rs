@@ -379,6 +379,7 @@ fn brain_with(
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     };
     (
         // Issue #339: the run store is wired here so a dispatch carrying a

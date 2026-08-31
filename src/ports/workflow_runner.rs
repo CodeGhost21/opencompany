@@ -609,6 +609,15 @@ pub enum DeliveryReason {
     /// The channel adapter refused the message. As with mail, the adapter's own
     /// reason stays in `detail`.
     ChannelRefused,
+    /// The operator feed's collision fallback
+    /// ([`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK))
+    /// is itself shadowed by a second grandfathered desk name, so there is no
+    /// address left to journal this report to that would not land it in that
+    /// desk's own transcript — see
+    /// [`CompanyRecord::operator_feed_channel_fallback_shadowed`](crate::ports::types::CompanyRecord::operator_feed_channel_fallback_shadowed)
+    /// (issue #1781 review). Refused rather than delivered, unlike the primary
+    /// collision.
+    ChannelCollisionShadowed,
     /// The destination kind is not one this runtime knows how to deliver to
     /// (unreachable through `parse_workflow`, which rejects unknown kinds).
     UnknownDestinationKind,
@@ -683,6 +692,10 @@ impl std::fmt::Display for DeliveryReason {
             Self::ChannelPosted => "posted to the channel",
             Self::ChannelNotWired => "the destination channel is not wired on this runtime",
             Self::ChannelRefused => "the channel refused the message",
+            Self::ChannelCollisionShadowed => {
+                "the operator feed's collision-fallback address is itself shadowed by another \
+                 desk's name, so the report was refused rather than journaled to that desk"
+            }
             Self::UnknownDestinationKind => {
                 "the destination kind is not one this runtime can deliver to"
             }

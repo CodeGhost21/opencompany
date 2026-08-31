@@ -2658,10 +2658,15 @@ async fn workflow_tool_slugs(
 /// destination editor offers a picker of real targets. Not feature-gated — the
 /// channel set exists on every build.
 ///
-/// **`operator` is not among them** (issue #981). This used to say the opposite
-/// and serve the unfiltered adapter list, which offered authors the one target
-/// workflow delivery refuses by name. An empty list is a truthful answer for a
-/// company with no desks and no provider channels: there is nowhere to deliver.
+/// **`operator` is always among them** (issue #1757; previously excluded per
+/// issue #981, when the in-memory `operator` adapter had no durable reader and
+/// workflow delivery refused it by name). The built-in Operator channel is now
+/// a durable, journal-backed delivery target present on every running company,
+/// so it is a real entry in this picker like any other — never doubled, even
+/// when a grandfathered manifest desk also claims the literal id `operator`
+/// (`CompanyRuntime::deliverable_channel_ids` dedupes). An empty list is still
+/// a truthful answer for everything else: a company with no desks and no
+/// provider channels has nowhere else to deliver.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WiredChannelsResponse {
@@ -4902,6 +4907,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -4986,6 +4992,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -5312,6 +5319,7 @@ mod tests {
                     setup: Default::default(),
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -5535,6 +5543,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -5545,8 +5554,9 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 runtime.deliverable_channel_ids(),
-                vec!["engineering".to_string()],
-                "the fixture must have exactly one delivery channel, or these tests prove nothing"
+                vec!["operator".to_string(), "engineering".to_string()],
+                "the fixture must have the operator channel plus exactly one desk channel, or \
+                 these tests prove nothing"
             );
             let state = AppState::new(AppConfig::default());
             state
@@ -5654,29 +5664,30 @@ mod tests {
             );
         }
 
-        /// **The #981 regression.** `operator` was in the picker the console
-        /// showed the author, and delivery refuses it by name on every runtime —
-        /// so the graph saved, ran green, and dropped its report. It is now
-        /// refused at save, naming the channels that would work.
+        /// **The #981 story, resolved by #1757.** `operator` was in the picker
+        /// the console showed the author while delivery refused it by name — so
+        /// the graph saved, ran green, and dropped its report. Now `operator` is a
+        /// durable, journal-backed channel that lands in the standing Operator
+        /// feed, so routing a report to it is legitimate and the save succeeds.
         #[tokio::test]
-        async fn a_report_routed_to_operator_is_refused_at_save() {
+        async fn a_report_routed_to_operator_saves() {
             let home_dir = home();
             let state = desk_state(home_dir.path()).await;
 
-            let response =
-                post_create(state, body_with_destination("channel", Some("operator"))).await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            let message = json_body(response).await.to_string();
-            assert!(
-                message.contains("is not a workflow delivery channel"),
-                "{message}"
-            );
-            // The live set, so the fix is legible from the refusal alone.
-            assert!(message.contains("engineering"), "{message}");
-            assert!(
-                message.contains("done"),
-                "the refusal must name the node: {message}"
-            );
+            let response = post_create(
+                state.clone(),
+                body_with_destination("channel", Some("operator")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph = json_body(response).await;
+            assert_eq!(graph["nodes"][1]["destination"]["kind"], "channel");
+            assert_eq!(graph["nodes"][1]["destination"]["target"], "operator");
         }
 
         /// A channel nobody wired is refused the same way. The author's typo and
@@ -5797,7 +5808,9 @@ mod tests {
                 .expect("create returns a version")
                 .to_string();
 
-            let mut body = body_with_destination("channel", Some("operator"));
+            // A genuinely unwired desk (issue #1757: `operator` is now a real
+            // target, so it can no longer stand in for an undeliverable one).
+            let mut body = body_with_destination("channel", Some("marketing"));
             body["expectedVersion"] = serde_json::json!(version);
             let response = router(state)
                 .oneshot(request(
@@ -5821,11 +5834,14 @@ mod tests {
         /// save — the guard is about channels, and a company with no desks can
         /// still mail its owner.
         #[tokio::test]
-        async fn a_company_with_no_delivery_channel_says_so_and_still_saves_an_owner_report() {
+        async fn a_company_with_no_desks_still_offers_the_operator_channel() {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
 
+            // A desk nobody wired is still refused — but the runtime is not
+            // channel-less: since #1757 it always has the Operator channel, so the
+            // refusal names `operator` as what would work.
             let response = post_create(
                 state.clone(),
                 body_with_destination("channel", Some("engineering")),
@@ -5833,9 +5849,13 @@ mod tests {
             .await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             let message = json_body(response).await.to_string();
-            assert!(message.contains("no durable channels"), "{message}");
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+            assert!(message.contains("operator"), "{message}");
 
-            // …and the picker it was offered is empty, not `["operator"]`.
+            // …and the picker it offers is `["operator"]`, never empty.
             let response = router(state.clone())
                 .oneshot(request(
                     "GET",
@@ -5844,8 +5864,13 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(json_body(response).await["channels"], serde_json::json!([]));
+            assert_eq!(
+                json_body(response).await["channels"],
+                serde_json::json!(["operator"])
+            );
 
+            // An `owner` report saves — it needs no channel, and its no-mailbox
+            // fallback lands in that same Operator channel.
             let response = post_create(state, body_with_destination("owner", None)).await;
             assert_eq!(
                 response.status(),
@@ -6527,6 +6552,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -6854,6 +6880,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -8557,6 +8584,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -10179,6 +10207,7 @@ mod tests {
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -10482,6 +10511,7 @@ label = "ok"
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();
@@ -11179,6 +11209,7 @@ label = "ok"
                     setup: None,
                     name_confirmed: false,
                     activation_completed_at: None,
+                    created_at_millis: None,
                 })
                 .await
                 .unwrap();

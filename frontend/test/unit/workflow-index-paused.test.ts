@@ -92,6 +92,11 @@ function makeClient(rows: WorkflowSummary[] = ROWS, created?: WorkflowGraph) {
     },
     post: async () => created ?? {},
     del: async () => {},
+    // Issue #1845: the week-1 nudge banner polls this on mount; an empty
+    // feed keeps it a no-op for every test in this file, which is not about
+    // the nudge.
+    notifications: async () => ({ notifications: [], unread: 0 }),
+    markNotificationsRead: async () => ({ unread: 0 }),
   } as unknown as OpenCompanyClient;
 }
 

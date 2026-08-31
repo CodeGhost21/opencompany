@@ -799,8 +799,9 @@ async fn runtime_with_desk(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc
         .expect("runtime");
     assert_eq!(
         runtime.deliverable_channel_ids(),
-        vec!["engineering".to_string()],
-        "the fixture must have exactly one delivery channel, or these tests prove nothing"
+        vec!["operator".to_string(), "engineering".to_string()],
+        "the fixture must have the operator channel plus exactly one desk channel, or these \
+         tests prove nothing"
     );
     runtime.set_builder(Arc::new(WorkflowBuilder::new(model, "chat-v1")));
     (home, Arc::new(runtime))
@@ -1478,11 +1479,17 @@ async fn the_card_prompt_grounds_the_wired_channels() {
     let evidence = gather_evidence(&runtime, &card("t-ground", None))
         .await
         .expect("evidence");
-    assert_eq!(evidence.wired_channels, vec!["engineering".to_string()]);
+    // Since issue #1757 the always-present Operator channel is a durable delivery
+    // target too, so it grounds alongside the desk channel.
+    assert_eq!(
+        evidence.wired_channels,
+        vec!["operator".to_string(), "engineering".to_string()]
+    );
 
     let prompt = evidence_prompt(&evidence);
     assert!(prompt.contains("## Channels"), "{prompt}");
     assert!(prompt.contains("`engineering`"), "{prompt}");
+    assert!(prompt.contains("`operator`"), "{prompt}");
     assert!(
         prompt.contains("copied exactly"),
         "the section must say the id is copied, not paraphrased: {prompt}"
@@ -1499,22 +1506,34 @@ async fn the_description_prompt_grounds_the_wired_channels() {
     let prompt = description_evidence_prompt(&evidence, &[], &[], "post the weekly digest");
     assert!(prompt.contains("## Channels"), "{prompt}");
     assert!(prompt.contains("`engineering`"), "{prompt}");
+    assert!(prompt.contains("`operator`"), "{prompt}");
 }
 
-/// A company with no desk and no provider channel says so in its own words,
-/// matching how the roster and tool sections state an empty set — a silent
-/// section would read as "anything goes".
+/// A company with no desk and no provider channel still has the always-present
+/// Operator channel (issue #1757), so the Channels section grounds on it rather
+/// than the empty-set fallback — every company can deliver *somewhere* now.
 #[tokio::test]
-async fn an_empty_channel_set_renders_the_honest_fallback() {
+async fn a_company_with_no_desks_still_grounds_on_the_operator_channel() {
     let (_home, runtime) = runtime_with(ScriptedModel::replying(VALID_GRAPH)).await;
     let evidence = gather_evidence(&runtime, &card("t-empty", None))
         .await
         .expect("evidence");
-    assert!(evidence.wired_channels.is_empty());
+    assert_eq!(evidence.wired_channels, vec!["operator".to_string()]);
 
     let prompt = evidence_prompt(&evidence);
     assert!(prompt.contains("## Channels"), "{prompt}");
-    assert!(prompt.contains("no channels are wired"), "{prompt}");
+    assert!(prompt.contains("`operator`"), "{prompt}");
+}
+
+/// The empty-set fallback message still renders for a truly channel-less set —
+/// unreachable from a live runtime now (every company has `operator`), but the
+/// pure section renderer must still speak honestly when handed nothing.
+#[test]
+fn an_empty_channel_slice_renders_the_honest_fallback() {
+    let mut out = String::new();
+    super::render_channel_section(&mut out, &[]);
+    assert!(out.contains("## Channels"), "{out}");
+    assert!(out.contains("no channels are wired"), "{out}");
 }
 
 /// The model does not get a vote on approval gating: whatever `requires_approval`

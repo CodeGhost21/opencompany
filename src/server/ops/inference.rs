@@ -943,6 +943,7 @@ base_url = "https://byo.example/v1"
                 setup: None,
                 name_confirmed: false,
                 activation_completed_at: None,
+                created_at_millis: None,
             })
             .await
             .unwrap();

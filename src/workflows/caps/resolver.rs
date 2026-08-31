@@ -530,6 +530,7 @@ mod tests {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }))))
     }
 
@@ -558,6 +559,7 @@ mod tests {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         }))))
     }
 

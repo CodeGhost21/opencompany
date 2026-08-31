@@ -119,6 +119,12 @@ pub mod task_intent;
 // build.
 pub mod tool_catalog;
 mod types;
+/// The week-1 "did this user save a workflow" query (issue #1845): the
+/// per-user attribution check
+/// [`runtime::LifecycleScheduler`](crate::runtime::LifecycleScheduler) reads
+/// before nudging. Always compiled — it is a pure journal scan, no different
+/// from `activation`'s own workflow-run check.
+pub(crate) mod week1_nudge;
 mod workflow_create;
 mod workflow_file;
 // The shared workspace-file read (node + content + `[[wikilink]]` backlinks)

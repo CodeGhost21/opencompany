@@ -228,6 +228,7 @@ impl Fixture {
             setup: None,
             name_confirmed: false,
             activation_completed_at: None,
+            created_at_millis: None,
         };
         Self {
             company,
@@ -1383,6 +1384,7 @@ async fn a_disabled_global_stays_hidden_even_if_a_second_read_would_fail() {
         setup: None,
         name_confirmed: false,
         activation_completed_at: None,
+        created_at_millis: None,
     };
     let store: Arc<dyn CompanyStore> = Arc::new(FailsAfterFirstLoadStore::seeded(record));
     let admin = WorkflowAdmin::new(company, None, store, None, None);
