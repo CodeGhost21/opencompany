@@ -107,14 +107,14 @@ export function TaskDetailRoute({
         });
       }}
       onOpenThread={onOpenThread}
-      // Both of these used to hand a card back to the board rendered beside
-      // this screen, which held its own copy of the row. There is no such
-      // sibling now: the board is the `tasks` ledger, it re-reads from the host,
-      // and it is not mounted while this screen is. So a save reconciles
-      // nothing here — the board reads the change when the operator returns to
-      // it — and a delete leaves for the board rather than sitting on the
-      // detail of a card that no longer exists.
-      onSaved={() => {}}
+      // `onSaved` used to be here, as a literal `() => {}`. It handed a saved
+      // card back to the board rendered beside this screen, which held its own
+      // copy of the row; there is no such sibling now — the board is the `tasks`
+      // ledger, it re-reads from the host, and it is not mounted while this
+      // screen is. The prop survived the deletion as five components' worth of
+      // plumbing that ended in a no-op, so it has gone with it. A delete still
+      // has somewhere to go: leave for the board, rather than sit on the detail
+      // of a card that no longer exists.
       onDeleted={onLeave}
     />
   );
