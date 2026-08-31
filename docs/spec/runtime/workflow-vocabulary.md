@@ -267,6 +267,16 @@ with a message pointing at the `json.`-prefixed form, the same way it refuses
 `field_present` with no `field` at all above — a gate that can never pass is
 as much an authoring bug as one that is missing entirely.
 
+**Only `json` has anything to descend INTO.** `text` and `agent_ref` are
+always plain strings in the envelope `field` resolves against, so while
+`field = "text"` or `field = "agent_ref"` are valid roots on their own, a
+dotted descendant of either — `field = "text.foo"`, `field =
+"agent_ref.id"` — can never resolve any more than a bare `items` could:
+indexing a string with a further path segment always comes back empty.
+`parse_workflow` refuses these the same way, at author time. `json` is the
+only root with real structure to walk into (`json.items`, `json.result.count`,
+…).
+
 **`field` is not the place for an `=`-expression.** `postcondition` lowers
 into the same engine-resolved node config as everything else in this
 document, so it is tempting to write `field = "=item.some_key"` the way
@@ -317,20 +327,31 @@ capped turn's partial reply is exactly the truncation class a postcondition is
 meant to catch, so a declared postcondition is checked regardless of whether
 the cap already would have failed the attempt on its own.
 
-**On success, the node's emitted output reflects what the gate certified.**
-When (and only when) a postcondition is declared, the node's output — what a
-downstream `=item.json.<field>` binding reads — is enriched with the parsed
-reply: an object reply's own keys are merged in (so `json.items` above also
-resolves downstream, not only inside the gate's own check), and a bare-array
-or bare-scalar reply (`["a","b"]`, `42`, `true`, `"ok"`) replaces the emitted
-value with that array or scalar itself (so `=item.json` resolves to the exact
-value `field_present`/`non_empty_list` validated — this is what lets
-`field_present` on the bare `field = "json"` root check "did the agent reply
-with any JSON at all", scalars included, and have the answer downstream match
-what the gate saw). A node with **no** declared postcondition is entirely
-unaffected by any of this — its output stays the plain `{text, agent_ref}`
-shape it always had, regardless of what the agent happens to reply, so this
-feature changes nothing for a workflow that never opted into it.
+**On success, the node's emitted output reflects what the gate certified —
+except a bare scalar, which the gate refuses to certify in the first
+place.** When (and only when) a postcondition is declared, the node's output
+— what a downstream `=item.json.<field>` binding reads — is enriched with
+the parsed reply: an object reply's own keys are merged in (so `json.items`
+above also resolves downstream, not only inside the gate's own check), and a
+bare-array reply (`["a", "b"]`) replaces the emitted value with the array
+itself (so `=item.json` resolves to the exact array `non_empty_list`
+validated). A bare **scalar** reply (`42`, `true`, `"ok"`) is different: the
+engine's own item envelope only ever carries an object or array under
+`json` — anything else normalizes to `null` on the way to a downstream
+binding, a fixed property of the runtime this postcondition layer cannot
+change. `field_present` on the bare `field = "json"` root therefore REFUSES
+a scalar reply rather than certifying a value nothing downstream could ever
+read: it fails with a gap sentence naming the scalar and suggesting the
+fix — have the agent reply with an object naming the value (e.g.
+`{"value": 42}`) and target the dotted path (`field = "json.value"`), which
+already works via the object-merge case above. A dotted path *under* `json`
+(`json.count`) is unaffected by this — reaching a scalar there means the
+reply was already an object, which merges into the emitted value intact, so
+`item.json.count` really does resolve downstream. A node with **no**
+declared postcondition is entirely unaffected by any of this — its output
+stays the plain `{text, agent_ref}` shape it always had, regardless of what
+the agent happens to reply, so this feature changes nothing for a workflow
+that never opted into it.
 
 ## The engine-only kinds OpenCompany rejects
 
