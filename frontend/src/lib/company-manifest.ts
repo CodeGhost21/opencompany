@@ -19,6 +19,14 @@ export interface ManifestInput {
    */
   adminEmail?: string;
   /**
+   * Wallet sign-in addresses, on a host whose auth mode is `wallet`. When
+   * non-empty the manifest is emitted in `wallet` mode (`[users].mode =
+   * "wallet"` plus `[users].wallets`) — the host's manifest validator only
+   * reads the wallet list when the manifest itself declares that mode, and
+   * `wallet` mode never reads `[users].admins`, so the two lists do not mix.
+   */
+  wallets?: string[];
+  /**
    * The approval tier, when the operator overrode it. Omitted for the default:
    * the host records `[policy].mode = "auto"` for a manifest that names none,
    * so leaving it out is how the operator says "use the host default" rather
@@ -90,7 +98,16 @@ export function buildManifestToml(input: ManifestInput): string {
   const lines: string[] = ["[company]", `name = ${tomlString(input.name)}`];
 
   const email = input.adminEmail?.trim();
-  if (email) {
+  const wallets = (input.wallets ?? []).map((w) => w.trim()).filter((w) => w.length > 0);
+
+  // `wallet` mode is emitted with its own `mode` declaration: the host's
+  // manifest validator reads `[users].wallets` only when the manifest itself
+  // says `mode = "wallet"`, and refuses `email`-mode text that carries a wallet
+  // list. `wallet` mode never reads `admins`, so the two never share a block.
+  if (wallets.length > 0) {
+    const rendered = wallets.map((w) => tomlString(w)).join(", ");
+    lines.push("", "[users]", 'mode = "wallet"', `wallets = [${rendered}]`);
+  } else if (email) {
     lines.push("", "[users]", `admins = [${tomlString(email)}]`);
   }
 
@@ -100,6 +117,31 @@ export function buildManifestToml(input: ManifestInput): string {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * A conservative sanity check on one wallet address, returning a problem string
+ * or `null`. The host's `manifest_wallets` decoder stays authoritative — this
+ * only catches the obvious typos (blank, non-base58 characters, an implausible
+ * length) before the destructive archive leg on a reset, the same way
+ * `adminEmailProblem` does for an email admin.
+ *
+ * A base58 Ed25519 public key is 32 bytes, which encodes to 43 or 44 base58
+ * characters; the bounds here are loose around that so a stricter server-side
+ * check remains the real gate.
+ */
+export function walletAddressProblem(address: string): string | null {
+  const trimmed = address.trim();
+  if (!trimmed) {
+    return "Enter a wallet address, or nobody will be able to sign in to this company.";
+  }
+  if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(trimmed)) {
+    return "That doesn't look like a wallet address — it should be base58 (no 0, O, I, or l).";
+  }
+  if (trimmed.length < 32 || trimmed.length > 48) {
+    return "That doesn't look like a wallet address — it should be a 32-byte base58 public key.";
+  }
+  return null;
 }
 
 /**
