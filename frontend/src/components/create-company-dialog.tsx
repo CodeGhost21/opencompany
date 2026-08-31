@@ -32,6 +32,7 @@ import {
   describeProvisionError,
   explicitIdProblem,
   resetReplacementId,
+  walletAddressProblem,
   wasAlreadyArchived,
   wasAmbiguousProvisionOutcome,
   wasArchiveOutcomeAmbiguous,
@@ -122,6 +123,15 @@ export function CreateCompanyDialog({
 }: Props) {
   const [name, setName] = useState("");
   const [adminEmail, setAdminEmail] = useState("");
+  const [wallet, setWallet] = useState("");
+  // The host's sign-in mode, from the provisioning preflight. Defaults to
+  // "email" — the mode a console-built manifest lands in when no host override
+  // forces otherwise — and is upgraded to "wallet"/"none" once the preflight
+  // resolves.
+  const [authMode, setAuthMode] = useState<"wallet" | "email" | "none">("email");
+  // The preflight could not be read, so the mode is unknown. Submit refuses
+  // before the destructive archive leg rather than archiving blind.
+  const [preflightFailed, setPreflightFailed] = useState(false);
   const [policyMode, setPolicyMode] = useState(DEFAULT_POLICY_MODE);
   const [explicitId, setExplicitId] = useState("");
   const [advanced, setAdvanced] = useState(false);
@@ -180,6 +190,9 @@ export function CreateCompanyDialog({
     if (!request) return;
     setName(request.kind === "reset" ? request.name : "");
     setAdminEmail("");
+    setWallet("");
+    setAuthMode("email");
+    setPreflightFailed(false);
     setPolicyMode(DEFAULT_POLICY_MODE);
     // Reset pre-seeds a fresh id rather than leaving this blank: the name
     // field above is pre-filled with the archived company's own name, and an
@@ -202,6 +215,27 @@ export function CreateCompanyDialog({
     setCreateMaybe(false);
     setIdTouched(false);
   }, [request]);
+
+  // Read the host's sign-in mode on open, so the form asks for a wallet address
+  // on a wallet-mode host and an admin email otherwise — and so a wallet-mode
+  // refusal is caught in `submit` BEFORE the reset's archive leg, not after it.
+  // Only a platform bearer can reach the preflight; the triggers are already
+  // gated on that, so a client without one keeps the default email behaviour.
+  useEffect(() => {
+    if (!request || !canCreateCompanies(client)) return;
+    let cancelled = false;
+    client
+      .provisioningInfo()
+      .then((info) => {
+        if (!cancelled) setAuthMode(info.auth_mode);
+      })
+      .catch(() => {
+        if (!cancelled) setPreflightFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [request, client]);
 
   if (!request) return null;
 
@@ -231,10 +265,33 @@ export function CreateCompanyDialog({
     // reset that is destructive: the usable old company is archived before
     // its now-inaccessible replacement exists (codex review on #1828, PR
     // comment 3864885200).
-    const emailProblem = adminEmailProblem(adminEmail, true);
-    if (emailProblem) {
-      setError(emailProblem);
+    // A preflight we could not read leaves the host's sign-in mode unknown, so
+    // refuse before archiving rather than committing the destructive leg and
+    // discovering the mode only when provisioning is refused.
+    if (preflightFailed) {
+      setError(
+        "Couldn't check this host's sign-in mode, so nothing was changed. Try again.",
+      );
       return;
+    }
+
+    // The required identity is mode-dependent, and — like the id checks below —
+    // is validated BEFORE the destructive archive leg on a reset. A wallet-mode
+    // host needs a wallet address; every other mode with a sign-in needs an
+    // admin email. Discovering a bad or missing identity only after the archive
+    // ran is the exact half-state this ordering exists to prevent.
+    if (authMode === "wallet") {
+      const problem = walletAddressProblem(wallet);
+      if (problem) {
+        setError(problem);
+        return;
+      }
+    } else if (authMode !== "none") {
+      const emailProblem = adminEmailProblem(adminEmail, true);
+      if (emailProblem) {
+        setError(emailProblem);
+        return;
+      }
     }
 
     // Derive the id this submission will actually send, up front — before
@@ -491,7 +548,9 @@ export function CreateCompanyDialog({
     try {
       const manifest_toml = buildManifestToml({
         name: trimmedName,
-        adminEmail: adminEmail.trim() || undefined,
+        adminEmail:
+          authMode === "wallet" ? undefined : adminEmail.trim() || undefined,
+        wallets: authMode === "wallet" ? [wallet.trim()] : undefined,
         // Omitted at the default so the host records its own `auto`, rather
         // than pinning the tier in the manifest text.
         policyMode: policyMode !== DEFAULT_POLICY_MODE ? policyMode : undefined,
@@ -626,22 +685,40 @@ export function CreateCompanyDialog({
           />
         </div>
 
-        <div className="grid gap-1.5">
-          <Label htmlFor="create-company-admin">Admin email</Label>
-          <Input
-            id="create-company-admin"
-            type="email"
-            value={adminEmail}
-            onChange={(e) => setAdminEmail(e.target.value)}
-            placeholder="who can sign in as an admin"
-            disabled={busy}
-          />
-          <p className="text-2xs text-muted-foreground">
-            Required — a company provisioned with no admin here has nobody
-            eligible to sign in unless this host has its own bootstrap admin
-            configured.
-          </p>
-        </div>
+        {authMode === "wallet" ? (
+          <div className="grid gap-1.5">
+            <Label htmlFor="create-company-wallet">Admin wallet</Label>
+            <Input
+              id="create-company-wallet"
+              value={wallet}
+              onChange={(e) => setWallet(e.target.value)}
+              placeholder="base58 wallet address that can sign in as an admin"
+              disabled={busy}
+              className="font-mono text-xs"
+            />
+            <p className="text-2xs text-muted-foreground">
+              Required — this host signs users in with wallets, so a company
+              provisioned with no admin wallet has nobody eligible to sign in.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-1.5">
+            <Label htmlFor="create-company-admin">Admin email</Label>
+            <Input
+              id="create-company-admin"
+              type="email"
+              value={adminEmail}
+              onChange={(e) => setAdminEmail(e.target.value)}
+              placeholder="who can sign in as an admin"
+              disabled={busy}
+            />
+            <p className="text-2xs text-muted-foreground">
+              Required — a company provisioned with no admin here has nobody
+              eligible to sign in unless this host has its own bootstrap admin
+              configured.
+            </p>
+          </div>
+        )}
 
         <div className="grid gap-1.5">
           <button
