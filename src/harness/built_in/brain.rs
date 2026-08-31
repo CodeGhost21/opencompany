@@ -1783,7 +1783,13 @@ impl HarnessBrain {
             return Ok(None);
         };
         let speaker = relay_speaker(&self.record(), &origin, &orchestrator);
-        let relay = lifecycle::relay_reply(&card, &orchestrator, &speaker, origin);
+        // `speaker` goes in both slots: a refusal never claims anyone ran the
+        // card, so `relay_text`'s `responder == orchestrator` check must
+        // always hold here, regardless of who the relay speaks as (issue
+        // #1949 review, CodeRabbit thread 3895107568). Passing `orchestrator`
+        // in the responder slot instead used to fire the "ran it" credit
+        // whenever `speaker` diverged from it — i.e. every private DM.
+        let relay = lifecycle::relay_reply(&card, &speaker, &speaker, origin);
         self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
             .await;
         Ok(Some(relay))
@@ -7046,6 +7052,42 @@ members = ["engineer"]
         // before journaling, since the settle already left a
         // `DeskTaskCompleted` link and this would only duplicate it.
         assert_eq!(posted.task_id.as_deref(), Some("t-origin"));
+    }
+
+    /// A refusal into a private DM must not claim anyone ran the card.
+    ///
+    /// `refuse_dispatch` used to pass the orchestrator's own id into
+    /// `relay_reply`'s `responder` slot while the DM's speaker went into the
+    /// `orchestrator` slot — the opposite of every other call site. For a
+    /// desk/shared origin the two values collide (`relay_speaker` returns the
+    /// orchestrator) and the swap is invisible, but a private DM's speaker is
+    /// the teammate, not the orchestrator, so the mismatch fires the "ran it"
+    /// credit onto a card that never ran at all (CodeRabbit review, PR #1949
+    /// thread 3895107568).
+    #[tokio::test]
+    async fn a_refused_dispatch_into_a_dm_credits_no_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks(dir.path());
+        let mut c = card("t-dm-origin", "Shane");
+        // "engineer" is a real roster agent (not the orchestrator "ceo"), so
+        // `relay_speaker` claims this as a private DM and returns "engineer"
+        // instead of falling back to the orchestrator.
+        c.origin_chat_id = Some("engineer".to_string());
+        tasks
+            .upsert(&CompanyId::new("acme"), &c)
+            .await
+            .expect("seed");
+
+        let posted = brain
+            .run_task("t-dm-origin", None)
+            .await
+            .expect("run")
+            .expect("a refused card with an origin must still post back");
+        assert!(
+            !posted.text.contains("ran it"),
+            "a refusal must never credit anyone with running the card: {}",
+            posted.text
+        );
     }
 
     /// A dispatch for a card that no longer exists is a silent no-op, not an
