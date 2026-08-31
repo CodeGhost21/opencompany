@@ -96,6 +96,47 @@ pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 /// than silently un-splitting the message.
 pub(crate) const OPEN_WORK_ANNOTATION: &str = "\n\n[Open work already handed to you";
 
+/// Where the thread index begins on an operator message (issue #1890 E,
+/// written by [`inject_thread_index`](CycleRunner::inject_thread_index)).
+///
+/// The fourth machine-appended part of an operator message, on exactly
+/// [`OPEN_WORK_ANNOTATION`]'s terms: in-memory only, never journaled, and
+/// stripped by [`operator_words`](crate::runtime::delegation::operator_words)
+/// before anything reasons about what the operator asked for.
+///
+/// # What it is for
+///
+/// A thread scoped to itself (#1890 A) is **cold by construction**: the turn
+/// answering in it sees that thread and nothing else, which is the whole point
+/// and also means it does not know what else its channel is about. A reference
+/// to "the other thread" resolves to nothing, and a channel-level turn asked
+/// "where are we?" can speak only for the channel line.
+///
+/// This is the orientation, folded into the prompt rather than into history —
+/// because history is what A scoped, and widening it again would undo A. The
+/// same seam and the same terms as its three siblings.
+///
+/// # Sized for deciding, never for knowing
+///
+/// Each line is the root's own opening words, its state, and its recency, and
+/// **that is the whole budget**. If lines grow long enough to answer *from*,
+/// the flat channel window A removed has been rebuilt in the prompt and paid
+/// for twice — the failure this constant's own shape has to prevent.
+///
+/// The opening words are the operator's, verbatim and truncated, never
+/// summarised: summarising costs a model call per thread per turn and loses the
+/// exact words a later reference will echo. They are the discriminator, so
+/// "the launch email one" resolves.
+///
+/// # Default is not to read
+///
+/// Most turns reference nothing outside their own thread, so the instruction
+/// gates on an *explicit* reference. Over-reading is the failure mode to guard
+/// hardest: an agent that pulls three threads to be safe has silently undone A.
+/// Where a reference is ambiguous across the index, asking beats guessing and
+/// beats reading all three.
+pub(crate) const THREAD_INDEX_ANNOTATION: &str = "\n\n[Other conversations in this channel";
+
 /// Where the settled-work briefing begins on an operator message addressed to a
 /// conversation that has raised work (issue #1890 C, written by
 /// [`inject_handed_task_awareness`](CycleRunner::inject_handed_task_awareness)).
@@ -830,8 +871,23 @@ impl<'a> CycleRunner<'a> {
             // Brain-agnostic (both brains read `req.events`); mutates only the
             // in-memory copy handed to the brain, never the durable log persisted
             // above.
-            if let Some(record) = &record {
-                self.inject_handed_task_awareness(record, &mut events).await;
+            if let Some(record) = &record
+                // Cheap exit before touching either store: nothing is
+                // addressed, so no briefing has anywhere to land.
+                && events
+                    .iter()
+                    .any(|e| matches!(e, CompanyEvent::OperatorMessage { chat: Some(_), .. }))
+            {
+                // One read, three briefings (#1890 C, E). The board answers
+                // "what are you working on?" and "did that ship?"; the journal
+                // answers "what else is this channel about?".
+                let cards = self.rt.tasks().list(&self.rt.id).await.unwrap_or_default();
+                self.inject_handed_task_awareness(record, &mut events, &cards)
+                    .await;
+                // Issue #1890 E: and where else this channel is talking, so a
+                // thread scoped to itself (#1890 A) is not also blind to its
+                // own channel. Same in-memory-only terms as its siblings.
+                self.inject_thread_index(&mut events, &cards).await;
             }
             // Issue #845: and when the operator asked for a workflow rather than a
             // one-off, tell the turn that the builder pass owns authoring it — so it
@@ -1230,15 +1286,12 @@ impl<'a> CycleRunner<'a> {
         &self,
         record: &CompanyRecord,
         events: &mut [CompanyEvent],
+        // Read once by the caller and shared with the thread index (#1890 E),
+        // which needs the same cards to say where a thread's work landed. Two
+        // `list` calls to answer related questions about one company is the
+        // cost the caller's cheap exit exists to avoid.
+        cards: &[TaskRecord],
     ) {
-        // Cheap exit before touching the task store: nothing is addressed.
-        if !events
-            .iter()
-            .any(|e| matches!(e, CompanyEvent::OperatorMessage { chat: Some(_), .. }))
-        {
-            return;
-        }
-        let cards = self.rt.tasks().list(&self.rt.id).await.unwrap_or_default();
         let open: Vec<&TaskRecord> = cards
             .iter()
             .filter(|c| c.column != "done" && !c.assignee.trim().is_empty())
@@ -1328,6 +1381,81 @@ working on):\n{}\n]",
                 "{SETTLED_WORK_ANNOTATION} has finished — this is where each card \
 stands now, which may differ from the marker in the transcript):\n{}{tail}\n]",
                 lines.join("\n")
+            ));
+        }
+    }
+
+    /// Folds an index of the channel's other live threads into each addressed
+    /// operator message (issue #1890 E). See [`THREAD_INDEX_ANNOTATION`].
+    ///
+    /// Separate from [`inject_handed_task_awareness`](Self::inject_handed_task_awareness)
+    /// because it reads a different store — the journal rather than the board —
+    /// and must be skippable on a host with no event log wired, which the board
+    /// briefings are not.
+    ///
+    /// `settled` is passed in rather than re-read: the caller has just listed
+    /// the cards, and a second `list` to answer a related question about the
+    /// same company is the cost that function's cheap exit exists to avoid.
+    async fn inject_thread_index(&self, events: &mut [CompanyEvent], cards: &[TaskRecord]) {
+        let settled: Vec<&TaskRecord> = cards.iter().filter(|c| has_settled(c)).collect();
+        let log = self.rt.events();
+        for event in events.iter_mut() {
+            let CompanyEvent::OperatorMessage {
+                text,
+                chat: Some(target),
+                parent,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            let current = *parent;
+            // Both terms are the chat id the operator addressed, which is what
+            // every message in this channel was journaled under — `owns` folds
+            // General's spellings through `same_conversation` either way. The
+            // desk *name* term exists for histories journaled under a name, and
+            // an index drawn from one addressed page does not need it.
+            let (desk_id, desk_name) = (target.as_str(), target.as_str());
+            let page = match log.read_before(&self.rt.id, None, THREAD_INDEX_PAGE).await {
+                Ok(page) => page,
+                // A read failure costs the turn its orientation and nothing
+                // else. The same posture `build_chat_seed` takes: a briefing is
+                // an enhancement, and failing the turn over one would be worse
+                // than answering without it.
+                Err(error) => {
+                    tracing::warn!(
+                        company = %self.rt.id,
+                        %error,
+                        "[thread-index] journal read failed; the turn answers without orientation"
+                    );
+                    return;
+                }
+            };
+            let (lines, omitted) = thread_index(&page, desk_id, desk_name, current, text, &settled);
+            if lines.is_empty() {
+                continue;
+            }
+            // The truncation is DECLARED. A selection presented as an
+            // enumeration is answered from confidently and wrongly.
+            let tail = if omitted > 0 {
+                format!("\n- (and {omitted} older, not listed)")
+            } else {
+                String::new()
+            };
+            // **The instruction is half the mechanism.** Without the gate an
+            // agent reads every thread it is shown "to be safe", which rebuilds
+            // the flat channel window this epic removed — in the prompt, and
+            // paid for twice. With it, the index is a pointer: enough to notice
+            // a reference, never enough to answer from.
+            text.push_str(&format!(
+                "{THREAD_INDEX_ANNOTATION}, for reference only — do NOT read or \
+answer from them unless this message explicitly refers to one, and if a \
+reference could mean more than one, ask which):\n{}{tail}\n]",
+                lines
+                    .iter()
+                    .map(ThreadLine::render)
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ));
         }
     }
@@ -3429,6 +3557,163 @@ impl<'a> CycleHostImpl<'a> {
 /// long-lived channel's whole board history is not re-sent on every turn. What
 /// does not fit is declared as a count rather than dropped — see the write site.
 const SETTLED_WORK_BRIEFING_MAX: usize = 5;
+
+/// How many threads the index lists before it starts counting (issue #1890 E).
+///
+/// A handful, because this is a **selection and not an enumeration**: a channel
+/// accumulates roots without limit, and what does not fit is declared as a
+/// count. A model handed 5 of 28 with no marker answers "that is everything"
+/// confidently and wrongly.
+const THREAD_INDEX_MAX: usize = 5;
+
+/// How much of the journal's tail the index is drawn from (issue #1890 E).
+///
+/// **Liveness, expressed as a bound.** A thread is "live" here if it has
+/// activity inside the page the chat seed already walks — which is the same
+/// window the turn's own history comes from, so the index cannot name a
+/// conversation the turn could not otherwise have heard of.
+///
+/// Cheap since #1890 G: a tail page is read from the end of the journal rather
+/// than by streaming it from the head, so this costs the page and not the
+/// company's history.
+const THREAD_INDEX_PAGE: usize = 256;
+
+/// One line of the index — a thread the turn may decide to ask about.
+struct ThreadLine {
+    /// The root's own opening words, truncated. The discriminator, and what a
+    /// later reference will echo.
+    opening: String,
+    /// How many replies hang off it.
+    replies: usize,
+    /// Where its work landed, when a card raised in it has settled — the fact
+    /// #1890 B made answerable by recording a card's thread.
+    landed: Option<String>,
+    /// The newest sequence in the thread, for ordering by recency.
+    latest: EventSeq,
+}
+
+impl ThreadLine {
+    /// `- "draft the launch email" — 4 replies`
+    ///
+    /// State before count where there is one: "finished → In review" answers
+    /// the question a reader is actually asking, and a reply count is only how
+    /// busy it was.
+    fn render(&self) -> String {
+        match (&self.landed, self.replies) {
+            (Some(landing), _) => format!("- {:?} — {landing}", self.opening),
+            (None, 0) => format!("- {:?} — no reply yet", self.opening),
+            (None, 1) => format!("- {:?} — 1 reply", self.opening),
+            (None, n) => format!("- {:?} — {n} replies", self.opening),
+        }
+    }
+}
+
+/// The channel's other live threads, newest first (issue #1890 E).
+///
+/// `current` is the thread the turn is answering in, excluded from its own
+/// index — `None` for a channel-level turn, which therefore sees every thread,
+/// and that asymmetry is the "both directions" the epic asks for rather than
+/// two separate mechanisms.
+///
+/// Reads one bounded tail page and derives the roots from it; a thread whose
+/// last activity fell outside that page is not live and is not listed. The
+/// landing comes from the settled cards already in hand, matched on the thread
+/// each recorded at raise time (#1890 B).
+fn thread_index(
+    page: &[crate::ports::types::StoredEvent],
+    desk_id: &str,
+    desk_name: &str,
+    current: Option<EventSeq>,
+    // The message being answered, so it never appears in its own index.
+    //
+    // At channel level `current` is `None` — there is no thread to exclude —
+    // but the message has already been journaled by the time the cycle runs,
+    // so it is itself an unparented root on the page and the index would list
+    // the very message it is attached to. Matched on text for the same reason
+    // `chat_seed::strip_current_message` is: the in-memory event carries no
+    // sequence to compare against. The same trap applies and is worth naming —
+    // a *different* thread opened with identical wording is excluded too,
+    // which costs one line of orientation and never shows a reader their own
+    // message back as somebody else's conversation.
+    current_message: &str,
+    settled: &[&TaskRecord],
+) -> (Vec<ThreadLine>, usize) {
+    use std::collections::HashMap;
+
+    let mut roots: HashMap<EventSeq, ThreadLine> = HashMap::new();
+    let mut replies: HashMap<EventSeq, usize> = HashMap::new();
+
+    for stored in page {
+        if !crate::server::chat_history::owns(desk_id, desk_name, &stored.event) {
+            continue;
+        }
+        match &stored.event {
+            // A root: an operator message that hangs off nothing. Only an
+            // operator message opens a thread — an agent reply is always
+            // parented to the question it answers.
+            CompanyEvent::OperatorMessage {
+                text, parent: None, ..
+            } => {
+                let opening = first_line(text, 120);
+                if opening.is_empty() {
+                    continue;
+                }
+                roots.insert(
+                    stored.seq,
+                    ThreadLine {
+                        opening,
+                        replies: 0,
+                        landed: None,
+                        latest: stored.seq,
+                    },
+                );
+            }
+            CompanyEvent::OperatorMessage {
+                parent: Some(root), ..
+            }
+            | CompanyEvent::AgentReply {
+                parent: Some(root), ..
+            } => {
+                *replies.entry(*root).or_default() += 1;
+                if let Some(line) = roots.get_mut(root) {
+                    line.latest = line.latest.max(stored.seq);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut lines: Vec<ThreadLine> = roots
+        .into_iter()
+        .filter(|(seq, line)| {
+            Some(*seq) != current
+                && !(!line.opening.is_empty()
+                    && current_message.trim().starts_with(line.opening.as_str()))
+        })
+        .map(|(seq, mut line)| {
+            line.replies = replies.get(&seq).copied().unwrap_or(0);
+            // Where the work raised in this thread landed, if any did. The
+            // question "did that ship?" for a thread the turn is not in.
+            line.landed = settled
+                .iter()
+                .find(|card| card.origin_parent == Some(seq))
+                .map(|card| {
+                    format!(
+                        "finished → {}",
+                        crate::ports::tasks::column_label(&card.column)
+                    )
+                });
+            line
+        })
+        .collect();
+
+    // Most recent first, so "the other one" resolves to the thread most likely
+    // meant, and the cap cuts the stale tail rather than the live head.
+    lines.sort_by_key(|line| std::cmp::Reverse(line.latest));
+    let omitted = lines.len().saturating_sub(THREAD_INDEX_MAX);
+    lines.truncate(THREAD_INDEX_MAX);
+    (lines, omitted)
+}
 
 /// Has this card **stopped**, in the sense the transcript's `finished → …`
 /// marker means (issue #1890 C)?
@@ -10351,7 +10636,11 @@ timeout)",
 
         let mut events = vec![operator_in_thread("growth", Some(41), "make it shorter")];
         CycleRunner::new(&rt)
-            .inject_handed_task_awareness(&record, &mut events)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.expect("list"),
+            )
             .await;
         let text = message_text(&events[0]);
 
@@ -10400,7 +10689,11 @@ timeout)",
 
         let mut events = vec![operator_in_thread("growth", None, "did that ship?")];
         CycleRunner::new(&rt)
-            .inject_handed_task_awareness(&record, &mut events)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.expect("list"),
+            )
             .await;
         let text = message_text(&events[0]);
         assert!(
@@ -10441,7 +10734,11 @@ timeout)",
 
         let mut events = vec![operator_in_thread("growth", None, "where are we?")];
         CycleRunner::new(&rt)
-            .inject_handed_task_awareness(&record, &mut events)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.expect("list"),
+            )
             .await;
         let text = message_text(&events[0]);
 
@@ -10488,7 +10785,11 @@ timeout)",
 
         let mut events = vec![operator_in_thread("engineering", None, "what's up?")];
         CycleRunner::new(&rt)
-            .inject_handed_task_awareness(&record, &mut events)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.expect("list"),
+            )
             .await;
         let text = message_text(&events[0]);
         assert!(!text.contains(SETTLED_WORK_ANNOTATION), "{text}");
@@ -10541,5 +10842,275 @@ timeout)",
             CompanyEvent::OperatorMessage { text, .. } => text.as_str(),
             other => panic!("expected an operator message, got {other:?}"),
         }
+    }
+
+    /* ---- issue #1890 E: the thread index ---- */
+
+    fn op(
+        seq: u64,
+        chat: &str,
+        parent: Option<u64>,
+        text: &str,
+    ) -> crate::ports::types::StoredEvent {
+        crate::ports::types::StoredEvent {
+            seq: EventSeq::new(seq),
+            company: CompanyId::new("acme"),
+            event: CompanyEvent::OperatorMessage {
+                text: text.to_string(),
+                by: None,
+                chat: Some(chat.to_string()),
+                parent: parent.map(EventSeq::new),
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+            },
+            at_millis: seq,
+        }
+    }
+
+    fn agent_reply(seq: u64, chat: &str, parent: u64) -> crate::ports::types::StoredEvent {
+        crate::ports::types::StoredEvent {
+            seq: EventSeq::new(seq),
+            company: CompanyId::new("acme"),
+            event: CompanyEvent::AgentReply {
+                chat_id: chat.to_string(),
+                agent_id: "ceo".to_string(),
+                text: "an answer".to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                parent: Some(EventSeq::new(parent)),
+                mentions: Vec::new(),
+                mention_depth: 0,
+            },
+            at_millis: seq,
+        }
+    }
+
+    /// The index is the channel's other threads — the turn's own is excluded,
+    /// because a thread does not need pointing at itself and the line would
+    /// spend budget saying nothing.
+    #[test]
+    fn the_index_lists_the_other_threads_and_not_this_one() {
+        let page = vec![
+            op(41, "growth", None, "draft the launch email"),
+            agent_reply(42, "growth", 41),
+            op(43, "growth", None, "what's our Q3 CAC?"),
+            agent_reply(44, "growth", 43),
+        ];
+        let (lines, omitted) =
+            thread_index(&page, "growth", "growth", Some(EventSeq::new(41)), "", &[]);
+        assert_eq!(omitted, 0);
+        let rendered: Vec<String> = lines.iter().map(ThreadLine::render).collect();
+        assert_eq!(rendered, vec![r#"- "what's our Q3 CAC?" — 1 reply"#]);
+    }
+
+    /// A channel-level turn is in no thread, so it sees them all. That is the
+    /// epic's "both directions" falling out of one rule rather than needing two.
+    #[test]
+    fn a_channel_level_turn_sees_every_thread() {
+        let page = vec![
+            op(41, "growth", None, "draft the launch email"),
+            op(43, "growth", None, "what's our Q3 CAC?"),
+        ];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(lines.len(), 2);
+    }
+
+    /// Newest first, so "the other one" resolves to the thread most likely
+    /// meant — and so the cap below cuts the stale tail rather than the live
+    /// head.
+    #[test]
+    fn the_index_is_ordered_by_recency() {
+        let page = vec![
+            op(10, "growth", None, "the old one"),
+            op(11, "growth", None, "the middle one"),
+            agent_reply(30, "growth", 10), // revives the oldest root
+            op(12, "growth", None, "the newest root"),
+        ];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(
+            lines.iter().map(|l| l.opening.clone()).collect::<Vec<_>>(),
+            vec!["the old one", "the newest root", "the middle one"],
+            "recency is the thread's LAST activity, not when it opened"
+        );
+    }
+
+    /// Past the cap the index **says so**. A selection presented as an
+    /// enumeration is answered from confidently and wrongly — the same rule
+    /// #1890 C's briefing follows.
+    #[test]
+    fn a_truncated_index_declares_what_it_left_out() {
+        let total = THREAD_INDEX_MAX + 3;
+        let page: Vec<crate::ports::types::StoredEvent> = (0..total)
+            .map(|n| op(100 + n as u64, "growth", None, &format!("topic {n}")))
+            .collect();
+        let (lines, omitted) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(lines.len(), THREAD_INDEX_MAX);
+        assert_eq!(omitted, 3);
+        // The newest survive; the oldest are what the cap cut.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.opening == format!("topic {}", total - 1))
+        );
+        assert!(!lines.iter().any(|l| l.opening == "topic 0"));
+    }
+
+    /// End to end through the injector: a turn answering in one thread is told
+    /// what else its channel is about, and told **not to read it**.
+    ///
+    /// The gate is half the mechanism. Without it an agent pulls every thread
+    /// it is shown "to be safe", which rebuilds the flat channel window #1890 A
+    /// removed — in the prompt, and paid for twice.
+    #[tokio::test]
+    async fn a_threaded_turn_is_oriented_without_being_invited_to_read() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        for stored in [
+            op(41, "growth", None, "draft the launch email"),
+            agent_reply(42, "growth", 41),
+            op(43, "growth", None, "what's our Q3 CAC?"),
+        ] {
+            rt.events().append(&id, stored.event).await.unwrap();
+        }
+
+        // Answering inside thread 41 — the seqs the fixture appended start at
+        // 1, so the roots are whatever the log assigned; read them back.
+        let page = rt.events().read_before(&id, None, 64).await.unwrap();
+        let first_root = page
+            .iter()
+            .rev()
+            .find_map(|e| match &e.event {
+                CompanyEvent::OperatorMessage { parent: None, .. } => Some(e.seq),
+                _ => None,
+            })
+            .expect("a root");
+
+        let mut events = vec![operator_in_thread(
+            "growth",
+            Some(first_root.value()),
+            "make it shorter",
+        )];
+        CycleRunner::new(&rt)
+            .inject_thread_index(&mut events, &[])
+            .await;
+        let text = message_text(&events[0]);
+
+        assert!(text.starts_with("make it shorter"), "{text}");
+        assert!(text.contains(THREAD_INDEX_ANNOTATION), "{text}");
+        assert!(
+            text.contains("what's our Q3 CAC?"),
+            "the other thread is named: {text}"
+        );
+        assert!(
+            !text.contains("draft the launch email"),
+            "but not the one being answered in: {text}"
+        );
+        assert!(
+            text.contains("do NOT read or answer from them"),
+            "the gate rides with the index or the index undoes A: {text}"
+        );
+    }
+
+    /// A channel with no other thread gets no index at all — an empty briefing
+    /// is prompt budget spent to say nothing.
+    #[tokio::test]
+    async fn a_channel_with_nothing_else_open_gets_no_index() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut events = vec![operator_in_thread("growth", None, "anything happening?")];
+        CycleRunner::new(&rt)
+            .inject_thread_index(&mut events, &[])
+            .await;
+        assert!(!message_text(&events[0]).contains(THREAD_INDEX_ANNOTATION));
+    }
+
+    /// A message never appears in its own index.
+    ///
+    /// At channel level there is no thread to exclude, but the operator's
+    /// message is journaled before the cycle runs — so it is an unparented root
+    /// on the page, and without this the index shows a reader their own message
+    /// back as somebody else's conversation. Found by
+    /// `redeem_replays_the_markers_attachments`, which printed the index into
+    /// its failure message.
+    #[test]
+    fn a_message_is_not_listed_in_its_own_index() {
+        let page = vec![
+            op(41, "growth", None, "review the attached report"),
+            op(43, "growth", None, "what's our Q3 CAC?"),
+        ];
+        let (lines, _) = thread_index(
+            &page,
+            "growth",
+            "growth",
+            None,
+            "review the attached report",
+            &[],
+        );
+        assert_eq!(
+            lines.iter().map(|l| l.opening.clone()).collect::<Vec<_>>(),
+            vec!["what's our Q3 CAC?"],
+            "the message being answered is not one of its own other conversations"
+        );
+    }
+
+    /// A thread whose work settled says where it landed — the question a reader
+    /// is actually asking, and answerable only because #1890 B records which
+    /// thread raised a card.
+    #[test]
+    fn a_thread_whose_work_settled_says_where_it_landed() {
+        let page = vec![op(41, "growth", None, "draft the launch email")];
+        let mut card = settled_card("t-1", "Draft the launch email");
+        card.origin_chat_id = Some("growth".to_string());
+        card.origin_parent = Some(EventSeq::new(41));
+        let settled = vec![&card];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &settled);
+        assert_eq!(
+            lines[0].render(),
+            r#"- "draft the launch email" — finished → In review"#,
+            "state beats a reply count: it is what a reader is asking"
+        );
+    }
+
+    /// Another channel's threads are another channel's business. An index that
+    /// crossed channels would be a wider leak than the one this epic closed.
+    #[test]
+    fn the_index_never_crosses_channels() {
+        let page = vec![
+            op(41, "growth", None, "draft the launch email"),
+            op(42, "engineering", None, "the migration plan"),
+        ];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].opening, "draft the launch email");
+    }
+
+    /// An agent reply never opens a thread — it is always parented to the
+    /// question it answers, so treating one as a root would invent a
+    /// conversation the operator never started.
+    #[test]
+    fn an_agent_reply_is_never_a_root() {
+        let page = vec![
+            op(41, "growth", None, "draft the launch email"),
+            agent_reply(42, "growth", 41),
+        ];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one root, not two: {lines:?}",
+            lines = lines.len()
+        );
     }
 }
