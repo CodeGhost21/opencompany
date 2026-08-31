@@ -254,13 +254,13 @@ export function TaskItem({
           Workflow
         </div>
       )}
-      {/*
-        `pending`, not `todo`: the board API sends the card's *phase* in
-        `column` (`TaskCard::from` runs the stored stage through
-        `board::phase_of`), and `todo` is the only stage in the pending phase.
-        Reading the stage word here matched nothing on the wire, so the chip
-        never rendered for a real bounced card.
-      */}
+      {/* Issue #1865 (Codex review): the task API converts a stored `todo`
+          card to the wire phase `column: "pending"` (issue #1512) and never
+          serializes `column: "todo"` — `stage_of` only fills `stage` for the
+          `working` phase's four columns, so a To-do card carries no `stage`
+          either. `"todo"` here matched no real card; `"pending"` is the wire
+          value a bounced card — always in the store's `todo` column — is
+          actually seen at. */}
       {task.column === "pending" && task.bounced && (
         <BouncedBadgeRow reason={task.bounced} />
       )}

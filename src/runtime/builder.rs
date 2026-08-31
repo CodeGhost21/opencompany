@@ -2233,13 +2233,33 @@ impl RuntimeBuilder {
                         )
                         .await
                         {
-                            Ok(Some(column)) => tracing::info!(
-                                company = %id,
-                                run = %run.id,
-                                task = %task_id,
-                                column,
-                                "returned a card stranded by a previous host process"
-                            ),
+                            Ok(Some(column)) => {
+                                tracing::info!(
+                                    company = %id,
+                                    run = %run.id,
+                                    task = %task_id,
+                                    column,
+                                    "returned a card stranded by a previous host process"
+                                );
+                                // Issue #1865: same notification `abandon_run`
+                                // and the cycle's terminality backstop raise
+                                // for the far more common "the brain errored"
+                                // shape of this failure. Without this, a card
+                                // bounced by a crash only this boot process
+                                // ever knows about gets its silent bounce chip
+                                // back, but the failure that was announced for
+                                // every *other* dispatch failure goes unheard
+                                // for the one that happened at 3am.
+                                if column == crate::ports::tasks::COLUMN_TODO {
+                                    crate::runtime::advance::notify_dispatch_failed(
+                                        ops.notifications.as_ref(),
+                                        &id,
+                                        task_id,
+                                        crate::ports::runs::ORPHAN_ERROR,
+                                    )
+                                    .await;
+                                }
+                            }
                             Ok(None) => {}
                             // One card that will not move must not stop the
                             // rest and must not fail boot — record-keeping never
@@ -6647,6 +6667,118 @@ mod test {
         assert_eq!(
             next.attempt, 2,
             "a card that came back to To-do is re-tried, not resumed"
+        );
+    }
+
+    /// Issue #1865 (Codex review): the boot reaper's card sweep bounces a
+    /// stranded card to To-do through the same guarded mover `abandon_run` and
+    /// the cycle's terminality backstop use, but historically never called the
+    /// notification helper those two do — so a crash-recovered dispatch
+    /// failure got the silent bounce chip and nothing else, while the exact
+    /// same failure discovered any other way was announced. This proves the
+    /// boot path now files the same `dispatch_failed` row.
+    #[tokio::test]
+    async fn boot_reaper_notifies_a_bounced_card_same_as_the_live_paths() {
+        use crate::ports::runs::{NewRun, RunOutcome, RunStatus};
+        use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_PAUSED, TaskRecord};
+
+        let home_dir = tmp_home("oc-run-reap-notify-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+        let card = |task: &str, column: &str| TaskRecord {
+            id: task.to_string(),
+            title: "Draft the spec".to_string(),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+
+        let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let runs = first_boot.runs().clone();
+        let tasks = first_boot.tasks().clone();
+
+        // `card-a` will be stranded In Progress by the crash. `card-b` is
+        // parked for a person and must raise nothing.
+        tasks
+            .upsert(&id, &card("card-a", COLUMN_IN_PROGRESS))
+            .await
+            .unwrap();
+        tasks
+            .upsert(&id, &card("card-b", COLUMN_PAUSED))
+            .await
+            .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-a", "card-a", "ceo"))
+            .await
+            .unwrap();
+        runs.begin_run(&id, "run-a", crate::ports::types::EventSeq::new(1))
+            .await
+            .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-b", "card-b", "ceo"))
+            .await
+            .unwrap();
+        runs.begin_run(&id, "run-b", crate::ports::types::EventSeq::new(2))
+            .await
+            .unwrap();
+        runs.finish_run(&id, "run-b", RunOutcome::new(RunStatus::Paused))
+            .await
+            .unwrap();
+
+        // The host dies here — no settle, no journal entry, nothing.
+        drop(first_boot);
+
+        let second_boot = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Sanity: the reaper did land the card on To-do, same as the existing
+        // `boot_returns_a_stranded_card_and_leaves_a_parked_one_alone` proves.
+        let stranded = second_boot
+            .tasks()
+            .list(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "card-a")
+            .expect("card survives the restart");
+        assert_eq!(stranded.column, crate::ports::tasks::COLUMN_TODO);
+
+        let notifications = second_boot.notifications().list(&id, "ceo").await.unwrap();
+        let dispatch_failed: Vec<_> = notifications
+            .iter()
+            .filter(|n| n.notification.kind == "dispatch_failed")
+            .collect();
+        assert_eq!(
+            dispatch_failed.len(),
+            1,
+            "the boot reaper must file exactly one dispatch_failed row for the \
+             one card it bounced: {notifications:?}"
+        );
+        assert_eq!(dispatch_failed[0].notification.subject.id, "card-a");
+        // The parked card never left In Progress from the reaper's point of
+        // view (its run was already `Paused`), so it must not be named.
+        assert!(
+            !dispatch_failed[0].notification.title.contains("card-b"),
+            "{:?}",
+            dispatch_failed[0]
         );
     }
 

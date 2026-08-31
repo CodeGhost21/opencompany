@@ -272,6 +272,9 @@ pub struct HarnessDeps {
     /// the whole roster addresses the configured workload (e.g. `chat-v1`).
     /// `None` keeps each agent's tier-derived default.
     pub model_override: Option<String>,
+    /// The company's durable notification store, used by workflow tools to
+    /// announce failures and other unhealthy outcomes.
+    pub notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
     /// The company's task board, so a [`TaskDispatched`] cycle can load the
     /// dispatched card and write its result back. `None` off the task path (the
     /// chat brain leaves the board untouched).
@@ -344,20 +347,6 @@ pub struct HarnessDeps {
     /// the `query_company` read tool for recent-activity context (issue #53).
     /// `None` leaves the orchestrator without the recent-events half.
     pub events: Option<Arc<dyn EventLog>>,
-    /// The company's notification store, so a workflow run an **agent** started
-    /// badges the operator when it ends unhealthy — blocked on an approval, or
-    /// stranded because it could not park one (issue #1861).
-    ///
-    /// Wired because the alternative shipped the feature inert: `run_workflow`
-    /// is the one entry point nobody is watching a progress bar for, so an
-    /// agent-initiated run that stops waiting on a person is invisible until
-    /// somebody thinks to open the run history. The console's and the
-    /// scheduler's runs already badge; this is the same contract for the third
-    /// trigger.
-    ///
-    /// `None` skips the badge and changes nothing else, which is what every
-    /// test that does not assert on notifications wants.
-    pub notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
     /// The shared delegation queue the orchestrator's `spawn_task` /
     /// `delegate_to_desk` tools push onto and the [`HarnessBrain`] drains after
     /// an orchestrator turn (issue #53). A [`DelegationQueue`] is a cheap shared
@@ -5023,14 +5012,14 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
-        notifications: None,
-        ledgers: None,
-        ledger_registry: Default::default(),
         provider: Arc::new(provider::MockProvider::default()),
         provider_slug: "mock".to_string(),
         serves: None,
         context: runtime.context.clone(),
         store: runtime.store.clone(),
+        notifications: Some(runtime.notifications().clone()),
+        ledgers: None,
+        ledger_registry: Default::default(),
         meter,
         workspace_root: std::env::temp_dir(),
         mcp_home: None,

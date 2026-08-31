@@ -55,8 +55,11 @@ use crate::ports::tasks::COLUMN_IN_PROGRESS as IN_PROGRESS;
 /// The board column a task must enter to be planned (issue #337). Read from the
 /// task port for the same reason the dispatch literal is.
 use crate::ports::tasks::COLUMN_PLANNING as PLANNING;
-/// The board column where unstarted and failed cards rest.
-use crate::ports::tasks::COLUMN_TODO;
+/// The board column a bounced card lands in (issue #1865). Read from the task
+/// port for the same reason the dispatch/planning literals above are — so the
+/// clear-on-departure edge below and [`TaskRecord::bounced`]'s own doc cannot
+/// drift onto two different literals for "todo".
+use crate::ports::tasks::COLUMN_TODO as TODO;
 
 /// Whether an upsert moves a card **into** `in_progress` (the dispatch edge).
 /// A card already in `in_progress` re-saved is not a fresh dispatch.
@@ -80,6 +83,22 @@ fn task_enters_in_progress(prev_column: Option<&str>, next_column: &str) -> bool
 /// to be.
 fn task_enters_planning(prev_column: Option<&str>, next_column: &str) -> bool {
     next_column == PLANNING && prev_column != Some(PLANNING)
+}
+
+/// Whether an upsert moves a card **out of** `todo`, by any route (issue
+/// #1865 Codex review on PR #1883).
+///
+/// [`TaskRecord::bounced`](crate::ports::tasks::TaskRecord::bounced)'s own doc
+/// says the field is "cleared the instant the card leaves `todo` any other
+/// way" — not only via the two edges above. `patch_task` accepts any board
+/// column on a single write, so an operator can move a bounced To-do card
+/// straight to `in_review` or `done` without ever passing through
+/// `in_progress`/`planning`; `dispatch || plan` alone missed that departure,
+/// so the stale chip rode along and could resurface if the card later came
+/// back to `todo` — a manual transition that superseded the bounce, reporting
+/// a reason that no longer applies.
+fn task_leaves_todo(prev_column: Option<&str>, next_column: &str) -> bool {
+    prev_column == Some(TODO) && next_column != TODO
 }
 
 /// Whether a company should come up with the emergency stop engaged, given what
@@ -983,7 +1002,14 @@ impl CompanyRuntime {
     /// the result lands on the card asynchronously. Without an attached harness
     /// both are no-ops and the board stays inert — the card simply rests where
     /// it was put.
-    pub async fn upsert_task(self: &Arc<Self>, task: &TaskRecord) -> Result<()> {
+    ///
+    /// Returns the record actually persisted, not necessarily `task` itself:
+    /// when a stale `bounced` chip is cleared (above), the clone that carries
+    /// the clear is what lands in the store, and a caller that went on to
+    /// serialize its own `task` back to a client (`PATCH /tasks/{id}`'s REST
+    /// handler) would otherwise hand back a `bounced` reason the stored card no
+    /// longer has (Codex review, PR #1883).
+    pub async fn upsert_task(self: &Arc<Self>, task: &TaskRecord) -> Result<TaskRecord> {
         let prev_column = self
             .ops
             .tasks
@@ -994,23 +1020,37 @@ impl CompanyRuntime {
             .map(|t| t.column);
         let dispatch = task_enters_in_progress(prev_column.as_deref(), &task.column);
         let plan = task_enters_planning(prev_column.as_deref(), &task.column);
-        // Issue #1865: a card leaving todo is a fresh attempt or a state
-        // change, so any bounce chip left over from a *previous* failed attempt
-        // is stale the moment this one starts — a card moved to planning or
-        // another column should not advertise the reason its last todo attempt
-        // came back. Cloned rather than mutating the caller's `task` in place:
-        // this is the single write site for REST mutations and the caller may
-        // hold or re-render its own copy afterwards.
-        let clear_bounced = prev_column.as_deref() == Some(COLUMN_TODO)
-            && task.column != COLUMN_TODO
-            && task.bounced.is_some();
-        let write: std::borrow::Cow<'_, TaskRecord> = if clear_bounced {
-            let mut cleared = task.clone();
-            cleared.bounced = None;
-            std::borrow::Cow::Owned(cleared)
-        } else {
-            std::borrow::Cow::Borrowed(task)
-        };
+        // Issue #1865: a card re-entering In Progress **or** Planning is a
+        // fresh attempt, so any bounce chip left over from a *previous* failed
+        // attempt is stale the moment this one starts — a card mid-retry must
+        // not go on advertising the reason its last try came back. Planning
+        // included (Codex review): "Plan first" on a bounced card is exactly
+        // as much a fresh attempt as a direct re-dispatch, and the planning
+        // pass's own settle paths (`settle_blocked`/`settle_failed` in
+        // `harness::built_in::planning`) write back to To-do through the plain
+        // `TaskStore::upsert` port, not through here — so if this call sat out
+        // the planning edge, the stale chip would ride the card all the way
+        // through the pass and reappear on a To-do that has nothing to do with
+        // the dispatch failure it names.
+        //
+        // Codex review (PR #1883): gated on `task_leaves_todo`, not
+        // `dispatch || plan` — `patch_task` accepts every board column on one
+        // write, so a bounced card can leave `todo` straight for `in_review`
+        // or `done` without ever touching `in_progress`/`planning`. That
+        // manual transition supersedes the bounce exactly as much as a
+        // re-dispatch does, and the field's own doc promises it clears "the
+        // instant the card leaves `todo` any other way" — not only these two.
+        // Cloned rather than mutating the caller's `task` in place: this is
+        // the single write site for REST mutations and the caller may hold or
+        // re-render its own copy afterwards.
+        let write: std::borrow::Cow<'_, TaskRecord> =
+            if task_leaves_todo(prev_column.as_deref(), &task.column) && task.bounced.is_some() {
+                let mut cleared = task.clone();
+                cleared.bounced = None;
+                std::borrow::Cow::Owned(cleared)
+            } else {
+                std::borrow::Cow::Borrowed(task)
+            };
         self.ops.tasks.upsert(&self.id, &write).await?;
         if dispatch {
             self.dispatch_task(task).await;
@@ -1018,7 +1058,7 @@ impl CompanyRuntime {
         if plan {
             self.plan_task(task);
         }
-        Ok(())
+        Ok(write.into_owned())
     }
 
     /// Fires the detached planning pass for a card that just entered
@@ -1266,14 +1306,6 @@ impl CompanyRuntime {
         }
     }
 
-    /// Files a durable notification that a board card's dispatch failed and it
-    /// bounced back to To-do (issue #1865) — shared by every system path that
-    /// settles a run its own turn did not: [`abandon_run`](Self::abandon_run),
-    /// the cycle's terminality backstop, and the boot reaper's card sweep.
-    ///
-    /// Whole-company audience: a bounced card has no single decider the way a
-    /// mention does, and its assignee is exactly who the card's own `assignee`
-    /// field already names for anyone who opens it.
     /// Parks a blocker on the approval gate from **outside a cycle** (issue
     /// #1861).
     ///
@@ -1433,28 +1465,21 @@ impl CompanyRuntime {
             .await
     }
 
+    /// Thin `&self` wrapper around
+    /// [`advance::notify_dispatch_failed`](crate::runtime::advance::notify_dispatch_failed)
+    /// for the two callers that already hold a live [`CompanyRuntime`]:
+    /// [`abandon_run`](Self::abandon_run) and the cycle's terminality
+    /// backstop. The boot reaper's card sweep runs before a `CompanyRuntime`
+    /// exists, so it calls the shared function directly — see that doc for
+    /// the full three-caller picture.
     pub(crate) async fn notify_dispatch_failed(&self, task_id: &str, reason: &str) {
-        let note = crate::ports::notifications::Notification {
-            id: crate::ports::generate_id(),
-            kind: "dispatch_failed".to_string(),
-            subject: crate::ports::notifications::Subject {
-                kind: crate::ports::notifications::SubjectKind::Task,
-                id: task_id.to_string(),
-            },
-            created_at: now_millis(),
-            title: format!("A card's dispatch failed and returned to To-do: {reason}"),
-            audience: None,
-            context: None,
-        };
-        if let Err(err) = self.notifications().append(&self.id, &note).await {
-            tracing::warn!(
-                company = %self.id,
-                task = %task_id,
-                error = %err,
-                "[runs] a dispatch-failure notification could not be recorded; the card still \
-                 bounced, but nobody is badged for it"
-            );
-        }
+        crate::runtime::advance::notify_dispatch_failed(
+            self.notifications().as_ref(),
+            &self.id,
+            task_id,
+            reason,
+        )
+        .await;
     }
 
     /// Mints this dispatch's [`RunStatus::Pending`] attempt row and returns its
@@ -1856,6 +1881,17 @@ impl CompanyRuntime {
     /// another task is the same class of untrue statement as the one being fixed.
     ///
     /// A no-op for every other receipt.
+    ///
+    /// Also files the same `approval_expired` notification
+    /// [`sweep_expired_approvals`](Self::sweep_expired_approvals) files when
+    /// *it* is the one to discover the deadline (issue #1865, Codex review on
+    /// PR #1883). Both callers reach the identical outcome — a parked
+    /// approval that ran out unanswered — and `notify_approval_expired` is
+    /// invoked from nowhere else, so before this an expiry notified when the
+    /// sweeper found it first and stayed silent when a late resolve found it
+    /// instead. Best-effort and after the retirement, same ordering as the
+    /// sweep: a notification that could not be filed must not undo a
+    /// default-deny that already happened.
     async fn retire_if_expired(
         self: &Arc<Self>,
         id: &ApprovalId,
@@ -1864,8 +1900,21 @@ impl CompanyRuntime {
         if !receipt.expired() {
             return Ok(());
         }
+        // Both read BEFORE the retirement, for the reason
+        // `sweep_expired_approvals` gives at its own call: retiring is what
+        // removes the approval from the journal's pending set, and after that
+        // there is no way back to what was being asked. Main's #1883 added
+        // this call site against the one-argument signature that predated
+        // #1861's blocker/approval distinction; without the two flags the
+        // notice would tell an operator a question was "denied by default"
+        // when nothing was ever decided.
+        let unanswered = self.unanswered_blocker(id);
+        let is_blocker = self.is_blocker(id);
         self.retire_approval(id, ExpiryReason::Ttl, now_millis())
-            .await
+            .await?;
+        self.notify_approval_expired(id, is_blocker, unanswered.is_some())
+            .await;
+        Ok(())
     }
 
     /// Pushes a parked approval's deadline out to a fresh full TTL window,
@@ -5226,6 +5275,157 @@ mod tests {
         );
     }
 
+    /// Codex review (#1865): "Plan first" on a bounced card is a fresh
+    /// attempt exactly like a re-dispatch, so the stale bounce chip must not
+    /// survive the To-do → Planning edge either.
+    ///
+    /// No harness/planner wired — the default shape ~200 callers use — so
+    /// `plan_task`'s spawn is a no-op and this exercises only the synchronous
+    /// clearing `upsert_task` does before it, matching the inert-board
+    /// pattern `runtime::builder::test` already uses for the sibling
+    /// dispatch edge.
+    #[tokio::test]
+    async fn planning_first_clears_a_stale_bounce_chip_same_as_a_redispatch() {
+        use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO, TaskRecord};
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .expect("manifest");
+        let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(crate::ports::types::CompanyId::new("acme"))
+            .build()
+            .await
+            .expect("runtime");
+        let runtime = std::sync::Arc::new(runtime);
+
+        let card = TaskRecord {
+            id: "card-1".to_string(),
+            title: "Draft the spec".to_string(),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            // A stale chip from a dispatch attempt that already bounced.
+            bounced: Some("a previous run's dispatch failed".to_string()),
+        };
+        runtime
+            .upsert_task(&card)
+            .await
+            .expect("seed the bounced card in To-do");
+
+        let mut planned = card.clone();
+        planned.column = COLUMN_PLANNING.to_string();
+        runtime
+            .upsert_task(&planned)
+            .await
+            .expect("drag it into Planning");
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|t| t.id == "card-1")
+            .expect("card survives");
+        assert_eq!(
+            after.bounced, None,
+            "entering Planning must clear the previous dispatch's bounce chip, not carry it \
+             through to whatever the planning pass settles next"
+        );
+    }
+
+    /// Codex review on PR #1883 (comment 3874654383): `patch_task` accepts
+    /// any board column on one write, so an operator can move a bounced
+    /// To-do card straight to `done` — a departure that touches neither the
+    /// dispatch nor the planning edge. The manual move supersedes the bounce
+    /// exactly as much as a re-dispatch does, and
+    /// [`crate::ports::tasks::TaskRecord::bounced`]'s own doc promises it
+    /// clears "the instant the card leaves `todo` any other way" — this
+    /// proves the "any other way" case, not just the two edge-fired ones the
+    /// sibling test above covers.
+    ///
+    /// Before the fix, `upsert_task` only cleared `bounced` when
+    /// `dispatch || plan`, so this direct To-do → Done transition left the
+    /// stale chip in place — and it would have resurfaced if the card later
+    /// came back to To-do, naming a failure the intervening manual move had
+    /// already superseded.
+    #[tokio::test]
+    async fn a_direct_move_to_done_clears_a_stale_bounce_chip() {
+        use crate::ports::tasks::{COLUMN_DONE, COLUMN_TODO, TaskRecord};
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+        )
+        .expect("manifest");
+        let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(crate::ports::types::CompanyId::new("acme"))
+            .build()
+            .await
+            .expect("runtime");
+        let runtime = std::sync::Arc::new(runtime);
+
+        let card = TaskRecord {
+            id: "card-2".to_string(),
+            title: "Draft the spec".to_string(),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            // A stale chip from a dispatch attempt that already bounced.
+            bounced: Some("a previous run's dispatch failed".to_string()),
+        };
+        runtime
+            .upsert_task(&card)
+            .await
+            .expect("seed the bounced card in To-do");
+
+        let mut done = card.clone();
+        done.column = COLUMN_DONE.to_string();
+        runtime
+            .upsert_task(&done)
+            .await
+            .expect("drag it straight to Done");
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|t| t.id == "card-2")
+            .expect("card survives");
+        assert_eq!(
+            after.bounced, None,
+            "a direct To-do → Done move must clear the stale bounce chip too — the operator's \
+             manual transition supersedes the reason it named, and the chip must not resurface \
+             if the card ever comes back to To-do"
+        );
+    }
+
     async fn runtime_and_record() -> (
         super::CompanyRuntime,
         crate::ports::CompanyRecord,
@@ -6198,6 +6398,56 @@ mod tests {
             .await
             .unwrap();
         approval
+    }
+
+    /// Issue #1865 (Codex review on PR #1883): a late resolve that discovers
+    /// an approval already past its deadline owes the SAME "expired
+    /// unanswered" notification the sweep loop files when it discovers the
+    /// identical deadline first.
+    ///
+    /// `notify_approval_expired` used to be invoked from nowhere but
+    /// `sweep_expired_approvals`, so `retire_if_expired` — the path a late
+    /// `resolve_approval_spawned`/`resolve_approval_amended_spawned` takes
+    /// when `settle_approval` answers `ResolveReceipt::Expired` — ran the
+    /// whole four-step `retire_approval` transaction and never told anybody.
+    /// The exact same expiry notified when the sweeper found it and stayed
+    /// silent when an operator's late click found it instead.
+    #[tokio::test]
+    async fn a_late_resolve_that_discovers_an_expiry_files_the_same_notification_as_the_sweep() {
+        use crate::ports::types::{Actor, ActorKind, Verdict};
+        use crate::runtime::grants::GrantScope;
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+        // Parked at epoch 0 — unambiguously past any TTL, the same trick
+        // `expired_approval_is_labelled_as_an_expiry_and_carries_its_wait`
+        // (src/server/ops/write_test.rs) uses.
+        let id = seed_parked(&rt, "appr-late", 0).await;
+
+        let by = Actor {
+            kind: ActorKind::Operator,
+            id: "owner".into(),
+        };
+        let (receipt, follow_up) = rt
+            .resolve_approval_spawned(&id, Verdict::Approve, by, GrantScope::Once)
+            .await
+            .unwrap();
+        assert!(
+            receipt.expired(),
+            "an epoch-0 park must read as expired, not approved: {receipt:?}"
+        );
+        super::join_follow_up(follow_up).await.unwrap();
+
+        let notifications = rt.notifications().list(rt.id(), "owner").await.unwrap();
+        assert!(
+            notifications
+                .iter()
+                .any(|n| n.notification.kind == "approval_expired"
+                    && n.notification.subject.id == id.as_ref()),
+            "a late resolve that discovers an expiry must file the same \
+             approval_expired notification the sweep files, got {notifications:?}"
+        );
     }
 
     /// Issue #971 (the projection this issue builds on): a card's deadline is the

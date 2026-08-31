@@ -1017,11 +1017,6 @@ pub fn build_agent(
             // the `read_run_output` companion reads back, so a clipped preview
             // is reachable within the turn. Orchestrator-only, like the tools.
             deps.run_outputs.clone(),
-            // Issue #1861: the notification store `run_workflow` badges a
-            // blocked or stranded run through, so a run the orchestrator
-            // started reports an unhealthy end the way the console's and the
-            // scheduler's already do.
-            deps.notifications.clone(),
             // Issue #619: who is minting, and how wide they are. `add_agent`
             // bounds the teammate it mints by this agent's own scope — #661
             // clamped to the *company* grant, which still lets a narrowly
@@ -1030,6 +1025,7 @@ pub fn build_agent(
             manifest_agent.id.clone(),
             manifest_agent.tools.clone(),
             grants.to_vec(),
+            deps.notifications.clone(),
         ));
     }
     // Recursive desk delegation (issue #176): a NON-orchestrator agent whose

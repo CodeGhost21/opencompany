@@ -11,12 +11,21 @@ import { VERDICT_TONE, runTone, verdictOf } from "@/views/workflows/run-health";
  * "ok" the same way `WorkflowRunVerdict::of` did before its own `degraded`
  * arm — the false-success half of the issue, mirrored client-side.
  *
- * The host is the source of truth for `degraded` (there is no client-side
- * fallback ladder for it, unlike the older verdicts — see `verdictOf`'s own
- * comment on why a pre-#981 host still needs one and a pre-#1865 host does
- * not need this one badly enough to earn a second ladder), so these tests
- * pin the READING side only: once `run.verdict === "degraded"` arrives, the
- * console must render it as its own amber tone, not fold it into `ok`.
+ * The host is the source of truth for `degraded` when it sends one, so most
+ * of these tests pin the READING side: once `run.verdict === "degraded"`
+ * arrives, the console must render it as its own amber tone, not fold it
+ * into `ok`.
+ *
+ * A prior version of this comment claimed there is no client-side fallback
+ * ladder for `degraded` at all, unlike the older verdicts. That was wrong
+ * (CodeRabbit review, PR #1883): a host old enough to predate #981's
+ * `verdict` field entirely sends no `verdict`, so `verdictOf` falls all the
+ * way through its pre-#981 ladder — and that ladder, before this fix, had no
+ * arm reading `nodes[].status`, so a settled run with an errored
+ * `on_error: continue|route` node and no higher-precedence condition still
+ * landed on `ok`. `verdictOf`'s fallback ladder now carries its own
+ * `degraded` arm, mirroring the host's `errored_nodes` fact off
+ * `run.nodes[].status === "error"` — the last test below pins that.
  */
 
 function baseRun(over: Partial<WorkflowRunOutcome> = {}): WorkflowRunOutcome {
@@ -51,5 +60,39 @@ describe("the degraded verdict", () => {
   it("does not shadow a host word it does not recognise, so a genuinely ok run stays ok", () => {
     const run = baseRun({ verdict: "ok" });
     expect(verdictOf(run)).toBe("ok");
+  });
+
+  it("a pre-#981 host with no verdict field still reads degraded off an errored node, not ok (PR #1883)", () => {
+    // No `verdict` at all — the shape a host predating #981 sends, forcing
+    // `verdictOf` down its own fallback ladder instead of trusting the host's
+    // word.
+    const run = baseRun({
+      nodes: [
+        { nodeId: "fetch", status: "ok", elapsedMs: 40 },
+        { nodeId: "notify", status: "error", elapsedMs: 12 },
+      ],
+    });
+    expect(verdictOf(run)).toBe("degraded");
+    expect(runTone(run)).toEqual(VERDICT_TONE.degraded);
+  });
+
+  it("a pre-#981 host's fallback still ranks a hard failure above a soft node error", () => {
+    // Same errored node as above, but the run itself also carries `error` —
+    // the more specific fact must win, exactly as it does on the host.
+    const run = baseRun({
+      error: "the graph broke",
+      nodes: [{ nodeId: "notify", status: "error", elapsedMs: 12 }],
+    });
+    expect(verdictOf(run)).toBe("failed");
+  });
+
+  it("a pre-#981 host's fallback does not call a node blocked on a person degraded", () => {
+    // A genuinely blocked node reports `status: "blocked"`, never `"error"` —
+    // this pins that the new arm only fires on `"error"` rows, so it cannot
+    // steal a blocked run's own verdict.
+    const run = baseRun({
+      nodes: [{ nodeId: "approve-me", status: "blocked", elapsedMs: 5 }],
+    });
+    expect(verdictOf(run)).not.toBe("degraded");
   });
 });

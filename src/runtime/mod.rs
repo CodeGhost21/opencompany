@@ -161,6 +161,15 @@ pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;
 pub(crate) use workflow_scheduler::workflow_schedule_id;
 pub use workflow_spawn::WorkflowSpawn;
+// Issue #1865: only referenced outside this module by the orchestrator's
+// `run_workflow` tool path, which is `openhuman`-only — see
+// `harness::built_in::orchestrator::RunWorkflowTool::execute`. The default
+// build has no other consumer of the re-export, so an ungated `pub(crate) use`
+// here is flagged unused by that build's own lint pass.
+#[cfg(feature = "openhuman")]
+pub(crate) use workflow_spawn::{
+    PANICKED_BEFORE_FINISH, RUN_FAILED_DETAIL, file_run_unhealthy_notification,
+};
 pub use workspace_events::WorkspaceAnnouncer;
 pub use workspace_quota::{
     DEFAULT_MAX_BLOB_BYTES, QuotaEnforcedWorkspace, UPLOAD_BODY_LIMIT_BYTES, WorkspaceQuota,

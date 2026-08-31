@@ -728,14 +728,26 @@ async fn settle_to_todo(
     // earlier proposal reading as current.
     card.workflow_proposal = None;
     card.column = COLUMN_TODO.to_string();
+    // Issue #1865 (CodeRabbit review, PR #1883): the same bounce-chip rule
+    // `advance::advance_settled_card` and `run_task`'s rich settle already
+    // apply. Without this, a builder pass that could not even be attempted —
+    // an unreadable company state, a model timeout, a model error — lands the
+    // card in To-do exactly like any other failed dispatch but skips the
+    // amber chip, because this was the one settle path that never computed
+    // it: dispatching this attempt already cleared any earlier value, so the
+    // card came back indistinguishable from one that had never bounced.
+    card.bounced = crate::runtime::advance::bounced_reason(COLUMN_TODO, RunStatus::Failed, &reason);
     card.updated_at_millis = now_millis();
-    if let Err(err) = runtime.tasks().upsert(runtime.id(), &card).await {
-        tracing::warn!(
-            company = %runtime.id(),
-            task = %task_id,
-            error = %err,
-            "[builder] could not return the card to To-do; it stays In Progress until the next boot"
-        );
+    match runtime.tasks().upsert(runtime.id(), &card).await {
+        Ok(()) => runtime.notify_dispatch_failed(task_id, &reason).await,
+        Err(err) => {
+            tracing::warn!(
+                company = %runtime.id(),
+                task = %task_id,
+                error = %err,
+                "[builder] could not return the card to To-do; it stays In Progress until the next boot"
+            );
+        }
     }
     finish_run(runtime, run_id, RunStatus::Failed, Some(&reason), usage).await;
 }

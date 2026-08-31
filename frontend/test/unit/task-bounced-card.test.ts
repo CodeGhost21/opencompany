@@ -31,6 +31,12 @@ function card(over: Partial<Task> = {}): Task {
   return {
     id: "task-1",
     title: "Send the weekly digest",
+    // Issue #1865 (Codex review): the task API never serializes `column:
+    // "todo"` — a card in the store's `todo` column carries the wire phase
+    // `column: "pending"` (issue #1512) and no `stage` at all. `"todo"` here
+    // was a wire value no real card can ever have, which is exactly how the
+    // production `task.column === "todo"` check went unnoticed: this fixture
+    // made it look reachable.
     column: "pending",
     priority: "medium",
     assignee: "ops",
@@ -48,11 +54,15 @@ async function render(task: Task) {
       createElement(TaskItem, {
         task,
         dragging: false,
+        // Since #1891 the card takes its approval state as `rows` rather than
+        // a single `block` — this suite is not exercising any of that, so an
+        // empty/no-op set of them leaves the card unblocked and the bounce
+        // chip the only thing under test.
         rows: [],
+        now: T0,
         askerNames: new Map(),
         deciding: new Map(),
         failed: {},
-        now: T0,
         onOpen: () => {},
         onResume: () => {},
       }),
