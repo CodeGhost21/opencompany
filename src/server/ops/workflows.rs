@@ -2882,15 +2882,18 @@ impl WorkflowRunOutcome {
             // Issue #1865: `self.nodes` already carries `relabel_blocked`'s
             // reclassification by the time this runs — see `fold_run_events`'s
             // settle arm — so a row still `Error` here is a genuine one under
-            // `on_error: continue|route`. A turn that instead truncated at the
-            // `max_tool_iterations` cap is NOT caught by this count: the engine
-            // journals `WorkflowNodeFinished` for it as `Ok` in real time,
-            // before the host-side relabel in `run_workflow_inner` ever runs
-            // (see `reclassify_capped_nodes`), so a persisted, re-read run
-            // undercounts by exactly that case until the journal itself carries
-            // the fact. The live/synchronous run response (`run_workflow`) does
-            // not have this gap — it reads the in-memory, already-relabelled
-            // `WorkflowRun.nodes` directly.
+            // `on_error: continue|route`.
+            //
+            // A turn that truncated at the `max_tool_iterations` cap counts
+            // here too, and that is newer than this comment's first draft
+            // (CodeRabbit review on #1905). The engine reports such a node as
+            // `Ok` and the host relabels it at settle, which used to reach only
+            // the in-memory `WorkflowRun.nodes` — so a persisted, re-read run
+            // undercounted by exactly that case and scored `ok` where the
+            // synchronous response said `degraded`. The journal now carries the
+            // relabelled status itself (see the progress collector in
+            // `workflows::runner`), so both surfaces derive the same verdict
+            // from the same fact.
             // Issue #1865: a degraded node fact may be carried separately when
             // progress draining failed, so history does not score the run green.
             errored_nodes: self
